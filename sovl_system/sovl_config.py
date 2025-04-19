@@ -10,6 +10,7 @@ import re
 import time
 from sovl_logger import Logger
 from transformers import AutoConfig
+from sovl_schema import ValidationSchema  # Import ValidationSchema from sovl_schema.py
 
 @dataclass
 class ConfigSchema:
@@ -244,165 +245,6 @@ class ConfigManager:
         min_rep_length = config_manager.get(ConfigKeys.PROCESSOR_MIN_REP_LENGTH)
     """
 
-    DEFAULT_SCHEMA = [
-        # core_config
-        ConfigSchema("core_config.base_model_name", str, "SmolLM2-360M", required=True),
-        ConfigSchema("core_config.scaffold_model_name", str, "SmolLM2-135M", required=True),
-        ConfigSchema("core_config.cross_attn_layers", list, [5, 7], lambda x: all(isinstance(i, int) for i in x)),
-        ConfigSchema("core_config.use_dynamic_layers", bool, False),
-        ConfigSchema("core_config.layer_selection_mode", str, "balanced", lambda x: x in ["balanced", "random", "fixed"]),
-        ConfigSchema("core_config.custom_layers", list, None, lambda x: x is None or all(isinstance(i, int) for i in x), nullable=True),
-        ConfigSchema("core_config.valid_split_ratio", float, 0.2, range=(0.0, 1.0)),
-        ConfigSchema("core_config.random_seed", int, 42, range=(0, 2**32)),
-        ConfigSchema("core_config.quantization", str, "fp16", lambda x: x in ["fp16", "int8", "fp32"]),
-        ConfigSchema("core_config.hidden_size", int, 768, range=(128, 4096)),
-        # lora_config
-        ConfigSchema("lora_config.lora_rank", int, 8, range=(1, 64)),
-        ConfigSchema("lora_config.lora_alpha", int, 16, range=(1, 128)),
-        ConfigSchema("lora_config.lora_dropout", float, 0.1, range=(0.0, 0.5)),
-        ConfigSchema("lora_config.lora_target_modules", list, ["c_attn", "c_proj", "c_fc"], lambda x: all(isinstance(i, str) for i in x)),
-        # training_config
-        ConfigSchema("training_config.learning_rate", float, 0.0003, range=(0.0, 0.01)),
-        ConfigSchema("training_config.train_epochs", int, 3, range=(1, 10)),
-        ConfigSchema("training_config.batch_size", int, 1, range=(1, 64)),
-        ConfigSchema("training_config.max_seq_length", int, 128, range=(64, 2048)),
-        ConfigSchema("training_config.sigmoid_scale", float, 0.5, range=(0.1, 10.0)),
-        ConfigSchema("training_config.sigmoid_shift", float, 5.0, range=(0.0, 10.0)),
-        ConfigSchema("training_config.lifecycle_capacity_factor", float, 0.01, range=(0.0, 1.0)),
-        ConfigSchema("training_config.lifecycle_curve", str, "sigmoid_linear", lambda x: x in ["sigmoid_linear", "linear", "exponential"]),
-        ConfigSchema("training_config.accumulation_steps", int, 4, range=(1, 16)),
-        ConfigSchema("training_config.exposure_gain_eager", int, 3, range=(1, 10)),
-        ConfigSchema("training_config.exposure_gain_default", int, 2, range=(1, 10)),
-        ConfigSchema("training_config.max_patience", int, 2, range=(1, 5)),
-        ConfigSchema("training_config.sleep_max_steps", int, 100, range=(10, 1000)),
-        ConfigSchema("training_config.lora_capacity", int, 0, range=(0, 1000)),
-        ConfigSchema("training_config.dry_run", bool, False),
-        ConfigSchema("training_config.dry_run_params.max_samples", int, 2, range=(1, 100)),
-        ConfigSchema("training_config.dry_run_params.max_length", int, 128, range=(64, 2048)),
-        ConfigSchema("training_config.dry_run_params.validate_architecture", bool, True),
-        ConfigSchema("training_config.dry_run_params.skip_training", bool, True),
-        ConfigSchema("training_config.weight_decay", float, 0.01, range=(0.0, 0.1)),
-        ConfigSchema("training_config.total_steps", int, 1000, range=(100, 10000)),
-        ConfigSchema("training_config.max_grad_norm", float, 1.0, range=(0.1, 10.0)),
-        ConfigSchema("training_config.use_amp", bool, True),
-        ConfigSchema("training_config.checkpoint_interval", int, 1000, range=(100, 10000)),
-        ConfigSchema("training_config.scheduler_type", str, "linear", lambda x: x in ["linear", "cosine", "constant"]),
-        ConfigSchema("training_config.cosine_min_lr", float, 1e-6, range=(1e-7, 1e-3)),
-        ConfigSchema("training_config.warmup_ratio", float, 0.1, range=(0.0, 0.5)),
-        ConfigSchema("training_config.metrics_to_track", list, ["loss", "accuracy", "confidence"], lambda x: all(isinstance(i, str) for i in x)),
-        ConfigSchema("training_config.repetition_n", int, 3, range=(1, 10)),
-        ConfigSchema("training_config.checkpoint_path", str, "checkpoints/sovl_trainer"),
-        ConfigSchema("training_config.validate_every_n_steps", int, 100, range=(10, 1000)),
-        # curiosity_config
-        ConfigSchema("curiosity_config.queue_maxlen", int, 10, range=(1, 50)),
-        ConfigSchema("curiosity_config.novelty_history_maxlen", int, 20, range=(5, 100)),
-        ConfigSchema("curiosity_config.decay_rate", float, 0.9, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.attention_weight", float, 0.5, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.question_timeout", float, 3600.0, range=(60.0, 86400.0)),
-        ConfigSchema("curiosity_config.novelty_threshold_spontaneous", float, 0.9, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.novelty_threshold_response", float, 0.8, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.pressure_threshold", float, 0.7, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.pressure_drop", float, 0.3, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.silence_threshold", float, 20.0, range=(0.0, 3600.0)),
-        ConfigSchema("curiosity_config.question_cooldown", float, 60.0, range=(0.0, 3600.0)),
-        ConfigSchema("curiosity_config.weight_ignorance", float, 0.7, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.weight_novelty", float, 0.3, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.max_new_tokens", int, 8, range=(1, 100)),
-        ConfigSchema("curiosity_config.base_temperature", float, 1.1, range=(0.1, 2.0)),
-        ConfigSchema("curiosity_config.temperament_influence", float, 0.4, range=(0.0, 1.0)),
-        ConfigSchema("curiosity_config.top_k", int, 30, range=(1, 100)),
-        ConfigSchema("curiosity_config.enable_curiosity", bool, True),
-        # cross_attn_config
-        ConfigSchema("cross_attn_config.memory_weight", float, 0.5, range=(0.0, 1.0)),
-        ConfigSchema("cross_attn_config.dynamic_scale", float, 0.3, range=(0.0, 1.0)),
-        ConfigSchema("cross_attn_config.enable_dynamic", bool, True),
-        ConfigSchema("cross_attn_config.enable_memory", bool, True),
-        # controls_config
-        ConfigSchema("controls_config.sleep_conf_threshold", float, 0.7, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.sleep_time_factor", float, 1.0, range=(0.1, 10.0)),
-        ConfigSchema("controls_config.sleep_log_min", int, 10, range=(1, 100)),
-        ConfigSchema("controls_config.dream_swing_var", float, 0.1, range=(0.0, 0.5)),
-        ConfigSchema("controls_config.dream_lifecycle_delta", float, 0.1, range=(0.0, 0.5)),
-        ConfigSchema("controls_config.dream_temperament_on", bool, True),
-        ConfigSchema("controls_config.dream_noise_scale", float, 0.05, range=(0.0, 0.1)),
-        ConfigSchema("controls_config.temp_eager_threshold", float, 0.8, range=(0.7, 0.9)),
-        ConfigSchema("controls_config.temp_sluggish_threshold", float, 0.6, range=(0.4, 0.6)),
-        ConfigSchema("controls_config.temp_mood_influence", float, 0.0, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.scaffold_weight_cap", float, 0.9, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.base_temperature", float, 0.7, range=(0.1, 2.0)),
-        ConfigSchema("controls_config.save_path_prefix", str, "state", lambda x: bool(re.match(r'^[a-zA-Z0-9_/.-]+$', x))),
-        ConfigSchema("controls_config.dream_memory_weight", float, 0.1, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.dream_memory_maxlen", int, 10, range=(1, 50)),
-        ConfigSchema("controls_config.dream_prompt_weight", float, 0.5, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.dream_novelty_boost", float, 0.03, range=(0.0, 0.1)),
-        ConfigSchema("controls_config.temp_curiosity_boost", float, 0.5, range=(0.0, 0.5)),
-        ConfigSchema("controls_config.temp_restless_drop", float, 0.1, range=(0.0, 0.5)),
-        ConfigSchema("controls_config.temp_melancholy_noise", float, 0.02, range=(0.0, 0.05)),
-        ConfigSchema("controls_config.conf_feedback_strength", float, 0.5, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.temp_smoothing_factor", float, 0.0, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.dream_memory_decay", float, 0.95, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.dream_prune_threshold", float, 0.1, range=(0.0, 0.5)),
-        ConfigSchema("controls_config.use_scaffold_memory", bool, True),
-        ConfigSchema("controls_config.use_token_map_memory", bool, True),
-        ConfigSchema("controls_config.memory_decay_rate", float, 0.95, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.dynamic_cross_attn_mode", str, None, lambda x: x is None or x in ["adaptive", "fixed"], nullable=True),
-        ConfigSchema("controls_config.has_woken", bool, False),
-        ConfigSchema("controls_config.is_sleeping", bool, False),
-        ConfigSchema("controls_config.confidence_history_maxlen", int, 5, range=(3, 10)),
-        ConfigSchema("controls_config.temperament_history_maxlen", int, 5, range=(3, 10)),
-        ConfigSchema("controls_config.conversation_history_maxlen", int, 10, range=(5, 50)),
-        ConfigSchema("controls_config.max_seen_prompts", int, 1000, range=(100, 10000)),
-        ConfigSchema("controls_config.prompt_timeout", float, 86400.0, range=(3600.0, 604800.0)),
-        ConfigSchema("controls_config.temperament_decay_rate", float, 0.95, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.scaffold_unk_id", int, 0, range=(0, 100000)),
-        ConfigSchema("controls_config.enable_dreaming", bool, True),
-        ConfigSchema("controls_config.enable_temperament", bool, True),
-        ConfigSchema("controls_config.enable_confidence_tracking", bool, True),
-        ConfigSchema("controls_config.enable_gestation", bool, True),
-        ConfigSchema("controls_config.enable_sleep_training", bool, True),
-        ConfigSchema("controls_config.enable_cross_attention", bool, True),
-        ConfigSchema("controls_config.enable_dynamic_cross_attention", bool, True),
-        ConfigSchema("controls_config.enable_lora_adapters", bool, True),
-        ConfigSchema("controls_config.enable_repetition_check", bool, True),
-        ConfigSchema("controls_config.enable_prompt_driven_dreams", bool, True),
-        ConfigSchema("controls_config.enable_lifecycle_weighting", bool, True),
-        ConfigSchema("controls_config.memory_threshold", float, 0.85, range=(0.0, 1.0)),
-        ConfigSchema("controls_config.enable_error_listening", bool, True),
-        ConfigSchema("controls_config.enable_scaffold", bool, True),
-        ConfigSchema("controls_config.injection_strategy", str, "sequential", lambda x: x in ["sequential", "parallel", "replace"]),
-        # logging_config
-        ConfigSchema("logging_config.log_dir", str, "logs"),
-        ConfigSchema("logging_config.log_file", str, "sovl_logs.jsonl"),
-        ConfigSchema("logging_config.debug_log_file", str, "sovl_debug.log"),
-        ConfigSchema("logging_config.max_size_mb", int, 10, range=(0, 100)),
-        ConfigSchema("logging_config.compress_old", bool, False),
-        ConfigSchema("logging_config.max_in_memory_logs", int, 1000, range=(100, 10000)),
-        ConfigSchema("logging_config.schema_version", str, "1.1"),
-        # Dynamic Weighting
-        ConfigSchema("dynamic_weighting.min_weight", float, 0.0, range=(0.0, 1.0)),
-        ConfigSchema("dynamic_weighting.max_weight", float, 1.0, range=(0.0, 1.0)),
-        ConfigSchema("dynamic_weighting.weight_decay", float, 0.01, range=(0.0, 1.0)),
-        ConfigSchema("dynamic_weighting.momentum", float, 0.9, range=(0.0, 1.0)),
-        ConfigSchema("dynamic_weighting.history_size", int, 10, range=(1, 100)),
-        ConfigSchema("dynamic_weighting.enable_dynamic_scaling", bool, True),
-
-        # Preprocessing
-        ConfigSchema("preprocessing.remove_special_chars", bool, True),
-        ConfigSchema("preprocessing.lowercase", bool, True),
-        ConfigSchema("preprocessing.remove_extra_spaces", bool, True),
-        ConfigSchema("preprocessing.max_length", int, 512, range=(1, 2048)),
-
-        # Augmentation
-        ConfigSchema("augmentation.synonym_replacement_prob", float, 0.3, range=(0.0, 1.0)),
-        ConfigSchema("augmentation.word_dropout_prob", float, 0.1, range=(0.0, 1.0)),
-        ConfigSchema("augmentation.max_augmentations", int, 3, range=(1, 10)),
-
-        # Hardware
-        ConfigSchema("hardware.enable_cuda", bool, True),
-        ConfigSchema("hardware.memory_query_interval", float, 0.1, range=(0.0, 10.0)),
-        ConfigSchema("hardware.mock_memory_total_mb", float, 8192.0, range=(0.0, 16384.0)),
-    ]
-
     def __init__(self, config_file: str, logger: Logger):
         self.config_file = os.getenv("SOVL_CONFIG_FILE", config_file)
         self.logger = logger
@@ -413,8 +255,28 @@ class ConfigManager:
         self._frozen = False
         self._last_config_hash = ""
         self._subscribers: set[Callable[[], None]] = set()
+        # Load schema from sovl_schema.py
+        self.DEFAULT_SCHEMA = self._load_schema()
         self.validator.register(self.DEFAULT_SCHEMA)
         self._initialize_config()
+
+    def _load_schema(self) -> List[ConfigSchema]:
+        """Load schema from ValidationSchema and convert to flat list for validation."""
+        schema_dict = ValidationSchema.get_schema()
+        flat_schema = []
+        for section, fields in schema_dict.items():
+            for field, config_schema in fields.items():
+                # Create a new ConfigSchema with the full key (section.field)
+                flat_schema.append(ConfigSchema(
+                    field=f"{section}.{field}",
+                    type=config_schema.type,
+                    default=config_schema.default,
+                    validator=lambda x: config_schema.validate(x),
+                    range=(config_schema.min, config_schema.max) if config_schema.min is not None and config_schema.max is not None else None,
+                    required=config_schema.required,
+                    nullable=config_schema.default is None and not config_schema.required
+                ))
+        return flat_schema
 
     def _initialize_config(self) -> None:
         with self.lock:
@@ -426,7 +288,7 @@ class ConfigManager:
             self._log_event("config_load", "Configuration loaded successfully", "info", {
                 "config_file": self.config_file,
                 "config_hash": self._last_config_hash,
-                "schema_version": self.DEFAULT_SCHEMA[-1].default
+                "schema_version": self.get("logging_config.schema_version", "1.1")
             })
 
     def _compute_config_hash(self) -> str:
