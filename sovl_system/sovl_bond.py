@@ -1,8 +1,5 @@
-from typing import Optional, Dict, Any
-import re
-import time
+from typing import Optional
 import torch
-from collections import deque, defaultdict
 from threading import Lock
 from sovl_logger import Logger
 from sovl_state import SOVLState
@@ -16,13 +13,7 @@ class BondCalculator:
     """Calculates bonding score based on user wordprint and duration of knowing."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger):
-        """
-        Initialize bond calculator with configuration and logging.
-        
-        Args:
-            config_manager: Configuration manager instance
-            logger: Logger instance
-        """
+        """Initialize bond calculator with configuration and logging."""
         if not config_manager or not logger:
             raise ValueError("config_manager and logger cannot be None")
         self.config_manager = config_manager
@@ -42,7 +33,6 @@ class BondCalculator:
             self.decay_rate = float(bond_config.get("decay_rate", 0.95))
             self.decay_interval = float(bond_config.get("decay_interval", 86400.0))  # 24 hours
             self.max_expected_dev = float(bond_config.get("max_expected_dev", 20.0))
-            self.max_lexicon_size = int(bond_config.get("max_lexicon_size", 1000))
             self.weights = {
                 "curiosity": float(bond_config.get("curiosity_weight", 0.3)),
                 "stability": float(bond_config.get("stability_weight", 0.3)),
@@ -66,55 +56,44 @@ class BondCalculator:
             )
             raise
 
-    def _compute_wordprint_score(self, user_input: str, state: SOVLState) -> float:
+    def _compute_wordprint_score(self, user_input: str, profile: dict) -> float:
         """Calculate wordprint score based on lexical signature and style consistency."""
-        profile = state.user_profiles[state.conversation_id]
         # Lexical Signature
         current_words = set(re.findall(r'\w+', user_input.lower()))
-        top_words = sorted(profile["user_lexicon"].items(), key=lambda x: x[1], reverse=True)[:10]
+        top_words = sorted(profile["lexicon"].items(), key=lambda x: x[1], reverse=True)[:10]
         top_words_set = set(word for word, _ in top_words)
         signature_score = (len(current_words & top_words_set) / len(current_words | top_words_set)
                           if current_words and top_words_set else 0.5)
         # Style Consistency
-        word_counts = [len(re.findall(r'\w+', input)) for input in profile["recent_inputs"]]
+        word_counts = [len(re.findall(r'\w+', input)) for input in profile["inputs"]]
         std_dev = torch.std(torch.tensor(word_counts, dtype=torch.float32)).item() if word_counts else 0.0
         style_score = 1 - min(std_dev / self.max_expected_dev, 1.0)
         # Combine
         wordprint_score = 0.6 * signature_score + 0.4 * style_score
         return max(0.0, min(1.0, wordprint_score))
 
-    def _compute_knowing_score(self, state: SOVLState) -> float:
+    def _compute_knowing_score(self, profile: dict) -> float:
         """Calculate duration of knowing score based on interaction count and time."""
-        profile = state.user_profiles[state.conversation_id]
         # Apply decay if inactive
-        if time.time() - profile["last_interaction_time"] > self.decay_interval:
-            profile["interaction_count"] = int(profile["interaction_count"] * self.decay_rate)
-            profile["total_session_time"] *= self.decay_rate
-            profile["last_interaction_time"] = time.time()
+        if time.time() - profile["last_interaction"] > self.decay_interval:
+            profile["interactions"] = int(profile["interactions"] * self.decay_rate)
+            profile["session_time"] *= self.decay_rate
+            profile["last_interaction"] = time.time()
         # Interaction Familiarity
-        familiarity = min(profile["interaction_count"] / self.max_interactions, 1.0)
+        familiarity = min(profile["interactions"] / self.max_interactions, 1.0)
         # Time Duration
-        duration = min(profile["total_session_time"] / self.max_session_time, 1.0)
+        duration = min(profile["session_time"] / self.max_session_time, 1.0)
         # Combine
         knowing_score = 0.7 * familiarity + 0.3 * duration
         return max(0.0, min(1.0, knowing_score))
 
     def _compute_stability_score(self, state: SOVLState) -> float:
         """Placeholder for stability score (system health/errors)."""
-        # Implement based on error rates or system metrics
         return 0.5  # Neutral default
 
     def _compute_coherence_score(self, user_input: str, state: SOVLState) -> float:
         """Placeholder for coherence score (input-response alignment)."""
-        # Implement based on semantic similarity
         return 0.5  # Neutral default
-
-    def _prune_lexicon(self, lexicon: Dict[str, int]) -> None:
-        """Prune lexicon to top max_lexicon_size words by frequency."""
-        if len(lexicon) > self.max_lexicon_size:
-            sorted_items = sorted(lexicon.items(), key=lambda x: x[1], reverse=True)[:self.max_lexicon_size]
-            lexicon.clear()
-            lexicon.update(dict(sorted_items))
 
     @synchronized()
     def calculate_bonding_score(
@@ -126,7 +105,7 @@ class BondCalculator:
         curiosity_manager: Optional[CuriosityManager] = None
     ) -> float:
         """
-        Calculate bonding score using curiosity, stability, coherence, and personalized (wordprint + knowing) components.
+        Calculate bonding score using curiosity, stability, coherence, and personalized components.
         
         Args:
             user_input: User input string
@@ -141,36 +120,21 @@ class BondCalculator:
         try:
             if not isinstance(user_input, str):
                 raise ValueError("user_input must be a string")
-            if not state.conversation_id:
+            if not state.history.conversation_id:
                 raise ValueError("conversation_id must be set in state")
 
-            # Initialize profile for new conversation_id
-            if state.conversation_id not in state.user_profiles:
-                state.user_profiles[state.conversation_id] = {
-                    "user_lexicon": defaultdict(int),
-                    "interaction_count": 0,
-                    "total_session_time": 0.0,
-                    "recent_inputs": deque(maxlen=10),
-                    "last_interaction_time": time.time()
-                }
-            profile = state.user_profiles[state.conversation_id]
-
-            # Update state
-            for word in re.findall(r'\w+', user_input.lower()):
-                profile["user_lexicon"][word] += 1
-            self._prune_lexicon(profile["user_lexicon"])
-            profile["recent_inputs"].append(user_input)
-            profile["interaction_count"] += 1
-            profile["total_session_time"] += time.time() - state.session_start
-            profile["last_interaction_time"] = time.time()
+            # Get and update profile via UserProfileState
+            conversation_id = state.history.conversation_id
+            profile = state.user_profile_state.get(conversation_id)
+            state.user_profile_state.update(conversation_id, user_input, state.session_start)
 
             # Calculate component scores
             curiosity_score = (curiosity_manager.get_novelty_score(user_input)
                               if curiosity_manager else 0.5)
             stability_score = self._compute_stability_score(state)
             coherence_score = self._compute_coherence_score(user_input, state)
-            wordprint_score = self._compute_wordprint_score(user_input, state)
-            knowing_score = self._compute_knowing_score(state)
+            wordprint_score = self._compute_wordprint_score(user_input, profile)
+            knowing_score = self._compute_knowing_score(profile)
             personalized_score = 0.5 * wordprint_score + 0.5 * knowing_score
 
             # Combine scores
@@ -193,10 +157,9 @@ class BondCalculator:
                     "coherence_score": coherence_score,
                     "wordprint_score": wordprint_score,
                     "knowing_score": knowing_score,
-                    "conversation_id": state.conversation_id
+                    "conversation_id": conversation_id
                 }
             )
-
             return bond_score
 
         except Exception as e:
@@ -204,9 +167,9 @@ class BondCalculator:
                 event_type="bond_score_failed",
                 message=f"Failed to calculate bond score: {str(e)}",
                 level="error",
-                additional_info={"error": str(e), "conversation_id": state.conversation_id}
+                additional_info={"error": str(e), "conversation_id": state.history.conversation_id}
             )
             error_manager.handle_data_error(
-                e, {"user_input": user_input[:50]}, state.conversation_id
+                e, {"user_input": user_input[:50]}, state.history.conversation_id
             )
             return self.default_bond_score
