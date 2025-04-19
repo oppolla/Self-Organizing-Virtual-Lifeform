@@ -685,4 +685,197 @@ class SoulLogitsProcessor(LogitsProcessor):
                 }
             )
             return scores
+
+class VibeSculptor:
+    """Sculpts conversational vibes as dynamic, empathetic fingerprints."""
+
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        temperament_system: Optional['TemperamentSystem'] = None,
+        lifecycle_manager: Optional['LifecycleManager'] = None
+    ):
+        """Initialize with config, logger, and optional system components."""
+        if not config_manager or not logger:
+            raise ValueError("config_manager and logger cannot be None")
+        self.config_manager = config_manager
+        self.logger = logger
+        self.temperament_system = temperament_system
+        self.lifecycle_manager = lifecycle_manager
+        self.vibes = deque(maxlen=self._get_config("history_maxlen", 20))
+        self._load_config()
+
+    def _load_config(self) -> None:
+        """Load vibe configuration elegantly."""
+        try:
+            vibe_config = self.config_manager.get_section("vibe_config", {})
+            self.default_vibe = vibe_config.get("default_vibe_score", 0.5)
+            self.min_vibe = vibe_config.get("min_vibe_score", 0.0)
+            self.max_vibe = vibe_config.get("max_vibe_score", 1.0)
+            self.switch_threshold = vibe_config.get("switch_threshold", 0.3)
+            self.decay_factor = vibe_config.get("decay_factor", 0.9)
+            self.weights = {
+                "energy": vibe_config.get("energy_weight", 0.25),  # Lexical + sentiment
+                "flow": vibe_config.get("flow_weight", 0.25),      # Syntactic + rhythm
+                "resonance": vibe_config.get("resonance_weight", 0.25),  # Topic + temperament
+                "curiosity": vibe_config.get("curiosity_weight", 0.25)   # Curiosity synergy
+            }
+            if abs(sum(self.weights.values()) - 1.0) > 1e-6:
+                raise ValueError("Vibe weights must sum to 1.0")
+            self.logger.record_event(
+                event_type="vibe_config_loaded",
+                message="Vibe sculptor configured",
+                level="info",
+                additional_info={"weights": self.weights}
+            )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="vibe_config_failed",
+                message=f"Vibe config failed: {str(e)}",
+                level="error"
+            )
+            raise StateError(f"Vibe config failed: {str(e)}")
+
+    def _get_config(self, key: str, default: Any) -> Any:
+        """Helper to get vibe config values."""
+        return self.config_manager.get(f"vibe_config.{key}", default)
+
+    def _compute_energy(self, text: str) -> float:
+        """Measure lexical diversity and sentiment as conversational energy."""
+        words = re.findall(r'\w+', text.lower())
+        if not words:
+            return 0.5
+        # Lexical diversity (TTR)
+        ttr = len(set(words)) / len(words)
+        # Sentiment (simple rule-based)
+        pos_words = {'good', 'great', 'happy', 'awesome', 'love'}
+        neg_words = {'bad', 'sad', 'hate', 'terrible', 'awful'}
+        pos_count = len(set(words) & pos_words)
+        neg_count = len(set(words) & neg_words)
+        sentiment = pos_count / (pos_count + neg_count) if pos_count + neg_count else 0.5
+        return 0.6 * ttr + 0.4 * sentiment
+
+    def _compute_flow(self, text: str, profile: Dict) -> float:
+        """Measure syntactic complexity and interaction rhythm as conversational flow."""
+        # Syntactic complexity (sentence length)
+        sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+        avg_length = sum(len(re.findall(r'\w+', s)) for s in sentences) / len(sentences) if sentences else 0.0
+        syntax = min(avg_length / 20.0, 1.0)
+        # Rhythm (input frequency and length)
+        inputs = profile.get("inputs", deque())
+        rhythm = min(len(inputs) / 10.0, 1.0) * 0.5 + min(sum(len(i) for i in inputs) / (200.0 * len(inputs) or 1), 1.0) * 0.5
+        return 0.5 * syntax + 0.5 * rhythm
+
+    def _compute_resonance(self, text: str, state: SOVLState) -> float:
+        """Measure topic consistency and temperament alignment as vibe resonance."""
+        # Topic consistency (Jaccard with profile inputs)
+        profile = state.user_profile_state.get(state.history.conversation_id)
+        inputs = profile.get("inputs", deque())
+        text_words = set(re.findall(r'\w+', text.lower()))
+        topic = sum(
+            len(text_words & set(re.findall(r'\w+', h.lower()))) /
+            len(text_words | set(re.findall(r'\w+', h.lower()))) if text_words and h else 0.5
+            for h in inputs
+        ) / len(inputs) if inputs else 0.5
+        # Temperament alignment
+        temperament_score = self.temperament_system.get_temperament_score() if self.temperament_system else 0.5
+        user_mood = self._compute_energy(text)  # Proxy for user mood
+        alignment = 1.0 - abs(temperament_score - user_mood)
+        return 0.5 * topic + 0.5 * alignment
+
+    def _compute_curiosity(self, text: str, curiosity_manager: Optional[CuriosityManager]) -> float:
+        """Measure engagement with curiosity-driven questions."""
+        if not curiosity_manager:
+            return 0.5
+        novelty = curiosity_manager.get_novelty_score(text)
+        return min(novelty / 0.7, 1.0)  # Normalize based on typical novelty threshold
+
+    @synchronized()
+    def sculpt_vibe(
+        self,
+        user_input: str,
+        state: SOVLState,
+        error_manager: ErrorManager,
+        context: SystemContext,
+        curiosity_manager: Optional[CuriosityManager] = None
+    ) -> float:
+        """Sculpt a vibe score that resonates with user and system energy."""
+        try:
+            if not isinstance(user_input, str):
+                raise ValueError("user_input must be a string")
+            conversation_id = state.history.conversation_id
+            profile = state.user_profile_state.get(conversation_id)
+            state.user_profile_state.update(conversation_id, user_input, state.session_start)
+
+            # Calculate vibe components with temporal decay
+            now = time.time()
+            decay = self.decay_factor ** ((now - profile.get("last_interaction", now)) / 86400.0)
+            energy = self._compute_energy(user_input) * decay
+            flow = self._compute_flow(user_input, profile) * decay
+            resonance = self._compute_resonance(user_input, state) * decay
+            curiosity = self._compute_curiosity(user_input, curiosity_manager) * decay
+
+            # Combine with lifecycle influence
+            lifecycle_factor = self.lifecycle_manager.get_lifecycle_factor() if self.lifecycle_manager else 1.0
+            vibe = (
+                self.weights["energy"] * energy +
+                self.weights["flow"] * flow +
+                self.weights["resonance"] * resonance +
+                self.weights["curiosity"] * curiosity
+            ) * lifecycle_factor
+
+            vibe = max(self.min_vibe, min(self.max_vibe, vibe))
+            self.vibes.append((vibe, now))
+            self.logger.record_event(
+                event_type="vibe_sculpted",
+                message="Vibe score sculpted",
+                level="info",
+                additional_info={
+                    "vibe": vibe,
+                    "energy": energy,
+                    "flow": flow,
+                    "resonance": resonance,
+                    "curiosity": curiosity,
+                    "conversation_id": conversation_id
+                }
+            )
+            return vibe
+
+        except Exception as e:
+            self.logger.record_event(
+                event_type="vibe_sculpt_failed",
+                message=f"Vibe sculpting failed: {str(e)}",
+                level="error"
+            )
+            error_manager.handle_data_error(e, {"user_input": user_input[:50]}, conversation_id)
+            return self.default_vibe
+
+    def predict_vibe_shift(self, vibe: float) -> bool:
+        """Predict if a vibe shift is occurring based on recent trends."""
+        if len(self.vibes) < 3:
+            return False
+        recent_vibes = [v for v, _ in self.vibes]
+        avg_vibe = sum(recent_vibes) / len(recent_vibes)
+        deviation = abs(vibe - avg_vibe)
+        if deviation > self.switch_threshold:
+            self.logger.record_event(
+                event_type="vibe_shift_detected",
+                message="Potential vibe shift detected",
+                level="warning",
+                additional_info={"vibe": vibe, "avg_vibe": avg_vibe, "deviation": deviation}
+            )
+            return True
+        return False
+
+    def get_vibe_aura(self, state: SOVLState) -> Dict[str, float]:
+        """Generate a vibe 'aura' for visualization."""
+        profile = state.user_profile_state.get(state.history.conversation_id)
+        vibe_scores = [v for v, _ in self.vibes]
+        return {
+            "energy": self._compute_energy(" ".join(profile.get("inputs", []))),
+            "flow": self._compute_flow("", profile),
+            "resonance": self._compute_resonance(" ".join(profile.get("inputs", [])), state),
+            "curiosity": vibe_scores[-1] if vibe_scores else 0.5,
+            "trend": (v
     
