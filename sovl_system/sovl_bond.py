@@ -1,473 +1,212 @@
 from typing import Optional, Dict, Any
 import re
+import time
+import torch
+from collections import deque, defaultdict
 from threading import Lock
-from collections import deque
 from sovl_logger import Logger
-import traceback
 from sovl_state import SOVLState
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
-from sovl_utils import synchronized, NumericalGuard
+from sovl_utils import synchronized
 from sovl_config import ConfigManager
-from sovl_temperament import TemperamentSystem
-from sovl_trainer import LifecycleManager
-
-# Constants
-DEFAULT_BONDING = 0.0
-MIN_BONDING = -1.0
-MAX_BONDING = 1.0
-MIN_HISTORY_LENGTH = 3
-RECOVERY_WEIGHTS = [0.5, 0.3, 0.2]
-CURIOSITY_WEIGHT = 0.3
-STABILITY_WEIGHT = 0.3
-COHERENCE_WEIGHT = 0.2
-HISTORY_WEIGHT = 0.2
-NOVELTY_THRESHOLD = 0.8
-PRESSURE_THRESHOLD = 0.7
-PRESSURE_DROP = 0.3
-ERROR_PENALTY_FACTOR = 0.2
-
-# Temperament-based bonding adjustments
-TEMPERAMENT_MOOD_MULTIPLIERS = {
-    "Cautious": 0.8,  # Lower bonding in cautious mood
-    "Balanced": 1.0,  # Neutral bonding
-    "Curious": 1.2    # Higher bonding in curious mood
-}
-
-# Lifecycle stage adjustments
-LIFECYCLE_STAGE_MULTIPLIERS = {
-    "initialization": 0.9,  # Conservative bonding
-    "exploration": 1.2,    # Enhanced bonding
-    "consolidation": 1.0,  # Standard bonding
-    "refinement": 0.95     # Slightly reduced bonding
-}
-
-class BondHistory:
-    """Manages history of bonding scores."""
-    
-    def __init__(self, maxlen: int = 10):
-        self.history = deque(maxlen=maxlen)
-    
-    def add_bond(self, bond: float) -> None:
-        """Add a bonding score to history."""
-        self.history.append(bond)
-    
-    def get_bond_history(self) -> deque:
-        """Return the bonding history."""
-        return self.history
-    
-    def clear_history(self) -> None:
-        """Clear the bonding history."""
-        self.history.clear()
 
 class BondCalculator:
-    """Calculates bonding score between user and LLM with thread safety."""
+    """Calculates bonding score based on user wordprint and duration of knowing."""
     
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        logger: Logger,
-        temperament_system: Optional[TemperamentSystem] = None,
-        lifecycle_manager: Optional[LifecycleManager] = None
-    ):
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        """
+        Initialize bond calculator with configuration and logging.
+        
+        Args:
+            config_manager: Configuration manager instance
+            logger: Logger instance
+        """
         if not config_manager or not logger:
             raise ValueError("config_manager and logger cannot be None")
-        if not isinstance(config_manager, ConfigManager):
-            raise TypeError("config_manager must be a ConfigManager instance")
-            
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
-        self.temperament_system = temperament_system
-        self.lifecycle_manager = lifecycle_manager
-        self.bond_history = BondHistory(maxlen=10)
-        
-        # Initialize configuration
         self._initialize_config()
-    
+
     def _initialize_config(self) -> None:
-        """Initialize and validate configuration from ConfigManager."""
+        """Initialize bonding score configuration."""
         try:
             bond_config = self.config_manager.get_section("bond_config", {})
-            controls_config = self.config_manager.get_section("controls_config", {})
-            
-            # Bonding parameters
-            self.default_bonding = float(bond_config.get("default_bonding", DEFAULT_BONDING))
-            self.min_bonding = float(bond_config.get("min_bonding", MIN_BONDING))
-            self.max_bonding = float(bond_config.get("max_bonding", MAX_BONDING))
-            self.min_history_length = int(bond_config.get("min_history_length", MIN_HISTORY_LENGTH))
-            self.recovery_weights = [
-                float(w) for w in bond_config.get("recovery_weights", RECOVERY_WEIGHTS)
-            ]
-            self.curiosity_weight = float(bond_config.get("curiosity_weight", CURIOSITY_WEIGHT))
-            self.stability_weight = float(bond_config.get("stability_weight", STABILITY_WEIGHT))
-            self.coherence_weight = float(bond_config.get("coherence_weight", COHERENCE_WEIGHT))
-            self.history_weight = float(bond_config.get("history_weight", HISTORY_WEIGHT))
-            self.novelty_threshold = float(controls_config.get("curiosity_novelty_threshold_response", NOVELTY_THRESHOLD))
-            self.pressure_threshold = float(controls_config.get("curiosity_pressure_threshold", PRESSURE_THRESHOLD))
-            self.pressure_drop = float(controls_config.get("curiosity_pressure_drop", PRESSURE_DROP))
-            self.error_penalty_factor = float(bond_config.get("error_penalty_factor", ERROR_PENALTY_FACTOR))
-            
-            # Validate configuration
-            self._validate_config_values()
-            
-            # Subscribe to configuration changes
-            self.config_manager.subscribe(self._on_config_change)
-            
+            self.min_bond_score = float(bond_config.get("min_bond_score", 0.0))
+            self.max_bond_score = float(bond_config.get("max_bond_score", 1.0))
+            self.default_bond_score = float(bond_config.get("default_bond_score", 0.5))
+            self.max_interactions = int(bond_config.get("max_interactions", 100))
+            self.max_session_time = float(bond_config.get("max_session_time", 3600.0))
+            self.decay_rate = float(bond_config.get("decay_rate", 0.95))
+            self.decay_interval = float(bond_config.get("decay_interval", 86400.0))  # 24 hours
+            self.max_expected_dev = float(bond_config.get("max_expected_dev", 20.0))
+            self.max_lexicon_size = int(bond_config.get("max_lexicon_size", 1000))
+            self.weights = {
+                "curiosity": float(bond_config.get("curiosity_weight", 0.3)),
+                "stability": float(bond_config.get("stability_weight", 0.3)),
+                "coherence": float(bond_config.get("coherence_weight", 0.2)),
+                "personalized": float(bond_config.get("personalized_weight", 0.2))
+            }
+            if abs(sum(self.weights.values()) - 1.0) > 1e-6:
+                raise ValueError("Bond weights must sum to 1.0")
             self.logger.record_event(
                 event_type="bond_config_initialized",
-                message="Bonding configuration initialized successfully",
+                message="Bond configuration initialized",
                 level="info",
-                additional_info={
-                    "default_bonding": self.default_bonding,
-                    "min_bonding": self.min_bonding,
-                    "max_bonding": self.max_bonding,
-                    "min_history_length": self.min_history_length,
-                    "recovery_weights": self.recovery_weights,
-                    "curiosity_weight": self.curiosity_weight,
-                    "stability_weight": self.stability_weight,
-                    "coherence_weight": self.coherence_weight,
-                    "history_weight": self.history_weight,
-                    "novelty_threshold": self.novelty_threshold,
-                    "pressure_threshold": self.pressure_threshold,
-                    "pressure_drop": self.pressure_drop,
-                    "error_penalty_factor": self.error_penalty_factor
-                }
+                additional_info={"bond_config": bond_config}
             )
-            
         except Exception as e:
             self.logger.record_event(
-                event_type="bond_config_initialization_failed",
-                message=f"Failed to initialize bonding configuration: {str(e)}",
+                event_type="bond_config_failed",
+                message=f"Failed to initialize bond configuration: {str(e)}",
                 level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+                additional_info={"error": str(e)}
             )
             raise
-    
-    def _validate_config_values(self) -> None:
-        """Validate configuration values."""
-        try:
-            if not -1.0 <= self.min_bonding <= 1.0 or not -1.0 <= self.max_bonding <= 1.0:
-                raise ValueError("Bonding bounds must be between -1.0 and 1.0")
-            if self.min_bonding >= self.max_bonding:
-                raise ValueError("min_bonding must be less than max_bonding")
-            if not -1.0 <= self.default_bonding <= 1.0:
-                raise ValueError("default_bonding must be between -1.0 and 1.0")
-            if not 1 <= self.min_history_length <= 10:
-                raise ValueError("min_history_length must be between 1 and 10")
-            if len(self.recovery_weights) != 3 or not all(0.0 <= w <= 1.0 for w in self.recovery_weights):
-                raise ValueError("Invalid recovery_weights")
-            if abs(sum(self.recovery_weights) - 1.0) > 1e-6:
-                raise ValueError("Recovery weights must sum to 1.0")
-            if not all(0.0 <= w <= 1.0 for w in [self.curiosity_weight, self.stability_weight, self.coherence_weight, self.history_weight]):
-                raise ValueError("Bonding weights must be between 0.0 and 1.0")
-            if abs(self.curiosity_weight + self.stability_weight + self.coherence_weight + self.history_weight - 1.0) > 1e-6:
-                raise ValueError("Bonding weights must sum to 1.0")
-            if not 0.0 <= self.novelty_threshold <= 1.0:
-                raise ValueError("novelty_threshold must be between 0.0 and 1.0")
-            if not 0.0 <= self.pressure_threshold <= 1.0:
-                raise ValueError("pressure_threshold must be between 0.0 and 1.0")
-            if not 0.0 <= self.pressure_drop <= 1.0:
-                raise ValueError("pressure_drop must be between 0.0 and 1.0")
-            if not 0.0 <= self.error_penalty_factor <= 1.0:
-                raise ValueError("error_penalty_factor must be between 0.0 and 1.0")
-                
-        except Exception as e:
-            self.logger.record_event(
-                event_type="bond_config_validation_failed",
-                message=f"Bonding configuration validation failed: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
-            raise
-    
-    def _on_config_change(self) -> None:
-        """Handle configuration changes."""
-        try:
-            self._initialize_config()
-            self.logger.record_event(
-                event_type="bond_config_updated",
-                message="Bonding configuration updated",
-                level="info"
-            )
-        except Exception as e:
-            self.logger.record_event(
-                event_type="bond_config_update_failed",
-                message=f"Failed to update bonding configuration: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
-    
-    def _compute_jaccard_similarity(self, text1: str, text2: str) -> float:
-        """Compute Jaccard similarity between two texts."""
-        try:
-            # Preprocess: lowercase, remove special chars, split into words
-            text1 = re.sub(r'[^a-zA-Z0-9\s]', '', text1.lower())
-            text2 = re.sub(r'[^a-zA-Z0-9\s]', '', text2.lower())
-            words1 = set(text1.split())
-            words2 = set(text2.split())
-            intersection = len(words1 & words2)
-            union = len(words1 | words2)
-            return intersection / union if union > 0 else 0.0
-        except Exception as e:
-            self.logger.record_event(
-                event_type="bond_jaccard_calculation_failed",
-                message=f"Failed to compute Jaccard similarity: {str(e)}",
-                level="error",
-                additional_info={"text1": text1[:50], "text2": text2[:50], "error": str(e)}
-            )
-            return 0.0
-    
-    def _apply_temperament_bonding(self, base_score: float) -> float:
-        """Apply temperament-based adjustments to bonding score."""
-        if not self.temperament_system:
-            return base_score
-            
-        try:
-            mood_label = self.temperament_system.mood_label
-            mood_multiplier = TEMPERAMENT_MOOD_MULTIPLIERS.get(mood_label, 1.0)
-            adjusted_score = base_score * mood_multiplier
-            
-            self.logger.record_event(
-                event_type="bond_temperament_adjusted",
-                message="Applied temperament-based bonding adjustments",
-                level="info",
-                additional_info={
-                    "base_score": base_score,
-                    "adjusted_score": adjusted_score,
-                    "mood_label": mood_label,
-                    "mood_multiplier": mood_multiplier
-                }
-            )
-            
-            return adjusted_score
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="bond_temperament_adjustment_failed",
-                message=f"Failed to apply temperament bonding adjustments: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
-            return base_score
-    
-    def _apply_lifecycle_bonding(self, base_score: float) -> float:
-        """Apply lifecycle-based adjustments to bonding score."""
-        if not self.lifecycle_manager:
-            return base_score
-            
-        try:
-            lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage()
-            stage_multiplier = LIFECYCLE_STAGE_MULTIPLIERS.get(lifecycle_stage, 1.0)
-            adjusted_score = base_score * stage_multiplier
-            
-            self.logger.record_event(
-                event_type="bond_lifecycle_adjusted",
-                message="Applied lifecycle-based bonding adjustments",
-                level="info",
-                additional_info={
-                    "base_score": base_score,
-                    "adjusted_score": adjusted_score,
-                    "lifecycle_stage": lifecycle_stage,
-                    "stage_multiplier": stage_multiplier
-                }
-            )
-            
-            return adjusted_score
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="bond_lifecycle_adjustment_failed",
-                message=f"Failed to apply lifecycle bonding adjustments: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
-            return base_score
-    
+
+    def _compute_wordprint_score(self, user_input: str, state: SOVLState) -> float:
+        """Calculate wordprint score based on lexical signature and style consistency."""
+        profile = state.user_profiles[state.conversation_id]
+        # Lexical Signature
+        current_words = set(re.findall(r'\w+', user_input.lower()))
+        top_words = sorted(profile["user_lexicon"].items(), key=lambda x: x[1], reverse=True)[:10]
+        top_words_set = set(word for word, _ in top_words)
+        signature_score = (len(current_words & top_words_set) / len(current_words | top_words_set)
+                          if current_words and top_words_set else 0.5)
+        # Style Consistency
+        word_counts = [len(re.findall(r'\w+', input)) for input in profile["recent_inputs"]]
+        std_dev = torch.std(torch.tensor(word_counts, dtype=torch.float32)).item() if word_counts else 0.0
+        style_score = 1 - min(std_dev / self.max_expected_dev, 1.0)
+        # Combine
+        wordprint_score = 0.6 * signature_score + 0.4 * style_score
+        return max(0.0, min(1.0, wordprint_score))
+
+    def _compute_knowing_score(self, state: SOVLState) -> float:
+        """Calculate duration of knowing score based on interaction count and time."""
+        profile = state.user_profiles[state.conversation_id]
+        # Apply decay if inactive
+        if time.time() - profile["last_interaction_time"] > self.decay_interval:
+            profile["interaction_count"] = int(profile["interaction_count"] * self.decay_rate)
+            profile["total_session_time"] *= self.decay_rate
+            profile["last_interaction_time"] = time.time()
+        # Interaction Familiarity
+        familiarity = min(profile["interaction_count"] / self.max_interactions, 1.0)
+        # Time Duration
+        duration = min(profile["total_session_time"] / self.max_session_time, 1.0)
+        # Combine
+        knowing_score = 0.7 * familiarity + 0.3 * duration
+        return max(0.0, min(1.0, knowing_score))
+
+    def _compute_stability_score(self, state: SOVLState) -> float:
+        """Placeholder for stability score (system health/errors)."""
+        # Implement based on error rates or system metrics
+        return 0.5  # Neutral default
+
+    def _compute_coherence_score(self, user_input: str, state: SOVLState) -> float:
+        """Placeholder for coherence score (input-response alignment)."""
+        # Implement based on semantic similarity
+        return 0.5  # Neutral default
+
+    def _prune_lexicon(self, lexicon: Dict[str, int]) -> None:
+        """Prune lexicon to top max_lexicon_size words by frequency."""
+        if len(lexicon) > self.max_lexicon_size:
+            sorted_items = sorted(lexicon.items(), key=lambda x: x[1], reverse=True)[:self.max_lexicon_size]
+            lexicon.clear()
+            lexicon.update(dict(sorted_items))
+
     @synchronized()
     def calculate_bonding_score(
         self,
         user_input: str,
-        llm_response: str,
         state: SOVLState,
         error_manager: ErrorManager,
         context: SystemContext,
         curiosity_manager: Optional[CuriosityManager] = None
     ) -> float:
-        """Calculate bonding score between user and LLM on a -1 to 1 scale.
+        """
+        Calculate bonding score using curiosity, stability, coherence, and personalized (wordprint + knowing) components.
         
         Args:
-            user_input: User's input text
-            llm_response: LLM's response text
-            state: Current SOVL state
-            error_manager: Error handling manager
+            user_input: User input string
+            state: Current system state
+            error_manager: Error manager instance
             context: System context
-            curiosity_manager: Optional curiosity manager
-            
+            curiosity_manager: Optional curiosity manager for novelty score
+        
         Returns:
-            float: Bonding score between -1.0 and 1.0
+            Bonding score in [min_bond_score, max_bond_score]
         """
         try:
-            # Validate inputs
-            if not isinstance(user_input, str) or not isinstance(llm_response, str):
-                raise ValueError("user_input and llm_response must be strings")
-                
-            # Curiosity alignment
-            novelty = curiosity_manager.get_novelty_score(user_input) if curiosity_manager else 0.0
-            novelty = novelty if novelty >= self.novelty_threshold else 0.0
-            text_sim = self._compute_jaccard_similarity(user_input, llm_response)
-            curiosity_score = 0.6 * novelty + 0.4 * text_sim
-            
-            # Interaction stability
-            interaction_count = getattr(state, 'interaction_count', 0)
-            engagement = min(interaction_count / 100.0, 1.0)
-            error_rate = error_manager.get_error_rate(window=10) if hasattr(error_manager, 'get_error_rate') else 0.0
-            stability = 1.0 - error_rate * self.error_penalty_factor
-            stability_score = 0.6 * engagement + 0.4 * stability
-            
-            # Response coherence
-            relevance = novelty if novelty >= self.novelty_threshold else 0.5
-            coherence_score = 0.5 * text_sim + 0.5 * relevance
-            
-            # Base bonding score
-            base_score = (
-                self.curiosity_weight * curiosity_score +
-                self.stability_weight * stability_score +
-                self.coherence_weight * coherence_score
+            if not isinstance(user_input, str):
+                raise ValueError("user_input must be a string")
+            if not state.conversation_id:
+                raise ValueError("conversation_id must be set in state")
+
+            # Initialize profile for new conversation_id
+            if state.conversation_id not in state.user_profiles:
+                state.user_profiles[state.conversation_id] = {
+                    "user_lexicon": defaultdict(int),
+                    "interaction_count": 0,
+                    "total_session_time": 0.0,
+                    "recent_inputs": deque(maxlen=10),
+                    "last_interaction_time": time.time()
+                }
+            profile = state.user_profiles[state.conversation_id]
+
+            # Update state
+            for word in re.findall(r'\w+', user_input.lower()):
+                profile["user_lexicon"][word] += 1
+            self._prune_lexicon(profile["user_lexicon"])
+            profile["recent_inputs"].append(user_input)
+            profile["interaction_count"] += 1
+            profile["total_session_time"] += time.time() - state.session_start
+            profile["last_interaction_time"] = time.time()
+
+            # Calculate component scores
+            curiosity_score = (curiosity_manager.get_novelty_score(user_input)
+                              if curiosity_manager else 0.5)
+            stability_score = self._compute_stability_score(state)
+            coherence_score = self._compute_coherence_score(user_input, state)
+            wordprint_score = self._compute_wordprint_score(user_input, state)
+            knowing_score = self._compute_knowing_score(state)
+            personalized_score = 0.5 * wordprint_score + 0.5 * knowing_score
+
+            # Combine scores
+            bond_score = (
+                self.weights["curiosity"] * curiosity_score +
+                self.weights["stability"] * stability_score +
+                self.weights["coherence"] * coherence_score +
+                self.weights["personalized"] * personalized_score
             )
-            
-            # Apply temperament and lifecycle adjustments
-            tempered_score = self._apply_temperament_bonding(base_score)
-            lifecycle_score = self._apply_lifecycle_bonding(tempered_score)
-            
-            # History smoothing
-            history_avg = self.default_bonding
-            if len(self.bond_history.get_bond_history()) >= self.min_history_length:
-                recent_scores = list(self.bond_history.get_bond_history())[-self.min_history_length:]
-                history_avg = sum(s * w for s, w in zip(recent_scores, self.recovery_weights))
-            smoothed_score = (1.0 - self.history_weight) * lifecycle_score + self.history_weight * history_avg
-            
-            # Curiosity pressure adjustment
-            final_score = smoothed_score
-            if curiosity_manager:
-                pressure = curiosity_manager.get_pressure()
-                if pressure > self.pressure_threshold:
-                    final_score *= (1.0 - pressure * self.pressure_drop)
-            
-            # Clamp and store
-            final_score = max(self.min_bonding, min(self.max_bonding, final_score * 2.0 - 1.0))
-            self.bond_history.add_bond(final_score)
-            
-            # Log the calculation
+            bond_score = max(self.min_bond_score, min(self.max_bond_score, bond_score))
+
             self.logger.record_event(
-                event_type="bond_calculation_complete",
-                message="Bonding calculation completed",
+                event_type="bond_score_calculated",
+                message="Bond score calculated",
                 level="info",
                 additional_info={
-                    "user_input": user_input[:50],
-                    "llm_response": llm_response[:50],
-                    "base_score": base_score,
-                    "tempered_score": tempered_score,
-                    "lifecycle_score": lifecycle_score,
-                    "smoothed_score": smoothed_score,
-                    "final_score": final_score,
+                    "bond_score": bond_score,
                     "curiosity_score": curiosity_score,
                     "stability_score": stability_score,
                     "coherence_score": coherence_score,
-                    "novelty": novelty,
-                    "text_sim": text_sim,
-                    "engagement": engagement,
-                    "error_rate": error_rate,
-                    "mood_label": self.temperament_system.mood_label if self.temperament_system else None,
-                    "lifecycle_stage": self.lifecycle_manager.get_lifecycle_stage() if self.lifecycle_manager else None
+                    "wordprint_score": wordprint_score,
+                    "knowing_score": knowing_score,
+                    "conversation_id": state.conversation_id
                 }
             )
-            
-            return final_score
-            
+
+            return bond_score
+
         except Exception as e:
-            return self._recover_bonding(e, error_manager)
-    
-    def _recover_bonding(self, error: Exception, error_manager: ErrorManager) -> float:
-        """Attempt to recover bonding score from history or use default."""
-        try:
-            history = self.bond_history.get_bond_history()
-            if len(history) >= self.min_history_length:
-                recent_bonds = list(history)[-self.min_history_length:]
-                if any(not isinstance(b, (int, float)) or b < self.min_bonding or b > self.max_bonding for b in recent_bonds):
-                    error_manager.logger.record_event(
-                        event_type="bond_history_invalid",
-                        message="Invalid values in bonding history",
-                        level="error",
-                        additional_info={"history": recent_bonds}
-                    )
-                    return self.default_bonding
-                    
-                recovered_bonding = sum(b * w for b, w in zip(recent_bonds, self.recovery_weights))
-                
-                error_manager.logger.record_event(
-                    event_type="bond_recovered",
-                    message="Recovered bonding from history",
-                    level="warning",
-                    additional_info={
-                        "error": str(error),
-                        "recovered_bonding": recovered_bonding,
-                        "history_length": len(history)
-                    }
-                )
-                
-                return recovered_bonding
-                
-            error_manager.logger.record_event(
-                event_type="bond_default_used",
-                message="Using default bonding due to insufficient history",
-                level="warning",
-                additional_info={
-                    "error": str(error),
-                    "history_length": len(history)
-                }
+            self.logger.record_event(
+                event_type="bond_score_failed",
+                message=f"Failed to calculate bond score: {str(e)}",
+                level="error",
+                additional_info={"error": str(e), "conversation_id": state.conversation_id}
             )
-            return self.default_bonding
-            
-        except Exception as recovery_error:
-            error_manager.logger.record_event(
-                event_type="bond_recovery_failed",
-                message="Failed to recover bonding",
-                level="critical",
-                additional_info={
-                    "original_error": str(error),
-                    "recovery_error": str(recovery_error)
-                }
+            error_manager.handle_data_error(
+                e, {"user_input": user_input[:50]}, state.conversation_id
             )
-            return self.default_bonding
-
-# Singleton instance
-_bond_calculator = None
-
-def calculate_bonding_score(
-    user_input: str,
-    llm_response: str,
-    state: SOVLState,
-    error_manager: ErrorManager,
-    context: SystemContext,
-    curiosity_manager: Optional[CuriosityManager] = None
-) -> float:
-    """Calculate bonding score with robust error recovery."""
-    global _bond_calculator
-    if _bond_calculator is None:
-        _bond_calculator = BondCalculator(
-            config_manager=state.config_manager,
-            logger=state.logger,
-            temperament_system=state.temperament_system if hasattr(state, 'temperament_system') else None,
-            lifecycle_manager=state.lifecycle_manager if hasattr(state, 'lifecycle_manager') else None
-        )
-    
-    return _bond_calculator.calculate_bonding_score(
-        user_input=user_input,
-        llm_response=llm_response,
-        state=state,
-        error_manager=error_manager,
-        context=context,
-        curiosity_manager=curiosity_manager
-    )
+            return self.default_bond_score
