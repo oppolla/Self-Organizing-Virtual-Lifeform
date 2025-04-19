@@ -685,3 +685,230 @@ class SoulLogitsProcessor(LogitsProcessor):
                 }
             )
             return scores
+        
+class VibeCalculator:
+    """Calculates and tracks user vibe score as a conversational fingerprint."""
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        temperament_system: Optional[TemperamentSystem] = None,
+        lifecycle_manager: Optional[LifecycleManager] = None
+    ):
+        if not config_manager or not logger:
+            raise ValueError("config_manager and logger cannot be None")
+        if not isinstance(config_manager, ConfigManager):
+            raise TypeError("config_manager must be a ConfigManager instance")
+            
+        self.config_manager = config_manager
+        self.logger = logger
+        self.temperament_system = temperament_system
+        self.lifecycle_manager = lifecycle_manager
+        self.vibe_history = deque(maxlen=VIBE_HISTORY_MAXLEN)
+        self._initialize_config()
+    
+    def _initialize_config(self) -> None:
+        """Initialize vibe score configuration."""
+        try:
+            vibe_config = self.config_manager.get_section("vibe_config", {})
+            self.default_vibe_score = float(vibe_config.get("default_vibe_score", DEFAULT_VIBE_SCORE))
+            self.min_vibe_score = float(vibe_config.get("min_vibe_score", MIN_VIBE_SCORE))
+            self.max_vibe_score = float(vibe_config.get("max_vibe_score", MAX_VIBE_SCORE))
+            self.history_maxlen = int(vibe_config.get("history_maxlen", VIBE_HISTORY_MAXLEN))
+            self.switch_threshold = float(vibe_config.get("switch_threshold", SWITCH_THRESHOLD))
+            self.weights = {
+                "lexical": float(vibe_config.get("lexical_weight", VIBE_WEIGHTS["lexical"])),
+                "sentiment": float(vibe_config.get("sentiment_weight", VIBE_WEIGHTS["sentiment"])),
+                "syntactic": float(vibe_config.get("syntactic_weight", VIBE_WEIGHTS["syntactic"])),
+                "topic": float(vibe_config.get("topic_weight", VIBE_WEIGHTS["topic"])),
+                "rhythm": float(vibe_config.get("rhythm_weight", VIBE_WEIGHTS["rhythm"]))
+            }
+            
+            if abs(sum(self.weights.values()) - 1.0) > 1e-6:
+                raise ValueError("Vibe weights must sum to 1.0")
+                
+            self.logger.record_event(
+                event_type="vibe_config_initialized",
+                message="Vibe score configuration initialized",
+                level="info",
+                additional_info={
+                    "default_vibe_score": self.default_vibe_score,
+                    "min_vibe_score": self.min_vibe_score,
+                    "max_vibe_score": self.max_vibe_score,
+                    "history_maxlen": self.history_maxlen,
+                    "switch_threshold": self.switch_threshold,
+                    "weights": self.weights
+                }
+            )
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="vibe_config_failed",
+                message=f"Failed to initialize vibe configuration: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            raise
+    
+    def _compute_lexical_diversity(self, text: str) -> float:
+        """Calculate Type-Token Ratio (TTR)."""
+        words = re.findall(r'\w+', text.lower())
+        if not words:
+            return 0.0
+        unique_words = len(set(words))
+        return unique_words / len(words)
+    
+    def _compute_sentiment_polarity(self, text: str) -> float:
+        """Simple rule-based sentiment score [0, 1]."""
+        positive_words = {'good', 'great', 'happy', 'awesome', 'love'}
+        negative_words = {'bad', 'sad', 'hate', 'terrible', 'awful'}
+        words = set(re.findall(r'\w+', text.lower()))
+        pos_count = len(words & positive_words)
+        neg_count = len(words & negative_words)
+        total = pos_count + neg_count
+        if total == 0:
+            return 0.5
+        return pos_count / total
+    
+    def _compute_syntactic_complexity(self, text: str) -> float:
+        """Average sentence length normalized to [0, 1]."""
+        sentences = re.split(r'[.!?]+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if not sentences:
+            return 0.0
+        avg_length = sum(len(re.findall(r'\w+', s)) for s in sentences) / len(sentences)
+        return min(avg_length / 20.0, 1.0)  # Normalize by max expected length
+    
+    def _compute_topic_consistency(self, text: str, state: SOVLState) -> float:
+        """Jaccard similarity with historical inputs."""
+        historical_inputs = getattr(state, 'recent_inputs', deque(maxlen=10))
+        if not historical_inputs:
+            return 0.5
+        text_words = set(re.findall(r'\w+', text.lower()))
+        similarities = [
+            len(text_words & set(re.findall(r'\w+', h.lower()))) /
+            len(text_words | set(re.findall(r'\w+', h.lower())))
+            for h in historical_inputs
+        ]
+        return sum(similarities) / len(similarities) if similarities else 0.5
+    
+    def _compute_interaction_rhythm(self, state: SOVLState) -> float:
+        """Normalize input frequency and length."""
+        interaction_count = getattr(state, 'interaction_count', 0)
+        recent_inputs = getattr(state, 'recent_inputs', deque(maxlen=10))
+        if not recent_inputs:
+            return 0.5
+        avg_length = sum(len(r) for r in recent_inputs) / len(recent_inputs)
+        return min(interaction_count / 100.0, 1.0) * 0.5 + min(avg_length / 200.0, 1.0) * 0.5
+    
+    @synchronized()
+    def calculate_vibe_score(
+        self,
+        user_input: str,
+        state: SOVLState,
+        error_manager: ErrorManager,
+        context: SystemContext,
+        curiosity_manager: Optional[CuriosityManager] = None
+    ) -> float:
+        """Calculate vibe score for user input."""
+        try:
+            if not isinstance(user_input, str):
+                raise ValueError("user_input must be a string")
+                
+            lexical = self._compute_lexical_diversity(user_input)
+            sentiment = self._compute_sentiment_polarity(user_input)
+            syntactic = self._compute_syntactic_complexity(user_input)
+            topic = self._compute_topic_consistency(user_input, state)
+            rhythm = self._compute_interaction_rhythm(state)
+            
+            vibe_score = (
+                self.weights["lexical"] * lexical +
+                self.weights["sentiment"] * sentiment +
+                self.weights["syntactic"] * syntactic +
+                self.weights["topic"] * topic +
+                self.weights["rhythm"] * rhythm
+            )
+            
+            vibe_score = max(self.min_vibe_score, min(self.max_vibe_score, vibe_score))
+            self.vibe_history.append(vibe_score)
+            
+            self.logger.record_event(
+                event_type="vibe_score_calculated",
+                message="Vibe score calculated",
+                level="info",
+                additional_info={
+                    "vibe_score": vibe_score,
+                    "lexical": lexical,
+                    "sentiment": sentiment,
+                    "syntactic": syntactic,
+                    "topic": topic,
+                    "rhythm": rhythm,
+                    "user_input": user_input[:50]
+                }
+            )
+            
+            # Store input for future topic consistency
+            if not hasattr(state, 'recent_inputs'):
+                state.recent_inputs = deque(maxlen=10)
+            state.recent_inputs.append(user_input)
+            
+            return vibe_score
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="vibe_score_failed",
+                message=f"Failed to calculate vibe score: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
+            return self.default_vibe_score
+    
+    def detect_user_switch(self, vibe_score: float) -> bool:
+        """Detect potential user switch based on vibe score deviation."""
+        if not self.vibe_history or len(self.vibe_history) < 3:
+            return False
+            
+        avg_vibe = sum(self.vibe_history) / len(self.vibe_history)
+        deviation = abs(vibe_score - avg_vibe)
+        if deviation > self.switch_threshold:
+            self.logger.record_event(
+                event_type="user_switch_suspected",
+                message="Significant vibe score deviation detected",
+                level="warning",
+                additional_info={"vibe_score": vibe_score, "avg_vibe": avg_vibe, "deviation": deviation}
+            )
+            return True
+        return False
+    
+    def get_vibe_trend(self) -> List[float]:
+        """Return vibe score history for charting."""
+        return list(self.vibe_history)
+
+# Singleton
+_vibe_calculator = None
+
+def calculate_vibe_score(
+    user_input: str,
+    state: SOVLState,
+    error_manager: ErrorManager,
+    context: SystemContext,
+    curiosity_manager: Optional[CuriosityManager] = None
+) -> float:
+    """Calculate vibe score with singleton access."""
+    global _vibe_calculator
+    if _vibe_calculator is None:
+        _vibe_calculator = VibeCalculator(
+            config_manager=state.config_manager,
+            logger=state.logger,
+            temperament_system=state.temperament_system if hasattr(state, 'temperament_system') else None,
+            lifecycle_manager=state.lifecycle_manager if hasattr(state, 'lifecycle_manager') else None
+        )
+    
+    return _vibe_calculator.calculate_vibe_score(
+        user_input=user_input,
+        state=state,
+        error_manager=error_manager,
+        context=context,
+        curiosity_manager=curiosity_manager
+    )       
