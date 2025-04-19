@@ -1,3 +1,7 @@
+from typing import Dict, List, Optional, Union
+from dataclasses import dataclass
+from sovl_config import ConfigSchema 
+
 class ValidationSchema:
     """Schema definitions for SOVL configuration validation."""
     
@@ -180,4 +184,3 @@ class ValidationSchema:
                 "weight": ConfigSchema(required=False, type=float, default=0.5, min=0.0, max=1.0)
             }
         }
-
