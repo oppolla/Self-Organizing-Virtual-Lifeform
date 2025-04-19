@@ -77,7 +77,7 @@ class SchemaValidator:
             })
             return False, schema.default
 
-        if schema.range and not (schema.range[0] <= value <= schema.range[1]):
+        if schema.range and not (schema.range[0] <= value <= schema.range[1] if schema.range[1] is not None else schema.range[0] <= value):
             self.logger.record({
                 "warning": f"Value for {key} out of range {schema.range}: {value}",
                 "suggested": f"Set to default: {schema.default}",
@@ -101,6 +101,17 @@ class ConfigStore:
             "cross_attn_config": {},
             "controls_config": {},
             "logging_config": {},
+            "dynamic_weighting": {},
+            "preprocessing": {},
+            "augmentation": {},
+            "hardware": {},
+            "error_config": {},
+            "generation_config": {},
+            "data_config": {},
+            "memory_config": {},
+            "state_config": {},
+            "temperament_config": {},
+            "confidence_config": {},
         }
         self.cache: Dict[str, Any] = {}
 
@@ -261,21 +272,12 @@ class ConfigManager:
         self._initialize_config()
 
     def _load_schema(self) -> List[ConfigSchema]:
-        """Load schema from ValidationSchema and convert to flat list for validation."""
+        """Load schema from ValidationSchema and flatten to a list for validation."""
         schema_dict = ValidationSchema.get_schema()
         flat_schema = []
         for section, fields in schema_dict.items():
             for field, config_schema in fields.items():
-                # Create a new ConfigSchema with the full key (section.field)
-                flat_schema.append(ConfigSchema(
-                    field=f"{section}.{field}",
-                    type=config_schema.type,
-                    default=config_schema.default,
-                    validator=lambda x: config_schema.validate(x),
-                    range=(config_schema.min, config_schema.max) if config_schema.min is not None and config_schema.max is not None else None,
-                    required=config_schema.required,
-                    nullable=config_schema.default is None and not config_schema.required
-                ))
+                flat_schema.append(config_schema)
         return flat_schema
 
     def _initialize_config(self) -> None:
@@ -613,7 +615,7 @@ class ConfigManager:
     def validate_or_raise(self, model_config: Optional[Any] = None) -> None:
         try:
             self.validate_keys([
-                "core_config.base_model_name",
+                "core_config.model_name",
                 "core_config.scaffold_model_name",
                 "training_config.learning_rate",
                 "curiosity_config.enable_curiosity",
@@ -625,7 +627,7 @@ class ConfigManager:
                 raise ValueError("core_config.cross_attn_layers must be a list")
 
             if not self.get("core_config.use_dynamic_layers", False) and model_config is not None:
-                base_model_name = self.get("core_config.base_model_name", "gpt2")
+                base_model_name = self.get("core_config.model_name", "gpt2")
                 try:
                     base_config = model_config or AutoConfig.from_pretrained(base_model_name)
                     invalid_layers = [l for l in cross_attn_layers if not (0 <= l < base_config.num_hidden_layers)]
@@ -641,7 +643,7 @@ class ConfigManager:
 
                 if model_config is not None:
                     try:
-                        base_model_name = self.get("core_config.base_model_name", "gpt2")
+                        base_model_name = self.get("core_config.model_name", "gpt2")
                         base_config = model_config or AutoConfig.from_pretrained(base_model_name)
                         invalid_custom = [l for l in custom_layers if not (0 <= l < base_config.num_hidden_layers)]
                         if invalid_custom:
@@ -685,6 +687,7 @@ if __name__ == "__main__":
     logger = Logger(LoggerConfig())
     config_manager = ConfigManager("sovl_config.json", logger)
     try:
-        config_manager.validate_keys(["core_config.base_model_name", "curiosity_config.attention_weight"])
+        config_manager.validate_keys(["core_config.model_name", "curiosity_config.attention_weight"])
+        print("Schema validation successful")
     except ValueError as e:
-        print(e)
+        print(f"Validation error: {e}")
