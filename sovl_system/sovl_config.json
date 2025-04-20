@@ -102,6 +102,8 @@
     "enable_lifecycle_weighting": true,
     "sleep_conf_threshold": 0.7,
     "sleep_log_min": 33,
+    "fatigue_factor_cap": 0.2,
+    "fatigue_scaling_factor": 2.0,
     "dream_memory_weight": 0.03,
     "enable_dreaming": true,
     "repetition_n": 3,

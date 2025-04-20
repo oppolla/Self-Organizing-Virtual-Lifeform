@@ -244,6 +244,19 @@ class ValidationSchema:
                 "base_weight": ConfigSchema(field="dream_memory_config.base_weight", type=float, default=0.1, range=(0.0, 1.0)),
                 "max_weight": ConfigSchema(field="dream_memory_config.max_weight", type=float, default=1.5, range=(0.0, None)),
             },
+            "lifecycle_config": {
+                "enable_gestation": ConfigSchema(field="lifecycle_config.enable_gestation", type=bool, default=True),
+                "enable_sleep_training": ConfigSchema(field="lifecycle_config.enable_sleep_training", type=bool, default=True),
+                "enable_lifecycle_weighting": ConfigSchema(field="lifecycle_config.enable_lifecycle_weighting", type=bool, default=True),
+                "lifecycle_capacity_factor": ConfigSchema(field="lifecycle_config.lifecycle_capacity_factor", type=float, default=0.01, range=(0.0, 1.0)),
+                "lifecycle_curve": ConfigSchema(field="lifecycle_config.lifecycle_curve", type=str, default="sigmoid_linear", validator=lambda x: x in ["sigmoid_linear", "exponential"]),
+                "sleep_conf_threshold": ConfigSchema(field="lifecycle_config.sleep_conf_threshold", type=float, default=0.7, range=(0.0, 1.0)),
+                "sleep_log_min": ConfigSchema(field="lifecycle_config.sleep_log_min", type=int, default=10, range=(1, None)),
+                "exposure_gain_eager": ConfigSchema(field="lifecycle_config.exposure_gain_eager", type=int, default=3, range=(1, None)),
+                "exposure_gain_default": ConfigSchema(field="lifecycle_config.exposure_gain_default", type=int, default=2, range=(1, None)),
+                "fatigue_factor_cap": ConfigSchema(field="lifecycle_config.fatigue_factor_cap", type=float, default=0.2, range=(0.0, 0.5)),
+                "fatigue_scaling_factor": ConfigSchema(field="lifecycle_config.fatigue_scaling_factor", type=float, default=2.0, range=(1.0, 5.0))
+            },
             "gestation_weighting": {
                 "type": "object",
                 "required": ["metadata_fields", "content_weights", "confidence_weights", "temperament_weights", "context_weights", "timing_weights", "weight_bounds"],
