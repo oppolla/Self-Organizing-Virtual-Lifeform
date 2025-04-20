@@ -890,7 +890,7 @@ class DataManager:
             split_ratio: Optional ratio for validation split. If None, uses default from config.
             
         Returns:
-            Tuple of (training_data, validation_data)
+            Tuple of (formatted_training_data, valid_data)
             
         Raises:
             RuntimeError: If DataManager is not properly initialized
@@ -942,7 +942,7 @@ class DataManager:
                 
             # Split data
             split_idx = int(len(data) * (1 - split_ratio))
-            train_data = data[:split_idx]
+            formatted_training_data = data[:split_idx]
             valid_data = data[split_idx:]
             
             # Log success
@@ -956,13 +956,13 @@ class DataManager:
                     "valid_entries": valid_entries,
                     "invalid_entries": invalid_entries,
                     "avg_entry_length": avg_entry_length,
-                    "train_size": len(train_data),
+                    "train_size": len(formatted_training_data),
                     "valid_size": len(valid_data),
                     "split_ratio": split_ratio
                 }
             )
             
-            return train_data, valid_data
+            return formatted_training_data, valid_data
             
         except Exception as e:
             self._log_error(
@@ -1004,7 +1004,7 @@ class DataManager:
             split_ratio: Fraction of data to use for validation (must be between 0 and 1)
             
         Returns:
-            Tuple of (train_data, valid_data)
+            Tuple of (formatted_training_data, valid_data)
             
         Raises:
             ValueError: If split_ratio is invalid or data is empty
@@ -1053,7 +1053,7 @@ class DataManager:
                 valid_size = total_size - train_size
                 
                 # Initialize empty lists for train and validation data
-                train_data = []
+                formatted_training_data = []
                 valid_data = []
                 
                 # Process data in batches
@@ -1066,10 +1066,10 @@ class DataManager:
                     batch_data = [data[idx] for idx in batch_indices]
                     
                     # Add to appropriate split based on current sizes
-                    if len(train_data) < train_size:
-                        train_data.extend(batch_data[:train_size - len(train_data)])
-                        if len(train_data) == train_size and len(valid_data) < valid_size:
-                            valid_data.extend(batch_data[train_size - len(train_data):])
+                    if len(formatted_training_data) < train_size:
+                        formatted_training_data.extend(batch_data[:train_size - len(formatted_training_data)])
+                        if len(formatted_training_data) == train_size and len(valid_data) < valid_size:
+                            valid_data.extend(batch_data[train_size - len(formatted_training_data):])
                     else:
                         valid_data.extend(batch_data)
                 
@@ -1080,7 +1080,7 @@ class DataManager:
                     level="info",
                     additional_info={
                         "total_entries": total_size,
-                        "train_entries": len(train_data),
+                        "train_entries": len(formatted_training_data),
                         "valid_entries": len(valid_data),
                         "split_ratio": split_ratio,
                         "batch_size": batch_size,
@@ -1089,7 +1089,7 @@ class DataManager:
                     }
                 )
                 
-                return train_data, valid_data
+                return formatted_training_data, valid_data
                 
             # For smaller datasets, use standard shuffling
             random.seed(self.random_seed)
@@ -1113,7 +1113,7 @@ class DataManager:
                 split_idx = max(1, min(len(shuffled_data) - 1, split_idx))
                 
             # Perform split
-            train_data = shuffled_data[:split_idx]
+            formatted_training_data = shuffled_data[:split_idx]
             valid_data = shuffled_data[split_idx:]
             
             # Log successful split
@@ -1123,14 +1123,14 @@ class DataManager:
                 level="info",
                 additional_info={
                     "total_entries": len(data),
-                    "train_entries": len(train_data),
+                    "train_entries": len(formatted_training_data),
                     "valid_entries": len(valid_data),
                     "split_ratio": split_ratio,
                     "conversation_id": self._get_conversation_id()
                 }
             )
             
-            return train_data, valid_data
+            return formatted_training_data, valid_data
             
         except Exception as e:
             # Handle any unexpected errors during splitting

@@ -18,6 +18,7 @@ from sovl_config import ConfigManager
 from sovl_io import ConfigurationError
 from sovl_confidence import ConfidenceCalculator
 from sovl_temperament import TemperamentSystem
+import hashlib
 
 @dataclass
 class TrainingConfig:
@@ -970,332 +971,218 @@ class TrainingWorkflowManager:
             self.logger.error(f"Error in dream cycle: {str(e)}")
             raise
 
+class MetadataProcessor:
+    """Handles metadata collection, analysis, and weighting for training examples."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        """Initialize metadata processor with configuration and logger."""
+        self.config_manager = config_manager
+        self.logger = logger
+        self._load_config()
+    
+    def _load_config(self) -> None:
+        """Load and validate metadata configuration."""
+        self.config = self.config_manager.get_section("gestation_weighting")
+        self.quality_weights = self.config["metadata_fields"]["quality_metrics"]
+        self.content_weights = self.config["content_weights"]
+        self.confidence_weights = self.config["confidence_weights"]
+        self.temperament_weights = self.config["temperament_weights"]
+        self.context_weights = self.config["context_weights"]
+        self.timing_weights = self.config["timing_weights"]
+        self.weight_bounds = self.config["weight_bounds"]
+    
+    def collect_metadata(self, content: str) -> Dict[str, Any]:
+        """Collect metadata from content."""
+        # Split content into words and sentences
+        words = content.split()
+        sentences = [s.strip() for s in content.split('.') if s.strip()]
+        
+        # Calculate metrics
+        word_count = len(words)
+        sentence_count = len(sentences)
+        avg_word_length = sum(len(w) for w in words) / word_count if word_count > 0 else 0
+        avg_sentence_length = word_count / sentence_count if sentence_count > 0 else 0
+        
+        return {
+            'content_metrics': {
+                'word_count': word_count,
+                'sentence_count': sentence_count,
+                'avg_word_length': avg_word_length,
+                'avg_sentence_length': avg_sentence_length
+            },
+            'quality_metrics': {
+                'has_code': '```' in content,
+                'has_url': 'http' in content,
+                'has_question': '?' in content,
+                'has_exclamation': '!' in content,
+                'has_emoji': any(c in content for c in '😀😃😄😁😆😅😂🤣😊😇')
+            }
+        }
+    
+    def calculate_weight(self, metadata: Dict[str, Any]) -> float:
+        """Calculate weight for a training example based on its metadata."""
+        weight = 1.0
+        
+        # Quality metrics weighting
+        for feature, config in self.quality_weights.items():
+            if config["enabled"] and metadata['quality_metrics'].get(f"has_{feature}", False):
+                weight *= config["weight"]
+        
+        # Content metrics weighting
+        content_metrics = metadata['content_metrics']
+        
+        # Word count balance
+        word_count = content_metrics['word_count']
+        if word_count > 0:
+            weight *= self.content_weights["word_count_ratio_scale"]
+        
+        # Word length optimization
+        avg_word_length = content_metrics['avg_word_length']
+        word_length_range = self.content_weights["optimal_word_length_range"]
+        if word_length_range["min"] <= avg_word_length <= word_length_range["max"]:
+            weight *= word_length_range["weight"]
+        else:
+            weight *= self.content_weights["suboptimal_word_length_weight"]
+        
+        # Sentence structure optimization
+        sentence_count = content_metrics['sentence_count']
+        sentence_count_range = self.content_weights["optimal_sentence_count_range"]
+        if sentence_count_range["min"] <= sentence_count <= sentence_count_range["max"]:
+            weight *= sentence_count_range["weight"]
+        elif sentence_count > sentence_count_range["max"]:
+            weight *= self.content_weights["excessive_sentence_weight"]
+        
+        # Sentence length optimization
+        avg_sentence_length = content_metrics['avg_sentence_length']
+        sentence_length_range = self.content_weights["optimal_sentence_length_range"]
+        if sentence_length_range["min"] <= avg_sentence_length <= sentence_length_range["max"]:
+            weight *= sentence_length_range["weight"]
+        elif avg_sentence_length > sentence_length_range["max"]:
+            weight *= self.content_weights["excessive_sentence_length_weight"]
+        
+        # Confidence weighting
+        confidence_score = metadata.get('confidence_score', 0.5)
+        if confidence_score >= self.confidence_weights["high_confidence_threshold"]:
+            weight *= self.confidence_weights["high_confidence_weight"]
+        elif confidence_score >= self.confidence_weights["moderate_confidence_threshold"]:
+            weight *= self.confidence_weights["moderate_confidence_weight"]
+        elif confidence_score < self.confidence_weights["low_confidence_threshold"]:
+            weight *= self.confidence_weights["low_confidence_weight"]
+        
+        # Temperament weighting
+        temperament_score = metadata.get('temperament_score', 0.5)
+        balanced_range = self.temperament_weights["balanced_range"]
+        if balanced_range["min"] <= temperament_score <= balanced_range["max"]:
+            weight *= balanced_range["weight"]
+        else:
+            weight *= self.temperament_weights["extreme_temperament_weight"]
+        
+        # Context weighting
+        context_metrics = metadata.get('context_metrics', {})
+        if context_metrics.get('is_first_message', False) or context_metrics.get('is_last_message', False):
+            weight *= self.context_weights["first_last_message_weight"]
+        
+        # Response timing
+        response_time = metadata.get('response_time')
+        if response_time is not None:
+            normalized_time = min(1.0, max(0.0, response_time / self.timing_weights["max_response_time"]))
+            weight *= self.timing_weights["optimal_timing_weight"] + (0.5 - abs(normalized_time - 0.5))
+        
+        # Apply weight bounds
+        return max(self.weight_bounds["min"], min(self.weight_bounds["max"], weight))
+    
+    def prepare_training_pairs(self, conversation_history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """Prepare training pairs with metadata from conversation history."""
+        training_pairs = []
+        context_window = deque(maxlen=5)
+        
+        for i in range(len(conversation_history) - 1):
+            current_msg = conversation_history[i]
+            next_msg = conversation_history[i + 1]
+            
+            if current_msg['role'] == 'user' and next_msg['role'] == 'assistant':
+                # Collect metadata for both messages
+                input_metadata = self.collect_metadata(current_msg['content'])
+                output_metadata = self.collect_metadata(next_msg['content'])
+                
+                # Calculate response time
+                response_time = None
+                if current_msg.get('timestamp') and next_msg.get('timestamp'):
+                    response_time = next_msg['timestamp'] - current_msg['timestamp']
+                
+                # Create training pair with metadata
+                training_pairs.append({
+                    'input': current_msg['content'],
+                    'output': next_msg['content'],
+                    'metadata': {
+                        'input_metrics': input_metadata['content_metrics'],
+                        'output_metrics': output_metadata['content_metrics'],
+                        'quality_metrics': {
+                            'input': input_metadata['quality_metrics'],
+                            'output': output_metadata['quality_metrics']
+                        },
+                        'confidence_score': next_msg.get('confidence_score', 0.5),
+                        'temperament_score': next_msg.get('temperament_score', 0.5),
+                        'context': [m['content'] for m in context_window],
+                        'context_metrics': {
+                            'is_first_message': i == 0,
+                            'is_last_message': i == len(conversation_history) - 2
+                        },
+                        'response_time': response_time
+                    }
+                })
+                
+                context_window.append(current_msg)
+        
+        return training_pairs
+
 class TrainingCycleManager:
     """Manages the orchestration of training cycles, including sleep training."""
     
-    def __init__(
-        self,
-        config: SOVLConfig,
-        logger: Logger,
-        device: torch.device,
-        state_manager: StateManager,
-        curiosity_manager: CuriosityManager
-    ):
-        self.config = config
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        """Initialize training cycle manager."""
+        self.config_manager = config_manager
         self.logger = logger
-        self.device = device
-        self.state_manager = state_manager
-        self.curiosity_manager = curiosity_manager
-        self.data_manager = data_manager
-
-        # Training configuration
-        training_config = config.get("training_config", {})
-        self.learning_rate = training_config.get("learning_rate", 1.5e-5)
-        self.batch_size = training_config.get("batch_size", 4)
-        self.grad_accum_steps = training_config.get("grad_accum_steps", 4)  # Renamed from accumulation_steps
-        self.warmup_steps = training_config.get("warmup_steps", 300)
-        self.model_name = training_config.get("model_name", "SmolLM2-360M") 
-        
-         # Dream memory configuration
-        dream_memory_config = config.get("dream_memory_config", {})
-        self.max_dream_memories = dream_memory_config.get("max_memories", 100)
-        self.dream_base_weight = dream_memory_config.get("base_weight", 0.1)
-        self.dream_max_weight = dream_memory_config.get("max_weight", 1.5)
-        
-        self.logger.record_event(
-            event_type="training_cycle_manager_init",
-            message="TrainingCycleManager initialized",
-            level="info",
-            additional_info={
-                "learning_rate": self.learning_rate,
-                "batch_size": self.batch_size,
-                "grad_accum_steps": self.grad_accum_steps,
-                "model_name": self.model_name,
-                "max_dream_memories": self.max_dream_memories
-            }
-        ) # New parameter
-             # Initialize trainer with current state
-        self.trainer = SOVLTrainer(
-            config=config,
-            state=state_manager.get_state(),
-            curiosity_manager=curiosity_manager,
-            error_manager=ErrorManager(),
-            device=device,
-            logger=logger
-        )
-        
-    def run_training_cycle(
-        self,
-        train_data: List[Dict[str, Any]],
-        valid_data: List[Dict[str, Any]],
-        scaffold_provider: Optional[Callable] = None,
-        epochs: Optional[int] = None,
-        batch_size: Optional[int] = None
-    ) -> Dict[str, Any]:
-        """Run a complete training cycle with validation.
-
-        Args:
-            train_data: List of training data dictionaries.
-            valid_data: List of validation data dictionaries.
-            scaffold_provider: Optional provider for scaffold context.
-            epochs: Number of training epochs, defaults to config value.
-            batch_size: Size of each training batch, defaults to config value.
-
-        Returns:
-            Dict containing training results or status if cycle is skipped.
-
-        Raises:
-            Exception: If training fails due to unexpected errors.
-        """
-        try:
-            # Get current state
-            state = self.state_manager.get_state()
-            
-            # Update trainer state if needed
-            if self.trainer.state != state:
-                self.trainer.state = state
-                self.trainer.curiosity_manager.set_state(state)
-            
-            # Get configuration parameters using type-safe keys
-            max_epochs = epochs or self.config_manager.get(ConfigKeys.TRAINING_MAX_EPOCHS, 10)
-            batch_size = batch_size or self.config_manager.get(ConfigKeys.TRAINING_BATCH_SIZE, 4)
-            grad_accum_steps = self.config_manager.get(ConfigKeys.TRAINING_GRAD_ACCUM_STEPS, 4)
-            model_name = self.config_manager.get(ConfigKeys.TRAINING_MODEL_NAME, "SmolLM2-360M")
-            
-            # Dream memory configuration
-            max_dream_memories = self.config_manager.get(ConfigKeys.DREAM_MEMORY_MAX_MEMORIES, 100)
-            dream_base_weight = self.config_manager.get("dream_memory_config.base_weight", 0.1)
-            dream_max_weight = self.config_manager.get("dream_memory_config.max_weight", 1.5)
-            
-            # Manage dream memory (if applicable)
-            if hasattr(self.trainer, 'dream_memory'):
-                # Trim dream memory to max_memories
-                if len(self.trainer.dream_memory) > max_dream_memories:
-                    self.trainer.dream_memory = self.trainer.dream_memory[-max_dream_memories:]
-                    self.logger.record_event(
-                        event_type="dream_memory_trimmed",
-                        message="Dream memory trimmed to max_memories",
-                        level="info",
-                        additional_info={
-                            "max_memories": max_dream_memories,
-                            "conversation_id": self.state.history.conversation_id
-                        }
-                    )
-                
-                # Apply weights to dream memory entries
-                for memory in self.trainer.dream_memory:
-                    memory["weight"] = min(
-                        dream_max_weight,
-                        max(dream_base_weight, memory.get("weight", dream_base_weight))
-                    )
-            
-            # Run training cycle through trainer
-            results = self.trainer.run_training_cycle(
-                train_data=train_data,
-                validation_data=valid_data,
-                scaffold_provider=scaffold_provider,
-                max_epochs=max_epochs,
-                batch_size=batch_size,
-                grad_accum_steps=grad_accum_steps,  # Pass updated parameter
-                model_name=model_name  # Pass new parameter
-            )
-            
-            # Save updated state
-            self.state_manager.save_state()
-            
-            # Log successful training cycle
-            self.logger.log_training_event(
-                event_type="training_cycle_complete",
-                epoch=max_epochs,
-                batch_size=batch_size,
-                data_exposure=results.get("data_exposure", 0.0),
-                conversation_id=self.state.history.conversation_id,
-                state_hash=self.state.state_hash,
-                additional_info={
-                    **results,
-                    "grad_accum_steps": grad_accum_steps,
-                    "model_name": model_name,
-                    "dream_memory_size": len(self.trainer.dream_memory) if hasattr(self.trainer, 'dream_memory') else 0
-                }
-            )
-            
-            return results
-            
-        except Exception as e:
-            self.logger.record({
-                "error": f"Training cycle failed: {str(e)}",
-                "timestamp": time.time(),
-                "conversation_id": self.state.history.conversation_id
-            })
-            raise
-            
-    def run_sleep_training(self, log_entries: List[Dict[str, Any]]) -> None:
-        """Run sleep training on dream-generated content."""
-        try:
-            if not self.config.enable_sleep_training:
-                self.logger.record_event(
-                    event_type="sleep_training_skipped",
-                    message="Sleep training disabled",
-                    level="info",
-                    conversation_id=self.state.history.conversation_id,
-                    state_hash=self.state.state_hash
-                )
-                return
-                
-            self.logger.record_event(
-                event_type="sleep_training_start",
-                message="Starting sleep training",
-                level="info",
-                conversation_id=self.state.history.conversation_id,
-                state_hash=self.state.state_hash
-            )
-            
-            # Get current state
-            state = self.state_manager.get_state()
-            
-            # Update trainer state if needed
-            if self.trainer.state != state:
-                self.trainer.state = state
-                self.trainer.curiosity_manager.set_state(state)
-            
-            # Run sleep training through trainer
-            self.trainer.sleep_train(log_entries)
-            self.trainer.last_trained = time.time()
-            self.trainer.last_weight = self.trainer.get_life_curve_weight()
-            
-            # Update temperament if enabled
-            if self.config.enable_temperament:
-                self.trainer._update_temperament()
-                self.trainer.last_temperament_score = self.trainer.temperament_system.score
-                
-            # Save updated state
-            self.state_manager.save_state()
-                
-            self.logger.record_event(
-                event_type="sleep_training_complete",
-                message="Sleep training completed successfully",
-                level="info",
-                conversation_id=self.state.history.conversation_id,
-                state_hash=self.state.state_hash,
-                additional_info={
-                    "last_weight": self.trainer.last_weight,
-                    "last_temperament_score": self.trainer.last_temperament_score
-                }
-            )
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Sleep training failed: {str(e)}",
-                error_type="sleep_training_error",
-                stack_trace=traceback.format_exc(),
-                conversation_id=self.state.history.conversation_id,
-                state_hash=self.state.state_hash
-            )
-            raise
-
-    @synchronized("lock")
-    def run_sleep_training(self, sovl_state: SOVLState) -> None:
-        """Run training during sleep phase using conversation history.
-        
-        Args:
-            sovl_state: The current SOVL state containing conversation history
-        """
-        try:
-            # Get conversation history and metadata
-            conversation_history = sovl_state.get_conversation_history()
-            metadata = sovl_state.get_conversation_metadata()
-            
-            if not conversation_history:
-                self.logger.info("No conversation history available for sleep training")
-                return
-                
-            self.logger.info(f"Starting sleep training with {metadata['message_count']} messages")
-            
-            # Prepare training data from conversation history
-            formatted_training_data = self._prepare_training_data(conversation_history)
-            
-            if not formatted_training_data:
-                self.logger.warning("No valid training data could be prepared")
-                return
-                
-            # Run training cycle
-            self._run_training_cycle(formatted_training_data)
-            
-            # Update training metrics
-            self._update_training_metrics(len(formatted_training_data))
-            
-            self.logger.info("Sleep training completed successfully")
-            
-        except Exception as e:
-            self.logger.error(f"Error during sleep training: {str(e)}")
-            raise
-
+        self.metadata_processor = MetadataProcessor(config_manager, logger)
+    
     def _prepare_training_data(self, conversation_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Prepare training data from conversation history.
-        
-        Args:
-            conversation_history: List of conversation messages
-            
-        Returns:
-            List[Dict[str, str]]: Prepared training data
-        """
+        """Prepare training data from conversation history."""
+        return self.metadata_processor.prepare_training_pairs(conversation_history)
+    
+    def _prepare_gestation_batch(self, training_pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Prepare training batch for gestation phase with enhanced metadata utilization."""
         try:
-            # Validate input
-            if not isinstance(conversation_history, list):
-                self.logger.error("conversation_history must be a list")
-                return []
+            prepared_batch = []
             
-            # Filter and validate messages
-            valid_messages = []
-            for msg in conversation_history:
-                if not isinstance(msg, dict):
-                    continue
-                if msg.get('role') not in ['user', 'assistant']:
-                    continue
-                if not isinstance(msg.get('content'), str):
-                    continue
-                if not msg['content'].strip():
-                    continue
-                valid_messages.append(msg)
-            
-            if not valid_messages:
-                self.logger.warning("No valid messages found in conversation history")
-                return []
-            
-            # Group messages into training pairs with role validation
-            training_pairs = []
-            i = 0
-            while i < len(valid_messages) - 1:
-                current_msg = valid_messages[i]
-                next_msg = valid_messages[i + 1]
+            for pair in training_pairs:
+                weight = self.metadata_processor.calculate_weight(pair['metadata'])
                 
-                # Ensure proper user-assistant alternation
-                if (current_msg['role'] == 'user' and next_msg['role'] == 'assistant'):
-                    training_pairs.append({
-                        'input': current_msg['content'],
-                        'output': next_msg['content'],
-                        'metadata': {
-                            'timestamp': current_msg.get('timestamp'),
-                            'conversation_id': current_msg.get('conversation_id')
-                        }
-                    })
-                    i += 2
-                else:
-                    # Skip invalid message pair
-                    self.logger.debug(f"Skipping invalid message pair at index {i}")
-                    i += 1
-                
-            if not training_pairs:
-                self.logger.warning("No valid training pairs could be created")
-                return []
+                prepared_batch.append({
+                    'input': pair['input'],
+                    'output': pair['output'],
+                    'weight': weight,
+                    'metadata': pair['metadata']
+                })
             
-            # Log successful preparation
-            self.logger.info(f"Prepared {len(training_pairs)} training pairs from {len(valid_messages)} messages")
+            # Sort batch by weight
+            prepared_batch.sort(key=lambda x: x['weight'], reverse=True)
             
-            return training_pairs
+            # Log batch preparation metrics
+            self.logger.info(
+                "Prepared gestation batch",
+                additional_info={
+                    'batch_size': len(prepared_batch),
+                    'avg_weight': sum(p['weight'] for p in prepared_batch) / len(prepared_batch),
+                    'max_weight': max(p['weight'] for p in prepared_batch),
+                    'min_weight': min(p['weight'] for p in prepared_batch),
+                    'weighted_examples': len([p for p in prepared_batch if p['weight'] > 1.0])
+                }
+            )
+            
+            return prepared_batch
             
         except Exception as e:
-            self.logger.error(f"Error preparing training data: {str(e)}")
+            self.logger.error(f"Error preparing gestation batch: {str(e)}")
             return []
 
 class SOVLTrainer:

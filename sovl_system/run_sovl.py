@@ -972,7 +972,7 @@ class SOVLRunner:
                     train_loss = self.orchestrator.train(
                         epochs=1,
                         batch_size=args.batch_size,
-                        train_data=formatted_training_data,
+                        formatted_training_data=formatted_training_data,
                         valid_data=valid_data,
                         checkpoint_callback=lambda: self.save_checkpoint(optimizer=optimizer),
                         validate_every=args.validate_every

@@ -38,7 +38,7 @@ def stress_test():
     print("\n-- Training Stress Test --")
     try:
         # Run a short training cycle
-        sovl.run_training_cycle(TRAIN_DATA, VALID_DATA, epochs=1)
+        sovl.run_training_cycle(FORMATTED_TRAINING_DATA, VALID_DATA, epochs=1)
         print("Training completed successfully.")
     except Exception as e:
         print("Error during Training Stress Test:", e)

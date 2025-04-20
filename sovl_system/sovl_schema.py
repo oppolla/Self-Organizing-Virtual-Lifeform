@@ -215,5 +215,189 @@ class ValidationSchema:
                 "max_memories": ConfigSchema(field="dream_memory_config.max_memories", type=int, default=100, range=(1, None)),
                 "base_weight": ConfigSchema(field="dream_memory_config.base_weight", type=float, default=0.1, range=(0.0, 1.0)),
                 "max_weight": ConfigSchema(field="dream_memory_config.max_weight", type=float, default=1.5, range=(0.0, None)),
+            },
+            "gestation_weighting": {
+                "type": "object",
+                "required": ["metadata_fields", "content_weights", "confidence_weights", "temperament_weights", "context_weights", "timing_weights", "weight_bounds"],
+                "properties": {
+                    "metadata_fields": {
+                        "type": "object",
+                        "required": ["quality_metrics", "content_metrics", "confidence_metrics", "context_metrics"],
+                        "properties": {
+                            "quality_metrics": {
+                                "type": "object",
+                                "required": ["code", "url", "question", "exclamation", "emoji"],
+                                "properties": {
+                                    "code": {
+                                        "type": "object",
+                                        "required": ["enabled", "weight"],
+                                        "properties": {
+                                            "enabled": {"type": "boolean", "default": True},
+                                            "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.5}
+                                        }
+                                    },
+                                    "url": {
+                                        "type": "object",
+                                        "required": ["enabled", "weight"],
+                                        "properties": {
+                                            "enabled": {"type": "boolean", "default": True},
+                                            "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.3}
+                                        }
+                                    },
+                                    "question": {
+                                        "type": "object",
+                                        "required": ["enabled", "weight"],
+                                        "properties": {
+                                            "enabled": {"type": "boolean", "default": True},
+                                            "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.2}
+                                        }
+                                    },
+                                    "exclamation": {
+                                        "type": "object",
+                                        "required": ["enabled", "weight"],
+                                        "properties": {
+                                            "enabled": {"type": "boolean", "default": True},
+                                            "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.1}
+                                        }
+                                    },
+                                    "emoji": {
+                                        "type": "object",
+                                        "required": ["enabled", "weight"],
+                                        "properties": {
+                                            "enabled": {"type": "boolean", "default": True},
+                                            "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.9}
+                                        }
+                                    }
+                                }
+                            },
+                            "content_metrics": {
+                                "type": "object",
+                                "required": ["word_count", "sentence_count", "avg_word_length", "avg_sentence_length"],
+                                "properties": {
+                                    "word_count": {"type": "integer", "minimum": 0, "default": 0},
+                                    "sentence_count": {"type": "integer", "minimum": 0, "default": 0},
+                                    "avg_word_length": {"type": "number", "minimum": 0, "default": 0.0},
+                                    "avg_sentence_length": {"type": "number", "minimum": 0, "default": 0.0}
+                                }
+                            },
+                            "confidence_metrics": {
+                                "type": "object",
+                                "required": ["confidence_score", "temperament_score"],
+                                "properties": {
+                                    "confidence_score": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5},
+                                    "temperament_score": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5}
+                                }
+                            },
+                            "context_metrics": {
+                                "type": "object",
+                                "required": ["is_first_message", "is_last_message", "context_window_size", "response_time"],
+                                "properties": {
+                                    "is_first_message": {"type": "boolean", "default": False},
+                                    "is_last_message": {"type": "boolean", "default": False},
+                                    "context_window_size": {"type": "integer", "minimum": 0, "default": 0},
+                                    "response_time": {"type": "number", "minimum": 0, "default": 0.0}
+                                }
+                            }
+                        }
+                    },
+                    "content_weights": {
+                        "type": "object",
+                        "required": ["word_count_ratio_scale", "optimal_word_length_range", "suboptimal_word_length_weight", "optimal_sentence_count_range", "excessive_sentence_weight", "optimal_sentence_length_range", "excessive_sentence_length_weight"],
+                        "properties": {
+                            "word_count_ratio_scale": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.5},
+                            "optimal_word_length_range": {
+                                "type": "object",
+                                "required": ["min", "max", "weight"],
+                                "properties": {
+                                    "min": {"type": "number", "minimum": 0, "default": 4},
+                                    "max": {"type": "number", "minimum": 0, "default": 8},
+                                    "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.2}
+                                }
+                            },
+                            "suboptimal_word_length_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.8},
+                            "optimal_sentence_count_range": {
+                                "type": "object",
+                                "required": ["min", "max", "weight"],
+                                "properties": {
+                                    "min": {"type": "integer", "minimum": 0, "default": 2},
+                                    "max": {"type": "integer", "minimum": 0, "default": 5},
+                                    "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.2}
+                                }
+                            },
+                            "excessive_sentence_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.9},
+                            "optimal_sentence_length_range": {
+                                "type": "object",
+                                "required": ["min", "max", "weight"],
+                                "properties": {
+                                    "min": {"type": "number", "minimum": 0, "default": 10},
+                                    "max": {"type": "number", "minimum": 0, "default": 20},
+                                    "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.2}
+                                }
+                            },
+                            "excessive_sentence_length_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.9}
+                        }
+                    },
+                    "confidence_weights": {
+                        "type": "object",
+                        "required": ["high_confidence_threshold", "high_confidence_weight", "moderate_confidence_threshold", "moderate_confidence_weight", "low_confidence_threshold", "low_confidence_weight"],
+                        "properties": {
+                            "high_confidence_threshold": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.8},
+                            "high_confidence_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.3},
+                            "moderate_confidence_threshold": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.6},
+                            "moderate_confidence_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.1},
+                            "low_confidence_threshold": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.4},
+                            "low_confidence_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.8}
+                        }
+                    },
+                    "temperament_weights": {
+                        "type": "object",
+                        "required": ["balanced_range", "extreme_temperament_weight"],
+                        "properties": {
+                            "balanced_range": {
+                                "type": "object",
+                                "required": ["min", "max", "weight"],
+                                "properties": {
+                                    "min": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.4},
+                                    "max": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.6},
+                                    "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.2}
+                                }
+                            },
+                            "extreme_temperament_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.9}
+                        }
+                    },
+                    "context_weights": {
+                        "type": "object",
+                        "required": ["first_last_message_weight", "optimal_context_range", "excessive_context_weight"],
+                        "properties": {
+                            "first_last_message_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.2},
+                            "optimal_context_range": {
+                                "type": "object",
+                                "required": ["min", "max", "weight"],
+                                "properties": {
+                                    "min": {"type": "integer", "minimum": 0, "default": 2},
+                                    "max": {"type": "integer", "minimum": 0, "default": 4},
+                                    "weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.1}
+                                }
+                            },
+                            "excessive_context_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 0.9}
+                        }
+                    },
+                    "timing_weights": {
+                        "type": "object",
+                        "required": ["max_response_time", "optimal_timing_weight"],
+                        "properties": {
+                            "max_response_time": {"type": "number", "minimum": 0, "default": 60},
+                            "optimal_timing_weight": {"type": "number", "minimum": 0.1, "maximum": 3.0, "default": 1.0}
+                        }
+                    },
+                    "weight_bounds": {
+                        "type": "object",
+                        "required": ["min", "max"],
+                        "properties": {
+                            "min": {"type": "number", "minimum": 0.1, "default": 0.1},
+                            "max": {"type": "number", "minimum": 0.1, "default": 3.0}
+                        }
+                    }
+                }
             }
         }

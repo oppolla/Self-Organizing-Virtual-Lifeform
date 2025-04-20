@@ -295,18 +295,18 @@ class TrainingState:
         """Update data exposure."""
         self.data_exposure = exposure
 
-    def update_data_quality(self, training_data: List[Dict[str, str]]) -> None:
+    def update_data_quality(self, formatted_training_data: List[Dict[str, str]]) -> None:
         """Update data quality metrics."""
-        if not training_data:
+        if not formatted_training_data:
             return
             
-        total_pairs = len(training_data)
+        total_pairs = len(formatted_training_data)
         valid_pairs = 0
         total_input_length = 0
         total_output_length = 0
         validation_errors = []
         
-        for pair in training_data:
+        for pair in formatted_training_data:
             try:
                 if not isinstance(pair, dict):
                     validation_errors.append("Invalid pair type")

@@ -424,7 +424,7 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, formatted
             logger.warning("Split would result in empty dataset, adjusting split ratio")
             split_idx = max(1, min(len(valid_data) - 1, split_idx))
             
-        train_data = valid_data[:split_idx]
+        formatted_training_data = valid_data[:split_idx]
         valid_data = valid_data[split_idx:]
         
         # Log data split
@@ -432,9 +432,6 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, formatted
             event_type="data_split",
             message="Data split into training and validation sets",
             additional_info={
-                "train_samples": len(train_data),
-                "valid_samples": len(valid_data),
-                "split_ratio": valid_split_ratio,
                 "random_seed": random_seed,
                 "shuffled": shuffle_data,
                 "original_size": len(formatted_training_data),
@@ -442,7 +439,7 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, formatted
             }
         )
         
-        return train_data, valid_data
+        return formatted_training_data, valid_data
         
     except Exception as e:
         logger.log_error(
@@ -450,7 +447,7 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, formatted
             error_type="data_split_error",
             stack_trace=traceback.format_exc(),
             additional_info={
-                "train_data_size": len(formatted_training_data),
+                "formatted_training_data_size": len(formatted_training_data),
                 "valid_split_ratio": valid_split_ratio
             }
         )
