@@ -135,11 +135,7 @@ class ModelLoader:
         """
         self.context = context
         self.logger = context.logger
-        self.config = {
-            "model_path": context.config_handler.config_manager.get(ConfigKeys.MODEL_PATH),
-            "model_type": context.config_handler.config_manager.get(ConfigKeys.MODEL_TYPE),
-            "quantization_mode": context.config_handler.config_manager.get(ConfigKeys.MODEL_QUANTIZATION_MODE)
-        }
+        self.config = context.config_handler.get_section("model")
         
         # Validate model configuration
         if not self._validate_model_config():
@@ -152,19 +148,15 @@ class ModelLoader:
     def _validate_model_config(self) -> bool:
         """Validate model configuration section."""
         try:
-            required_fields = [
-                ConfigKeys.MODEL_PATH,
-                ConfigKeys.MODEL_TYPE,
-                ConfigKeys.MODEL_QUANTIZATION_MODE
-            ]
+            required_fields = ["model_path", "model_type", "quantization_mode"]
             for field in required_fields:
-                if self.context.config_handler.config_manager.get(field) is None:
+                if field not in self.config or self.config[field] is None:
                     self.logger.log_error(
-                        error_msg=f"Missing required model configuration field: {field}",
+                        error_msg=f"Missing or invalid model configuration field: {field}",
                         error_type="config_validation_error",
                         stack_trace=None,
                         additional_info={
-                            "missing_field": str(field),
+                            "missing_field": field,
                             "config_section": "model"
                         }
                     )
@@ -187,7 +179,7 @@ class ModelLoader:
             
         except Exception as e:
             self.logger.log_error(
-                error_msg=str(e),
+                error_msg=f"Failed to validate model configuration: {str(e)}",
                 error_type="config_validation_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
@@ -195,6 +187,64 @@ class ModelLoader:
                 }
             )
             return False
+            
+    def load_model(self) -> torch.nn.Module:
+        """Load and initialize the model with validated configuration."""
+        try:
+            if not self._validate_model_config():
+                raise ModelLoadingError(
+                    "Cannot load model with invalid configuration",
+                    self.config,
+                    traceback.format_exc()
+                )
+                
+            # Load model with validated configuration
+            model = self._load_model(
+                self.config["model_path"],
+                self.config["model_type"],
+                self.config["quantization_mode"],
+                self.context.device
+            )
+            
+            self.logger.record_event(
+                event_type="model_loaded",
+                message="Model loaded successfully",
+                level="info",
+                additional_info={
+                    "model_path": self.config["model_path"],
+                    "model_type": self.config["model_type"],
+                    "quantization_mode": self.config["quantization_mode"],
+                    "device": self.context.device
+                }
+            )
+            
+            return model
+            
+        except NameError as e:
+            self.logger.log_error(
+                error_msg=f"Model loading function not defined: {str(e)}",
+                error_type="model_loading_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "model_path": self.config["model_path"],
+                    "model_type": self.config["model_type"],
+                    "quantization_mode": self.config["quantization_mode"]
+                }
+            )
+            raise ModelLoadingError("Model loading function is not defined.") from e
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type="model_loading_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "model_path": self.config["model_path"],
+                    "model_type": self.config["model_type"],
+                    "quantization_mode": self.config["quantization_mode"]
+                }
+            )
+            raise
+
             
     def load_model(self) -> torch.nn.Module:
         """Load and initialize the model with validated configuration."""
@@ -400,12 +450,13 @@ class ErrorManager:
         self.logger = context.logger
         self.error_counts = defaultdict(int)
         self.recent_errors = deque(maxlen=100)
+        self._lock = Lock()
         self._initialize()
         
     def _initialize(self) -> None:
         """Initialize error handling configuration."""
         config = self.context.config_handler.config_manager.get_section("error_config", {})
-        self.error_cooldown = config.get("error_cooldown", 1.0)
+        self.error_cooldown = float(config.get("error_cooldown", 1.0))
         self.severity_thresholds = {
             "warning": float(config.get("warning_threshold", 3.0)),
             "error": float(config.get("error_threshold", 5.0)),
@@ -418,26 +469,33 @@ class ErrorManager:
             "generation": self._recover_generation,
             "data": self._recover_data
         }
+        self.logger.record_event(
+            event_type="error_manager_initialized",
+            message="Error manager initialized successfully",
+            level="info",
+            additional_info={"error_cooldown": self.error_cooldown}
+        )
         
     def _is_duplicate_error(self, error: Exception, error_type: str) -> bool:
         """Check if this error is a duplicate within the cooldown period."""
         error_key = f"{error_type}:{type(error).__name__}"
         current_time = time.time()
         
-        # Remove old errors from tracking using float_compare
-        while self.recent_errors and float_gt(current_time - self.recent_errors[0]["timestamp"], self.error_cooldown):
-            self.recent_errors.popleft()
-            
-        # Check for duplicates
-        for recent_error in self.recent_errors:
-            if recent_error["key"] == error_key:
-                return True
+        with self._lock:
+            # Remove old errors from tracking
+            while self.recent_errors and float_gt(current_time - self.recent_errors[0]["timestamp"], self.error_cooldown):
+                self.recent_errors.popleft()
                 
-        # Add to recent errors
-        self.recent_errors.append({
-            "key": error_key,
-            "timestamp": current_time
-        })
+            # Check for duplicates
+            for recent_error in self.recent_errors:
+                if recent_error["key"] == error_key:
+                    return True
+                    
+            # Add to recent errors
+            self.recent_errors.append({
+                "key": error_key,
+                "timestamp": current_time
+            })
         
         return False
         
@@ -447,9 +505,8 @@ class ErrorManager:
             error_type = "training_error"
             self._record_error(error, error_type, {"batch_size": batch_size})
             
-            # Existing error handling logic
             if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
+                self.logger.log_error(
                     error_msg=str(error),
                     error_type=error_type,
                     stack_trace=traceback.format_exc(),
@@ -463,7 +520,7 @@ class ErrorManager:
             self._adjust_training_parameters(batch_size)
             
         except Exception as e:
-            self.context.logger.log_error(
+            self.logger.log_error(
                 error_msg=f"Error handler failed: {str(e)}",
                 error_type="error_handler_failure",
                 stack_trace=traceback.format_exc()
@@ -475,9 +532,8 @@ class ErrorManager:
             error_type = "curiosity_error"
             self._record_error(error, error_type, {"pressure": pressure})
             
-            # Existing error handling logic
             if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
+                self.logger.log_error(
                     error_msg=str(error),
                     error_type=error_type,
                     stack_trace=traceback.format_exc(),
@@ -491,7 +547,7 @@ class ErrorManager:
             self._adjust_curiosity_parameters(pressure)
             
         except Exception as e:
-            self.context.logger.log_error(
+            self.logger.log_error(
                 error_msg=f"Error handler failed: {str(e)}",
                 error_type="error_handler_failure",
                 stack_trace=traceback.format_exc()
@@ -503,9 +559,8 @@ class ErrorManager:
             error_type = "memory_error"
             self._record_error(error, error_type, {"memory_usage": memory_usage})
             
-            # Existing error handling logic
             if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
+                self.logger.log_error(
                     error_msg=str(error),
                     error_type=error_type,
                     stack_trace=traceback.format_exc(),
@@ -518,7 +573,7 @@ class ErrorManager:
             self._recover_memory(error_type)
             
         except Exception as e:
-            self.context.logger.log_error(
+            self.logger.log_error(
                 error_msg=f"Error handler failed: {str(e)}",
                 error_type="error_handler_failure",
                 stack_trace=traceback.format_exc()
@@ -530,9 +585,8 @@ class ErrorManager:
             error_type = "generation_error"
             self._record_error(error, error_type, {"temperature": temperature})
             
-            # Existing error handling logic
             if not self._is_duplicate_error(error, error_type):
-                self.context.logger.log_error(
+                self.logger.log_error(
                     error_msg=str(error),
                     error_type=error_type,
                     stack_trace=traceback.format_exc(),
@@ -546,7 +600,7 @@ class ErrorManager:
             self._adjust_generation_parameters(temperature)
             
         except Exception as e:
-            self.context.logger.log_error(
+            self.logger.log_error(
                 error_msg=f"Error handler failed: {str(e)}",
                 error_type="error_handler_failure",
                 stack_trace=traceback.format_exc()
@@ -558,7 +612,7 @@ class ErrorManager:
             error_key = f"data:{type(error).__name__}"
             
             if self._is_duplicate_error(error, "data"):
-                self._log_event(
+                self.logger.record_event(
                     event_type="duplicate_data_error",
                     message=f"Duplicate data error detected: {error_key}",
                     level="warning",
@@ -572,10 +626,10 @@ class ErrorManager:
                 
             self.error_counts[error_key] += 1
             
-            self._log_error(
-                error=error,
-                context="data",
-                level="error",
+            self.logger.log_error(
+                error_msg=str(error),
+                error_type="data_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "error_key": error_key,
                     "error_count": self.error_counts[error_key],
@@ -590,10 +644,10 @@ class ErrorManager:
                 self._adjust_data_parameters(context)
                 
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="error_handling",
-                level="critical",
+            self.logger.log_error(
+                error_msg=f"Error handler failed: {str(e)}",
+                error_type="error_handler_failure",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "original_error": str(error),
                     "context": context,
@@ -604,14 +658,12 @@ class ErrorManager:
     def _recover_training(self, error_key: str) -> None:
         """Recover from critical training errors."""
         try:
-            # Reset error count
             self.error_counts[error_key] = 0
             
-            # Take recovery actions
             self.context.config_handler.config_manager.update("training_config.batch_size", 1)
             self.context.config_handler.config_manager.update("training_config.learning_rate", 1e-5)
             
-            self._log_event(
+            self.logger.record_event(
                 event_type="training_recovery",
                 message="Recovered from critical training error",
                 level="info",
@@ -619,21 +671,20 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="recovery",
-                level="critical",
+            self.logger.log_error(
+                error_msg=f"Failed to recover from training error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={"error_key": error_key}
             )
             
     def _adjust_training_parameters(self, batch_size: int) -> None:
         """Adjust training parameters for non-critical errors."""
         try:
-            # Reduce batch size
             new_batch_size = max(1, batch_size // 2)
             self.context.config_handler.config_manager.update("training_config.batch_size", new_batch_size)
             
-            self._log_event(
+            self.logger.record_event(
                 event_type="training_adjustment",
                 message="Adjusted training parameters",
                 level="info",
@@ -644,10 +695,10 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self._log_error(
-                error=e,
-                context="adjustment",
-                level="error"
+            self.logger.log_error(
+                error_msg=f"Failed to adjust training parameters: {str(e)}",
+                error_type="adjustment_error",
+                stack_trace=traceback.format_exc()
             )
             
     def _recover_curiosity(self, error_key: str) -> None:
@@ -655,7 +706,6 @@ class ErrorManager:
         try:
             self.error_counts[error_key] = 0
             
-            # Reset curiosity parameters
             self.context.config_handler.config_manager.update("curiosity_config.pressure_threshold", 0.5)
             self.context.config_handler.config_manager.update("curiosity_config.decay_rate", 0.9)
             
@@ -667,10 +717,10 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from curiosity error: {str(e)}",
-                level="critical",
+            self.logger.log_error(
+                error_msg=f"Failed to recover from curiosity error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={"error_key": error_key}
             )
             
@@ -679,7 +729,6 @@ class ErrorManager:
         try:
             self.error_counts[error_key] = 0
             
-            # Clear memory and reduce usage
             self.context.config_handler.config_manager.update("memory_config.max_memory_mb", 512)
             self.context.config_handler.config_manager.update("memory_config.garbage_collection_threshold", 0.7)
             
@@ -693,6 +742,15 @@ class ErrorManager:
             return True
             
         except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to recover from memory error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error_key": error_key}
+            )
+            return False
+            
+        except Exception as e:
             self.logger.record_event(
                 event_type="recovery_failed",
                 message=f"Failed to recover from memory error: {str(e)}",
@@ -704,7 +762,6 @@ class ErrorManager:
     def _adjust_curiosity_parameters(self, pressure: float) -> None:
         """Adjust curiosity parameters for non-critical errors."""
         try:
-            # Adjust curiosity parameters
             current_pressure = self.context.config_handler.config_manager.get("curiosity_config.pressure_threshold", 0.5)
             new_pressure = max(0.1, current_pressure - 0.05)
             self.context.config_handler.config_manager.update("curiosity_config.pressure_threshold", new_pressure)
@@ -721,10 +778,10 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="adjustment_failed",
-                message=f"Failed to adjust curiosity parameters: {str(e)}",
-                level="error"
+            self.logger.log_error(
+                error_msg=f"Failed to adjust curiosity parameters: {str(e)}",
+                error_type="adjustment_error",
+                stack_trace=traceback.format_exc()
             )
             
     def _recover_generation(self, error_key: str) -> str:
@@ -732,7 +789,6 @@ class ErrorManager:
         try:
             self.error_counts[error_key] = 0
             
-            # Reset generation parameters
             self.context.config_handler.config_manager.update("generation_config.temperature", 0.7)
             self.context.config_handler.config_manager.update("generation_config.top_p", 0.9)
             
@@ -746,10 +802,10 @@ class ErrorManager:
             return "System recovered from error. Please try your request again."
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from generation error: {str(e)}",
-                level="critical",
+            self.logger.log_error(
+                error_msg=f"Failed to recover from generation error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={"error_key": error_key}
             )
             return "A critical error occurred. Please try again later."
@@ -757,7 +813,6 @@ class ErrorManager:
     def _adjust_generation_parameters(self, temperature: float) -> str:
         """Adjust generation parameters for non-critical errors."""
         try:
-            # Adjust generation parameters
             current_temp = self.context.config_handler.config_manager.get("generation_config.temperature", 1.0)
             new_temp = max(0.5, current_temp - 0.05)
             self.context.config_handler.config_manager.update("generation_config.temperature", new_temp)
@@ -776,6 +831,14 @@ class ErrorManager:
             return "System adjusted parameters. Please try your request again."
             
         except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to adjust generation parameters: {str(e)}",
+                error_type="adjustment_error",
+                stack_trace=traceback.format_exc()
+            )
+            return "An error occurred. Please try again."
+            
+        except Exception as e:
             self.logger.record_event(
                 event_type="adjustment_failed",
                 message=f"Failed to adjust generation parameters: {str(e)}",
@@ -788,7 +851,6 @@ class ErrorManager:
         try:
             self.error_counts[error_key] = 0
             
-            # Reset data parameters
             self.context.config_handler.config_manager.update("data_config.batch_size", 1)
             self.context.config_handler.config_manager.update("data_config.max_retries", 3)
             
@@ -800,17 +862,16 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="recovery_failed",
-                message=f"Failed to recover from data error: {str(e)}",
-                level="critical",
+            self.logger.log_error(
+                error_msg=f"Failed to recover from data error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={"error_key": error_key}
             )
 
     def _adjust_data_parameters(self, context: Dict[str, Any]) -> None:
         """Adjust data parameters for non-critical errors."""
         try:
-            # Adjust data parameters
             current_batch_size = self.context.config_handler.config_manager.get("data_config.batch_size", 32)
             new_batch_size = max(1, current_batch_size // 2)
             self.context.config_handler.config_manager.update("data_config.batch_size", new_batch_size)
@@ -827,23 +888,45 @@ class ErrorManager:
             )
             
         except Exception as e:
-            self.logger.record_event(
-                event_type="adjustment_failed",
-                message=f"Failed to adjust data parameters: {str(e)}",
-                level="error"
+            self.logger.log_error(
+                error_msg=f"Failed to adjust data parameters: {str(e)}",
+                error_type="adjustment_error",
+                stack_trace=traceback.format_exc()
             )
 
     def _record_error(self, error: Exception, error_type: str, context: Dict[str, Any] = None) -> None:
         """Record an error in the history."""
-        error_entry = {
-            "type": error_type,
-            "message": str(error),
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc(),
-            "context": context or {}
-        }
-        self.recent_errors.append(error_entry)
-        self.error_counts[f"{error_type}:{type(error).__name__}"] += 1
+        with self._lock:
+            error_entry = {
+                "type": error_type,
+                "message": str(error),
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc(),
+                "context": context or {}
+            }
+            self.recent_errors.append(error_entry)
+            self.error_counts[f"{error_type}:{type(error).__name__}"] += 1
+
+    def get_recent_errors(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get the list of recent errors."""
+        with self._lock:
+            return list(self.recent_errors)[-limit:]
+
+    def get_last_error(self) -> Optional[Dict[str, Any]]:
+        """Get the most recent error."""
+        with self._lock:
+            return self.recent_errors[-1] if self.recent_errors else None
+
+    def clear_error_history(self) -> None:
+        """Clear the error history."""
+        with self._lock:
+            self.recent_errors.clear()
+            self.error_counts.clear()
+            self.logger.record_event(
+                event_type="error_history_cleared",
+                message="Error history cleared successfully",
+                level="info"
+            )
 
 class MemoryMonitor:
     """Monitors system memory health."""
@@ -919,46 +1002,21 @@ class CuriosityEngine:
                 device=self.device
             )
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "manager_creation")
+            self.error_manager.handle_curiosity_error(e, pressure=0.0)
             raise
             
     def _create_training_cycle_manager(self) -> TrainingCycleManager:
         """Create and initialize the training cycle manager."""
         try:
-            # Initialize DataManager with data_provider config
-            data_config = self.config_handler.config_manager.get_section("data_provider")
-            provider_type = data_config.get("provider_type", "default")
-            data_path = data_config.get("data_path", "")
-
-            if provider_type not in ["default", "file", "database"]:
-                self.logger.record_event(
-                    event_type="data_config_error",
-                    message=f"Unsupported provider_type: {provider_type}",
-                    level="error"
-                )
-                raise ValueError(f"Unsupported provider_type: {provider_type}")
-
-            if provider_type in ["default", "file"]:
-                data_provider = FileDataProvider(data_path)
-            else:  # database
-                data_provider = DatabaseDataProvider(data_path)
-
-            data_manager = DataManager(
-                provider=data_provider,
-                logger=self.logger,
-                config_manager=self.config_handler.config_manager
-            )
-
             return TrainingCycleManager(
                 config=self.config_handler.config_manager.get_section("sovl_config"),
                 logger=self.logger,
                 device=self.device,
                 state_manager=self.state_tracker,
-                curiosity_manager=self.curiosity_manager,
-                data_manager=data_manager  # Pass initialized DataManager
+                curiosity_manager=self.curiosity_manager
             )
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "cycle_manager_creation")
+            self.error_manager.handle_curiosity_error(e, pressure=0.0)
             raise
             
     def _validate_configuration(self) -> bool:
@@ -970,9 +1028,7 @@ class CuriosityEngine:
                     message="Configuration validation failed, attempting recovery",
                     level="error"
                 )
-                # Attempt to refresh configuration
                 self.config_handler._refresh_configs()
-                # Re-validate after refresh
                 if not self.config_handler.validate():
                     self.logger.record_event(
                         event_type="config_recovery_failed",
@@ -982,14 +1038,11 @@ class CuriosityEngine:
                     return False
             return True
         except Exception as e:
-            self.logger.record_event(
-                event_type="config_validation_error",
-                message=f"Error during configuration validation: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
+            self.logger.log_error(
+                error_msg=f"Error during configuration validation: {str(e)}",
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error": str(e)}
             )
             return False
             
@@ -1002,24 +1055,11 @@ class CuriosityEngine:
     ) -> None:
         """Run a training cycle with configuration validation."""
         try:
-            # Validate configuration before proceeding
             if not self._validate_configuration():
                 raise RuntimeError("Invalid configuration state")
                 
-            # Validate DataManager state
-            if not hasattr(self.cycle_manager, 'data_manager'):
-                raise RuntimeError("DataManager not initialized in cycle manager")
-                
-            if not hasattr(self.cycle_manager.data_manager, 'provider'):
-                raise RuntimeError("DataManager provider not initialized")
-                
-            if not isinstance(self.cycle_manager.data_manager.provider, DataProvider):
-                raise RuntimeError(f"Invalid DataManager provider type: {type(self.cycle_manager.data_manager.provider)}")
-                
-            # Get current state
             state = self.state_tracker.get_state()
             
-            # Run training cycle through cycle manager
             results = self.cycle_manager.run_training_cycle(
                 train_data=train_data,
                 valid_data=valid_data,
@@ -1027,15 +1067,10 @@ class CuriosityEngine:
                 batch_size=batch_size
             )
             
-            # Log training completion
             self._log_event("training_complete", {
                 "epochs": epochs,
                 "batch_size": batch_size,
-                "results": results,
-                "data_manager_state": {
-                    "provider_type": type(self.cycle_manager.data_manager.provider).__name__,
-                    "provider_initialized": hasattr(self.cycle_manager.data_manager.provider, '_initialized')
-                }
+                "results": results
             })
             
         except Exception as e:
@@ -1185,7 +1220,7 @@ class SOVLSystem(SystemInterface):
         """Generate a curiosity-driven question."""
         try:
             if not hasattr(self.curiosity_engine, 'curiosity_manager'):
-                self.logger.record_event(
+                self.context.logger.record_event(
                     event_type="curiosity_error",
                     message="Curiosity manager not initialized",
                     level="error"
@@ -1193,7 +1228,7 @@ class SOVLSystem(SystemInterface):
                 return None
                 
             question = self.curiosity_engine.curiosity_manager.generate_question()
-            self.logger.record_event(
+            self.context.logger.record_event(
                 event_type="curiosity_question_generated",
                 message="Generated curiosity question",
                 level="info",
@@ -1202,15 +1237,12 @@ class SOVLSystem(SystemInterface):
             return question
             
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "question_generation")
-            self.logger.record_event(
-                event_type="curiosity_question_error",
-                message="Failed to generate curiosity question",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
+            self.error_manager.handle_curiosity_error(e, pressure=0.0)
+            self.context.logger.log_error(
+                error_msg=f"Failed to generate curiosity question: {str(e)}",
+                error_type="curiosity_question_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error": str(e)}
             )
             return None
 
@@ -1218,7 +1250,7 @@ class SOVLSystem(SystemInterface):
         """Run a dream cycle to process and consolidate memories."""
         try:
             if not hasattr(self.curiosity_engine, 'run_dream_cycle'):
-                self.logger.record_event(
+                self.context.logger.record_event(
                     event_type="dream_error",
                     message="Dream cycle not supported",
                     level="error"
@@ -1226,7 +1258,7 @@ class SOVLSystem(SystemInterface):
                 return False
                 
             self.curiosity_engine.run_dream_cycle()
-            self.logger.record_event(
+            self.context.logger.record_event(
                 event_type="dream_cycle_complete",
                 message="Dream cycle completed successfully",
                 level="info"
@@ -1234,15 +1266,12 @@ class SOVLSystem(SystemInterface):
             return True
             
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, "dream_cycle")
-            self.logger.record_event(
-                event_type="dream_cycle_error",
-                message="Failed to run dream cycle",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
+            self.error_manager.handle_curiosity_error(e, pressure=0.0)
+            self.context.logger.log_error(
+                error_msg=f"Failed to run dream cycle: {str(e)}",
+                error_type="dream_cycle_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error": str(e)}
             )
             return False
 
