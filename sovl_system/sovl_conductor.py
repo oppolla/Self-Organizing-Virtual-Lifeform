@@ -460,19 +460,72 @@ class SOVLOrchestrator(OrchestratorInterface):
             raise
 
     def shutdown(self) -> None:
-        """Shutdown the system and save state."""
-        try:
-            if hasattr(self, 'mediator'):
-                self.mediator.shutdown()
-            self._log_event("system_shutdown")
-        except Exception as e:
-            self._log_error("System shutdown failed", e)
-            self.error_handler.handle_generic_error(
-                error=e,
-                context="system_shutdown",
-                fallback_action=lambda: self._emergency_shutdown()
-            )
-            raise
+        """Shutdown the system, saving state and releasing resources."""
+        with self._lock:
+            try:
+                # Log shutdown start
+                self.logger.record_event(
+                    event_type="system_shutdown_start",
+                    message="Starting system shutdown process",
+                    level="info"
+                )
+    
+                # Cleanup event dispatcher
+                self.context.event_dispatcher.cleanup()
+                self.logger.record_event(
+                    event_type="event_dispatcher_cleanup",
+                    message="Event dispatcher cleaned up",
+                    level="info"
+                )
+    
+                # Save final state
+                self.state_tracker.state.save_state()
+                self.logger.record_event(
+                    event_type="state_saved",
+                    message="Final state saved",
+                    level="info"
+                )
+    
+                # Clear state history
+                self.state_tracker.clear_history()
+                self.logger.record_event(
+                    event_type="state_history_cleared",
+                    message="State history cleared",
+                    level="info"
+                )
+    
+                # Clear error history
+                self.error_manager.clear_error_history()
+                self.logger.record_event(
+                    event_type="error_history_cleared",
+                    message="Error history cleared",
+                    level="info"
+                )
+    
+                # Release GPU memory if available
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    self.logger.record_event(
+                        event_type="gpu_memory_cleared",
+                        message="GPU memory cache cleared",
+                        level="info"
+                    )
+    
+                # Final cleanup of logger
+                self.logger.clear_queues()
+                self.logger.record_event(
+                    event_type="system_shutdown_complete",
+                    message="System shutdown completed successfully",
+                    level="info"
+                )
+    
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"Failed to shutdown system: {str(e)}",
+                    error_type="shutdown_error",
+                    stack_trace=traceback.format_exc()
+                )
+                raise RuntimeError("Failed to shutdown system") from e
 
     def _handle_execution_failure(self) -> None:
         """Handle system execution failure with recovery actions."""
