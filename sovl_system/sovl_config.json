@@ -210,7 +210,7 @@
     "garbage_collection_threshold": 0.7
   },
   "state_config": {
-    "max_history": 100,
+    "max_history": 500,
     "state_file": "sovl_state.json"
   },
   "confidence_config": {
