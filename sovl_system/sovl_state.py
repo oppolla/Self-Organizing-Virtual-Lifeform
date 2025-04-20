@@ -258,6 +258,13 @@ class TrainingState:
     gestation_metrics: Dict[str, Any] = field(default_factory=dict)
     dream_metrics: Dict[str, Any] = field(default_factory=dict)
     sleep_metrics: Dict[str, Any] = field(default_factory=dict)
+    data_quality_metrics: Dict[str, Any] = field(default_factory=lambda: {
+        'avg_input_length': 0.0,
+        'avg_output_length': 0.0,
+        'pair_completeness': 0.0,
+        'last_validation_time': 0.0,
+        'validation_errors': []
+    })
 
     def update_gestation_metrics(self, batch_size: int, avg_loss: float) -> None:
         """Update gestation training metrics."""
@@ -288,6 +295,50 @@ class TrainingState:
         """Update data exposure."""
         self.data_exposure = exposure
 
+    def update_data_quality(self, training_data: List[Dict[str, str]]) -> None:
+        """Update data quality metrics."""
+        if not training_data:
+            return
+            
+        total_pairs = len(training_data)
+        valid_pairs = 0
+        total_input_length = 0
+        total_output_length = 0
+        validation_errors = []
+        
+        for pair in training_data:
+            try:
+                if not isinstance(pair, dict):
+                    validation_errors.append("Invalid pair type")
+                    continue
+                    
+                if 'input' not in pair or 'output' not in pair:
+                    validation_errors.append("Missing required fields")
+                    continue
+                    
+                if not isinstance(pair['input'], str) or not isinstance(pair['output'], str):
+                    validation_errors.append("Invalid field types")
+                    continue
+                    
+                if not pair['input'].strip() or not pair['output'].strip():
+                    validation_errors.append("Empty content")
+                    continue
+                    
+                valid_pairs += 1
+                total_input_length += len(pair['input'])
+                total_output_length += len(pair['output'])
+                
+            except Exception as e:
+                validation_errors.append(str(e))
+                
+        self.data_quality_metrics.update({
+            'avg_input_length': total_input_length / valid_pairs if valid_pairs > 0 else 0,
+            'avg_output_length': total_output_length / valid_pairs if valid_pairs > 0 else 0,
+            'pair_completeness': valid_pairs / total_pairs if total_pairs > 0 else 0,
+            'last_validation_time': time.time(),
+            'validation_errors': validation_errors
+        })
+
     def get_state_hash(self) -> str:
         """Generate a hash of the current training state."""
         state_dict = {
@@ -296,7 +347,8 @@ class TrainingState:
             "sleep_confidence_sum": self.sleep_confidence_sum,
             "sleep_confidence_count": self.sleep_confidence_count,
             "data_exposure": self.data_exposure,
-            "lora_capacity": self.lora_capacity
+            "lora_capacity": self.lora_capacity,
+            "data_quality": self.data_quality_metrics
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
@@ -930,6 +982,28 @@ class SOVLState(StateBase):
             "confidence_history": self._confidence_history.to_dict()
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
+
+    @synchronized("lock")
+    def get_conversation_history(self) -> List[Dict[str, str]]:
+        """Get the current conversation history as a list of messages.
+        
+        Returns:
+            List[Dict[str, str]]: List of messages, each containing 'role' and 'content'
+        """
+        return list(self.history.messages)
+
+    @synchronized("lock")
+    def get_conversation_metadata(self) -> Dict[str, Any]:
+        """Get metadata about the current conversation.
+        
+        Returns:
+            Dict[str, Any]: Dictionary containing conversation_id and message count
+        """
+        return {
+            "conversation_id": self.history.conversation_id,
+            "message_count": len(self.history.messages),
+            "max_messages": self.history._config.max_messages
+        }
 
 class StateManager:
     """Manages the SOVL state and its persistence."""

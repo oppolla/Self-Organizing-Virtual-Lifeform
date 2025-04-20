@@ -1193,6 +1193,111 @@ class TrainingCycleManager:
             )
             raise
 
+    @synchronized("lock")
+    def run_sleep_training(self, sovl_state: SOVLState) -> None:
+        """Run training during sleep phase using conversation history.
+        
+        Args:
+            sovl_state: The current SOVL state containing conversation history
+        """
+        try:
+            # Get conversation history and metadata
+            conversation_history = sovl_state.get_conversation_history()
+            metadata = sovl_state.get_conversation_metadata()
+            
+            if not conversation_history:
+                self.logger.info("No conversation history available for sleep training")
+                return
+                
+            self.logger.info(f"Starting sleep training with {metadata['message_count']} messages")
+            
+            # Prepare training data from conversation history
+            formatted_training_data = self._prepare_training_data(conversation_history)
+            
+            if not formatted_training_data:
+                self.logger.warning("No valid training data could be prepared")
+                return
+                
+            # Run training cycle
+            self._run_training_cycle(formatted_training_data)
+            
+            # Update training metrics
+            self._update_training_metrics(len(formatted_training_data))
+            
+            self.logger.info("Sleep training completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during sleep training: {str(e)}")
+            raise
+
+    def _prepare_training_data(self, conversation_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Prepare training data from conversation history.
+        
+        Args:
+            conversation_history: List of conversation messages
+            
+        Returns:
+            List[Dict[str, str]]: Prepared training data
+        """
+        try:
+            # Validate input
+            if not isinstance(conversation_history, list):
+                self.logger.error("conversation_history must be a list")
+                return []
+            
+            # Filter and validate messages
+            valid_messages = []
+            for msg in conversation_history:
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get('role') not in ['user', 'assistant']:
+                    continue
+                if not isinstance(msg.get('content'), str):
+                    continue
+                if not msg['content'].strip():
+                    continue
+                valid_messages.append(msg)
+            
+            if not valid_messages:
+                self.logger.warning("No valid messages found in conversation history")
+                return []
+            
+            # Group messages into training pairs with role validation
+            training_pairs = []
+            i = 0
+            while i < len(valid_messages) - 1:
+                current_msg = valid_messages[i]
+                next_msg = valid_messages[i + 1]
+                
+                # Ensure proper user-assistant alternation
+                if (current_msg['role'] == 'user' and next_msg['role'] == 'assistant'):
+                    training_pairs.append({
+                        'input': current_msg['content'],
+                        'output': next_msg['content'],
+                        'metadata': {
+                            'timestamp': current_msg.get('timestamp'),
+                            'conversation_id': current_msg.get('conversation_id')
+                        }
+                    })
+                    i += 2
+                else:
+                    # Skip invalid message pair
+                    self.logger.debug(f"Skipping invalid message pair at index {i}")
+                    i += 1
+                
+            if not training_pairs:
+                self.logger.warning("No valid training pairs could be created")
+                return []
+            
+            # Log successful preparation
+            self.logger.info(f"Prepared {len(training_pairs)} training pairs from {len(valid_messages)} messages")
+            
+            return training_pairs
+            
+        except Exception as e:
+            self.logger.error(f"Error preparing training data: {str(e)}")
+            return []
+
 class SOVLTrainer:
     """Main trainer class for SOVL system."""
     

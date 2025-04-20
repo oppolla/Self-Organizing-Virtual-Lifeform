@@ -40,7 +40,7 @@ from sovl_scaffold import (
 # Constants
 TRAIN_EPOCHS = 10
 BATCH_SIZE = 32
-TRAIN_DATA = None
+FORMATTED_TRAINING_DATA = None
 VALID_DATA = None
 CHECKPOINT_INTERVAL = 1  # Save checkpoint every epoch by default
 COMMAND_CATEGORIES = {
@@ -953,11 +953,12 @@ class SOVLRunner:
                 )
                 
                 # Load training and validation data
-                train_data = load_training_data(args.train_data) if args.train_data else []
+                formatted_training_data = load_training_data(args.train_data) if args.train_data else []
                 valid_data = load_training_data(args.valid_data) if args.valid_data else []
                 
-                if not train_data:
-                    raise ValueError("No training data provided")
+                if not formatted_training_data:
+                    self.logger.warning("No training data available")
+                    return
                 
                 # Training loop with validation
                 for epoch in range(args.epochs):
@@ -971,7 +972,7 @@ class SOVLRunner:
                     train_loss = self.orchestrator.train(
                         epochs=1,
                         batch_size=args.batch_size,
-                        train_data=train_data,
+                        train_data=formatted_training_data,
                         valid_data=valid_data,
                         checkpoint_callback=lambda: self.save_checkpoint(optimizer=optimizer),
                         validate_every=args.validate_every

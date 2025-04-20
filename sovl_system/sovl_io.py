@@ -367,20 +367,34 @@ class JSONLLoader:
             )
             raise DataValidationError(f"Failed to load JSONL file: {str(e)}")
 
-def load_and_split_data(config_manager: ConfigManager, logger: Logger, train_data: List, valid_split_ratio: float) -> Tuple[List, List]:
+def load_and_split_data(config_manager: ConfigManager, logger: Logger, formatted_training_data: List, valid_split_ratio: float) -> Tuple[List, List]:
     """
     Load and split the training data into training and validation sets.
 
     Args:
         config_manager: ConfigManager instance for configuration settings
         logger: Logger instance for recording events
-        train_data: List of training data samples
+        formatted_training_data: List of training data samples
         valid_split_ratio: Ratio for splitting validation data
 
     Returns:
         A tuple containing the training and validation data lists
+
+    Raises:
+        DataValidationError: If data validation fails
     """
     try:
+        # Validate input parameters
+        if not isinstance(formatted_training_data, list):
+            raise DataValidationError("formatted_training_data must be a list")
+            
+        if not 0 < valid_split_ratio < 1:
+            raise DataValidationError("valid_split_ratio must be between 0 and 1")
+            
+        if not formatted_training_data:
+            logger.warning("Empty training data provided")
+            return [], []
+            
         # Get configuration values
         random_seed = config_manager.get("io_config.random_seed", 42, expected_type=int)
         shuffle_data = config_manager.get("io_config.shuffle_data", True, expected_type=bool)
@@ -388,13 +402,30 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, train_dat
         # Set random seed
         random.seed(random_seed)
         
+        # Validate data structure
+        valid_data = []
+        for entry in formatted_training_data:
+            if isinstance(entry, dict) and 'input' in entry and 'output' in entry:
+                if isinstance(entry['input'], str) and isinstance(entry['output'], str):
+                    if entry['input'].strip() and entry['output'].strip():
+                        valid_data.append(entry)
+        
+        if not valid_data:
+            logger.warning("No valid training data found after validation")
+            return [], []
+            
         # Shuffle data if enabled
         if shuffle_data:
-            random.shuffle(train_data)
+            random.shuffle(valid_data)
             
-        # Calculate split index
-        split_idx = int(len(train_data) * (1 - valid_split_ratio))
-        train_data, valid_data = train_data[:split_idx], train_data[split_idx:]
+        # Calculate split index with validation
+        split_idx = int(len(valid_data) * (1 - valid_split_ratio))
+        if split_idx == 0 or split_idx == len(valid_data):
+            logger.warning("Split would result in empty dataset, adjusting split ratio")
+            split_idx = max(1, min(len(valid_data) - 1, split_idx))
+            
+        train_data = valid_data[:split_idx]
+        valid_data = valid_data[split_idx:]
         
         # Log data split
         logger.log_training_event(
@@ -405,7 +436,9 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, train_dat
                 "valid_samples": len(valid_data),
                 "split_ratio": valid_split_ratio,
                 "random_seed": random_seed,
-                "shuffled": shuffle_data
+                "shuffled": shuffle_data,
+                "original_size": len(formatted_training_data),
+                "validated_size": len(valid_data)
             }
         )
         
@@ -417,7 +450,7 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, train_dat
             error_type="data_split_error",
             stack_trace=traceback.format_exc(),
             additional_info={
-                "train_data_size": len(train_data),
+                "train_data_size": len(formatted_training_data),
                 "valid_split_ratio": valid_split_ratio
             }
         )
@@ -492,17 +525,17 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
         loader = JSONLLoader(config_manager, logger)
         
         # Load training data
-        train_data = loader.load_jsonl(seed_file, min_entries=min_entries)
+        formatted_training_data = loader.load_jsonl(seed_file, min_entries=min_entries)
         
         # Split data
-        train_data, valid_data = load_and_split_data(config_manager, logger, train_data, valid_split_ratio)
+        formatted_training_data, valid_data = load_and_split_data(config_manager, logger, formatted_training_data, valid_split_ratio)
         
         # Log successful data loading
         logger.log_training_event(
             event_type="training_data_loaded",
             message="Training data loaded successfully",
             additional_info={
-                "train_samples": len(train_data),
+                "train_samples": len(formatted_training_data),
                 "valid_samples": len(valid_data),
                 "min_entries": min_entries,
                 "seed_file": seed_file,
@@ -510,7 +543,7 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
             }
         )
         
-        return train_data, valid_data
+        return formatted_training_data, valid_data
         
     except InsufficientDataError as e:
         logger.log_error(

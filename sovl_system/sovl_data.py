@@ -1259,3 +1259,20 @@ class DataManager:
                 validation_errors[str(type(e).__name__)] += 1
                 
         return valid_data, invalid_data, dict(validation_errors)
+
+    def split_data(self, data: List, valid_split_ratio: float) -> Tuple[List, List]:
+        """Split data into training and validation sets."""
+        split_idx = int(len(data) * (1 - valid_split_ratio))
+        formatted_training_data = data[:split_idx]
+        valid_data = data[split_idx:]
+        
+        return formatted_training_data, valid_data
+
+    def prepare_training_data(self, data: List, config: Dict) -> Tuple[List, List]:
+        """Prepare training data according to configuration."""
+        formatted_training_data = []
+        valid_data = []
+        
+        # ... rest of the function ...
+        
+        return formatted_training_data, valid_data
