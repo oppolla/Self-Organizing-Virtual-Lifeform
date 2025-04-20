@@ -306,7 +306,9 @@ class SOVLRunner:
             (ErrorManager, "error manager"),
             (MemoryMonitor, "memory monitor"),
             (CuriosityEngine, "curiosity engine"),
-            (MemoriaManager, "memory manager")
+            (MemoriaManager, "memory manager"),
+            (RAMManager, "RAM manager"),
+            (GPUMemoryManager, "GPU manager")
         ]
         
         try:
@@ -316,6 +318,13 @@ class SOVLRunner:
                 logger=self.logger,
                 device=context.device
             )
+            
+            # Initialize memory managers first
+            ram_manager = RAMManager(context.config_manager, context.logger)
+            gpu_manager = GPUMemoryManager(context.config_manager, context.logger)
+            
+            # Keep track of initialized components
+            memoria_manager = None
             
             # Initialize components in stages
             stage1_components = []  # Basic components without dependencies
@@ -336,8 +345,17 @@ class SOVLRunner:
                         components.append(self.model)
                         continue
                     
+                    # Handle memory managers separately as they're already initialized
+                    if name == "RAM manager":
+                        components.append(ram_manager)
+                        continue
+                    
+                    if name == "GPU manager":
+                        components.append(gpu_manager)
+                        continue
+                    
                     # Stage 1: Basic components
-                    if name in ["model loader", "state tracker", "memory monitor"]:
+                    if name in ["model loader", "state tracker"]:
                         component = initialize_component(component_class, context)
                         stage1_components.append(component)
                         components.append(component)
@@ -355,6 +373,18 @@ class SOVLRunner:
                         stage2_components.append(component)
                         components.append(component)
                     
+                    # Handle memory monitor with RAM and GPU managers
+                    elif name == "memory monitor":
+                        component = MemoryMonitor(
+                            config_manager=context.config_manager,
+                            logger=context.logger,
+                            memoria_manager=memoria_manager,  # Will be updated later
+                            ram_manager=ram_manager,
+                            gpu_manager=gpu_manager
+                        )
+                        stage2_components.append(component)
+                        components.append(component)
+                    
                     # Stage 3: Components with complex dependencies
                     elif name in ["curiosity engine", "memory manager"]:
                         if not self.error_manager:
@@ -368,8 +398,15 @@ class SOVLRunner:
                                 model_manager=self.model_manager,
                                 logger=context.logger
                             )
-                        else:  # memory manager
-                            component = initialize_component(MemoriaManager, context.config_manager, context.device, context.logger)
+                        else:  # memoria manager
+                            component = MemoriaManager(context.config_manager, context.logger)
+                            memoria_manager = component
+                            
+                            # Update memory monitor with memoria manager
+                            for c in components:
+                                if isinstance(c, MemoryMonitor):
+                                    c.memoria_manager = memoria_manager
+                                    break
                         
                         stage3_components.append(component)
                         components.append(component)

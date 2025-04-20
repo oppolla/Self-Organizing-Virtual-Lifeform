@@ -335,9 +335,9 @@ class TrainingManager:
         curiosity_manager: Optional[CuriosityManager] = None,
         confidence_calculator: Optional[ConfidenceCalculator] = None,
         temperament_system: Optional[TemperamentSystem] = None,
-        memoria_manager: Optional[MemoriaManager] = None,
-        ram_manager: Optional[RAMManager] = None,
-        gpu_manager: Optional[GPUMemoryManager] = None
+        memoria_manager: Optional[MemoriaManager] = None,  # For experiential aspects
+        ram_manager: Optional[RAMManager] = None,          # For RAM memory management
+        gpu_manager: Optional[GPUMemoryManager] = None     # For GPU memory management
     ):
         self.config = config
         self.model = model.to(device)
@@ -347,9 +347,9 @@ class TrainingManager:
         self.curiosity_manager = curiosity_manager
         self.confidence_calculator = confidence_calculator
         self.temperament_system = temperament_system
-        self.memoria_manager = memoria_manager
-        self.ram_manager = ram_manager
-        self.gpu_manager = gpu_manager
+        self.memoria_manager = memoria_manager  # Handles experiential memory
+        self.ram_manager = ram_manager          # Handles RAM resources
+        self.gpu_manager = gpu_manager          # Handles GPU resources
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
         self.scheduler = self._init_scheduler()
         self.global_step = 0
@@ -500,7 +500,7 @@ class TrainingManager:
             })
             
     def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """Prepare batch for training with memory-aware processing."""
+        """Prepare batch for training with memory-aware processing and metadata enrichment."""
         try:
             # Check memory health before processing
             ram_health = self.ram_manager.check_memory_health() if self.ram_manager else {"is_healthy": True}
@@ -522,6 +522,17 @@ class TrainingManager:
                 )
                 self.config.batch_size = adjusted_size
             
+            # Enrich batch with metadata if content is available
+            if hasattr(self, 'metadata_processor') or (hasattr(self, 'memoria_manager') and hasattr(self.memoria_manager, 'metadata_processor')):
+                metadata_processor = getattr(self, 'metadata_processor', None) or getattr(self.memoria_manager, 'metadata_processor', None)
+                
+                for item in batch:
+                    if "content" in item:
+                        # Add metadata to each item in the batch
+                        item["metadata"] = metadata_processor.collect_metadata(item["content"])
+                        # Calculate weights based on metadata
+                        item["weight"] = metadata_processor.calculate_weight(item["metadata"])
+            
             # Prepare batch data
             batch_size = len(batch)
             input_ids = torch.stack([item["input_ids"] for item in batch])
@@ -536,11 +547,23 @@ class TrainingManager:
                     "labels": labels
                 })
             
-            return {
+            # Create result dictionary
+            result = {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
                 "labels": labels
             }
+            
+            # Include metadata and weights if available
+            metadata = [item.get("metadata", {}) for item in batch if "metadata" in item]
+            weights = [item.get("weight", 1.0) for item in batch if "weight" in item]
+            
+            if metadata:
+                result["metadata"] = metadata
+            if weights:
+                result["weights"] = torch.tensor(weights, device=self.device)
+                
+            return result
             
         except Exception as e:
             self.error_manager.handle_training_error(e, {
@@ -602,14 +625,38 @@ class TrainingManager:
         outputs: torch.Tensor,
         batch: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
-        """Calculate loss."""
+        """Calculate loss with optional metadata-based weighting."""
         try:
-            # ... existing loss calculation code ...
-            pass
+            # Calculate base loss - assume cross_entropy if loss_fn not explicitly defined
+            if hasattr(self, 'loss_fn') and self.loss_fn is not None:
+                loss = self.loss_fn(outputs, batch["labels"])
+            else:
+                # Default to cross-entropy loss
+                loss = F.cross_entropy(
+                    outputs.view(-1, outputs.size(-1)), 
+                    batch["labels"].view(-1), 
+                    ignore_index=-100,
+                    reduction='none'  # Use 'none' to apply per-example weights
+                )
+            
+            # Apply weights from metadata if available
+            if "weights" in batch:
+                # Reshape weights to match loss shape if needed
+                if loss.dim() > 1 and batch["weights"].dim() == 1:
+                    # Expand weights to match loss dimensions
+                    expanded_weights = batch["weights"].unsqueeze(1).expand_as(loss)
+                    loss = loss * expanded_weights
+                else:
+                    # Direct multiplication for same dimensions
+                    loss = loss * batch["weights"]
+            
+            # Return mean loss
+            return loss.mean()
+            
         except Exception as e:
             self.error_manager.handle_training_error(e, {
                 "step": "loss_calculation",
-                "batch_size": len(batch)
+                "batch_size": len(batch["input_ids"])
             })
             raise
             
@@ -753,15 +800,54 @@ class TrainingWorkflowManager:
             self.logger.error(f"Error in sleep training: {str(e)}")
             raise
 
-    def run_gestation_cycle(self, batch: List[Dict[str, Any]]) -> None:
-        """Run gestation cycle."""
+    def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
+        """Run gestation cycle with metadata enrichment."""
         try:
+            batch = []
+            
+            # Process conversation history with metadata if available
+            if hasattr(self.trainer, 'metadata_processor'):
+                # Prepare training pairs with metadata
+                training_pairs = self.trainer.metadata_processor.prepare_training_pairs(conversation_history)
+                
+                # Convert training pairs to batch format
+                for pair in training_pairs:
+                    # Convert to model inputs
+                    input_text = pair["input"]
+                    output_text = pair["output"]
+                    
+                    # Tokenize inputs/outputs (assuming tokenizer is available)
+                    tokenizer = getattr(self.trainer, 'tokenizer', None)
+                    if tokenizer:
+                        inputs = tokenizer(input_text, return_tensors="pt").to(self.trainer.device)
+                        outputs = tokenizer(output_text, return_tensors="pt").to(self.trainer.device)
+                        
+                        # Create batch item
+                        batch_item = {
+                            "input_ids": inputs.input_ids[0],
+                            "attention_mask": inputs.attention_mask[0],
+                            "labels": outputs.input_ids[0],
+                            "content": input_text + "\n" + output_text,  # Include raw content for metadata collection
+                            "metadata": pair["metadata"]  # Include the collected metadata
+                        }
+                        batch.append(batch_item)
+            else:
+                # Fall back to standard processing if metadata processor not available
+                # ... existing conversion from conversation history to batch ...
+                pass
+                
+            if not batch:
+                self._logger.log_warning("No training pairs generated for gestation cycle")
+                return
+                
             # Get batch size from memory manager
-            batch_size = self.trainer.memory_manager.get_batch_size()
+            batch_size = len(batch)
+            if hasattr(self.trainer, 'memory_manager') and hasattr(self.trainer.memory_manager, 'get_batch_size'):
+                batch_size = min(batch_size, self.trainer.memory_manager.get_batch_size())
             
             # Run gestation step
             loss, metrics = self.trainer.train_step_with_scaffold(
-                batch=batch,
+                batch=batch[:batch_size],  # Use only batch_size items
                 scaffold_provider=None,
                 dry_run=False
             )
@@ -794,7 +880,9 @@ class TrainingCycleManager:
     def __init__(self, config_manager: ConfigManager, logger: Logger):
         self._config_manager = config_manager
         self._logger = logger
+        # Memoria manager handles experiential aspects only
         self.memoria_manager = MemoriaManager(config_manager, logger)
+        # Memory managers handle RAM and GPU resources
         self.ram_manager = RAMManager(config_manager, logger)
         self.gpu_manager = GPUMemoryManager(config_manager, logger)
         
@@ -828,9 +916,9 @@ class SOVLTrainer:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
-        ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
+        memoria_manager: MemoriaManager,  # For experiential aspects
+        ram_manager: RAMManager,          # For RAM memory management
+        gpu_manager: GPUMemoryManager     # For GPU memory management
     ):
         """
         Initialize trainer.
@@ -838,7 +926,7 @@ class SOVLTrainer:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
+            memoria_manager: MemoriaManager instance for experiential memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """
@@ -847,6 +935,8 @@ class SOVLTrainer:
         self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
+        # Initialize metadata processor for processing training data
+        self.metadata_processor = MetadataProcessor(config_manager, logger)
         
     def _prepare_gestation_batch(self, batch_size: int) -> int:
         """Prepare batch for gestation training with memory awareness."""

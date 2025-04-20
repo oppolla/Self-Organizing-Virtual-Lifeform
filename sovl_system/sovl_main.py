@@ -748,9 +748,9 @@ class MemoryMonitor:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
-        ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
+        memoria_manager: MemoriaManager,  # For experiential aspects
+        ram_manager: RAMManager,          # For RAM memory management
+        gpu_manager: GPUMemoryManager     # For GPU memory management
     ):
         """
         Initialize memory monitor.
@@ -758,19 +758,20 @@ class MemoryMonitor:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
+            memoria_manager: MemoriaManager instance for experiential memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
-        self.ram_manager = ram_manager
-        self.gpu_manager = gpu_manager
+        self.memoria_manager = memoria_manager  # Manages experiential memory
+        self.ram_manager = ram_manager          # Manages RAM resources
+        self.gpu_manager = gpu_manager          # Manages GPU resources
         
     def check_memory_health(self) -> Dict[str, Any]:
-        """Check memory health across all memory managers."""
+        """Check memory health across hardware memory managers."""
         try:
+            # Only use RAM and GPU managers for hardware memory health
             ram_health = self.ram_manager.check_memory_health()
             gpu_health = self.gpu_manager.get_gpu_usage()
             

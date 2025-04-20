@@ -6,7 +6,7 @@ from threading import Lock
 from dataclasses import dataclass
 from sovl_config import ConfigManager
 from sovl_logger import Logger
-from sovl_memory_manager import GPUMemoryManager, RAMManager
+from sovl_memory import GPUMemoryManager, RAMManager
 
 """
 Facade for hardware access, abstracting GPU and CPU operations to decouple
