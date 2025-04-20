@@ -258,6 +258,8 @@ class IntrospectionManager:
                 self.last_trigger_time = time.time()
                 state = self.state_manager.get_state()
                 state.introspection_dialogues = deque(self.dialogues, maxlen=self.dialogues.maxlen)
+                # Add to conversation history for training
+                self._add_dialogue_to_history(result, state)
                 self.state_manager.update_state(state)
 
             self._log_dialogue(result)
@@ -286,6 +288,59 @@ class IntrospectionManager:
                 "dialogue_id": dialogue_id
             })
             return result
+
+    def _add_dialogue_to_history(self, dialogue: Dict, state: SOVLState) -> None:
+        """Add introspection dialogue to conversation history for training."""
+        try:
+            content = self._format_dialogue_for_history(dialogue)
+            state.history.add_message(role="introspection", content=content)
+            self.logger.record_event(
+                event_type="introspection_added_to_history",
+                message="Introspection dialogue added to conversation history",
+                level="info",
+                additional_info={
+                    "dialogue_id": dialogue["dialogue_id"],
+                    "action": dialogue["action"],
+                    "is_approved": dialogue["is_approved"]
+                }
+            )
+        except StateError as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "add_dialogue_to_history",
+                "dialogue_id": dialogue["dialogue_id"]
+            })
+            raise
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "add_dialogue_to_history",
+                "dialogue_id": dialogue["dialogue_id"]
+            })
+            raise
+
+    def _format_dialogue_for_history(self, dialogue: Dict) -> str:
+        """Format introspection dialogue as a string for conversation history."""
+        try:
+            questions_answers = "\n".join(
+                f"Q: {qa['question']}\nA: {qa['answer']} (Confidence: {qa['confidence']:.2f})"
+                for qa in dialogue["questions"]
+            )
+            traits = ", ".join(f"{k}: {v:.2f}" for k, v in dialogue["traits"].items())
+            content = (
+                f"Introspection Dialogue (ID: {dialogue['dialogue_id']})\n"
+                f"Action: {dialogue['action']}\n"
+                f"Approved: {dialogue['is_approved']}\n"
+                f"Confidence: {dialogue['confidence']:.2f}\n"
+                f"Threshold: {dialogue['threshold_used']:.2f}\n"
+                f"Traits: {traits}\n"
+                f"Questions and Answers:\n{questions_answers}"
+            )
+            return content
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "format_dialogue_for_history",
+                "dialogue_id": dialogue["dialogue_id"]
+            })
+            raise
 
     def _show_processing_status(self):
         """Display subtle processing indication."""
