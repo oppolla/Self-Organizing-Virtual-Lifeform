@@ -19,9 +19,9 @@
     "device": "cuda"
   },
   "model": {
-    "model_path": "/path/to/SmolLM2-360M/model",  
-    "model_type": "causal_lm",  
-    "quantization_mode": "fp16"  
+    "model_path": "/path/to/SmolLM2-360M/model",
+    "model_type": "causal_lm",
+    "quantization_mode": "fp16"
   },
   "controls_config": {
     "enable_scaffold": true,
@@ -30,19 +30,12 @@
     "enable_cross_attention": true,
     "enable_dynamic_cross_attention": false,
     "injection_strategy": "sequential",
-    "temp_eager_threshold": 0.8,
-    "temp_sluggish_threshold": 0.6,
-    "temp_mood_influence": 0.0,
-    "temp_curiosity_boost": 0.5,
-    "temp_restless_drop": 0.1,
-    "temp_melancholy_noise": 0.02,
-    "conf_feedback_strength": 0.5,
-    "temp_smoothing_factor": 0.0,
-    "temperament_decay_rate": 0.95,
-    "temperament_history_maxlen": 5,
-    "confidence_history_maxlen": 5,
     "blend_strength": 0.5,
-    "attention_weight": 0.5,
+    "attention_weight": 0.5
+  },
+  "temperament_config": {
+    "mood_influence": 0.3,
+    "history_maxlen": 5,
     "temp_eager_threshold": 0.7,
     "temp_sluggish_threshold": 0.3,
     "temp_mood_influence": 0.3,
@@ -70,7 +63,7 @@
     }
   },
   "training_config": {
-    "model_name": "SmolLM2-360M", 
+    "model_name": "SmolLM2-360M",
     "learning_rate": 1.5e-5,
     "train_epochs": 1,
     "batch_size": 2,
@@ -143,29 +136,6 @@
     "history_size": 5,
     "enable_dynamic_scaling": true,
     "weight_curves": ["linear", "sigmoid_linear"]
-  },
-  "preprocessing": {
-    "remove_special_chars": true,
-    "lowercase": true,
-    "remove_extra_spaces": true,
-    "max_length": 512
-  },
-  "augmentation": {
-    "synonym_replacement_prob": 0.3,
-    "word_dropout_prob": 0.1,
-    "max_augmentations": 3
-  },
-  "hardware": {
-    "enable_cuda": true,
-    "memory_query_interval": 0.1,
-    "mock_memory_total_mb": 4096.0,
-    "max_scaffold_memory_mb": 128  
-  },
-  "lora_config": {
-    "lora_rank": 8,
-    "lora_alpha": 16,
-    "lora_dropout": 0.1,
-    "lora_target_modules": ["c_attn", "c_proj", "c_fc"]
   },
   "curiosity_config": {
     "enable_curiosity": true,
@@ -242,10 +212,6 @@
   "state_config": {
     "max_history": 100,
     "state_file": "sovl_state.json"
-  },
-  "temperament_config": {
-    "mood_influence": 0.3,
-    "history_maxlen": 5
   },
   "confidence_config": {
     "history_maxlen": 5,
