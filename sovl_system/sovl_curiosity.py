@@ -15,6 +15,7 @@ from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
 from sovl_manager import ModelManager
 from sovl_schema import ConfigSchema
+from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -36,12 +37,16 @@ class Curiosity:
         self.max_memory_mb = max_memory_mb
         self.batch_size = batch_size
         
+        # Initialize memory managers
+        self.memoria_manager = MemoriaManager(config_manager, logger)
+        self.ram_manager = RAMManager(config_manager, logger)
+        self.gpu_manager = GPUMemoryManager(config_manager, logger)
+        
         # Initialize components
         self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
         self.metrics = deque(maxlen=self.metrics_maxlen)
         self.embedding_cache = {}
         self.lock = threading.Lock()
-        self.memory_usage = 0.0
         
         # Initialize memory tracking
         self._update_memory_usage()
@@ -54,39 +59,67 @@ class Curiosity:
             raise ValueError("Weights must sum to 1.0")
 
     def _update_memory_usage(self) -> None:
-        """Update memory usage tracking."""
+        """Update memory usage tracking using the new memory managers."""
         try:
             with self.lock:
-                self.memory_usage = sum(
-                    tensor.element_size() * tensor.nelement() / (1024 * 1024)
-                    for tensor in self.embedding_cache.values()
-                    if isinstance(tensor, torch.Tensor)  # Ensure tensor is valid
+                # Get memory usage from RAM manager
+                ram_stats = self.ram_manager.check_memory_health()
+                gpu_stats = self.gpu_manager.get_gpu_usage()
+                
+                # Log memory usage
+                self._log_event(
+                    "memory_usage_updated",
+                    "Memory usage updated",
+                    level="info",
+                    ram_stats=ram_stats,
+                    gpu_stats=gpu_stats
                 )
         except Exception as e:
             self._log_error(f"Memory usage tracking failed: {str(e)}")
 
     def _prune_cache(self) -> None:
-        """Prune cache if memory usage exceeds threshold."""
+        """Prune cache if memory usage exceeds threshold using the new memory managers."""
         try:
             with self.lock:
-                if self.memory_usage > self.max_memory_mb:
+                # Check memory health
+                ram_stats = self.ram_manager.check_memory_health()
+                gpu_stats = self.gpu_manager.get_gpu_usage()
+                
+                # If memory usage is high, prune the cache
+                if ram_stats.get("usage_percent", 0) > 0.8 or gpu_stats.get("usage_percent", 0) > 0.8:
                     # Sort by last access time and remove oldest entries
                     sorted_cache = sorted(
                         self.embedding_cache.items(),
                         key=lambda x: x[1].get('last_access', 0)
                     )
-                    while self.memory_usage > self.max_memory_mb * 0.8 and sorted_cache:
+                    while sorted_cache:
                         key, _ = sorted_cache.pop(0)
                         del self.embedding_cache[key]
-                        self._update_memory_usage()
+                        
+                        # Check if memory usage has improved
+                        ram_stats = self.ram_manager.check_memory_health()
+                        gpu_stats = self.gpu_manager.get_gpu_usage()
+                        if ram_stats.get("usage_percent", 0) < 0.7 and gpu_stats.get("usage_percent", 0) < 0.7:
+                            break
+                            
+                    self._log_event(
+                        "cache_pruned",
+                        "Cache pruned due to high memory usage",
+                        level="info",
+                        ram_stats=ram_stats,
+                        gpu_stats=gpu_stats
+                    )
         except Exception as e:
             self._log_error(f"Cache pruning failed: {str(e)}")
 
     def _compress_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """Compress tensor to reduce memory usage."""
         try:
-            if tensor.dtype == torch.float32:
-                return tensor.half()  # Convert to float16
+            # Check GPU memory before compression
+            gpu_stats = self.gpu_manager.get_gpu_usage()
+            if gpu_stats.get("usage_percent", 0) > 0.8:
+                if tensor.dtype == torch.float32:
+                    return tensor.half()  # Convert to float16
             return tensor
         except Exception as e:
             self._log_error(f"Tensor compression failed: {str(e)}")
@@ -281,8 +314,56 @@ class CuriosityError(Exception):
     """Custom error for curiosity-related failures."""
     pass
 
+class CuriositySystem:
+    """Manages curiosity-driven exploration and learning."""
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        memoria_manager: MemoriaManager,
+        ram_manager: RAMManager,
+        gpu_manager: GPUMemoryManager
+    ):
+        """
+        Initialize curiosity system.
+        
+        Args:
+            config_manager: Config manager for fetching configuration values
+            logger: Logger instance for logging events
+            memoria_manager: MemoriaManager instance for core memory management
+            ram_manager: RAMManager instance for RAM memory management
+            gpu_manager: GPUMemoryManager instance for GPU memory management
+        """
+        self._config_manager = config_manager
+        self._logger = logger
+        self.memoria_manager = memoria_manager
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        
+    def check_memory_health(self) -> Dict[str, Any]:
+        """Check memory health across all memory managers."""
+        try:
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            return {
+                "ram_health": ram_health,
+                "gpu_health": gpu_health
+            }
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to check memory health: {str(e)}",
+                error_type="memory_health_error",
+                stack_trace=traceback.format_exc()
+            )
+            return {
+                "ram_health": {"status": "error"},
+                "gpu_health": {"status": "error"}
+            }
+
 class CuriosityManager:
-    """Manages the curiosity system and its components."""
+    """Manages curiosity-driven exploration and learning."""
     
     def __init__(
         self,
@@ -304,353 +385,140 @@ class CuriosityManager:
         self.temperament_system = temperament_system
         self.confidence_calculator = confidence_calculator
         
-        # Initialize components with validated configuration
-        self.curiosity = Curiosity(
-            config_manager=self.config_manager,
-            logger=self.logger
-        )
+        # Initialize memory managers
+        self.memoria_manager = MemoriaManager(config_manager, logger)
+        self.ram_manager = RAMManager(config_manager, logger)
+        self.gpu_manager = GPUMemoryManager(config_manager, logger)
         
-        # Initialize other components
+        # Initialize components
+        self.curiosity = Curiosity(config_manager, logger)
         self.pressure = CuriosityPressure(
-            base_pressure=self.config_manager.get("curiosity_config.pressure_threshold", 0.7),
+            base_pressure=0.5,
             max_pressure=1.0,
             min_pressure=0.0,
-            decay_rate=self.config_manager.get("curiosity_config.decay_rate", 0.9)
-        )
-        
-        self.callbacks = CuriosityCallbacks(logger=self.logger)
-        self.exploration_queue = deque(maxlen=self.config_manager.get("curiosity_config.queue_maxlen", 10))
-        
-        # Subscribe to config changes
-        self.config_manager.subscribe(self._on_config_change)
-        
-        # Initialize other attributes
-        self.metrics = defaultdict(list)
-        self._initialized = False
-        self.state = None
-        self.pressure = 0.0
-        self.last_update = time.time()
-        self.conversation_id = None
-        self.state_hash = None
-        self.pressure_mgr = CuriosityPressure(
-            base_pressure=0.5,
-            max_pressure=0.9,
-            min_pressure=0.1,
             decay_rate=0.95
         )
-        self.lock = threading.Lock()
-        self._pressure_history = deque(maxlen=100)
-        self._last_pressure_change = 0.0
+        self.callbacks = CuriosityCallbacks(logger)
         
         # Initialize configuration
         self._initialize_config()
         
-        # Initialize components
-        self._initialize_components()
+        # Initialize state
+        self.state = None
+        self.exploration_queue = deque()
+        self.metrics = defaultdict(list)
         
-        # Log device initialization
+        # Log initialization
         self._log_event(
-            "device_initialized",
-            message="Curiosity manager device initialized",
-            level="info",
-            device=str(self.device),
-            device_type=self.device.type
+            "curiosity_manager_initialized",
+            "Curiosity manager initialized",
+            level="info"
         )
-        
+
     def _initialize_config(self) -> None:
-        """Initialize and validate configuration from ConfigManager."""
+        """Initialize and validate configuration parameters."""
         try:
-            # Load curiosity configuration
-            curiosity_config = self.config_manager.get_section("curiosity_config")
+            # Get curiosity config section
+            curiosity_config = self.config_manager.get_section("curiosity_config", {})
             
-            # Set configuration parameters with validation
-            self._pressure_change_cooldown = float(curiosity_config.get("pressure_change_cooldown", 1.0))
-            self._min_pressure = float(curiosity_config.get("min_pressure", 0.1))
-            self._max_pressure = float(curiosity_config.get("max_pressure", 0.9))
-            self._pressure_decay_rate = float(curiosity_config.get("pressure_decay_rate", 0.95))
-            self.curiosity_queue = deque(maxlen=int(curiosity_config.get("curiosity_queue_maxlen", 100)))
-            self.max_memory_mb = float(curiosity_config.get("max_dream_memory_mb", 512.0))
-            
-            # Validate configuration values
-            self._validate_config_values()
-            
-            # Subscribe to configuration changes
-            self.config_manager.subscribe(self._on_config_change)
-            
-            self.logger.record_event(
-                event_type="curiosity_config_initialized",
-                message="Curiosity configuration initialized successfully",
-                level="info",
-                additional_info={
-                    "pressure_change_cooldown": self._pressure_change_cooldown,
-                    "min_pressure": self._min_pressure,
-                    "max_pressure": self._max_pressure,
-                    "pressure_decay_rate": self._pressure_decay_rate,
-                    "queue_maxlen": self.curiosity_queue.maxlen,
-                    "max_memory_mb": self.max_memory_mb
-                }
+            # Validate and set config values
+            self.weight_ignorance = self._validate_config_value(
+                "weight_ignorance",
+                curiosity_config.get("weight_ignorance", 0.7),
+                (0.0, 1.0)
             )
             
-        except Exception as e:
-            self.logger.record_event(
-                event_type="curiosity_config_initialization_failed",
-                message=f"Failed to initialize curiosity configuration: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            self.weight_novelty = self._validate_config_value(
+                "weight_novelty",
+                curiosity_config.get("weight_novelty", 0.3),
+                (0.0, 1.0)
             )
-            raise
             
-    def _validate_config_values(self) -> None:
-        """Validate configuration values against defined ranges."""
-        try:
-            # Validate pressure-related parameters
-            if not 0.0 <= self._min_pressure <= 1.0:
-                raise ValueError(f"Invalid min_pressure: {self._min_pressure}. Must be between 0.0 and 1.0.")
-                
-            if not 0.0 <= self._max_pressure <= 1.0:
-                raise ValueError(f"Invalid max_pressure: {self._max_pressure}. Must be between 0.0 and 1.0.")
-                
-            if self._min_pressure >= self._max_pressure:
-                raise ValueError(f"min_pressure ({self._min_pressure}) must be less than max_pressure ({self._max_pressure})")
-                
-            if not 0.0 <= self._pressure_decay_rate <= 1.0:
-                raise ValueError(f"Invalid pressure_decay_rate: {self._pressure_decay_rate}. Must be between 0.0 and 1.0.")
-                
-            if not 0.0 <= self._pressure_change_cooldown <= 10.0:
-                raise ValueError(f"Invalid pressure_change_cooldown: {self._pressure_change_cooldown}. Must be between 0.0 and 10.0.")
-                
-            # Validate memory parameters
-            if not 64.0 <= self.max_memory_mb <= 4096.0:
-                raise ValueError(f"Invalid max_memory_mb: {self.max_memory_mb}. Must be between 64.0 and 4096.0.")
-                
-            # Validate queue parameters
-            if not 10 <= self.curiosity_queue.maxlen <= 1000:
-                raise ValueError(f"Invalid queue_maxlen: {self.curiosity_queue.maxlen}. Must be between 10 and 1000.")
-                
-        except Exception as e:
-            self.logger.record_event(
-                event_type="curiosity_config_validation_failed",
-                message=f"Configuration validation failed: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
-            raise
+            # Update config with validated values
+            curiosity_config.update({
+                "weight_ignorance": self.weight_ignorance,
+                "weight_novelty": self.weight_novelty
+            })
             
-    def _on_config_change(self) -> None:
-        """Handle configuration changes."""
-        try:
-            # Update curiosity weights
-            self.curiosity.weight_ignorance = self.config_manager.get("curiosity_config.weight_ignorance", 0.7)
-            self.curiosity.weight_novelty = self.config_manager.get("curiosity_config.weight_novelty", 0.3)
-            self.curiosity.metrics_maxlen = self.config_manager.get("curiosity_config.novelty_history_maxlen", 1000)
+            self.config_manager.update_section("curiosity_config", curiosity_config)
             
-            # Update pressure parameters
-            self.pressure.base_pressure = self.config_manager.get("curiosity_config.pressure_threshold", 0.7)
-            self.pressure.decay_rate = self.config_manager.get("curiosity_config.decay_rate", 0.9)
-            
-            # Update queue size
-            new_queue_size = self.config_manager.get("curiosity_config.queue_maxlen", 10)
-            if new_queue_size != self.exploration_queue.maxlen:
-                old_queue = list(self.exploration_queue)
-                self.exploration_queue = deque(maxlen=new_queue_size)
-                self.exploration_queue.extend(old_queue[:new_queue_size])
-            
+            # Log successful initialization
             self._log_event(
-                "config_updated",
-                message="Curiosity configuration updated",
-                level="info",
-                additional_info={
-                    "weight_ignorance": self.curiosity.weight_ignorance,
-                    "weight_novelty": self.curiosity.weight_novelty,
-                    "metrics_maxlen": self.curiosity.metrics_maxlen,
-                    "pressure_threshold": self.pressure.base_pressure,
-                    "decay_rate": self.pressure.decay_rate,
-                    "queue_maxlen": new_queue_size
-                }
+                "curiosity_config_initialized",
+                "Curiosity configuration initialized successfully",
+                level="info"
             )
             
         except Exception as e:
-            self._log_error(f"Configuration update failed: {str(e)}")
-            
-    def _initialize_components(self) -> None:
-        """Initialize curiosity components with configuration."""
-        try:
-            # Load curiosity weights from configuration
-            curiosity_config = self.config_manager.get_section("curiosity_config")
-            weight_ignorance = float(curiosity_config.get("weight_ignorance", 0.7))
-            weight_novelty = float(curiosity_config.get("weight_novelty", 0.3))
-            metrics_maxlen = int(curiosity_config.get("metrics_maxlen", 1000))
-            
-            # Initialize components with validated configuration
-            self.curiosity = Curiosity(
-                config_manager=self.config_manager,
-                logger=self.logger
-            )
-            self.callbacks = CuriosityCallbacks(logger=self.logger)
-            self.last_question_time = time.time()
-            
-            self.logger.record_event(
-                event_type="curiosity_components_initialized",
-                message="Curiosity components initialized successfully",
-                level="info",
-                additional_info={
-                    "weight_ignorance": weight_ignorance,
-                    "weight_novelty": weight_novelty,
-                    "metrics_maxlen": metrics_maxlen
-                }
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="curiosity_components_initialization_failed",
-                message=f"Failed to initialize curiosity components: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
+            self._log_error(
+                f"Failed to initialize curiosity config: {str(e)}",
+                error_type="config_error",
+                stack_trace=traceback.format_exc(),
+                context="config_initialization"
             )
             raise
-            
-    def set_state(self, state: SOVLState) -> None:
-        """Set the SOVL state and synchronize with CuriosityState."""
-        with self.lock:
-            try:
-                if not isinstance(state, SOVLState):
-                    raise ValueError("State must be an instance of SOVLState")
-                    
-                # Validate device consistency
-                if state.device != self.device:
-                    self._log_warning(f"State device ({state.device}) differs from manager device ({self.device})")
-                    
-                self.state = state
-                
-                # Validate and synchronize curiosity state
-                if not hasattr(state, 'curiosity'):
-                    self._log_error("Missing curiosity state in SOVLState")
-                    state.curiosity = CuriosityState(self.config_manager, self.logger, self.device)
-                    
-                # Validate required attributes
-                required_attrs = [
-                    'pressure', 'novelty_threshold_spontaneous',
-                    'novelty_threshold_response', 'pressure_threshold',
-                    'pressure_drop', 'silence_threshold',
-                    'question_cooldown', 'queue_maxlen'
-                ]
-                
-                missing_attrs = [attr for attr in required_attrs 
-                               if not hasattr(state.curiosity, attr)]
-                
-                if missing_attrs:
-                    self._log_error(f"Missing required attributes in CuriosityState: {missing_attrs}")
-                    return
-                
-                # Validate and clamp parameter ranges
-                if not (0 <= state.curiosity.pressure <= 1):
-                    self._log_warning(f"Invalid pressure value: {state.curiosity.pressure}, clamping to [0,1]")
-                    state.curiosity.pressure = max(0, min(1, state.curiosity.pressure))
-                
-                if not (0 <= state.curiosity.novelty_threshold_spontaneous <= 1):
-                    self._log_warning(f"Invalid novelty_threshold_spontaneous: {state.curiosity.novelty_threshold_spontaneous}, clamping to [0,1]")
-                    state.curiosity.novelty_threshold_spontaneous = max(0, min(1, state.curiosity.novelty_threshold_spontaneous))
-                
-                if not (0 <= state.curiosity.novelty_threshold_response <= 1):
-                    self._log_warning(f"Invalid novelty_threshold_response: {state.curiosity.novelty_threshold_response}, clamping to [0,1]")
-                    state.curiosity.novelty_threshold_response = max(0, min(1, state.curiosity.novelty_threshold_response))
-                
-                # Synchronize pressure
-                self.pressure = state.curiosity.pressure
-                
-                # Log successful synchronization
-                self._log_event("state_sync", {
-                    "pressure": self.pressure,
-                    "novelty_threshold_spontaneous": state.curiosity.novelty_threshold_spontaneous,
-                    "novelty_threshold_response": state.curiosity.novelty_threshold_response,
-                    "conversation_id": getattr(state, 'history', {}).get('conversation_id', None),
-                    "state_hash": getattr(state, 'state_hash', None),
-                    "device": str(self.device)
-                })
-                
-            except Exception as e:
-                self._log_error(f"Error synchronizing with SOVLState: {str(e)}")
-                raise
 
-    def _generate_query_embedding(self, state: Any, tokenizer: Any, model: Any, query: Optional[str]) -> Optional[torch.Tensor]:
-        """Generate query embedding with device validation."""
+    def _validate_config_value(self, key: str, value: Any, valid_range: Tuple[float, float]) -> float:
+        """Validate a configuration value against a range."""
         try:
-            if not query:
-                return None
-                
-            # Ensure model is on correct device
-            model = model.to(self.device)
-            
-            # Tokenize and move to device
-            inputs = tokenizer(query, return_tensors="pt", padding=True, truncation=True)
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            
-            # Generate embedding
-            with torch.no_grad():
-                outputs = model(**inputs)
-                embedding = outputs.last_hidden_state.mean(dim=1)
-                
-            return embedding
-            
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"Config {key} must be a number")
+            min_val, max_val = valid_range
+            if not (min_val <= value <= max_val):
+                raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+            return float(value)
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "query_embedding",
-                "query": query
-            })
-            return None
-            
-    def _validate_device(self, tensor: torch.Tensor, name: str) -> torch.Tensor:
-        """Validate tensor device and move if necessary."""
-        try:
-            if not isinstance(tensor, torch.Tensor):
-                raise ValueError(f"{name} must be a torch.Tensor")
-                
-            if tensor.device != self.device:
-                self._log_warning(f"Moving {name} from {tensor.device} to {self.device}")
-                tensor = tensor.to(self.device)
-                
-            return tensor
-            
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "device_validation",
-                "tensor_name": name,
-                "tensor_shape": list(tensor.shape) if isinstance(tensor, torch.Tensor) else None
-            })
+            self._log_error(
+                f"Config validation failed for {key}: {str(e)}",
+                error_type="config_validation_error",
+                context="config_validation"
+            )
             raise
 
-    def update_pressure(self, confidence: float, timestamp: float) -> None:
-        """Update pressure based on confidence and timestamp."""
-        with self.lock:
-            # Calculate new pressure
-            new_pressure = self.pressure_mgr.update(confidence)
+    def _get_valid_memory_embeddings(self, state: SOVLState) -> List[torch.Tensor]:
+        """Get valid memory embeddings with memory constraints."""
+        try:
+            # Check memory health before processing
+            ram_stats = self.ram_manager.check_memory_health()
+            gpu_stats = self.gpu_manager.get_gpu_usage()
             
-            # Add to queue
-            self._pressure_queue.append((new_pressure, timestamp))
-            self._last_pressure_update = timestamp
+            if ram_stats.get("usage_percent", 0) > 0.9 or gpu_stats.get("usage_percent", 0) > 0.9:
+                self._log_warning(
+                    "High memory usage detected during embedding retrieval",
+                    ram_stats=ram_stats,
+                    gpu_stats=gpu_stats
+                )
+                return []
             
-            # Log pressure update
-            self.logger.log_event(
-                "curiosity_pressure_updated",
-                {
-                    "pressure": new_pressure,
-                    "confidence": confidence,
-                    "timestamp": timestamp
-                }
-            )
-
-    def get_current_pressure(self, timestamp: Optional[float] = None) -> float:
-        """Get current pressure from queue."""
-        with self.lock:
-            if not self._pressure_queue:
-                return self.pressure_mgr.current_pressure
+            # Get embeddings from memoria manager
+            embeddings = self.memoria_manager.get_embeddings(state)
+            
+            # Process embeddings in batches to manage memory
+            valid_embeddings = []
+            batch_size = self.curiosity.batch_size
+            
+            for i in range(0, len(embeddings), batch_size):
+                batch = embeddings[i:i + batch_size]
                 
-            if timestamp is None or timestamp - self._last_pressure_update >= self._pressure_update_interval:
-                # Get most recent pressure
-                pressure, _ = self._pressure_queue[-1]
-                return pressure
+                # Check memory health for each batch
+                ram_stats = self.ram_manager.check_memory_health()
+                gpu_stats = self.gpu_manager.get_gpu_usage()
                 
-            return self.pressure_mgr.current_pressure
+                if ram_stats.get("usage_percent", 0) > 0.9 or gpu_stats.get("usage_percent", 0) > 0.9:
+                    self._log_warning(
+                        "High memory usage detected during batch processing",
+                        ram_stats=ram_stats,
+                        gpu_stats=gpu_stats
+                    )
+                    break
+                
+                valid_embeddings.extend(batch)
+            
+            return valid_embeddings
+            
+        except Exception as e:
+            self._log_error(f"Failed to get valid memory embeddings: {str(e)}")
+            return []
 
     def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log an event with standardized fields."""
@@ -698,14 +566,14 @@ class CuriosityManager:
     def calculate_curiosity_score(self, prompt: str) -> float:
         """Calculate curiosity score for a prompt."""
         try:
-            if not self._initialized:
-                raise RuntimeError("CuriosityManager not initialized")
+            if not self.state_manager:
+                return 0.0
                 
             novelty_score = self._calculate_novelty(prompt)
             ignorance_score = self._calculate_ignorance(prompt)
             
-            weight_novelty = self.config_manager.get("weight_novelty")
-            weight_ignorance = self.config_manager.get("weight_ignorance")
+            weight_novelty = self.weight_novelty
+            weight_ignorance = self.weight_ignorance
             
             return (weight_novelty * novelty_score + 
                    weight_ignorance * ignorance_score)
@@ -719,9 +587,6 @@ class CuriosityManager:
     def should_explore(self, prompt: str) -> bool:
         """Determine if exploration should be triggered."""
         try:
-            if not self._initialized:
-                return False
-                
             curiosity_score = self.calculate_curiosity_score(prompt)
             threshold = self.config_manager.get("novelty_threshold_spontaneous")
             
@@ -736,10 +601,7 @@ class CuriosityManager:
     def queue_exploration(self, prompt: str) -> bool:
         """Queue a prompt for exploration."""
         try:
-            if not self._initialized:
-                return False
-                
-            self.curiosity_queue.append({
+            self.exploration_queue.append({
                 "prompt": prompt,
                 "timestamp": time.time(),
                 "score": self.calculate_curiosity_score(prompt)
@@ -755,16 +617,16 @@ class CuriosityManager:
     def get_next_exploration(self) -> Optional[Dict]:
         """Get next prompt for exploration."""
         try:
-            if not self.curiosity_queue:
+            if not self.exploration_queue:
                 return None
                 
             timeout = self.config_manager.get("curiosity_question_timeout")
             current_time = time.time()
             
-            while self.curiosity_queue:
-                item = self.curiosity_queue[0]
+            while self.exploration_queue:
+                item = self.exploration_queue[0]
                 if current_time - item["timestamp"] > timeout:
-                    self.curiosity_queue.popleft()
+                    self.exploration_queue.popleft()
                 else:
                     return item
                     
@@ -829,8 +691,8 @@ class CuriosityManager:
     ) -> Optional[str]:
         """Generate a curiosity-driven question."""
         try:
-            if not self._initialized:
-                raise RuntimeError("CuriosityManager not initialized")
+            if not self.state_manager:
+                return None
                 
             # Get next exploration item
             item = self.get_next_exploration()
@@ -872,7 +734,6 @@ class CuriosityManager:
                 raise ValueError("State cannot be None")
                 
             self.state = state
-            self._initialized = True
             return True
             
         except Exception as e:
@@ -886,8 +747,7 @@ class CuriosityManager:
         """Reset the CuriosityManager state."""
         try:
             self.metrics.clear()
-            self.curiosity_queue.clear()
-            self._initialized = False
+            self.exploration_queue.clear()
             self.state = None
             return True
             
@@ -904,50 +764,45 @@ class CuriosityManager:
             **params: Key-value pairs of parameters to update
         """
         try:
-            with self.lock:
-                for key, value in params.items():
-                    # Validate parameter exists and is valid
-                    if not hasattr(self, key):
+            for key, value in params.items():
+                # Validate parameter exists and is valid
+                if not hasattr(self, key):
+                    self._log_warning(
+                        "invalid_parameter",
+                        message=f"Invalid curiosity parameter: {key}",
+                        parameter=key,
+                        value=value
+                    )
+                    continue
+                    
+                # Validate value type and range
+                if key in ["pressure", "weight_ignorance", "weight_novelty"]:
+                    if not isinstance(value, (int, float)):
                         self._log_warning(
-                            "invalid_parameter",
-                            message=f"Invalid curiosity parameter: {key}",
+                            "invalid_value_type",
+                            message=f"Invalid type for {key}: {type(value)}",
                             parameter=key,
                             value=value
                         )
                         continue
-                        
-                    # Validate value type and range
-                    if key in ["pressure", "weight_ignorance", "weight_novelty"]:
-                        if not isinstance(value, (int, float)):
-                            self._log_warning(
-                                "invalid_value_type",
-                                message=f"Invalid type for {key}: {type(value)}",
-                                parameter=key,
-                                value=value
-                            )
-                            continue
-                        if not 0.0 <= value <= 1.0:
-                            self._log_warning(
-                                "invalid_value_range",
-                                message=f"Value out of range for {key}: {value}",
-                                parameter=key,
-                                value=value
-                            )
-                            continue
+                    if not 0.0 <= value <= 1.0:
+                        self._log_warning(
+                            "invalid_value_range",
+                            message=f"Value out of range for {key}: {value}",
+                            parameter=key,
+                            value=value
+                        )
+                        continue
                             
-                    # Update parameter
-                    setattr(self, key, value)
-                    self._log_event(
-                        "parameter_updated",
-                        message=f"Updated {key} to {value}",
-                        parameter=key,
-                        value=value
-                    )
-                    
-                    # Special handling for queue_maxlen
-                    if key == "queue_maxlen":
-                        self.curiosity_queue = deque(maxlen=value)
-                        
+                # Update parameter
+                setattr(self, key, value)
+                self._log_event(
+                    "parameter_updated",
+                    message=f"Updated {key} to {value}",
+                    parameter=key,
+                    value=value
+                )
+                
         except Exception as e:
             self._log_error(
                 "tune_failed",
@@ -960,7 +815,7 @@ class CuriosityManager:
     def get_metrics_summary(self) -> Dict[str, float]:
         """Get summary statistics of tracked metrics."""
         try:
-            if not self._initialized:
+            if not self.state_manager:
                 return {}
                 
             summary = {}
@@ -981,22 +836,22 @@ class CuriosityManager:
     def get_exploration_queue_stats(self) -> Dict[str, Any]:
         """Get statistics about the exploration queue."""
         try:
-            if not self._initialized:
+            if not self.exploration_queue:
                 return {}
                 
             current_time = time.time()
             stats = {
-                "queue_length": len(self.curiosity_queue),
+                "queue_length": len(self.exploration_queue),
                 "avg_score": 0.0,
                 "oldest_item_age": 0.0,
                 "newest_item_age": 0.0
             }
             
-            if self.curiosity_queue:
-                scores = [item["score"] for item in self.curiosity_queue]
+            if self.exploration_queue:
+                scores = [item["score"] for item in self.exploration_queue]
                 stats["avg_score"] = sum(scores) / len(scores)
-                stats["oldest_item_age"] = current_time - self.curiosity_queue[0]["timestamp"]
-                stats["newest_item_age"] = current_time - self.curiosity_queue[-1]["timestamp"]
+                stats["oldest_item_age"] = current_time - self.exploration_queue[0]["timestamp"]
+                stats["newest_item_age"] = current_time - self.exploration_queue[-1]["timestamp"]
                 
             return stats
             
@@ -1005,319 +860,3 @@ class CuriosityManager:
                 "operation": "queue_stats"
             })
             return {}
-
-    def _get_valid_memory_embeddings(self, state: SOVLState) -> List[torch.Tensor]:
-        """
-        Get valid memory embeddings while respecting memory limits.
-        
-        Args:
-            state: Current SOVLState instance
-            
-        Returns:
-            List of valid memory embeddings within memory limits
-        """
-        try:
-            memory_embeddings = []
-            hidden_size = self.config_manager.get("hidden_size")
-            total_size = 0.0
-            
-            if not hasattr(state, 'dream_memory') or not state.dream_memory:
-                return memory_embeddings
-                
-            for entry in state.dream_memory:
-                tensor = entry["tensor"]
-                # Calculate memory size in MB
-                memory_size = tensor.element_size() * tensor.nelement() / (1024 * 1024)
-                
-                # Check memory limit
-                if total_size + memory_size > self.max_memory_mb:
-                    self._log_event("memory_limit_reached", {
-                        "total_size_mb": total_size,
-                        "skipped_size_mb": memory_size,
-                        "max_memory_mb": self.max_memory_mb
-                    })
-                    break
-                    
-                # Validate tensor shape
-                if tensor.shape[-1] == hidden_size:
-                    try:
-                        # Validate and move tensor to correct device
-                        tensor = self._validate_device(tensor, f"dream_memory_tensor_{len(memory_embeddings)}")
-                        memory_embeddings.append(tensor)
-                        total_size += memory_size
-                    except Exception as e:
-                        self._log_warning("tensor_validation_failed", {
-                            "error": str(e),
-                            "tensor_shape": list(tensor.shape)
-                        })
-                        continue
-                else:
-                    self._log_warning("invalid_tensor_shape", {
-                        "expected_size": hidden_size,
-                        "actual_size": tensor.shape[-1]
-                    })
-                    
-            # Update total memory tracking
-            self.total_memory_mb = total_size
-            
-            return memory_embeddings
-            
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "get_valid_memory_embeddings",
-                "hidden_size": hidden_size if 'hidden_size' in locals() else None,
-                "total_size_mb": total_size if 'total_size' in locals() else None
-            })
-            return []
-            
-    def get_pressure(self) -> float:
-        """Get current pressure with validation, decay, and confidence awareness."""
-        try:
-            with self.lock:
-                # Get lifecycle stage if available
-                lifecycle_stage = "unknown"
-                if self.lifecycle_manager:
-                    lifecycle_stage = self.lifecycle_manager._lifecycle_stage
-                
-                # Apply natural decay
-                time_delta = time.time() - self.last_update
-                if time_delta > 0:
-                    decay_rate = self._pressure_decay_rate
-                    
-                    # Adjust decay rate based on confidence if available
-                    if self.confidence_calculator:
-                        current_confidence = self.confidence_calculator.calculate_confidence_score(
-                            logits=torch.tensor([]),  # Placeholder
-                            generated_ids=torch.tensor([]),  # Placeholder
-                            state=self.state,
-                            error_manager=self.error_manager,
-                            context=SystemContext(),  # Placeholder
-                            curiosity_manager=self
-                        )
-                        
-                        # Higher confidence leads to faster pressure decay
-                        decay_rate *= (1.0 + (current_confidence - 0.5) * 0.5)
-                    
-                    self.pressure *= (decay_rate ** time_delta)
-                    self.last_update = time.time()
-                
-                # Ensure pressure stays within bounds
-                self.pressure = max(self._min_pressure, min(self._max_pressure, self.pressure))
-                
-                # Record pressure in history with confidence context
-                self._pressure_history.append((
-                    time.time(),
-                    self.pressure,
-                    lifecycle_stage,
-                    getattr(self.confidence_calculator, "current_confidence", None)
-                ))
-                
-                # Log pressure update with confidence context
-                self._log_event(
-                    "pressure_updated",
-                    message="Pressure updated with confidence context",
-                    level="info",
-                    additional_info={
-                        "current_pressure": self.pressure,
-                        "lifecycle_stage": lifecycle_stage,
-                        "time_delta": time_delta,
-                        "confidence": getattr(self.confidence_calculator, "current_confidence", None)
-                    }
-                )
-                
-                return self.pressure
-                
-        except Exception as e:
-            self._log_error(f"Failed to get pressure: {str(e)}")
-            return self._min_pressure  # Return minimum pressure on error
-
-    def reduce_pressure(self, amount: float) -> None:
-        """Reduce pressure with validation, cooldown, and lifecycle awareness."""
-        try:
-            with self.lock:
-                current_time = time.time()
-                
-                # Get lifecycle stage if available
-                lifecycle_stage = "unknown"
-                if self.lifecycle_manager:
-                    lifecycle_stage = self.lifecycle_manager._lifecycle_stage
-                
-                # Check cooldown
-                if current_time - self._last_pressure_change < self._pressure_change_cooldown:
-                    self._log_warning(
-                        "pressure_change_cooldown",
-                        message="Pressure change too frequent",
-                        last_change=self._last_pressure_change,
-                        current_time=current_time,
-                        lifecycle_stage=lifecycle_stage
-                    )
-                    return
-                
-                # Validate amount
-                if not isinstance(amount, (int, float)) or amount <= 0:
-                    self._log_warning(
-                        "invalid_pressure_reduction",
-                        message=f"Invalid pressure reduction amount: {amount}",
-                        amount=amount,
-                        lifecycle_stage=lifecycle_stage
-                    )
-                    return
-                
-                # Adjust reduction amount based on lifecycle stage
-                if lifecycle_stage in self.config_manager.get("curiosity_config.lifecycle_params", {}):
-                    stage_params = self.config_manager.get(f"curiosity_config.lifecycle_params.{lifecycle_stage}")
-                    amount *= stage_params.get("reduction_factor", 1.0)
-                
-                # Calculate new pressure
-                new_pressure = self.pressure - amount
-                
-                # Ensure pressure stays above minimum
-                if new_pressure < self._min_pressure:
-                    self._log_warning(
-                        "pressure_min_reached",
-                        message=f"Pressure reduction would go below minimum: {new_pressure}",
-                        current_pressure=self.pressure,
-                        reduction=amount,
-                        lifecycle_stage=lifecycle_stage
-                    )
-                    new_pressure = self._min_pressure
-                
-                # Update pressure
-                self.pressure = new_pressure
-                self._last_pressure_change = current_time
-                self.last_update = current_time
-                
-                # Log pressure change with lifecycle context
-                self._log_event(
-                    "pressure_reduced",
-                    message=f"Pressure reduced by {amount}",
-                    old_pressure=self.pressure + amount,
-                    new_pressure=self.pressure,
-                    reduction=amount,
-                    lifecycle_stage=lifecycle_stage
-                )
-                
-        except Exception as e:
-            self._log_error(f"Failed to reduce pressure: {str(e)}")
-
-    def get_pressure_stats(self) -> Dict[str, Any]:
-        """Get statistics about pressure changes."""
-        try:
-            with self.lock:
-                if not self._pressure_history:
-                    return {
-                        "current_pressure": self.pressure,
-                        "min_pressure": self._min_pressure,
-                        "max_pressure": self._max_pressure,
-                        "history_size": 0
-                    }
-                
-                pressures = [p for _, p, _, _ in self._pressure_history]
-                return {
-                    "current_pressure": self.pressure,
-                    "min_pressure": self._min_pressure,
-                    "max_pressure": self._max_pressure,
-                    "avg_pressure": sum(pressures) / len(pressures),
-                    "min_observed": min(pressures),
-                    "max_observed": max(pressures),
-                    "history_size": len(pressures),
-                    "last_change": self._last_pressure_change
-                }
-                
-        except Exception as e:
-            self._log_error(f"Failed to get pressure stats: {str(e)}")
-            return {}
-
-class CuriosityEngine:
-    """Manages curiosity-driven exploration and learning."""
-    
-    def __init__(
-        self,
-        config_handler: ConfigHandler,
-        model_manager: ModelManager,
-        state_tracker: StateTracker,
-        error_manager: ErrorManager,
-        logger: Logger,
-        device: str
-    ):
-        """
-        Initialize the curiosity engine with explicit dependencies.
-        
-        Args:
-            config_handler: Configuration handler
-            model_manager: Model manager instance
-            state_tracker: State tracker instance
-            error_manager: Error manager instance
-            logger: Logger instance
-            device: Device to use for tensor operations
-        """
-        self.config_handler = config_handler
-        self.model_manager = model_manager
-        self.state_tracker = state_tracker
-        self.error_manager = error_manager
-        self.logger = logger
-        self.device = device
-        
-        # Initialize components
-        self.curiosity_manager = self._create_curiosity_manager()
-        self.cycle_manager = self._create_training_cycle_manager()
-        
-        # Log initialization
-        self.logger.record_event(
-            event_type="curiosity_engine_initialized",
-            message="Curiosity engine initialized successfully",
-            level="info"
-        )
-        
-    def _create_curiosity_manager(self) -> CuriosityManager:
-        """Create and initialize the curiosity manager."""
-        try:
-            return CuriosityManager(
-                config_manager=self.config_handler.config_manager,
-                logger=self.logger,
-                device=self.device
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0)
-            raise
-            
-    def _create_training_cycle_manager(self) -> TrainingCycleManager:
-        """Create and initialize the training cycle manager."""
-        try:
-            return TrainingCycleManager(
-                config=self.config_handler.config_manager.get_section("sovl_config"),
-                logger=self.logger,
-                device=self.device,
-                state_manager=self.state_tracker,
-                curiosity_manager=self.curiosity_manager
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0)
-            raise
-            
-    def _validate_configuration(self) -> bool:
-        """Validate current configuration state."""
-        try:
-            if not self.config_handler.validate():
-                self.logger.record_event(
-                    event_type="config_validation_failed",
-                    message="Configuration validation failed, attempting recovery",
-                    level="error"
-                )
-                self.config_handler._refresh_configs()
-                if not self.config_handler.validate():
-                    self.logger.record_event(
-                        event_type="config_recovery_failed",
-                        message="Configuration recovery failed",
-                        level="error"
-                    )
-                    return False
-            return True
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Error during configuration validation: {str(e)}",
-                error_type="config_validation_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"error": str(e)}
-            )
-            return False

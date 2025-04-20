@@ -25,7 +25,7 @@ from sovl_utils import (
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 from sovl_conductor import SOVLOrchestrator
-from sovl_memory import MemoryManager
+from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
 from sovl_state import StateManager, SOVLState
 from sovl_error import ErrorManager, ErrorContext
 from sovl_manager import ModelManager
@@ -305,7 +305,7 @@ class SOVLRunner:
             (ErrorManager, "error manager"),
             (MemoryMonitor, "memory monitor"),
             (CuriosityEngine, "curiosity engine"),
-            (MemoryManager, "memory manager")
+            (MemoriaManager, "memory manager")
         ]
         
         try:
@@ -337,7 +337,7 @@ class SOVLRunner:
                     
                     # Stage 1: Basic components
                     if name in ["model loader", "state tracker", "memory monitor"]:
-                        component = component_class(context)
+                        component = initialize_component(component_class, context)
                         stage1_components.append(component)
                         components.append(component)
                     
@@ -368,11 +368,7 @@ class SOVLRunner:
                                 logger=context.logger
                             )
                         else:  # memory manager
-                            component = MemoryManager(
-                                context.config_manager,
-                                context.device,
-                                context.logger
-                            )
+                            component = initialize_component(MemoriaManager, context.config_manager, context.device, context.logger)
                         
                         stage3_components.append(component)
                         components.append(component)

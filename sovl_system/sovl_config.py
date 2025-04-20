@@ -727,6 +727,46 @@ class ConfigManager:
             self._log_error("Configuration validation failed", {"error": str(e), "model_config": str(model_config)})
             return False
 
+    def _initialize_memory_config(self) -> None:
+        """Initialize memory configuration with new memory management structure."""
+        # Initialize memoria configuration
+        self.update("memory_config.memoria", {
+            "max_memory_mb": self.get("memory_config.max_memory_mb", 512),
+            "garbage_collection_threshold": self.get("memory_config.garbage_collection_threshold", 0.7),
+            "memory_decay_rate": self.get("memory_config.memory_decay_rate", 0.95),
+            "enable_memory_compression": self.get("memory_config.enable_memory_compression", True),
+            "compression_ratio": self.get("memory_config.compression_ratio", 0.5),
+            "max_compressed_memory_mb": self.get("memory_config.max_compressed_memory_mb", 1024)
+        })
+
+        # Initialize RAM configuration
+        self.update("memory_config.ram", {
+            "max_ram_mb": self.get("memory_config.max_ram_mb", 2048),
+            "ram_threshold": self.get("memory_config.ram_threshold", 0.8),
+            "enable_ram_compression": self.get("memory_config.enable_ram_compression", True),
+            "ram_compression_ratio": self.get("memory_config.ram_compression_ratio", 0.6),
+            "max_compressed_ram_mb": self.get("memory_config.max_compressed_ram_mb", 4096)
+        })
+
+        # Initialize GPU memory configuration
+        self.update("memory_config.gpu", {
+            "max_gpu_memory_mb": self.get("memory_config.max_gpu_memory_mb", 1024),
+            "gpu_memory_threshold": self.get("memory_config.gpu_memory_threshold", 0.85),
+            "enable_gpu_memory_compression": self.get("memory_config.enable_gpu_memory_compression", True),
+            "gpu_compression_ratio": self.get("memory_config.gpu_compression_ratio", 0.7),
+            "max_compressed_gpu_memory_mb": self.get("memory_config.max_compressed_gpu_memory_mb", 2048)
+        })
+
+        # Initialize memory manager configuration
+        self.update("memory_config.manager", {
+            "enable_memoria_manager": self.get("memory_config.enable_memoria_manager", True),
+            "enable_ram_manager": self.get("memory_config.enable_ram_manager", True),
+            "enable_gpu_memory_manager": self.get("memory_config.enable_gpu_memory_manager", True),
+            "memory_sync_interval": self.get("memory_config.memory_sync_interval", 60),
+            "enable_memory_monitoring": self.get("memory_config.enable_memory_monitoring", True),
+            "memory_monitoring_interval": self.get("memory_config.memory_monitoring_interval", 5)
+        })
+
 if __name__ == "__main__":
     from sovl_logger import LoggerConfig
     logger = Logger(LoggerConfig())

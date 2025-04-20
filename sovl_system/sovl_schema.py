@@ -200,8 +200,36 @@ class ValidationSchema:
                 "data_path": ConfigSchema(field="data_provider.data_path", type=str, required=True),
             },
             "memory_config": {
-                "max_memory_mb": ConfigSchema(field="memory_config.max_memory_mb", type=int, default=512, range=(1, None)),
-                "garbage_collection_threshold": ConfigSchema(field="memory_config.garbage_collection_threshold", type=float, default=0.7, range=(0.0, 1.0)),
+                "memoria": {
+                    "max_memory_mb": ConfigSchema(field="memory_config.memoria.max_memory_mb", type=int, default=512, range=(1, None)),
+                    "garbage_collection_threshold": ConfigSchema(field="memory_config.memoria.garbage_collection_threshold", type=float, default=0.7, range=(0.0, 1.0)),
+                    "memory_decay_rate": ConfigSchema(field="memory_config.memoria.memory_decay_rate", type=float, default=0.95, range=(0.0, 1.0)),
+                    "enable_memory_compression": ConfigSchema(field="memory_config.memoria.enable_memory_compression", type=bool, default=True),
+                    "compression_ratio": ConfigSchema(field="memory_config.memoria.compression_ratio", type=float, default=0.5, range=(0.0, 1.0)),
+                    "max_compressed_memory_mb": ConfigSchema(field="memory_config.memoria.max_compressed_memory_mb", type=int, default=1024, range=(1, None))
+                },
+                "ram": {
+                    "max_ram_mb": ConfigSchema(field="memory_config.ram.max_ram_mb", type=int, default=2048, range=(1, None)),
+                    "ram_threshold": ConfigSchema(field="memory_config.ram.ram_threshold", type=float, default=0.8, range=(0.0, 1.0)),
+                    "enable_ram_compression": ConfigSchema(field="memory_config.ram.enable_ram_compression", type=bool, default=True),
+                    "ram_compression_ratio": ConfigSchema(field="memory_config.ram.ram_compression_ratio", type=float, default=0.6, range=(0.0, 1.0)),
+                    "max_compressed_ram_mb": ConfigSchema(field="memory_config.ram.max_compressed_ram_mb", type=int, default=4096, range=(1, None))
+                },
+                "gpu": {
+                    "max_gpu_memory_mb": ConfigSchema(field="memory_config.gpu.max_gpu_memory_mb", type=int, default=1024, range=(1, None)),
+                    "gpu_memory_threshold": ConfigSchema(field="memory_config.gpu.gpu_memory_threshold", type=float, default=0.85, range=(0.0, 1.0)),
+                    "enable_gpu_memory_compression": ConfigSchema(field="memory_config.gpu.enable_gpu_memory_compression", type=bool, default=True),
+                    "gpu_compression_ratio": ConfigSchema(field="memory_config.gpu.gpu_compression_ratio", type=float, default=0.7, range=(0.0, 1.0)),
+                    "max_compressed_gpu_memory_mb": ConfigSchema(field="memory_config.gpu.max_compressed_gpu_memory_mb", type=int, default=2048, range=(1, None))
+                },
+                "manager": {
+                    "enable_memoria_manager": ConfigSchema(field="memory_config.manager.enable_memoria_manager", type=bool, default=True),
+                    "enable_ram_manager": ConfigSchema(field="memory_config.manager.enable_ram_manager", type=bool, default=True),
+                    "enable_gpu_memory_manager": ConfigSchema(field="memory_config.manager.enable_gpu_memory_manager", type=bool, default=True),
+                    "memory_sync_interval": ConfigSchema(field="memory_config.manager.memory_sync_interval", type=int, default=60, range=(1, None)),
+                    "enable_memory_monitoring": ConfigSchema(field="memory_config.manager.enable_memory_monitoring", type=bool, default=True),
+                    "memory_monitoring_interval": ConfigSchema(field="memory_config.manager.memory_monitoring_interval", type=int, default=5, range=(1, None))
+                }
             },
             "state_config": {
                 "max_history": ConfigSchema(field="state_config.max_history", type=int, default=100, range=(1, None)),

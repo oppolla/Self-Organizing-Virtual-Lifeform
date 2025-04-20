@@ -16,6 +16,7 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
 from sovl_records import ConfidenceHistory
+from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -732,14 +733,36 @@ class SOVLState(StateBase):
     STATE_VERSION = "1.0"
 
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
+        """Initialize SOVL state with configuration and dependencies."""
         super().__init__(config_manager, logger)
-        self.device = device
-        self._cache = {}
-        self._last_update_time = time.time()
-        self._confidence_history = ConfidenceHistory(config_manager, logger)
-        self._initialize_state()
+        self._device = device
+        self.memoria_manager = MemoriaManager(config_manager, logger)
+        self.ram_manager = RAMManager(config_manager, logger)
+        self.gpu_manager = GPUMemoryManager(config_manager, logger)
+        
+    def _update_memory_usage(self) -> None:
+        """Update memory usage statistics."""
+        try:
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.get_gpu_usage()
+            
+            self._logger.record_event(
+                event_type="memory_usage_updated",
+                message="Memory usage statistics updated",
+                level="info",
+                additional_info={
+                    "ram_health": ram_health,
+                    "gpu_health": gpu_health
+                }
+            )
+            
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to update memory usage: {str(e)}",
+                error_type="memory_update_error",
+                stack_trace=traceback.format_exc()
+            )
 
-    @synchronized("lock")
     def _initialize_state(self) -> None:
         """Initialize state components."""
         try:
@@ -802,15 +825,6 @@ class SOVLState(StateBase):
                 self.log_event("memory_stats_failed", f"Failed to get GPU memory stats: {str(e)}", level="warning")
         return stats
 
-    @synchronized("lock")
-    def _update_memory_usage(self) -> None:
-        """Update memory usage statistics."""
-        try:
-            self.memory_usage = self._get_memory_stats()
-            self.last_memory_update = time.time()
-        except Exception as e:
-            self.log_event("memory_update_failed", f"Failed to update memory stats: {str(e)}", level="warning")
-
     def _calculate_memory_usage(self) -> float:
         """Calculate current memory usage percentage."""
         try:
@@ -856,7 +870,7 @@ class SOVLState(StateBase):
                 if target_device is not None:
                     tensor = tensor.to(target_device)
                 else:
-                    tensor = tensor.to(self.device)
+                    tensor = tensor.to(self._device)
                 return tensor
         except Exception as e:
             self.log_error(f"Failed to decompress tensor: {str(e)}", error_type="tensor_decompression_error")
@@ -876,71 +890,86 @@ class SOVLState(StateBase):
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
-        with self.lock:
-            return {
-                "version": self.version,
-                "seen_prompts": list(self.seen_prompts),
-                "temperament_score": self.temperament_score,
-                "last_temperament_score": self.last_temperament_score,
-                "temperament_history": list(self.temperament_history),
-                "dream_memory": [{
-                    "tensor": self._compress_tensor(m["tensor"], target_device="cpu"),
-                    "weight": m["weight"],
-                    "metadata": m["metadata"],
-                    "timestamp": m["timestamp"]
-                } for m in self.dream_memory],
-                "total_dream_memory_mb": self.total_dream_memory_mb,
-                "history": self.history.to_dict(),
-                "data_stats": self.data_stats.to_dict(),
-                "confidence_history": self._confidence_history.to_dict()
-            }
+        with self._lock:
+            try:
+                # Get base state data
+                state_data = {
+                    "version": self.STATE_VERSION,
+                    "confidence_history": list(self._confidence_history.get_history()),
+                    "dream_memory": [self._compress_tensor(tensor) for tensor in self._dream_memory],
+                    "temperament_history": list(self._temperament_history),
+                    "seen_prompts": list(self._seen_prompts),
+                    "training_state": self._training_state.__dict__,
+                    "conversation_metadata": self._conversation_metadata
+                }
+                
+                # Use MemoriaManager to save state
+                self.memoria_manager.save_state("state")
+                
+                # Use storage classes to save their respective data
+                self._dream_storage.load_state([self._compress_tensor(tensor) for tensor in self._dream_memory])
+                self._token_map_storage.load_state(self._token_map)
+                self._state_storage.load_state(state_data)
+                
+                return state_data
+            except Exception as e:
+                self.log_error(f"Failed to convert state to dict: {str(e)}", "state_serialization_error")
+                raise
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any], config_manager: ConfigManager, logger: Logger, device: torch.device) -> 'SOVLState':
-        """Create state from dictionary."""
-        state = cls(config_manager, logger, device)
-        with state.lock:
-            if data.get("version") != cls.STATE_VERSION:
-                logger.log_error(error_msg=f"State version mismatch: expected {cls.STATE_VERSION}, got {data.get('version')}",
-                               error_type="state_version_error")
-                raise StateError("State version mismatch")
-            state.seen_prompts = set(data.get("seen_prompts", []))
-            state.temperament_score = data.get("temperament_score", 0.0)
-            state.last_temperament_score = data.get("last_temperament_score", 0.0)
-            state.temperament_history = deque(data.get("temperament_history", []),
-                                            maxlen=config_manager.get("controls_config.temperament_history_maxlen", 5))
-            state.dream_memory = deque(maxlen=config_manager.get("controls_config.dream_memory_maxlen", 10))
-            for m in data.get("dream_memory", []):
-                state.dream_memory.append({
-                    "tensor": state._decompress_tensor(m["tensor"], target_device=device),
-                    "weight": m["weight"],
-                    "metadata": m["metadata"],
-                    "timestamp": m["timestamp"]
-                })
-            state.total_dream_memory_mb = data.get("total_dream_memory_mb", 0.0)
-            state.history = ConversationHistory.from_dict(data.get("history", {}),
-                                                       maxlen=config_manager.get("controls_config.max_messages", 100))
-            state.data_stats = DataStats.from_dict(data.get("data_stats", {}))
-            if "confidence_history" in data:
-                state._confidence_history.from_dict(data["confidence_history"])
+        """Create SOVLState instance from dictionary."""
+        try:
+            # Create new state instance
+            state = cls(config_manager, logger, device)
+            
+            # Use MemoriaManager to load state
+            state.memoria_manager.load_state("state")
+            
+            # Use storage classes to load their respective data
+            dream_memory_data = state._dream_storage.get_state()
+            token_map_data = state._token_map_storage.get_state()
+            state_data = state._state_storage.get_state()
+            
+            # Update state with loaded data
+            with state._lock:
+                state._confidence_history = ConfidenceHistory(state._config.confidence_history_maxlen)
+                state._confidence_history.add_many(data.get("confidence_history", []))
+                
+                state._dream_memory = deque(maxlen=state._config.dream_memory_maxlen)
+                for compressed in data.get("dream_memory", []):
+                    tensor = state._decompress_tensor(compressed)
+                    state._dream_memory.append(tensor)
+                
+                state._temperament_history = deque(maxlen=state._config.temperament_history_maxlen)
+                state._temperament_history.extend(data.get("temperament_history", []))
+                
+                state._seen_prompts = set(data.get("seen_prompts", []))
+                state._training_state = TrainingState(**data.get("training_state", {}))
+                state._conversation_metadata = data.get("conversation_metadata", {})
+            
+            # Validate loaded state
             state._validate_state()
-        return state
+            
+            return state
+        except Exception as e:
+            logger.log_error(f"Failed to create state from dict: {str(e)}", "state_deserialization_error")
+            raise StateError(f"Failed to create state from dict: {str(e)}")
 
     def _validate_state(self) -> None:
         """Validate state integrity."""
         try:
-            assert isinstance(self.seen_prompts, set), "seen_prompts must be a set"
+            assert isinstance(self._seen_prompts, set), "seen_prompts must be a set"
             assert isinstance(self.temperament_score, float), "temperament_score must be a float"
-            assert isinstance(self.confidence_history, deque), "confidence_history must be a deque"
-            assert isinstance(self.temperament_history, deque), "temperament_history must be a deque"
-            assert isinstance(self.dream_memory, deque), "dream_memory must be a deque"
+            assert isinstance(self._confidence_history, deque), "confidence_history must be a deque"
+            assert isinstance(self._temperament_history, deque), "temperament_history must be a deque"
+            assert isinstance(self._dream_memory, deque), "dream_memory must be a deque"
             assert 0 <= self.temperament_score <= 1, "temperament_score must be in [0, 1]"
-            assert all(0 <= score <= 1 for score in self.confidence_history), "confidence scores must be in [0, 1]"
-            assert all(0 <= score <= 1 for score in self.temperament_history), "temperament scores must be in [0, 1]"
-            for memory in self.dream_memory:
-                assert isinstance(memory["tensor"], torch.Tensor), "dream memory tensor must be a torch.Tensor"
-                assert 0 <= memory["weight"] <= 1, "dream memory weight must be in [0, 1]"
-                assert isinstance(memory["timestamp"], float), "dream memory timestamp must be a float"
+            assert all(0 <= score <= 1 for score in self._confidence_history), "confidence scores must be in [0, 1]"
+            assert all(0 <= score <= 1 for score in self._temperament_history), "temperament scores must be in [0, 1]"
+            for memory in self._dream_memory:
+                assert isinstance(memory, torch.Tensor), "dream memory must be a torch.Tensor"
+                assert 0 <= memory.item() <= 1, "dream memory must be in [0, 1]"
             assert self.total_dream_memory_mb >= 0, "total_dream_memory_mb must be non-negative"
         except AssertionError as e:
             self.log_error(f"State validation failed: {str(e)}", error_type="state_validation_error")
@@ -968,18 +997,17 @@ class SOVLState(StateBase):
     def state_hash(self) -> str:
         """Generate a hash of the current state."""
         state_dict = {
-            "seen_prompts": tuple(self.seen_prompts),
+            "seen_prompts": tuple(self._seen_prompts),
             "temperament_score": self.temperament_score,
             "last_temperament_score": self.last_temperament_score,
-            "confidence_history": tuple(self.confidence_history),
-            "temperament_history": tuple(self.temperament_history),
+            "confidence_history": tuple(self._confidence_history),
+            "temperament_history": tuple(self._temperament_history),
             "dream_memory": tuple(
-                (self._compress_tensor(m["tensor"]), m["weight"], m["metadata"], m["timestamp"]) for m in self.dream_memory
+                (self._compress_tensor(tensor), tensor.item()) for tensor in self._dream_memory
             ),
             "total_dream_memory_mb": self.total_dream_memory_mb,
-            "history": self.history.to_dict(),
-            "data_stats": self.data_stats.to_dict(),
-            "confidence_history": self._confidence_history.to_dict()
+            "training_state": self._training_state.__dict__,
+            "conversation_metadata": self._conversation_metadata
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
@@ -1005,271 +1033,101 @@ class SOVLState(StateBase):
             "max_messages": self.history._config.max_messages
         }
 
+    def save_state(self, path_prefix: str) -> None:
+        """Save state using memoria manager."""
+        self.memoria_manager.save_state(path_prefix)
+        
+    def load_state(self, path_prefix: str) -> None:
+        """Load state using memoria manager."""
+        self.memoria_manager.load_state(path_prefix)
+
 class StateManager:
-    """Manages the SOVL state and its persistence."""
-    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
-        self.config_manager = config_manager
-        self.logger = logger
-        self.device = device
-        self.state = None
-        self.state_lock = threading.Lock()
-        self._validate_config()
-
-    def _validate_config(self) -> None:
-        """Validate the state configuration."""
+    """Manages system state and memory operations."""
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        memoria_manager: MemoriaManager,
+        ram_manager: RAMManager,
+        gpu_manager: GPUMemoryManager
+    ):
+        """
+        Initialize state manager.
+        
+        Args:
+            config_manager: Config manager for fetching configuration values
+            logger: Logger instance for logging events
+            memoria_manager: MemoriaManager instance for core memory management
+            ram_manager: RAMManager instance for RAM memory management
+            gpu_manager: GPUMemoryManager instance for GPU memory management
+        """
+        self._config_manager = config_manager
+        self._logger = logger
+        self.memoria_manager = memoria_manager
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        
+    def save_state(self, state: Dict[str, Any]) -> None:
+        """Save system state with memory awareness."""
         try:
-            required_sections = [
-                "controls_config", "core_config", "training_config", "lifecycle_config",
-                "dream_config", "memory_config", "curiosity_config"
-            ]
-            for section in required_sections:
-                if not self.config_manager.has_section(section):
-                    raise StateError(f"Missing required configuration section: {section}")
-            self.config_manager.validate_section("controls_config", {
-                "dream_memory_maxlen": (lambda x: x > 0, "must be positive"),
-                "temperament_history_maxlen": (lambda x: x > 0, "must be positive"),
-                "confidence_history_maxlen": (lambda x: x > 0, "must be positive"),
-                "max_seen_prompts": (lambda x: x > 0, "must be positive"),
-                "prompt_timeout": (lambda x: x > 0, "must be positive"),
-                "temperament_decay_rate": (lambda x: 0 <= x <= 1, "must be in [0, 1]"),
-                "scaffold_unk_id": (lambda x: x >= 0, "must be non-negative")
-            })
-            self.config_manager.validate_section("core_config", {
-                "hidden_size": (lambda x: x > 0, "must be positive"),
-                "quantization": (lambda x: x in ["fp16", "fp32", "int8"], "must be one of: fp16, fp32, int8")
-            })
-            self.config_manager.validate_section("training_config", {
-                "learning_rate": (lambda x: x > 0, "must be positive"),
-                "grad_accum_steps": (lambda x: x >= 1, "must be at least 1"),
-                "max_grad_norm": (lambda x: x > 0, "must be positive"),
-                "scheduler_type": (lambda x: x in ["linear", "cosine", "constant"], "must be one of: linear, cosine, constant"),
-                "sleep_max_steps": (lambda x: x > 0, "must be positive")
-            })
-            self.config_manager.validate_section("lifecycle_config", {
-                "lifecycle_curve": (lambda x: x in ["sigmoid_linear", "exponential"], "must be one of: sigmoid_linear, exponential"),
-                "sleep_conf_threshold": (lambda x: 0 <= x <= 1, "must be in [0, 1]"),
-                "sleep_log_min": (lambda x: x > 0, "must be positive")
-            })
-            self.config_manager.validate_section("dream_config", {
-                "repetition_n": (lambda x: x >= 2, "must be at least 2"),
-                "sigmoid_scale": (lambda x: x > 0, "must be positive"),
-                "sigmoid_shift": (lambda x: x >= 0, "must be non-negative"),
-                "dream_noise_scale": (lambda x: x >= 0, "must be non-negative"),
-                "dream_prompt_weight": (lambda x: 0 <= x <= 1, "must be in [0, 1]"),
-                "dream_memory_decay": (lambda x: 0 <= x <= 1, "must be in [0, 1]")
-            })
-            self.config_manager.validate_section("memory_config", {
-                "memory_threshold": (lambda x: 0 <= x <= 1, "must be in [0, 1]"),
-                "memory_decay_rate": (lambda x: 0 <= x <= 1, "must be in [0, 1]"),
-                "scaffold_weight": (lambda x: 0 <= x <= 1, "must be in [0, 1]")
-            })
-            self.config_manager.validate_section("curiosity_config", {
-                "weight_ignorance": (lambda x: 0 <= x <= 1, "must be in [0, 1]"),
-                "weight_novelty": (lambda x: 0 <= x <= 1, "must be in [0, 1]"),
-                "metrics_maxlen": (lambda x: x > 0, "must be positive"),
-                "curiosity_queue_maxlen": (lambda x: x > 0, "must be positive"),
-                "curiosity_question_timeout": (lambda x: x > 0, "must be positive")
-            })
-        except Exception as e:
-            raise StateError(f"Invalid state configuration: {str(e)}")
-
-    def initialize_state(self) -> None:
-        """Initialize or load the SOVL state."""
-        try:
-            with self.state_lock:
-                if self.state is None:
-                    state_file = self.config_manager.get("controls_config.state_file", "sovl_state.json")
-                    if os.path.exists(state_file):
-                        try:
-                            self.state = self._load_state(state_file)
-                            self.logger.log_training_event(
-                                event_type="state_loaded", message="Successfully loaded existing state",
-                                additional_info={"state_file": state_file, "state_size": len(str(self.state.to_dict()))}
-                            )
-                        except Exception as e:
-                            self.logger.log_error(
-                                error_type="state_load_error", message=f"Failed to load state from {state_file}",
-                                error=str(e), stack_trace=traceback.format_exc(), additional_info={"state_file": state_file}
-                            )
-                            self.state = self._initialize_state()
-                    else:
-                        self.state = self._initialize_state()
-                    self._start_backup_thread()
-        except Exception as e:
-            self.logger.log_error(
-                error_type="state_initialization_error", message="Failed to initialize state",
-                error=str(e), stack_trace=traceback.format_exc()
-            )
-            raise StateError(f"Failed to initialize state: {str(e)}")
-
-    def _initialize_state(self) -> SOVLState:
-        """Initialize a new SOVL state with configuration."""
-        try:
-            sovl_config = SOVLConfig.from_config_manager(self.config_manager)
-            state = SOVLState(self.config_manager, self.logger, self.device)
-            state._initialize_state()  # Call internal initialization
-            self.logger.log_training_event(
-                event_type="state_initialized", message="Successfully initialized new state",
-                additional_info={"config": str(sovl_config), "state_size": len(str(state.to_dict()))}
-            )
-            return state
-        except Exception as e:
-            self.logger.log_error(
-                error_type="state_initialization_error", message="Failed to initialize new state",
-                error=str(e), stack_trace=traceback.format_exc()
-            )
-            raise StateError(f"Failed to initialize new state: {str(e)}")
-
-    def _load_state(self, state_file: str) -> SOVLState:
-        """Load state from file."""
-        try:
-            with open(state_file, 'r') as f:
-                state_data = json.load(f)
-            state = SOVLState.from_dict(state_data, self.config_manager, self.logger, self.device)
-            self._validate_loaded_state(state)
-            return state
-        except Exception as e:
-            self.logger.log_error(
-                error_type="state_load_error", message=f"Failed to load state from {state_file}",
-                error=str(e), stack_trace=traceback.format_exc(), additional_info={"state_file": state_file}
-            )
-            raise StateError(f"Failed to load state from {state_file}: {str(e)}")
-
-    def _validate_loaded_state(self, state: SOVLState) -> None:
-        """Validate loaded state against current configuration."""
-        try:
-            current_config = SOVLConfig.from_config_manager(self.config_manager)
-            if len(state.seen_prompts) > current_config.max_seen_prompts:
-                state.seen_prompts = set(list(state.seen_prompts)[-current_config.max_seen_prompts:])
-            if len(state.temperament_history) > current_config.temperament_history_maxlen:
-                state.temperament_history = deque(list(state.temperament_history)[-current_config.temperament_history_maxlen:],
-                                               maxlen=current_config.temperament_history_maxlen)
-            if len(state.confidence_history) > current_config.confidence_history_maxlen:
-                state.confidence_history = deque(list(state.confidence_history)[-current_config.confidence_history_maxlen:],
-                                               maxlen=current_config.confidence_history_maxlen)
-            dream_memory_size = len(state.dream_memory)
-            if dream_memory_size > current_config.dream_memory_maxlen:
-                state.dream_memory = deque(list(state.dream_memory)[-current_config.dream_memory_maxlen:],
-                                         maxlen=current_config.dream_memory_maxlen)
-            self.logger.log_training_event(
-                event_type="state_validated", message="Successfully validated loaded state",
+            # Check memory health before saving
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            # Save state using memoria manager
+            self.memoria_manager.save_state("system_state", state)
+            
+            # Log state save with memory health info
+            self._logger.record_event(
+                event_type="state_saved",
+                message="System state saved",
+                level="info",
                 additional_info={
-                    "state_size": len(str(state.to_dict())), "dream_memory_size": dream_memory_size,
-                    "seen_prompts_count": len(state.seen_prompts), "temperament_history_size": len(state.temperament_history),
-                    "confidence_history_size": len(state.confidence_history)
+                    "state_size": len(str(state)),
+                    "ram_health": ram_health,
+                    "gpu_health": gpu_health
                 }
             )
+            
         except Exception as e:
-            self.logger.log_error(
-                error_type="state_validation_error", message="Failed to validate loaded state",
-                error=str(e), stack_trace=traceback.format_exc()
+            self._logger.log_error(
+                error_msg=f"Failed to save state: {str(e)}",
+                error_type="state_save_error",
+                stack_trace=traceback.format_exc()
             )
-            raise StateError(f"Failed to validate loaded state: {str(e)}")
-
-    def _start_backup_thread(self) -> None:
-        """Start the state backup thread."""
+            
+    def load_state(self) -> Dict[str, Any]:
+        """Load system state with memory awareness."""
         try:
-            backup_interval = self.config_manager.get("controls_config.backup_interval", 300)
-            if backup_interval <= 0:
-                self.logger.log_training_event(
-                    event_type="backup_disabled", message="State backup disabled due to invalid interval",
-                    additional_info={"backup_interval": backup_interval}
-                )
-                return
-            def backup_loop():
-                while True:
-                    try:
-                        time.sleep(backup_interval)
-                        self.backup_state()
-                    except Exception as e:
-                        self.logger.log_error(
-                            error_type="backup_error", message="Error in backup thread",
-                            error=str(e), stack_trace=traceback.format_exc()
-                        )
-            backup_thread = threading.Thread(target=backup_loop, daemon=True)
-            backup_thread.start()
-            self.logger.log_training_event(
-                event_type="backup_started", message="State backup thread started",
-                additional_info={"backup_interval": backup_interval}
+            # Check memory health before loading
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            # Load state using memoria manager
+            state = self.memoria_manager.load_state("system_state")
+            
+            # Log state load with memory health info
+            self._logger.record_event(
+                event_type="state_loaded",
+                message="System state loaded",
+                level="info",
+                additional_info={
+                    "state_size": len(str(state)) if state else 0,
+                    "ram_health": ram_health,
+                    "gpu_health": gpu_health
+                }
             )
+            
+            return state
+            
         except Exception as e:
-            self.logger.log_error(
-                error_type="backup_thread_error", message="Failed to start backup thread",
-                error=str(e), stack_trace=traceback.format_exc()
+            self._logger.log_error(
+                error_msg=f"Failed to load state: {str(e)}",
+                error_type="state_load_error",
+                stack_trace=traceback.format_exc()
             )
-            raise StateError(f"Failed to start backup thread: {str(e)}")
-
-    def backup_state(self) -> None:
-        """Backup the current state to file."""
-        try:
-            with self.state_lock:
-                if self.state is None:
-                    return
-                state_file = self.config_manager.get("controls_config.state_file", "sovl_state.json")
-                backup_file = f"{state_file}.backup"
-                with open(backup_file, 'w') as f:
-                    json.dump(self.state.to_dict(), f, indent=2)
-                os.replace(backup_file, state_file)
-                self.logger.log_training_event(
-                    event_type="state_backed_up", message="Successfully backed up state",
-                    additional_info={"state_file": state_file, "state_size": len(str(self.state.to_dict()))}
-                )
-        except Exception as e:
-            self.logger.log_error(
-                error_type="backup_error", message="Failed to backup state",
-                error=str(e), stack_trace=traceback.format_exc(), additional_info={"state_file": state_file}
-            )
-            raise StateError(f"Failed to backup state: {str(e)}")
-
-    def get_state(self) -> SOVLState:
-        """Get the current state."""
-        with self.state_lock:
-            if self.state is None:
-                raise StateError("State not initialized")
-            return self.state
-
-    def update_state(self, state: SOVLState) -> None:
-        """Update the current state."""
-        try:
-            with self.state_lock:
-                if self.state is None:
-                    raise StateError("State not initialized")
-                self._validate_state_update(state)
-                self.state = state
-                self.logger.log_training_event(
-                    event_type="state_updated", message="Successfully updated state",
-                    additional_info={
-                        "state_size": len(str(state.to_dict())), "dream_memory_size": len(state.dream_memory),
-                        "seen_prompts_count": len(state.seen_prompts), "temperament_history_size": len(state.temperament_history),
-                        "confidence_history_size": len(state.confidence_history)
-                    }
-                )
-        except Exception as e:
-            self.logger.log_error(
-                error_type="state_update_error", message="Failed to update state",
-                error=str(e), stack_trace=traceback.format_exc()
-            )
-            raise StateError(f"Failed to update state: {str(e)}")
-
-    def _validate_state_update(self, new_state: SOVLState) -> None:
-        """Validate state update against configuration limits."""
-        try:
-            current_config = SOVLConfig.from_config_manager(self.config_manager)
-            if len(new_state.seen_prompts) > current_config.max_seen_prompts:
-                raise StateError(f"Too many seen prompts: {len(new_state.seen_prompts)} > {current_config.max_seen_prompts}")
-            if len(new_state.temperament_history) > current_config.temperament_history_maxlen:
-                raise StateError(f"Temperament history too long: {len(new_state.temperament_history)} > {current_config.temperament_history_maxlen}")
-            if len(new_state.confidence_history) > current_config.confidence_history_maxlen:
-                raise StateError(f"Confidence history too long: {len(new_state.confidence_history)} > {current_config.confidence_history_maxlen}")
-            dream_memory_size = len(new_state.dream_memory)
-            if dream_memory_size > current_config.dream_memory_maxlen:
-                raise StateError(f"Dream memory too large: {dream_memory_size} > {current_config.dream_memory_maxlen}")
-        except Exception as e:
-            self.logger.log_error(
-                error_type="state_validation_error", message="Failed to validate state update",
-                error=str(e), stack_trace=traceback.format_exc()
-            )
-            raise StateError(f"Failed to validate state update: {str(e)}")
+            return {}
 
 class UserProfileState(StateBase):
     """Manages user profiles for bonding score calculations with simplicity and elegance."""

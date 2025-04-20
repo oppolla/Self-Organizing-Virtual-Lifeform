@@ -1,13 +1,14 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import torch
 from threading import Lock
 from sovl_config import ConfigManager
-from sovl_logger import LoggingManager
+from sovl_logger import LoggingManager, Logger
 from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorHandler
 import traceback
 import time
+from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
 
 class SystemInterface(ABC):
     """
@@ -318,6 +319,54 @@ class SOVLOrchestratorAdapter(OrchestratorInterface):
     
     def sync_state(self) -> None:
         self._orchestrator._sync_state_to_system()
+
+class SystemInterface:
+    """Interface for system components."""
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        memoria_manager: MemoriaManager,
+        ram_manager: RAMManager,
+        gpu_manager: GPUMemoryManager
+    ):
+        """
+        Initialize system interface.
+        
+        Args:
+            config_manager: Config manager for fetching configuration values
+            logger: Logger instance for logging events
+            memoria_manager: MemoriaManager instance for core memory management
+            ram_manager: RAMManager instance for RAM memory management
+            gpu_manager: GPUMemoryManager instance for GPU memory management
+        """
+        self._config_manager = config_manager
+        self._logger = logger
+        self.memoria_manager = memoria_manager
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        
+    def check_memory_health(self) -> Dict[str, Any]:
+        """Check memory health across all memory managers."""
+        try:
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            return {
+                "ram_health": ram_health,
+                "gpu_health": gpu_health
+            }
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to check memory health: {str(e)}",
+                error_type="memory_health_error",
+                stack_trace=traceback.format_exc()
+            )
+            return {
+                "ram_health": {"status": "error"},
+                "gpu_health": {"status": "error"}
+            }
 
 # Usage example
 if __name__ == "__main__":

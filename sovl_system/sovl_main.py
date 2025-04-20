@@ -21,7 +21,7 @@ from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
 from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
 from sovl_processor import LogitsProcessor, SOVLProcessor
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
-from sovl_memory import MemoryManager
+from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
 from sovl_manager import ModelManager
 from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
@@ -741,28 +741,52 @@ class ErrorManager:
             )
 
 class MemoryMonitor:
-    """Monitors system memory health."""
-
-    def __init__(self, context: SystemContext):
-        """Initialize the memory monitor with context."""
-        self.context = context
-        self.memory_manager = MemoryManager(context)
-
-    def check_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None) -> bool:
-        """Check memory health and handle any errors."""
+    """Monitors system memory usage."""
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        memoria_manager: MemoriaManager,
+        ram_manager: RAMManager,
+        gpu_manager: GPUMemoryManager
+    ):
+        """
+        Initialize memory monitor.
+        
+        Args:
+            config_manager: Config manager for fetching configuration values
+            logger: Logger instance for logging events
+            memoria_manager: MemoriaManager instance for core memory management
+            ram_manager: RAMManager instance for RAM memory management
+            gpu_manager: GPUMemoryManager instance for GPU memory management
+        """
+        self._config_manager = config_manager
+        self._logger = logger
+        self.memoria_manager = memoria_manager
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        
+    def check_memory_health(self) -> Dict[str, Any]:
+        """Check memory health across all memory managers."""
         try:
-            is_healthy = self.memory_manager.check_memory_health(model_size, trainer)
-            self.context.logger.log_memory_health(
-                model_size=model_size,
-                trainer=trainer,
-                health_status="healthy" if is_healthy else "unhealthy",
-                device=self.context.device
-            )
-            return is_healthy
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            return {
+                "ram_health": ram_health,
+                "gpu_health": gpu_health
+            }
         except Exception as e:
-            # Handle memory errors through ErrorManager
-            self.context.error_manager.handle_memory_error(e, model_size)
-            return False
+            self._logger.log_error(
+                error_msg=f"Failed to check memory health: {str(e)}",
+                error_type="memory_health_error",
+                stack_trace=traceback.format_exc()
+            )
+            return {
+                "ram_health": {"status": "error"},
+                "gpu_health": {"status": "error"}
+            }
 
 class SOVLSystem(SystemInterface):
     """Main SOVL system class that manages all components and state."""

@@ -691,34 +691,120 @@ class LoggingManager:
         )
 
     def log_memory_usage(self, phase: str, device: torch.device, **kwargs) -> None:
-        """
-        Log memory usage statistics.
+        """Log memory usage for a specific phase and device."""
+        try:
+            # Get memory stats from appropriate manager based on device
+            if device.type == 'cuda':
+                gpu_manager = kwargs.get('gpu_manager')
+                if gpu_manager:
+                    gpu_stats = gpu_manager.get_gpu_usage()
+                    memory_stats = {
+                        'gpu_usage': gpu_stats.get('usage', 0.0),
+                        'gpu_allocated': gpu_stats.get('allocated', 0.0),
+                        'gpu_cached': gpu_stats.get('cached', 0.0)
+                    }
+                else:
+                    memory_stats = {'gpu_usage': 0.0, 'gpu_allocated': 0.0, 'gpu_cached': 0.0}
+            else:
+                ram_manager = kwargs.get('ram_manager')
+                if ram_manager:
+                    ram_stats = ram_manager.check_memory_health()
+                    memory_stats = {
+                        'ram_usage': ram_stats.get('usage', 0.0),
+                        'ram_available': ram_stats.get('available', 0.0),
+                        'ram_total': ram_stats.get('total', 0.0)
+                    }
+                else:
+                    memory_stats = {'ram_usage': 0.0, 'ram_available': 0.0, 'ram_total': 0.0}
 
-        Args:
-            phase: The phase or operation being logged (e.g., "training", "generation")
-            device: The torch device to get memory stats from
-            **kwargs: Additional memory-related information to log
-        """
-        self.get_logger("system").log_memory_usage(
-            phase=phase,
-            device=device,
-            **kwargs
-        )
+            # Add memoria stats if available
+            memoria_manager = kwargs.get('memoria_manager')
+            if memoria_manager:
+                memoria_stats = memoria_manager.get_state()
+                memory_stats.update({
+                    'memoria_usage': memoria_stats.get('usage', 0.0),
+                    'memoria_capacity': memoria_stats.get('capacity', 0.0)
+                })
 
-    def log_memory_health(self, model_size: int, trainer: Optional[SOVLTrainer] = None, **kwargs) -> None:
-        """
-        Log memory health check results.
+            self.record_event(
+                event_type="memory_usage",
+                message=f"Memory usage for {phase} on {device.type}",
+                level="info",
+                additional_info={
+                    "phase": phase,
+                    "device": str(device),
+                    "memory_stats": memory_stats,
+                    **kwargs
+                }
+            )
+        except Exception as e:
+            self.log_error(
+                error_msg=f"Failed to log memory usage: {str(e)}",
+                error_type="memory_logging_error",
+                stack_trace=traceback.format_exc()
+            )
 
-        Args:
-            model_size: Size of the model in bytes
-            trainer: Optional trainer instance for additional memory stats
-            **kwargs: Additional health-related information to log
-        """
-        self.get_logger("system").log_memory_health(
-            model_size=model_size,
-            trainer=trainer,
-            **kwargs
-        )
+    def log_memory_health(self, model_size: int, **kwargs) -> None:
+        """Log comprehensive memory health metrics."""
+        try:
+            memory_health = {}
+            
+            # Get GPU memory health
+            gpu_manager = kwargs.get('gpu_manager')
+            if gpu_manager:
+                gpu_stats = gpu_manager.get_gpu_usage()
+                memory_health['gpu'] = {
+                    'usage': gpu_stats.get('usage', 0.0),
+                    'allocated': gpu_stats.get('allocated', 0.0),
+                    'cached': gpu_stats.get('cached', 0.0),
+                    'model_size': model_size
+                }
+            
+            # Get RAM health
+            ram_manager = kwargs.get('ram_manager')
+            if ram_manager:
+                ram_stats = ram_manager.check_memory_health()
+                memory_health['ram'] = {
+                    'usage': ram_stats.get('usage', 0.0),
+                    'available': ram_stats.get('available', 0.0),
+                    'total': ram_stats.get('total', 0.0)
+                }
+            
+            # Get Memoria health
+            memoria_manager = kwargs.get('memoria_manager')
+            if memoria_manager:
+                memoria_stats = memoria_manager.get_state()
+                memory_health['memoria'] = {
+                    'usage': memoria_stats.get('usage', 0.0),
+                    'capacity': memoria_stats.get('capacity', 0.0)
+                }
+            
+            # Get overall memory monitor stats if available
+            memory_monitor = kwargs.get('memory_monitor')
+            if memory_monitor:
+                monitor_stats = memory_monitor.get_memory_usage()
+                memory_health['monitor'] = {
+                    'cpu_usage': monitor_stats.get('cpu_usage', 0.0),
+                    'ram_usage': monitor_stats.get('ram_usage', 0.0),
+                    'gpu_usage': monitor_stats.get('gpu_usage', 0.0)
+                }
+
+            self.record_event(
+                event_type="memory_health",
+                message="Comprehensive memory health check",
+                level="info",
+                additional_info={
+                    "memory_health": memory_health,
+                    "model_size": model_size,
+                    **kwargs
+                }
+            )
+        except Exception as e:
+            self.log_error(
+                error_msg=f"Failed to log memory health: {str(e)}",
+                error_type="memory_health_logging_error",
+                stack_trace=traceback.format_exc()
+            )
 
     def log_training_event(self, event_type: str, epoch: int = None, loss: float = None,
                           batch_size: int = None, data_exposure: float = None,

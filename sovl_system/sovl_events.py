@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, U
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 from sovl_state import StateManager, SOVLState
-from sovl_memory import MemoryManager
+from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
 import traceback
 
 # Type alias for callbacks - clearer name
@@ -167,127 +167,78 @@ class StateEventDispatcher(EventDispatcher):
                 traceback.format_exc()
             )
 
-class MemoryEventDispatcher(EventDispatcher):
-    """
-    Extends EventDispatcher to handle memory-related events and memory management integration.
-    """
+class MemoryEventDispatcher:
+    """Dispatches memory-related events to registered handlers."""
     
-    def __init__(self, config_manager: ConfigManager, memory_manager: MemoryManager, logger: Optional[Logger] = None):
+    def __init__(
+        self,
+        memoria_manager: MemoriaManager,
+        ram_manager: RAMManager,
+        gpu_manager: GPUMemoryManager,
+        config_manager: ConfigManager,
+        logger: Logger
+    ):
         """
-        Initialize the MemoryEventDispatcher.
-
+        Initialize the memory event dispatcher.
+        
         Args:
-            config_manager: ConfigManager instance for configuration handling
-            memory_manager: MemoryManager instance for memory management
-            logger: Optional Logger instance. If None, creates a new Logger instance.
+            memoria_manager: MemoriaManager instance for core memory management
+            ram_manager: RAMManager instance for RAM memory management
+            gpu_manager: GPUMemoryManager instance for GPU memory management
+            config_manager: Config manager for fetching configuration values
+            logger: Logger instance for logging events
         """
-        super().__init__(config_manager, logger)
-        self.memory_manager = memory_manager
+        self.memoria_manager = memoria_manager
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        self.config_manager = config_manager
+        self.logger = logger
+        self._handlers = defaultdict(list)
+        self._lock = Lock()
         self._memory_events_history = deque(maxlen=100)
-        self._memory_stats_cache = {}
-        self._memory_stats_lock = Lock()
         
-        # Register memory event handlers
-        self._register_memory_handlers()
-        
-    def _register_memory_handlers(self) -> None:
+        # Register default handlers
+        self._register_default_handlers()
+
+    def _register_default_handlers(self) -> None:
         """Register default handlers for memory events."""
         self.subscribe(MemoryEventTypes.MEMORY_INITIALIZED, self._handle_memory_initialized, priority=10)
         self.subscribe(MemoryEventTypes.MEMORY_CONFIG_UPDATED, self._handle_config_update, priority=10)
-        self.subscribe(MemoryEventTypes.MEMORY_THRESHOLD_REACHED, self._handle_threshold_reached, priority=20)
+        self.subscribe(MemoryEventTypes.MEMORY_THRESHOLD_REACHED, self._handle_memory_threshold, priority=20)
         self.subscribe(MemoryEventTypes.MEMORY_ERROR, self._handle_memory_error, priority=30)
         self.subscribe(MemoryEventTypes.DREAM_MEMORY_APPENDED, self._handle_dream_memory_append, priority=15)
         self.subscribe(MemoryEventTypes.DREAM_MEMORY_PRUNED, self._handle_dream_memory_prune, priority=15)
         self.subscribe(MemoryEventTypes.TOKEN_MAP_UPDATED, self._handle_token_map_update, priority=15)
         self.subscribe(MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED, self._handle_scaffold_context_update, priority=15)
-        
-    async def _handle_memory_initialized(self, event_data: Dict[str, Any]) -> None:
-        """Handle memory initialization events."""
+
+    async def _handle_memory_threshold(self, event: MemoryEvent) -> None:
+        """Handle memory threshold events."""
         try:
-            # Record initialization event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.MEMORY_INITIALIZED,
-                'config': event_data.get('config', {})
-            })
-            
-            # Log successful initialization
-            self._logger.record_event(
-                event_type="memory_initialized",
-                message="Memory system initialized successfully",
-                level="info",
-                config=event_data.get('config', {})
-            )
-            
-        except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle memory initialization: {str(e)}"),
-                "memory_initialization",
-                traceback.format_exc()
-            )
-            
-    async def _handle_config_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle memory configuration update events."""
-        try:
-            config_changes = event_data.get('changes', {})
-            if not config_changes:
-                raise ValueError("No configuration changes provided")
+            if event.event_type == MemoryEventType.THRESHOLD_EXCEEDED:
+                # Check both RAM and GPU memory
+                ram_health = self.ram_manager.check_memory_health()
+                gpu_health = self.gpu_manager.check_memory_health()
                 
-            # Record config update
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.MEMORY_CONFIG_UPDATED,
-                'changes': config_changes
-            })
-            
-            # Update memory manager configuration
-            self.memory_manager.tune_memory_config(**config_changes)
-            
+                if not ram_health['is_healthy'] or not gpu_health['is_healthy']:
+                    self.logger.warning(
+                        "Memory threshold exceeded",
+                        extra={
+                            'ram_health': ram_health,
+                            'gpu_health': gpu_health
+                        }
+                    )
+                    
+                    # Trigger cleanup if needed
+                    if not ram_health['is_healthy']:
+                        self.ram_manager.cleanup()
+                    if not gpu_health['is_healthy']:
+                        self.gpu_manager.cleanup()
+                    
+                    # Update memory stats
+                    self.memoria_manager.update_memory_stats()
         except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle memory config update: {str(e)}"),
-                "memory_config_update",
-                traceback.format_exc()
-            )
-            
-    async def _handle_threshold_reached(self, event_data: Dict[str, Any]) -> None:
-        """Handle memory threshold reached events."""
-        try:
-            threshold = event_data.get('threshold')
-            current_usage = event_data.get('current_usage')
-            
-            # Record threshold event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
-                'threshold': threshold,
-                'current_usage': current_usage
-            })
-            
-            # Trigger cleanup if needed
-            if self.memory_manager.check_memory_health(threshold):
-                await self.async_notify(
-                    MemoryEventTypes.MEMORY_CLEANUP_STARTED,
-                    {'threshold': threshold, 'current_usage': current_usage}
-                )
-                
-        except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle memory threshold: {str(e)}"),
-                "memory_threshold",
-                traceback.format_exc()
-            )
-            
-    async def _handle_memory_error(self, event_data: Dict[str, Any]) -> None:
-        """Handle memory error events."""
-        error_msg = event_data.get('error_msg', 'Unknown memory error')
-        error_type = event_data.get('error_type', 'memory_error')
-        self._log_error(
-            Exception(error_msg),
-            error_type,
-            event_data.get('stack_trace')
-        )
-        
+            self.logger.error(f"Error handling memory threshold: {str(e)}", exc_info=True)
+
     async def _handle_dream_memory_append(self, event_data: Dict[str, Any]) -> None:
         """Handle dream memory append events."""
         try:
@@ -307,15 +258,11 @@ class MemoryEventDispatcher(EventDispatcher):
             })
             
             # Append to dream memory
-            self.memory_manager.append_dream_memory(tensor, weight, metadata)
+            self.memoria_manager.append_dream_memory(tensor, weight, metadata)
             
         except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle dream memory append: {str(e)}"),
-                "dream_memory_append",
-                traceback.format_exc()
-            )
-            
+            self.logger.error(f"Error handling dream memory append: {str(e)}", exc_info=True)
+
     async def _handle_dream_memory_prune(self, event_data: Dict[str, Any]) -> None:
         """Handle dream memory prune events."""
         try:
@@ -326,21 +273,11 @@ class MemoryEventDispatcher(EventDispatcher):
             })
             
             # Prune dream memory
-            self.memory_manager.prune_dream_memory()
-            
-            # Notify completion
-            await self.async_notify(
-                MemoryEventTypes.MEMORY_CLEANUP_COMPLETED,
-                {'operation': 'dream_memory_prune'}
-            )
+            self.memoria_manager.prune_dream_memory()
             
         except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle dream memory prune: {str(e)}"),
-                "dream_memory_prune",
-                traceback.format_exc()
-            )
-            
+            self.logger.error(f"Error handling dream memory prune: {str(e)}", exc_info=True)
+
     async def _handle_token_map_update(self, event_data: Dict[str, Any]) -> None:
         """Handle token map update events."""
         try:
@@ -360,15 +297,11 @@ class MemoryEventDispatcher(EventDispatcher):
             })
             
             # Update token map
-            self.memory_manager.update_token_map_memory(prompt, confidence, tokenizer)
+            self.memoria_manager.update_token_map_memory(prompt, confidence, tokenizer)
             
         except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle token map update: {str(e)}"),
-                "token_map_update",
-                traceback.format_exc()
-            )
-            
+            self.logger.error(f"Error handling token map update: {str(e)}", exc_info=True)
+
     async def _handle_scaffold_context_update(self, event_data: Dict[str, Any]) -> None:
         """Handle scaffold context update events."""
         try:
@@ -385,67 +318,14 @@ class MemoryEventDispatcher(EventDispatcher):
             })
             
             # Update scaffold context
-            self.memory_manager.set_scaffold_context(scaffold_hidden_states)
+            self.memoria_manager.set_scaffold_context(scaffold_hidden_states)
             
         except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle scaffold context update: {str(e)}"),
-                "scaffold_context_update",
-                traceback.format_exc()
-            )
-            
+            self.logger.error(f"Error handling scaffold context update: {str(e)}", exc_info=True)
+
     def get_memory_events_history(self) -> List[Dict[str, Any]]:
         """Get recent memory events history."""
         return list(self._memory_events_history)
-        
-    async def update_memory_stats(self) -> None:
-        """Update and broadcast memory statistics."""
-        try:
-            with self._memory_stats_lock:
-                stats = self.memory_manager.get_memory_stats()
-                if stats:
-                    self._memory_stats_cache = stats
-                    await self.async_notify(
-                        MemoryEventTypes.MEMORY_STATS_UPDATED,
-                        {'stats': stats}
-                    )
-                    
-        except Exception as e:
-            self._log_error(
-                Exception(f"Failed to update memory stats: {str(e)}"),
-                "memory_stats_update",
-                traceback.format_exc()
-            )
-            
-    async def dispatch_memory_event(self, event_type: str, event_data: Dict[str, Any]) -> None:
-        """
-        Dispatch events related to memory operations.
-        
-        Args:
-            event_type: Type of memory event
-            event_data: Dictionary containing event information
-        """
-        try:
-            # Validate event type
-            if not hasattr(MemoryEventTypes, event_type.upper()):
-                raise ValueError(f"Invalid memory event type: {event_type}")
-                
-            # Create event data
-            event_data = {
-                'type': event_type,
-                'timestamp': time.time(),
-                **event_data
-            }
-            
-            # Dispatch event
-            await self.async_notify(event_type, event_data)
-            
-        except Exception as e:
-            self._log_error(
-                Exception(f"Failed to dispatch memory event: {str(e)}"),
-                "memory_event_dispatch",
-                traceback.format_exc()
-            )
 
 class EventDispatcher:
     """
@@ -982,3 +862,37 @@ class EventDispatcher:
                     message=f"Cleaned up channel '{valid_channel}'",
                     level="debug"
                 )
+
+class EventManager:
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        self._config_manager = config_manager
+        self._logger = logger
+        self.memoria_manager = MemoriaManager(config_manager, logger)
+        self.ram_manager = RAMManager(config_manager, logger)
+        self.gpu_manager = GPUMemoryManager(config_manager, logger)
+        
+    def handle_memory_event(self, event_type: str, event_data: Dict[str, Any]) -> None:
+        """Handle memory-related events."""
+        try:
+            # Check memory health before handling event
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            # Log event with memory health info
+            self._logger.record_event(
+                event_type=event_type,
+                message=f"Memory event: {event_type}",
+                level="info",
+                additional_info={
+                    "event_data": event_data,
+                    "ram_health": ram_health,
+                    "gpu_health": gpu_health
+                }
+            )
+            
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to handle memory event: {str(e)}",
+                error_type="memory_event_error",
+                stack_trace=traceback.format_exc()
+            )

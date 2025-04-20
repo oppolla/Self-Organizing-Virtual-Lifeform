@@ -15,6 +15,7 @@ from sovl_error import ErrorHandler
 from sovl_confidence import ConfidenceCalculator
 from sovl_io import ConfigurationError
 from sovl_curiosity import CuriosityManager
+from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
@@ -1071,115 +1072,31 @@ class ScaffoldProvider:
         """
         self._config_manager = config_manager
         self._logger = logger
-        self._lock = Lock()
-        self._error_handler = ErrorHandler(config_manager, logger)
-        self._scaffold_state: Dict[str, Any] = {
-            "is_initialized": False,
-            "last_update": None,
-            "scaffold_model": None,
-            "token_map": None
-        }
-        
-        # Initialize configuration parameters from schema
-        self._initialize_config()
-        self._validate_config()
+        self.memoria_manager = MemoriaManager(config_manager, logger)
+        self.ram_manager = RAMManager(config_manager, logger)
+        self.gpu_manager = GPUMemoryManager(config_manager, logger)
         
     def _initialize_config(self) -> None:
-        """Initialize configuration parameters from the schema."""
+        """Initialize configuration and memory managers."""
         try:
-            # Core scaffold configuration
-            self.enable_scaffold = self._config_manager.get("controls_config.enable_scaffold", True)
-            self.scaffold_weight_cap = self._config_manager.get("controls_config.scaffold_weight_cap", 0.9)
-            self.scaffold_unk_id = self._config_manager.get("controls_config.scaffold_unk_id", 0)
-            self.enable_cross_attention = self._config_manager.get("controls_config.enable_cross_attention", True)
-            self.enable_dynamic_cross_attention = self._config_manager.get("controls_config.enable_dynamic_cross_attention", False)
-            self.injection_strategy = self._config_manager.get("controls_config.injection_strategy", "sequential")
+            # Initialize memory managers
+            self.memoria_manager._initialize_storage()
+            self.ram_manager._initialize_ram()
+            self.gpu_manager._initialize_gpu()
             
-            # Memory configuration
-            self.use_scaffold_memory = self._config_manager.get("memory_config.use_scaffold_memory", True)
-            self.scaffold_weight = self._config_manager.get("memory_config.scaffold_weight", 1.0)
-            self.memory_threshold = self._config_manager.get("memory_config.memory_threshold", 0.85)
-            self.memory_decay_rate = self._config_manager.get("memory_config.memory_decay_rate", 0.95)
-            
-            # Training configuration
-            self.scaffold_model_name = self._config_manager.get("core_config.scaffold_model_name")
-            self.scaffold_model_path = self._config_manager.get("core_config.scaffold_model_path")
-            self.cross_attn_layers = self._config_manager.get("core_config.cross_attn_layers", [5, 7])
-            self.use_dynamic_layers = self._config_manager.get("core_config.use_dynamic_layers", False)
-            self.layer_selection_mode = self._config_manager.get("core_config.layer_selection_mode", "balanced")
-            
-            self._logger.log_event(
-                event_type="scaffold_config_initialized",
-                message="Scaffold configuration initialized",
-                level="info",
-                additional_info={
-                    "enable_scaffold": self.enable_scaffold,
-                    "scaffold_weight_cap": self.scaffold_weight_cap,
-                    "enable_cross_attention": self.enable_cross_attention,
-                    "injection_strategy": self.injection_strategy
-                }
-            )
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to initialize scaffold configuration: {str(e)}",
-                error_type="config_initialization_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise ConfigurationError(f"Failed to initialize scaffold configuration: {str(e)}")
-            
-    def _validate_config(self) -> None:
-        """Validate the scaffold configuration parameters."""
-        try:
-            # Validate core parameters
-            if not isinstance(self.enable_scaffold, bool):
-                raise ValueError("enable_scaffold must be a boolean")
-            if not 0.0 <= self.scaffold_weight_cap <= 1.0:
-                raise ValueError("scaffold_weight_cap must be between 0.0 and 1.0")
-            if not isinstance(self.scaffold_unk_id, int) or self.scaffold_unk_id < 0:
-                raise ValueError("scaffold_unk_id must be a non-negative integer")
-            if not isinstance(self.enable_cross_attention, bool):
-                raise ValueError("enable_cross_attention must be a boolean")
-            if not isinstance(self.enable_dynamic_cross_attention, bool):
-                raise ValueError("enable_dynamic_cross_attention must be a boolean")
-            if self.injection_strategy not in ["sequential", "parallel"]:
-                raise ValueError("injection_strategy must be either 'sequential' or 'parallel'")
-            
-            # Validate memory parameters
-            if not isinstance(self.use_scaffold_memory, bool):
-                raise ValueError("use_scaffold_memory must be a boolean")
-            if not 0.0 <= self.scaffold_weight <= 1.0:
-                raise ValueError("scaffold_weight must be between 0.0 and 1.0")
-            if not 0.0 <= self.memory_threshold <= 1.0:
-                raise ValueError("memory_threshold must be between 0.0 and 1.0")
-            if not 0.0 <= self.memory_decay_rate <= 1.0:
-                raise ValueError("memory_decay_rate must be between 0.0 and 1.0")
-            
-            # Validate model parameters
-            if self.scaffold_model_name and not isinstance(self.scaffold_model_name, str):
-                raise ValueError("scaffold_model_name must be a string")
-            if self.scaffold_model_path and not isinstance(self.scaffold_model_path, str):
-                raise ValueError("scaffold_model_path must be a string")
-            if not isinstance(self.cross_attn_layers, list):
-                raise ValueError("cross_attn_layers must be a list")
-            if not isinstance(self.use_dynamic_layers, bool):
-                raise ValueError("use_dynamic_layers must be a boolean")
-            if self.layer_selection_mode not in ["balanced", "random", "fixed"]:
-                raise ValueError("layer_selection_mode must be one of: balanced, random, fixed")
-            
-            self._logger.log_event(
-                event_type="scaffold_config_validated",
-                message="Scaffold configuration validated successfully",
+            # Log successful initialization
+            self._logger.record_event(
+                event_type="scaffold_initialized",
+                message="Scaffold initialized successfully",
                 level="info"
             )
-            
         except Exception as e:
             self._logger.log_error(
-                error_msg=f"Scaffold configuration validation failed: {str(e)}",
-                error_type="config_validation_error",
+                error_msg=f"Failed to initialize scaffold: {str(e)}",
+                error_type="scaffold_error",
                 stack_trace=traceback.format_exc()
             )
-            raise ConfigurationError(f"Scaffold configuration validation failed: {str(e)}")
+            raise
 
     def initialize_scaffold(self) -> None:
         """Initialize the scaffold model and tokenizer."""
@@ -1249,12 +1166,35 @@ class ScaffoldProvider:
         raise NotImplementedError("Tokenizer loading not implemented")
 
     def _build_token_map(self, base_tokenizer: Any, scaffold_tokenizer: Any) -> Dict:
-        """Build token mapping between base and scaffold tokenizers."""
+        """Build token map between base and scaffold tokenizers."""
         try:
-            token_mapper = ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, self._logger)
-            return token_mapper.get_token_map()
+            # Initialize token map storage
+            token_map = self.token_map_storage.get_state()
+            
+            # Build token map
+            for base_token, base_id in base_tokenizer.get_vocab().items():
+                normalized = base_token.replace("Ġ", "").replace("##", "")
+                scaffold_ids = scaffold_tokenizer.encode(
+                    normalized, add_special_tokens=False, max_length=3, truncation=True
+                )
+                
+                if not scaffold_ids or scaffold_ids == [scaffold_tokenizer.unk_token_id]:
+                    scaffold_ids = [scaffold_tokenizer.unk_token_id]
+                
+                token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
+            
+            # Store token map
+            self.token_map_storage.load_state(token_map)
+            
+            return token_map
+            
         except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {"operation": "token_map_building"})
+            self.logger.record_event(
+                event_type="token_map_error",
+                message=f"Failed to build token map: {str(e)}",
+                level="error",
+                additional_info={"timestamp": time.time()}
+            )
             raise
 
     def get_scaffold_context(
@@ -1262,21 +1202,37 @@ class ScaffoldProvider:
         scaffold_inputs: Dict[str, torch.Tensor],
         scaffold_model: nn.Module
     ) -> torch.Tensor:
-        """Get scaffold context from inputs."""
+        """Get scaffold context for the current input."""
         try:
-            with self.scaffold_context(
-                self.get_scaffold_hidden_states(scaffold_inputs, scaffold_model)
-            ):
-                return self._scaffold_state_tensor
+            # Check memory health before processing
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_usage = self.gpu_manager.get_gpu_usage()
+            
+            if ram_health["usage_percent"] > 0.9 or gpu_usage["usage_percent"] > 0.9:
+                self.logger.record_event(
+                    event_type="memory_warning",
+                    message="High memory usage detected during scaffold context generation",
+                    level="warning",
+                    additional_info={
+                        "ram_usage": ram_health["usage_percent"],
+                        "gpu_usage": gpu_usage["usage_percent"]
+                    }
+                )
+            
+            # Get scaffold hidden states
+            hidden_states = self.get_scaffold_hidden_states(scaffold_inputs, scaffold_model)
+            
+            # Store in scaffold context storage
+            self.scaffold_context_storage.update("current", hidden_states)
+            
+            return hidden_states
+            
         except Exception as e:
-            self._logger.record_event(
-                event_type="scaffold_error",
-                message="Failed to get scaffold context",
+            self.logger.record_event(
+                event_type="scaffold_context_error",
+                message=f"Failed to get scaffold context: {str(e)}",
                 level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
+                additional_info={"timestamp": time.time()}
             )
             raise
     
@@ -1412,51 +1368,6 @@ class ScaffoldProvider:
                 level="info",
                 additional_info={"timestamp": time.time()}
             )
-
-    def build_token_map(self, base_tokenizer: Any, scaffold_tokenizer: Any) -> Dict:
-        """Build token mapping between base and scaffold models."""
-        try:
-            token_mapper = ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, self._logger)
-            return token_mapper.get_token_map()
-        except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {"operation": "token_map_building"})
-            raise
-
-    def validate_token_map(self) -> bool:
-        """Validate token mapping."""
-        try:
-            token_map = self._scaffold_state["token_map"]
-            if not token_map:
-                return False
-                
-            required_tokens = ['pad_token_id', 'eos_token_id', 'unk_token_id']
-            scaffold_tokenizer = self._scaffold_state["scaffold_model"].tokenizer
-            base_tokenizer = self._scaffold_state["scaffold_model"].base_tokenizer
-            
-            token_mapper = ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, self._logger)
-            return token_mapper.validate_token_maps()
-            
-        except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {"operation": "token_map_validation"})
-            return False
-
-    @contextlib.contextmanager
-    def scaffold_context(self, hidden_states: torch.Tensor):
-        """Context manager for scaffold operations."""
-        try:
-            if not self._scaffold_state["is_initialized"]:
-                raise RuntimeError("ScaffoldProvider not initialized")
-                
-            prev_states = self._scaffold_state_tensor
-            self._scaffold_state_tensor = hidden_states
-            yield
-            self._scaffold_state_tensor = prev_states
-        except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {
-                "operation": "scaffold_context",
-                "hidden_states_shape": hidden_states.shape
-            })
-            raise
 
     def get_scaffold_hidden_states(
         self, 
