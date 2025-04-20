@@ -19,7 +19,7 @@ from sovl_io import ConfigurationError
 from sovl_confidence import ConfidenceCalculator
 from sovl_temperament import TemperamentSystem
 import hashlib
-from sovl_experience import MemoriaManager
+from sovl_experience import MemoriaManager, MetadataProcessor
 from sovl_memory import RAMManager, GPUMemoryManager
 
 @dataclass
