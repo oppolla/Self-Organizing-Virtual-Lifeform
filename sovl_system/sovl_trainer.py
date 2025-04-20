@@ -421,6 +421,9 @@ class TrainingManager:
             prepared_batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
                             for k, v in prepared_batch.items()}
             
+            # Store the current batch for use in other methods
+            self.current_batch = prepared_batch
+            
             # Get scaffold context if available
             scaffold_context = None
             if scaffold_provider:
@@ -625,7 +628,7 @@ class TrainingManager:
         outputs: torch.Tensor,
         batch: Dict[str, torch.Tensor]
     ) -> torch.Tensor:
-        """Calculate loss with optional metadata-based weighting."""
+        """Calculate loss with metadata-based confidence weighting and reinforcement."""
         try:
             # Calculate base loss - assume cross_entropy if loss_fn not explicitly defined
             if hasattr(self, 'loss_fn') and self.loss_fn is not None:
@@ -650,6 +653,21 @@ class TrainingManager:
                     # Direct multiplication for same dimensions
                     loss = loss * batch["weights"]
             
+            # Apply confidence-based reinforcement if metadata available
+            if "metadata" in batch and isinstance(batch["metadata"], list):
+                confidence_weights = self._calculate_reinforcement_weights(batch["metadata"])
+                
+                # Apply confidence weights to loss
+                if confidence_weights is not None and confidence_weights.size(0) > 0:
+                    # Ensure shape compatibility
+                    if loss.dim() > 1 and confidence_weights.dim() == 1:
+                        # Expand confidence weights to match loss dimensions
+                        expanded_confidence = confidence_weights.unsqueeze(1).expand_as(loss)
+                        loss = loss * expanded_confidence
+                    elif loss.dim() == confidence_weights.dim():
+                        # Direct multiplication
+                        loss = loss * confidence_weights
+            
             # Return mean loss
             return loss.mean()
             
@@ -660,11 +678,120 @@ class TrainingManager:
             })
             raise
             
-    def _optimizer_step(self) -> None:
-        """Execute optimizer step."""
+    def _calculate_reinforcement_weights(self, metadata_list: List[Dict[str, Any]]) -> Optional[torch.Tensor]:
+        """
+        Calculate reinforcement weights based on confidence and quality metrics.
+        
+        Args:
+            metadata_list: List of metadata dictionaries
+            
+        Returns:
+            Tensor of weights or None if calculation fails
+        """
         try:
-            # ... existing optimizer step code ...
-            pass
+            weights = torch.ones(len(metadata_list), device=self.device)
+            
+            for i, metadata in enumerate(metadata_list):
+                # Get confidence score 
+                confidence_score = metadata.get("confidence_score", 0.5)
+                
+                # Apply confidence-based weighting
+                if confidence_score > 0.8:
+                    # Boost high-confidence examples (reinforce successful patterns)
+                    weights[i] *= 1.5
+                elif confidence_score < 0.3:
+                    # Reduce weight of very low confidence examples
+                    weights[i] *= 0.5
+                
+                # Get temperament score if available
+                temperament_score = metadata.get("temperament_score", 0.5)
+                
+                # Apply slight weighting based on balanced temperament
+                if 0.4 <= temperament_score <= 0.6:
+                    # Slightly boost balanced temperament
+                    weights[i] *= 1.1
+                
+                # Get context metrics
+                context_metrics = metadata.get("context_metrics", {})
+                
+                # Apply small boost to conversation starters/enders
+                if context_metrics.get("is_first_message", False) or context_metrics.get("is_last_message", False):
+                    weights[i] *= 1.2
+            
+            return weights
+            
+        except Exception as e:
+            self.error_manager.handle_training_error(e, {
+                "step": "reinforcement_weights_calculation",
+                "metadata_count": len(metadata_list)
+            })
+            return None
+            
+    def _optimizer_step(self) -> None:
+        """Execute optimizer step with metadata-based adaptive learning rates."""
+        try:
+            # Apply gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+            
+            # Apply adaptive learning rates based on metadata if available
+            if hasattr(self, 'current_batch') and isinstance(self.current_batch, dict) and "metadata" in self.current_batch:
+                # Get base learning rate
+                base_lr = self.config.learning_rate
+                
+                # Extract quality scores from metadata
+                metadata_list = self.current_batch["metadata"]
+                quality_factors = []
+                
+                # Calculate quality factors from metadata
+                for meta in metadata_list:
+                    # Get content metrics
+                    content_metrics = meta.get('content_metrics', {})
+                    quality_metrics = meta.get('quality_metrics', {})
+                    
+                    # Calculate a quality score based on metrics
+                    word_count = content_metrics.get('word_count', 0)
+                    sentence_count = content_metrics.get('sentence_count', 0)
+                    has_code = quality_metrics.get('has_code', False)
+                    has_question = quality_metrics.get('has_question', False)
+                    
+                    # Simple quality heuristic
+                    quality_score = 0.5  # Start with baseline
+                    
+                    # Adjust for content length (prefer medium length content)
+                    if 20 <= word_count <= 200:
+                        quality_score += 0.1
+                    
+                    # Adjust for structured content
+                    if has_code or has_question:
+                        quality_score += 0.1
+                    
+                    # Adjust for reasonable sentence count
+                    if 2 <= sentence_count <= 10:
+                        quality_score += 0.1
+                        
+                    quality_factors.append(quality_score)
+                
+                # Calculate overall quality factor
+                if quality_factors:
+                    quality_factor = sum(quality_factors) / len(quality_factors)
+                    # Scale learning rate between 0.75x and 1.25x based on quality
+                    lr_multiplier = 0.75 + (quality_factor * 0.5)
+                    
+                    # Apply to all parameter groups
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = base_lr * lr_multiplier
+            
+            # Step the optimizer
+            self.optimizer.step()
+            
+            # Step the scheduler if it exists
+            if self.scheduler is not None:
+                self.scheduler.step()
+                
+            # Zero gradients
+            self.optimizer.zero_grad()
+            self.global_step += 1
+            
         except Exception as e:
             self.error_manager.handle_training_error(e, {
                 "step": "optimizer_step",
@@ -687,6 +814,94 @@ class TrainingManager:
                 "global_step": self.global_step
             })
             raise
+
+    def train_with_contextual_batching(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Train the model with examples grouped by contextual similarity.
+        
+        This groups examples by their context within a conversation (first message, last message, etc.)
+        and trains on similar contexts together for more coherent learning.
+        
+        Args:
+            examples: List of training examples
+            
+        Returns:
+            Dict containing metrics from training
+        """
+        # Track metrics across all batches
+        all_metrics = {}
+        total_loss = 0.0
+        batch_count = 0
+        
+        # Skip if no examples
+        if not examples:
+            return {"loss": 0.0, "metrics": {}}
+        
+        # Group examples by context similarity using metadata
+        context_groups = {
+            "conversation_start": [],
+            "conversation_end": [],
+            "conversation_middle": [],
+            "other": []
+        }
+        
+        for example in examples:
+            metadata = example.get("metadata", {})
+            context_metrics = metadata.get("context_metrics", {})
+            
+            # Determine context category
+            if context_metrics.get("is_first_message", False):
+                category = "conversation_start"
+            elif context_metrics.get("is_last_message", False):
+                category = "conversation_end"
+            elif context_metrics:
+                category = "conversation_middle"
+            else:
+                category = "other"
+                
+            context_groups[category].append(example)
+        
+        # Train on each context group separately
+        for category, group in context_groups.items():
+            if len(group) < 2:  # Need at least a few examples for meaningful training
+                continue
+                
+            # Create batches from this group (up to batch_size)
+            batches = []
+            for i in range(0, len(group), self.config.batch_size):
+                batch = group[i:i + self.config.batch_size]
+                if len(batch) >= 2:  # Ensure we have at least 2 examples per batch
+                    batches.append(batch)
+            
+            # Train on each batch
+            for batch in batches:
+                loss, metrics = self.train_step_with_scaffold(
+                    batch=batch,
+                    scaffold_provider=None,
+                    dry_run=False
+                )
+                
+                # Accumulate metrics
+                total_loss += loss
+                batch_count += 1
+                
+                # Merge metrics
+                for k, v in metrics.items():
+                    if k in all_metrics:
+                        all_metrics[k] = (all_metrics[k] + v) / 2
+                    else:
+                        all_metrics[k] = v
+        
+        # Calculate average loss across all batches
+        avg_loss = total_loss / max(1, batch_count)
+        
+        # Add contextual training info to metrics
+        all_metrics["contextual_training"] = {
+            "total_batches": batch_count,
+            "context_distribution": {k: len(v) for k, v in context_groups.items()}
+        }
+        
+        return {"loss": avg_loss, "metrics": all_metrics}
 
 class TrainingEventHandler:
     """Handles training-related events and updates system state."""
@@ -970,3 +1185,155 @@ class SOVLTrainer:
                 stack_trace=traceback.format_exc()
             )
             return 1  # Return minimum batch size on error
+
+    def train_with_curriculum(self, training_cycle: int, all_examples: List[Dict[str, Any]]) -> Tuple[float, Dict[str, Any]]:
+        """
+        Train using a curriculum that gradually increases complexity.
+        
+        Args:
+            training_cycle: Current training cycle number
+            all_examples: All available training examples
+            
+        Returns:
+            Tuple of (loss, metrics)
+        """
+        # Create training manager if needed
+        if not hasattr(self, 'training_manager'):
+            self._logger.warning("Training manager not initialized, cannot use curriculum training")
+            return 0.0, {}
+            
+        # Select examples based on current curriculum stage
+        selected_examples = self._select_curriculum_examples(training_cycle, all_examples)
+        
+        # No examples available
+        if not selected_examples:
+            self._logger.warning("No suitable examples found for curriculum training")
+            return 0.0, {}
+            
+        # Get batch size (respecting memory constraints)
+        batch_size = self._prepare_gestation_batch(self.config_manager.get("training.batch_size", 4))
+        
+        # Create batch from selected examples
+        batch = selected_examples[:batch_size]
+        
+        # Perform training step
+        try:
+            # Use contextual batching for more advanced stages
+            if training_cycle > 300 and hasattr(self.training_manager, 'train_with_contextual_batching'):
+                result = self.training_manager.train_with_contextual_batching(batch)
+                loss = result.get("loss", 0.0)
+                metrics = result.get("metrics", {})
+            else:
+                # Standard training for early stages
+                loss, metrics = self.training_manager.train_step_with_scaffold(
+                    batch=batch,
+                    scaffold_provider=None,
+                    dry_run=False
+                )
+                
+            # Log curriculum stage
+            stage = "beginner" if training_cycle < 100 else "intermediate" if training_cycle < 500 else "advanced"
+            self._logger.record_event(
+                event_type="curriculum_training",
+                message=f"Completed curriculum training step (stage: {stage})",
+                level="info",
+                additional_info={
+                    "cycle": training_cycle,
+                    "stage": stage,
+                    "examples_count": len(selected_examples),
+                    "batch_size": len(batch),
+                    "loss": loss
+                }
+            )
+                
+            return loss, metrics
+            
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to execute curriculum training: {str(e)}",
+                error_type="curriculum_training_error",
+                stack_trace=traceback.format_exc()
+            )
+            return 0.0, {}
+    
+    def _select_curriculum_examples(self, training_cycle: int, all_examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Select examples with appropriate complexity for current training cycle.
+        
+        Args:
+            training_cycle: Current training cycle
+            all_examples: All available examples
+            
+        Returns:
+            List of selected examples
+        """
+        # No metadata processor or examples
+        if not hasattr(self, 'metadata_processor') or not all_examples:
+            return all_examples
+            
+        # Early cycles (0-100): Focus on simpler examples with clear patterns
+        if training_cycle < 100:
+            # Filter for shorter, clearer examples
+            filtered = []
+            for ex in all_examples:
+                metadata = ex.get("metadata", {})
+                content_metrics = metadata.get("content_metrics", {})
+                word_count = content_metrics.get("word_count", 100)
+                
+                # Select shorter examples (< 50 words)
+                if word_count < 50:
+                    filtered.append(ex)
+                    
+            return filtered if filtered else all_examples[:min(len(all_examples), 10)]
+            
+        # Middle cycles (100-500): Focus on medium complexity, diversity
+        elif training_cycle < 500:
+            # Select diverse examples including some complex ones
+            selected = []
+            categories_seen = set()
+            
+            # Try to get diverse examples
+            for ex in all_examples:
+                metadata = ex.get("metadata", {})
+                content_metrics = metadata.get("content_metrics", {})
+                quality_metrics = metadata.get("quality_metrics", {})
+                
+                # Create category signature
+                word_count = content_metrics.get("word_count", 0)
+                has_code = quality_metrics.get("has_code", False)
+                has_question = quality_metrics.get("has_question", False)
+                
+                # Categorize by length and content type
+                length_cat = "short" if word_count < 50 else "medium" if word_count < 150 else "long"
+                content_cat = "code" if has_code else "question" if has_question else "plain"
+                category = f"{length_cat}_{content_cat}"
+                
+                # Select if category not seen yet
+                if category not in categories_seen:
+                    selected.append(ex)
+                    categories_seen.add(category)
+                    
+                # Stop once we have enough diverse examples
+                if len(selected) >= 20:
+                    break
+                    
+            return selected if selected else all_examples[:min(len(all_examples), 20)]
+                
+        # Later cycles (500+): Focus on complex examples
+        else:
+            # Filter for more complex content
+            complex_examples = []
+            
+            for ex in all_examples:
+                metadata = ex.get("metadata", {})
+                content_metrics = metadata.get("content_metrics", {})
+                quality_metrics = metadata.get("quality_metrics", {})
+                
+                word_count = content_metrics.get("word_count", 0)
+                has_code = quality_metrics.get("has_code", False)
+                
+                # Select longer examples or those with code
+                if word_count > 100 or has_code:
+                    complex_examples.append(ex)
+                    
+            return complex_examples if complex_examples else all_examples[:min(len(all_examples), 20)]
