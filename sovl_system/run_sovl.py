@@ -25,7 +25,8 @@ from sovl_utils import (
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 from sovl_conductor import SOVLOrchestrator
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_state import StateManager, SOVLState
 from sovl_error import ErrorManager, ErrorContext
 from sovl_manager import ModelManager

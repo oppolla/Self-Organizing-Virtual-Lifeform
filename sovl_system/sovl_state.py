@@ -16,7 +16,8 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
 from sovl_records import ConfidenceHistory
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""

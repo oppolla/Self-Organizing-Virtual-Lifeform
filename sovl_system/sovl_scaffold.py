@@ -15,7 +15,8 @@ from sovl_error import ErrorHandler
 from sovl_confidence import ConfidenceCalculator
 from sovl_io import ConfigurationError
 from sovl_curiosity import CuriosityManager
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""

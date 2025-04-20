@@ -1,7 +1,8 @@
 from typing import Dict, Any, List
 from threading import Thread, Event, Lock
 from collections import deque
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_trainer import TrainingCycleManager
 from sovl_curiosity import CuriosityManager
 from sovl_config import ConfigManager

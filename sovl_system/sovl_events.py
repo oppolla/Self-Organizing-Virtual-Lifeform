@@ -8,7 +8,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, U
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 from sovl_state import StateManager, SOVLState
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 import traceback
 
 # Type alias for callbacks - clearer name

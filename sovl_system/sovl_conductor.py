@@ -20,7 +20,8 @@ from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediat
 import random
 from sovl_main import SOVLSystem, SystemContext, ConfigHandler, ModelLoader, MemoryMonitor, StateTracker, ErrorManager
 from sovl_curiosity import CuriosityEngine
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger
 
 if TYPE_CHECKING:

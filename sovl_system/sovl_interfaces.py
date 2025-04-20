@@ -8,7 +8,8 @@ from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorHandler
 import traceback
 import time
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 
 class SystemInterface(ABC):
     """

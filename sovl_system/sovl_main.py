@@ -21,7 +21,8 @@ from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
 from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
 from sovl_processor import LogitsProcessor, SOVLProcessor
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_manager import ModelManager
 from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner

@@ -15,7 +15,8 @@ from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
 from sovl_manager import ModelManager
 from sovl_schema import ConfigSchema
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""

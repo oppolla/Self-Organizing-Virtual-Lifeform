@@ -10,7 +10,8 @@ import traceback
 import os
 import json
 from collections import defaultdict
-from sovl_memory import MemoriaManager, RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 from threading import Lock
 
 class DataProvider(ABC):
