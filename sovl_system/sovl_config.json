@@ -4,7 +4,7 @@
     "base_model_path": null,
     "scaffold_model_name": "SmolLM2-135M",
     "scaffold_model_path": null,
-    "cross_attn_layers": [5, 7],
+    "cross_attn_layers": [4, 6],
     "use_dynamic_layers": false,
     "layer_selection_mode": "balanced",
     "custom_layers": null,
@@ -18,30 +18,63 @@
     "migration_mode": true,
     "device": "cuda"
   },
+  "model": {
+    "model_path": "/path/to/SmolLM2-360M/model",  // TODO: Verify exposure in model (from sovl_main.py)
+    "model_type": "causal_lm",  // TODO: Verify exposure in model (from sovl_main.py)
+    "quantization_mode": "fp16"  // TODO: Verify exposure in model (from sovl_main.py)
+  },
   "controls_config": {
     "enable_scaffold": true,
-    "scaffold_weight_cap": 0.9,
+    "scaffold_weight_cap": 0.5,
     "scaffold_unk_id": 0,
     "enable_cross_attention": true,
     "enable_dynamic_cross_attention": false,
-    "injection_strategy": "sequential"
+    "injection_strategy": "sequential",
+    "blend_strength": 0.5,  // TODO: Verify exposure in controls_config (from sovl_scaffold.py)
+    "attention_weight": 0.5,  // TODO: Verify exposure in controls_config (from sovl_scaffold.py)
+    "temp_eager_threshold": 0.7,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temp_sluggish_threshold": 0.3,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temp_mood_influence": 0.3,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temp_curiosity_boost": 0.2,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temp_restless_drop": 0.2,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temp_melancholy_noise": 0.02,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "conf_feedback_strength": 0.5,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temp_smoothing_factor": 0.5,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temperament_decay_rate": 0.9,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "temperament_history_maxlen": 5,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "confidence_history_maxlen": 5,  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+    "lifecycle_params": {  // TODO: Verify exposure in controls_config (from sovl_temperament.py)
+      "gestation": {
+        "bias": 0.1,
+        "decay": 1.0
+      },
+      "active": {
+        "bias": 0.0,
+        "decay": 0.9
+      },
+      "sleep": {
+        "bias": -0.1,
+        "decay": 0.8
+      }
+    }
   },
   "training_config": {
-    "learning_rate": 0.0003,
-    "train_epochs": 3,
-    "batch_size": 1,
+    "model_name": "SmolLM2-360M",  // TODO: Verify exposure in training_config (from sovl_trainer.py)
+    "learning_rate": 1.5e-5,
+    "train_epochs": 1,
+    "batch_size": 2,
     "max_seq_length": 512,
     "sigmoid_scale": 0.5,
-    "sigmoid_shift": 5.0,
+    "sigmoid_shift": 3.0,
     "lifecycle_capacity_factor": 0.01,
     "lifecycle_curve": "sigmoid_linear",
-    "accumulation_steps": 4,
-    "exposure_gain_eager": 3,
+    "grad_accum_steps": 4,
+    "exposure_gain_eager": 2,
     "exposure_gain_default": 2,
     "max_patience": 2,
     "dry_run": false,
     "dry_run_params": {
-      "max_samples": 2,
+      "max_samples": 4,
       "max_length": 128,
       "validate_architecture": true,
       "skip_training": true
@@ -53,26 +86,26 @@
     "scheduler_type": "linear",
     "cosine_min_lr": 1e-6,
     "warmup_ratio": 0.1,
-    "warmup_steps": 100,
-    "total_steps": 10000,
+    "warmup_steps": 300,
+    "total_steps": 5000,
     "validate_every_n_steps": 100,
     "checkpoint_path": "checkpoints/sovl_trainer",
     "dropout_rate": 0.1,
+    "max_epochs": 1,
     "metrics_to_track": ["loss", "accuracy", "confidence"],
     "enable_gestation": true,
     "enable_sleep_training": true,
     "enable_lifecycle_weighting": true,
     "sleep_conf_threshold": 0.7,
     "sleep_log_min": 10,
-    "dream_memory_weight": 0.1,
+    "dream_memory_weight": 0.03,
     "enable_dreaming": true,
     "repetition_n": 3,
-    "dream_noise_scale": 0.05,
+    "dream_noise_scale": 0.01,
     "dream_prompt_weight": 0.5,
     "dream_novelty_boost": 0.03,
     "dream_memory_decay": 0.95,
     "dream_prune_threshold": 0.1,
-    "temp_melancholy_noise": 0.02,
     "enable_prompt_driven_dreams": true,
     "dream_swing_var": 0.1,
     "dream_lifecycle_delta": 0.1,
@@ -83,16 +116,22 @@
     "memory_decay_rate": 0.95,
     "use_scaffold_memory": true,
     "use_token_map_memory": true,
-    "scaffold_weight": 1.0,
-    "max_dream_memory_mb": 256,
-    "dream_memory_maxlen": 10
+    "scaffold_weight": 0.3,
+    "max_dream_memory_mb": 128,
+    "dream_memory_maxlen": 3
+  },
+  "scaffold_config": {
+    "model_path": "/path/to/SmolLM2-135M/model",  // TODO: Verify exposure in scaffold_config (from sovl_scaffold.py)
+    "model_type": "gpt2",  // TODO: Verify exposure in scaffold_config (from sovl_scaffold.py)
+    "tokenizer_path": "/path/to/SmolLM2-135M/tokenizer",  // TODO: Verify exposure in scaffold_config (from sovl_scaffold.py)
+    "quantization_mode": "int8"  // TODO: Verify exposure in scaffold_config (from sovl_scaffold.py)
   },
   "dynamic_weighting": {
     "min_weight": 0.0,
     "max_weight": 1.0,
     "weight_decay": 0.01,
     "momentum": 0.9,
-    "history_size": 10,
+    "history_size": 5,
     "enable_dynamic_scaling": true,
     "weight_curves": ["linear", "sigmoid_linear"]
   },
@@ -110,7 +149,8 @@
   "hardware": {
     "enable_cuda": true,
     "memory_query_interval": 0.1,
-    "mock_memory_total_mb": 8192.0
+    "mock_memory_total_mb": 4096.0,
+    "max_scaffold_memory_mb": 128  // TODO: Verify exposure in hardware (from sovl_scaffold.py)
   },
   "lora_config": {
     "lora_rank": 8,
@@ -120,14 +160,14 @@
   },
   "curiosity_config": {
     "enable_curiosity": true,
-    "attention_weight": 0.5,
-    "queue_maxlen": 10,
+    "attention_weight": 0.3,
+    "queue_maxlen": 50,
     "novelty_history_maxlen": 20,
-    "decay_rate": 0.9,
-    "question_timeout": 3600.0,
-    "novelty_threshold_spontaneous": 0.9,
+    "decay_rate": 0.95,
+    "question_timeout": 1800.0,
+    "novelty_threshold_spontaneous": 0.8,
     "novelty_threshold_response": 0.8,
-    "pressure_threshold": 0.7,
+    "pressure_threshold": 0.55,
     "pressure_drop": 0.3,
     "silence_threshold": 20.0,
     "question_cooldown": 60.0,
@@ -135,11 +175,31 @@
     "weight_novelty": 0.3,
     "max_new_tokens": 8,
     "base_temperature": 0.9,
-    "temperament_influence": 0.4,
-    "top_k": 30
+    "temperament_influence": 0.3,
+    "top_k": 30,
+    "max_memory_mb": 512.0,
+    "pressure_change_cooldown": 1.0,  // TODO: Verify exposure in curiosity_config (from sovl_curiosity.py)
+    "min_pressure": 0.1,  // TODO: Verify exposure in curiosity_config (from sovl_curiosity.py)
+    "max_pressure": 0.9,  // TODO: Verify exposure in curiosity_config (from sovl_curiosity.py)
+    "pressure_decay_rate": 0.95,  // TODO: Verify exposure in curiosity_config (from sovl_curiosity.py)
+    "metrics_maxlen": 1000,  // TODO: Verify exposure in curiosity_config (from sovl_curiosity.py)
+    "lifecycle_params": {  // TODO: Verify exposure in curiosity_config (from sovl_curiosity.py)
+      "gestation": {
+        "pressure_reduction": 0.5,
+        "novelty_boost": 0.1
+      },
+      "active": {
+        "pressure_reduction": 0.3,
+        "novelty_boost": 0.35
+      },
+      "sleep": {
+        "pressure_reduction": 0.1,
+        "novelty_boost": 0.2
+      }
+    }
   },
   "cross_attn_config": {
-    "memory_weight": 0.5
+    "memory_weight": 0.2
   },
   "logging_config": {
     "log_dir": "logs",
@@ -150,8 +210,8 @@
   },
   "error_config": {
     "error_cooldown": 1.0,
-    "warning_threshold": 3.0,
-    "error_threshold": 5.0,
+    "warning_threshold": 5.0,
+    "error_threshold": 7.0,
     "critical_threshold": 10.0
   },
   "generation_config": {
@@ -159,8 +219,12 @@
     "top_p": 0.9
   },
   "data_config": {
-    "batch_size": 1,
+    "batch_size": 2,
     "max_retries": 3
+  },
+  "data_provider": {
+    "provider_type": "default",  // TODO: Verify exposure in data_provider (from sovl_main.py)
+    "data_path": "/path/to/training/data"  // TODO: Verify exposure in data_provider (from sovl_main.py)
   },
   "memory_config": {
     "max_memory_mb": 512,
@@ -171,11 +235,16 @@
     "state_file": "sovl_state.json"
   },
   "temperament_config": {
-    "mood_influence": 0.5,
+    "mood_influence": 0.3,
     "history_maxlen": 5
   },
   "confidence_config": {
     "history_maxlen": 5,
     "weight": 0.5
+  },
+  "dream_memory_config": {
+    "max_memories": 100,
+    "base_weight": 0.1,
+    "max_weight": 1.5
   }
 }
