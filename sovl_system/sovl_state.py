@@ -811,25 +811,25 @@ class SOVLState(StateBase):
 
     def _get_memory_stats(self) -> Dict[str, Any]:
         """Get current memory statistics."""
-        stats = {"gpu_allocated": None, "gpu_reserved": None, "gpu_memory_percent": None}
-        if torch.cuda.is_available():
-            try:
-                allocated = torch.cuda.memory_allocated() / (1024 ** 3)
-                reserved = torch.cuda.memory_reserved() / (1024 ** 3)
-                total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-                stats.update({
-                    "gpu_allocated": allocated,
-                    "gpu_reserved": reserved,
-                    "gpu_memory_percent": (allocated / total) * 100 if total > 0 else None
-                })
-            except Exception as e:
-                self.log_event("memory_stats_failed", f"Failed to get GPU memory stats: {str(e)}", level="warning")
-        return stats
+        try:
+            ram_stats = self.ram_manager.check_memory_health()
+            gpu_stats = self.gpu_manager.get_gpu_usage()
+            
+            return {
+                "ram": ram_stats,
+                "gpu": gpu_stats
+            }
+        except Exception as e:
+            self.log_event("memory_stats_failed", f"Failed to get memory stats: {str(e)}", level="warning")
+            return {"ram": {}, "gpu": {}}
 
     def _calculate_memory_usage(self) -> float:
         """Calculate current memory usage percentage."""
         try:
-            return self._get_memory_stats().get("gpu_memory_percent", 0.0)
+            stats = self._get_memory_stats()
+            ram_usage = stats["ram"].get("usage_percent", 0.0)
+            gpu_usage = stats["gpu"].get("usage_percent", 0.0)
+            return max(ram_usage, gpu_usage)
         except Exception as e:
             self.log_event("memory_calculation_failed", f"Failed to calculate memory usage: {str(e)}", level="warning")
             return 0.0

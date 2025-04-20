@@ -12,101 +12,7 @@ from sovl_utils import memory_usage, safe_divide
 from sovl_config import ConfigManager
 from sovl_hardware import HardwareManager
 import gc
-
-class MemoriaManager:
-    """Manages the core memory system for SOVL."""
-    
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
-        """Initialize MemoriaManager with configuration and logger."""
-        self._config_manager = config_manager
-        self._logger = logger
-        self._memory_lock = Lock()
-        self._state = None
-        self._conversation_history = None
-        
-        # Initialize storage
-        self._initialize_storage()
-        
-        # Log initialization
-        self._logger.record_event(
-            event_type="memoria_manager_initialized",
-            message="Memoria manager initialized",
-            level="info"
-        )
-
-    def _initialize_storage(self) -> None:
-        """Initialize memory storage systems."""
-        with self._memory_lock:
-            try:
-                # Initialize conversation history
-                self._conversation_history = ConversationHistory()
-                
-                # Initialize state
-                self._state = SOVLState()
-                
-                # Log successful initialization
-                self._logger.record_event(
-                    event_type="memoria_storage_initialized",
-                    message="Memoria storage initialized successfully",
-                    level="info"
-                )
-                
-            except Exception as e:
-                self._logger.log_error(
-                    error_msg=f"Failed to initialize memoria storage: {str(e)}",
-                    error_type="storage_error",
-                    stack_trace=traceback.format_exc()
-                )
-                raise
-
-    def save_state(self, path_prefix: str) -> None:
-        """Save current state to disk."""
-        try:
-            state = {
-                "conversation_history": self._conversation_history.get_state(),
-                "state": self._state.get_state()
-            }
-            
-            os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
-            with open(f"{path_prefix}_memoria.json", 'w') as f:
-                json.dump(state, f)
-                
-            self._logger.record_event(
-                event_type="memoria_state_saved",
-                message="Memoria state saved successfully",
-                level="info"
-            )
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to save memoria state: {str(e)}",
-                error_type="save_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
-
-    def load_state(self, path_prefix: str) -> None:
-        """Load state from disk."""
-        try:
-            with open(f"{path_prefix}_memoria.json", 'r') as f:
-                state = json.load(f)
-                
-            self._conversation_history.load_state(state["conversation_history"])
-            self._state.load_state(state["state"])
-            
-            self._logger.record_event(
-                event_type="memoria_state_loaded",
-                message="Memoria state loaded successfully",
-                level="info"
-            )
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to load memoria state: {str(e)}",
-                error_type="load_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
+import torch.cuda as cuda
 
 class RAMManager:
     """Manages RAM memory for the SOVL system."""
@@ -206,6 +112,7 @@ class GPUMemoryManager:
         self._logger = logger
         self._memory_lock = Lock()
         self.hardware = HardwareManager(config_manager, logger)
+        self._allocated_memory = {}  # Track allocated memory pointers
         
         # Initialize GPU
         self._initialize_gpu()
@@ -227,6 +134,7 @@ class GPUMemoryManager:
                 # Initialize GPU-specific parameters
                 self.gpu_threshold = gpu_config.get("gpu_threshold", 0.85)
                 self.gpu_decay_rate = gpu_config.get("gpu_decay_rate", 0.95)
+                self.max_gpu_memory = gpu_config.get("max_gpu_memory_mb", 1024) * 1024 * 1024  # Convert MB to bytes
                 
                 # Log successful initialization
                 self._logger.record_event(
@@ -243,18 +151,150 @@ class GPUMemoryManager:
                 )
                 raise
 
+    def allocate_gpu_memory(self, size_bytes: int) -> Optional[int]:
+        """Allocate GPU memory using CUDA."""
+        try:
+            if not torch.cuda.is_available():
+                self._logger.log_error(
+                    error_msg="CUDA is not available",
+                    error_type="cuda_error"
+                )
+                return None
+                
+            with self._memory_lock:
+                # Check if we have enough memory
+                current_usage = self.get_detailed_gpu_memory_stats()
+                if current_usage['allocated'] + size_bytes > self.max_gpu_memory:
+                    self._logger.log_error(
+                        error_msg="Not enough GPU memory available",
+                        error_type="memory_allocation_error"
+                    )
+                    return None
+                
+                # Allocate memory
+                ptr = cuda.malloc(size_bytes)
+                self._allocated_memory[ptr] = size_bytes
+                
+                self._logger.record_event(
+                    event_type="gpu_memory_allocated",
+                    message=f"Allocated {size_bytes} bytes of GPU memory",
+                    level="info",
+                    additional_info={
+                        "size_bytes": size_bytes,
+                        "total_allocated": current_usage['allocated'] + size_bytes
+                    }
+                )
+                
+                return ptr
+                
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to allocate GPU memory: {str(e)}",
+                error_type="memory_allocation_error",
+                stack_trace=traceback.format_exc()
+            )
+            return None
+
+    def free_gpu_memory(self, ptr: int) -> bool:
+        """Free GPU memory using CUDA."""
+        try:
+            if not torch.cuda.is_available():
+                self._logger.log_error(
+                    error_msg="CUDA is not available",
+                    error_type="cuda_error"
+                )
+                return False
+                
+            with self._memory_lock:
+                if ptr not in self._allocated_memory:
+                    self._logger.log_error(
+                        error_msg="Attempted to free unallocated memory",
+                        error_type="memory_free_error"
+                    )
+                    return False
+                
+                # Free memory
+                cuda.free(ptr)
+                size_bytes = self._allocated_memory.pop(ptr)
+                
+                self._logger.record_event(
+                    event_type="gpu_memory_freed",
+                    message=f"Freed {size_bytes} bytes of GPU memory",
+                    level="info",
+                    additional_info={
+                        "size_bytes": size_bytes,
+                        "total_allocated": self.get_detailed_gpu_memory_stats()['allocated']
+                    }
+                )
+                
+                return True
+                
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to free GPU memory: {str(e)}",
+                error_type="memory_free_error",
+                stack_trace=traceback.format_exc()
+            )
+            return False
+
+    def get_detailed_gpu_memory_stats(self) -> Dict[str, int]:
+        """Get detailed GPU memory statistics using CUDA."""
+        try:
+            if not torch.cuda.is_available():
+                return {
+                    'allocated': 0,
+                    'reserved': 0,
+                    'max_allocated': 0,
+                    'cached': 0
+                }
+                
+            with self._memory_lock:
+                stats = {
+                    'allocated': cuda.memory_allocated(),
+                    'reserved': cuda.memory_reserved(),
+                    'max_allocated': cuda.max_memory_allocated(),
+                    'cached': cuda.memory_cached()
+                }
+                
+                self._logger.record_event(
+                    event_type="gpu_memory_stats",
+                    message="Retrieved detailed GPU memory statistics",
+                    level="info",
+                    additional_info=stats
+                )
+                
+                return stats
+                
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to get GPU memory stats: {str(e)}",
+                error_type="memory_stats_error",
+                stack_trace=traceback.format_exc()
+            )
+            return {
+                'allocated': 0,
+                'reserved': 0,
+                'max_allocated': 0,
+                'cached': 0
+            }
+
     def get_gpu_usage(self) -> Dict[str, float]:
         """Get current GPU memory usage metrics."""
         try:
-            # Get current GPU usage
-            gpu_stats = self.hardware.get_gpu_memory_stats()
+            if not torch.cuda.is_available():
+                return {
+                    "gpu_usage": 0.0,
+                    "gpu_available": 0.0,
+                    "usage_percentage": 0.0
+                }
+                
+            # Get detailed stats
+            stats = self.get_detailed_gpu_memory_stats()
             
-            # Calculate GPU metrics
-            gpu_usage = gpu_stats.get("gpu_usage", 0.0)
-            gpu_available = gpu_stats.get("gpu_available", 0.0)
-            gpu_total = gpu_stats.get("gpu_total", 0.0)
-            
-            # Calculate usage percentage
+            # Calculate metrics
+            gpu_usage = stats['allocated']
+            gpu_total = self.max_gpu_memory
+            gpu_available = gpu_total - gpu_usage
             usage_percentage = (gpu_usage / gpu_total) if gpu_total > 0 else 0.0
             
             # Log GPU usage

@@ -478,38 +478,85 @@ class GenerationManager:
         )
 
     def check_memory_health(self) -> bool:
-        """Check GPU memory usage and clean up if necessary."""
-        if not torch.cuda.is_available():
-            return True
-
+        """Check memory usage and clean up if necessary."""
         try:
-            memory_stats = torch.cuda.memory_stats()
-            current_memory = memory_stats["allocated_bytes.all.current"]
-            total_memory = torch.cuda.get_device_properties(0).total_memory
-            memory_ratio = current_memory / total_memory
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.get_gpu_usage()
+            
+            is_healthy = (
+                ram_health.get("usage_percent", 0.0) <= self.memory_threshold and
+                gpu_health.get("usage_percent", 0.0) <= self.memory_threshold
+            )
+            
+            if not is_healthy:
+                self._manage_memory()
+                
+            return is_healthy
+            
+        except Exception as e:
+            self._log_error(f"Failed to check memory health: {str(e)}")
+            return False
 
-            # Log memory health using standardized method
-            self._log_memory_health(memory_ratio, current_memory, total_memory)
-
-            if memory_ratio > self.memory_threshold:
-                torch.cuda.empty_cache()
+    @synchronized()
+    def _manage_memory(self) -> None:
+        """Manage memory usage and integrate with state system."""
+        try:
+            # Get current memory stats from managers
+            ram_stats = self.ram_manager.check_memory_health()
+            gpu_stats = self.gpu_manager.get_gpu_usage()
+            
+            # Log memory usage
+            self._log_memory_health(
+                memory_ratio=max(
+                    ram_stats.get("usage_percent", 0.0),
+                    gpu_stats.get("usage_percent", 0.0)
+                ),
+                current_memory=max(
+                    ram_stats.get("used", 0),
+                    gpu_stats.get("used", 0)
+                ),
+                total_memory=max(
+                    ram_stats.get("total", 1),
+                    gpu_stats.get("total", 1)
+                )
+            )
+            
+            # Check if memory usage exceeds threshold
+            if (ram_stats.get("usage_percent", 0.0) > self.memory_threshold or
+                gpu_stats.get("usage_percent", 0.0) > self.memory_threshold):
+                
+                # Clear scaffold cache
+                self._clear_scaffold_cache()
+                
+                # Prune dream memory if available
+                if hasattr(self.state, 'dream_memory'):
+                    self.state._prune_dream_memory()
+                
+                # Clear CUDA cache
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Log memory cleanup
                 self._log_event(
                     "memory_cleanup",
-                    {
-                        "reason": "threshold_exceeded",
-                        "memory_ratio": memory_ratio,
+                    "Memory cleanup performed",
+                    level="info",
+                    additional_info={
+                        "ram_stats": ram_stats,
+                        "gpu_stats": gpu_stats,
                         "threshold": self.memory_threshold
                     }
                 )
-                return False
-            return True
+            
+            # Update state with current memory stats
+            self.state._update_memory_usage()
+            
         except Exception as e:
             self._log_error(
-                Exception(f"Memory health check failed: {str(e)}"),
-                "check_memory_health",
+                Exception(f"Memory management failed: {str(e)}"),
+                "memory_management",
                 traceback.format_exc()
             )
-            return False
 
     def _handle_error_prompt(self, error_msg: str) -> str:
         """Generate a response to a system error."""
@@ -1271,99 +1318,6 @@ class GenerationManager:
                 traceback.format_exc()
             )
             return []
-
-    @synchronized()
-    def _manage_memory(self) -> None:
-        """Manage memory usage and integrate with state system."""
-        try:
-            # Get current memory stats using the utility function
-            memory_stats = memory_usage(self.device, self._config_manager)
-            
-            # Log memory usage
-            self._log_memory_health(
-                memory_ratio=memory_stats.get("allocated", 0.0) / memory_stats.get("reserved", 1.0),
-                current_memory=memory_stats.get("allocated", 0),
-                total_memory=memory_stats.get("reserved", 1)
-            )
-            
-            # Check if memory usage exceeds threshold
-            if memory_stats.get("allocated", 0.0) / memory_stats.get("reserved", 1.0) > self.memory_threshold:
-                # Clear scaffold cache
-                self._clear_scaffold_cache()
-                
-                # Prune dream memory if available
-                if hasattr(self.state, 'dream_memory'):
-                    self.state._prune_dream_memory()
-                
-                # Clear CUDA cache
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Log memory cleanup
-                self._log_event(
-                    "memory_cleanup",
-                    "Memory cleanup performed",
-                    level="info",
-                    additional_info={
-                        "memory_stats": memory_stats,
-                        "threshold": self.memory_threshold
-                    }
-                )
-            
-            # Update state with current memory stats
-            self.state._update_memory_usage()
-            
-        except Exception as e:
-            self._log_error(
-                Exception(f"Memory management failed: {str(e)}"),
-                "memory_management",
-                traceback.format_exc()
-            )
-
-    def _get_dynamic_batch_size(self, prompts: List[str]) -> int:
-        """Get dynamic batch size based on available memory."""
-        try:
-            return dynamic_batch_size(
-                base_size=self.base_batch_size,
-                config_manager=self._config_manager,
-                logger=self.logger
-            )
-        except Exception as e:
-            self._log_error(
-                Exception(f"Failed to get dynamic batch size: {str(e)}"),
-                "dynamic_batch_size",
-                traceback.format_exc()
-            )
-            return self.base_batch_size
-
-    def _adjust_max_length(
-        self,
-        base_length: int,
-        temperament_score: float,
-        curiosity_pressure: Optional[float] = None
-    ) -> int:
-        """Adjust max length based on state parameters."""
-        try:
-            # Base adjustment from temperament
-            adjustment = (temperament_score - 0.5) * 0.2  # Scale to ±0.1
-            
-            # Add curiosity influence if available
-            if curiosity_pressure is not None:
-                adjustment += curiosity_pressure * 0.15  # Scale to +0.15
-            
-            # Apply adjustment with bounds
-            adjusted_length = int(base_length * (1 + adjustment))
-            adjusted_length = max(50, min(200, adjusted_length))
-            
-            return adjusted_length
-            
-        except Exception as e:
-            self._log_error(
-                Exception(f"Failed to adjust max length: {str(e)}"),
-                "adjust_max_length",
-                traceback.format_exc()
-            )
-            return base_length
 
     @synchronized()
     def _handle_state_driven_error(self, error: Exception, context: str) -> None:

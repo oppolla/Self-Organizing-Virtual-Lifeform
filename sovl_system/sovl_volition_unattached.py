@@ -6,6 +6,7 @@ from collections import deque
 import json
 from sovl_utils import memory_usage, log_memory_usage
 from sovl_logger import Logger
+from sovl_memory import GPUMemoryManager
 
 class AutonomyManager:
     """
@@ -82,10 +83,11 @@ class AutonomyManager:
             
             # Memory usage with fallback
             if torch.cuda.is_available():
-                mem_stats = memory_usage(self.device)
-                if mem_stats and mem_stats.get('allocated') is not None:
-                    current_mem = mem_stats['allocated'] * (1024 ** 3)
-                    total_mem = torch.cuda.get_device_properties(0).total_memory
+                gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
+                gpu_stats = gpu_manager.get_gpu_usage()
+                if gpu_stats:
+                    current_mem = gpu_stats.get('gpu_usage', 0.0)
+                    total_mem = gpu_stats.get('total_memory', 0.0)
                     metrics["memory_usage"] = current_mem / total_mem if total_mem > 0 else 0.0
                 else:
                     self.logger.record({

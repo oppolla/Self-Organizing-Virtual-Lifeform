@@ -772,7 +772,7 @@ class MemoryMonitor:
         """Check memory health across all memory managers."""
         try:
             ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
+            gpu_health = self.gpu_manager.get_gpu_usage()
             
             return {
                 "ram_health": ram_health,
@@ -1005,26 +1005,13 @@ class SOVLSystem(SystemInterface):
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get current memory statistics."""
         try:
-            if not hasattr(self.memory_monitor, 'memory_manager'):
-                return {"error": "Memory manager not initialized"}
-                
-            stats = {
-                "total_allocated": self.memory_monitor.memory_manager.get_total_allocated(),
-                "peak_allocated": self.memory_monitor.memory_manager.get_peak_allocated(),
-                "current_usage": self.memory_monitor.memory_manager.get_current_usage(),
-                "available_memory": self.memory_monitor.memory_manager.get_available_memory(),
-                "fragmentation": self.memory_monitor.memory_manager.get_fragmentation(),
-                "gc_count": self.memory_monitor.memory_manager.get_gc_count()
-            }
+            ram_stats = self.ram_manager.check_memory_health()
+            gpu_stats = self.gpu_manager.get_gpu_usage()
             
-            if torch.cuda.is_available():
-                stats.update({
-                    "gpu_allocated": torch.cuda.memory_allocated(),
-                    "gpu_cached": torch.cuda.memory_reserved(),
-                    "gpu_max_memory": torch.cuda.max_memory_allocated()
-                })
-                
-            return stats
+            return {
+                "ram": ram_stats,
+                "gpu": gpu_stats
+            }
             
         except Exception as e:
             self.error_manager.handle_memory_error(e, 0)

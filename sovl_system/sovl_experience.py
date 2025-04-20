@@ -12,6 +12,7 @@ from sovl_utils import memory_usage, safe_divide
 from sovl_config import ConfigManager
 from sovl_hardware import HardwareManager
 import gc
+from sovl_memory import RAMManager, GPUMemoryManager
 
 class MemoriaManager:
     """Manages the core memory system for SOVL."""
@@ -23,9 +24,14 @@ class MemoriaManager:
         self._memory_lock = Lock()
         self._state = None
         self._conversation_history = None
+        self._ram_manager = None
+        self._gpu_manager = None
         
         # Initialize storage
         self._initialize_storage()
+        
+        # Initialize memory managers
+        self._initialize_memory_managers()
         
         # Log initialization
         self._logger.record_event(
@@ -107,3 +113,5 @@ class MemoriaManager:
                 stack_trace=traceback.format_exc()
             )
             raise
+
+

@@ -9,6 +9,7 @@ from sovl_config import ConfigManager
 import torch
 from dataclasses import dataclass
 from datetime import datetime
+from sovl_memory import GPUMemoryManager
 
 @dataclass
 class ErrorContext:
@@ -1119,14 +1120,17 @@ class ErrorHandler:
             return {}
             
         try:
+            gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
+            gpu_stats = gpu_manager.get_gpu_usage()
+            
             return {
-                "allocated": torch.cuda.memory_allocated(),
-                "reserved": torch.cuda.memory_reserved(),
-                "max_allocated": torch.cuda.max_memory_allocated(),
-                "max_reserved": torch.cuda.max_memory_reserved(),
-                "device_count": torch.cuda.device_count(),
-                "current_device": torch.cuda.current_device(),
-                "device_name": torch.cuda.get_device_name()
+                "allocated": gpu_stats.get('gpu_usage', 0.0),
+                "reserved": gpu_stats.get('gpu_reserved', 0.0),
+                "max_allocated": gpu_stats.get('max_gpu_usage', 0.0),
+                "max_reserved": gpu_stats.get('max_gpu_reserved', 0.0),
+                "device_count": gpu_stats.get('device_count', 0),
+                "current_device": gpu_stats.get('current_device', 0),
+                "device_name": gpu_stats.get('device_name', 'unknown')
             }
         except Exception as e:
             self.logger.record_event(

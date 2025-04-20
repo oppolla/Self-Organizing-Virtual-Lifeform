@@ -6,6 +6,7 @@ from threading import Lock
 from dataclasses import dataclass
 from sovl_config import ConfigManager
 from sovl_logger import Logger
+from sovl_memory_manager import GPUMemoryManager, RAMManager
 
 """
 Facade for hardware access, abstracting GPU and CPU operations to decouple
@@ -92,72 +93,36 @@ class HardwareManager:
             self._log_error("Failed to check CUDA availability", e)
             return False
 
-    def get_memory_stats(self, device: Optional[torch.device] = None) -> Dict[str, float]:
-        """
-        Get memory statistics for the specified device or default CUDA/CPU.
-
-        Args:
-            device: Target device (CUDA or CPU). Uses default CUDA device or CPU if None.
-
-        Returns:
-            Dictionary with 'allocated_mb', 'reserved_mb', 'total_memory_mb', 'available_mb'.
-
-        Raises:
-            HardwareError: If memory query fails.
-        """
+    def get_memory_stats(self, device: Optional[torch.device] = None) -> Dict[str, Any]:
+        """Get memory statistics for specified device."""
         try:
-            with self._lock:
-                current_time = time.time()
-                # Use cached stats if recent enough
-                if (self._cached_memory_stats and
-                        current_time - self._last_memory_query < self._config.memory_query_interval):
-                    return self._cached_memory_stats
-
-                if self._cuda_available and (device is None or device.type == "cuda"):
-                    device = device or torch.device("cuda:0")
-                    allocated = torch.cuda.memory_allocated(device) / 1024 / 1024  # Bytes to MB
-                    reserved = torch.cuda.memory_reserved(device) / 1024 / 1024  # Bytes to MB
-                    total = torch.cuda.get_device_properties(device).total_memory / 1024 / 1024
-                    available = total - allocated
-                else:
-                    # Fallback for CPU or non-CUDA environments
-                    allocated = self._estimate_cpu_memory_usage()
-                    reserved = allocated  # Mock reserved as allocated for CPU
-                    total = self._config.mock_memory_total_mb
-                    available = total - allocated
-
-                self._cached_memory_stats = {
-                    "allocated_mb": allocated,
-                    "reserved_mb": reserved,
-                    "total_memory_mb": total,
-                    "available_mb": available
+            if device and device.type == 'cuda':
+                gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
+                gpu_stats = gpu_manager.get_gpu_usage()
+                return {
+                    'device': str(device),
+                    'type': 'cuda',
+                    'allocated': gpu_stats.get('gpu_usage', 0.0),
+                    'available': gpu_stats.get('gpu_available', 0.0),
+                    'usage_percentage': gpu_stats.get('usage_percentage', 0.0)
                 }
-                self._last_memory_query = current_time
-                self._log_training_event("memory_stats_collected", {
-                    "allocated_mb": allocated,
-                    "reserved_mb": reserved,
-                    "total_memory_mb": total,
-                    "available_mb": available,
-                    "device": str(device)
-                }, level="debug")
-                return self._cached_memory_stats
+            else:
+                ram_manager = RAMManager(self.config_manager, self.logger)
+                ram_stats = ram_manager.check_memory_health()
+                return {
+                    'device': 'cpu',
+                    'type': 'cpu',
+                    'total': ram_stats.get('total', 0.0),
+                    'available': ram_stats.get('available', 0.0),
+                    'usage_percentage': ram_stats.get('usage_percent', 0.0)
+                }
         except Exception as e:
-            self._log_error("Failed to get memory stats", e)
-            raise HardwareError(f"Memory stats query failed: {str(e)}")
-
-    def _estimate_cpu_memory_usage(self) -> float:
-        """
-        Estimate CPU memory usage for non-CUDA environments.
-
-        Returns:
-            Estimated memory usage in MB (mocked for simplicity).
-        """
-        try:
-            # Placeholder: Could use psutil for real CPU memory stats
-            return 100.0  # Mock 100 MB usage
-        except Exception as e:
-            self._log_error("Failed to estimate CPU memory usage", e)
-            return 0.0
+            self.logger.log_error(
+                error_msg=f"Failed to get memory stats: {str(e)}",
+                error_type="memory_stats_error",
+                stack_trace=traceback.format_exc()
+            )
+            return {}
 
     def get_detailed_memory_stats(self, device: Optional[torch.device] = None) -> Dict[str, Any]:
         """

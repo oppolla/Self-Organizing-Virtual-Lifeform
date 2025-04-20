@@ -20,12 +20,9 @@ class NumericalGuard:
     def __exit__(self, exc_type, exc_val, exc_tb):
         torch.set_grad_enabled(True)
 
-def safe_divide(a: float, b: float, default: float = 0.0) -> float:
-    """Safely divide two numbers with a default fallback."""
-    try:
-        return a / b if b != 0 else default
-    except Exception:
-        return default
+def safe_divide(numerator: float, denominator: float, default: float = 0.0) -> float:
+    """Safely divide two numbers, returning default if denominator is zero."""
+    return numerator / denominator if denominator != 0 else default
 
 def safe_compare(a: float, b: float, tolerance: float = 1e-6) -> bool:
     """Safely compare two floating point numbers."""
@@ -65,55 +62,41 @@ def validate_quantization_mode(mode: str, config_manager: ConfigManager, logger:
         return 'fp16'
     return mode
 
-def memory_usage(device: torch.device = None, config_manager: Optional[ConfigManager] = None) -> Dict[str, float]:
-    """Get memory usage statistics in GB."""
-    if device is None or device.type != 'cuda':
-        return {}
-    
-    try:
-        stats = {
-            'allocated': torch.cuda.memory_allocated(device) / (1024 ** 3),
-            'reserved': torch.cuda.memory_reserved(device) / (1024 ** 3),
-            'max_allocated': torch.cuda.max_memory_allocated(device) / (1024 ** 3)
-        }
-        
-        if config_manager:
-            memory_threshold = config_manager.get("memory_config.memory_threshold", 0.85)
-            if stats['allocated'] / stats['reserved'] > memory_threshold:
-                if hasattr(config_manager, 'logger'):
-                    config_manager.logger.record_event(
-                        event_type="memory_threshold_exceeded",
-                        message="Memory usage exceeded threshold",
-                        level="warning",
-                        additional_info={
-                            "allocated": stats['allocated'],
-                            "reserved": stats['reserved'],
-                            "threshold": memory_threshold
-                        }
-                    )
-        
-        return stats
-    except Exception as e:
-        if config_manager and hasattr(config_manager, 'logger'):
-            config_manager.logger.log_error(
-                error_msg=f"Failed to get memory usage: {str(e)}",
-                error_type="memory_usage_error",
-                stack_trace=traceback.format_exc()
-            )
-        return {}
-
-def log_memory_usage(label: str = "", device: torch.device = None, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None):
+def log_memory_usage(label: str = "", device: torch.device = None, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None) -> None:
     """Log memory usage statistics."""
-    if logger:
-        stats = memory_usage(device, config_manager)
-        if stats:
+    if logger and config_manager:
+        try:
+            # Get memory stats from appropriate manager based on device
+            if device and device.type == 'cuda':
+                gpu_manager = GPUMemoryManager(config_manager, logger)
+                gpu_stats = gpu_manager.get_gpu_usage()
+                memory_stats = {
+                    'gpu_usage': gpu_stats.get('usage_percentage', 0.0),
+                    'gpu_allocated': gpu_stats.get('gpu_usage', 0.0),
+                    'gpu_available': gpu_stats.get('gpu_available', 0.0)
+                }
+            else:
+                ram_manager = RAMManager(config_manager, logger)
+                ram_stats = ram_manager.check_memory_health()
+                memory_stats = {
+                    'ram_usage': ram_stats.get('usage_percent', 0.0),
+                    'ram_available': ram_stats.get('available', 0.0),
+                    'ram_total': ram_stats.get('total', 0.0)
+                }
+
             logger.log_memory_usage(
                 phase=label,
                 device=device,
                 additional_info={
-                    "memory_stats": stats,
+                    "memory_stats": memory_stats,
                     "label": label
                 }
+            )
+        except Exception as e:
+            logger.log_error(
+                error_msg=f"Failed to log memory usage: {str(e)}",
+                error_type="memory_logging_error",
+                stack_trace=traceback.format_exc()
             )
 
 def dynamic_batch_size(
@@ -148,8 +131,11 @@ def dynamic_batch_size(
         memory_threshold = config_manager.get("memory_config.memory_threshold", 0.8)
         safety_factor = config_manager.get("memory_config.safety_factor", 0.9)
         
-        total_mem = torch.cuda.get_device_properties(0).total_memory
-        allocated = torch.cuda.memory_allocated()
+        gpu_manager = GPUMemoryManager(config_manager, logger)
+        gpu_stats = gpu_manager.get_gpu_usage()
+        
+        total_mem = gpu_stats.get('total_memory', 0.0)
+        allocated = gpu_stats.get('gpu_usage', 0.0)
         available = (total_mem * memory_threshold * safety_factor) - allocated
         
         if available <= 0:
@@ -173,19 +159,6 @@ def dynamic_batch_size(
                 }
             )
         return adjusted
-    
-    except Exception as e:
-        if logger:
-            logger.log_error(
-                error_msg=f"Dynamic batch size failed: {str(e)}",
-                error_type="batch_size_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "base_size": base_size,
-                    "error": str(e)
-                }
-            )
-        return max(1, base_size // 4)
     
     except Exception as e:
         if logger:
