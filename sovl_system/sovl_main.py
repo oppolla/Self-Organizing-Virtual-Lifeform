@@ -27,7 +27,6 @@ from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
 from sovl_error import ErrorHandler
 from sovl_state import StateManager
-from sovl_grafter import PluginManager
 from sovl_confidence import calculate_confidence_score
 from sovl_events import EventDispatcher
 from sovl_interfaces import SystemInterface
