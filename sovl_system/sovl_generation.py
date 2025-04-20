@@ -949,45 +949,68 @@ class GenerationManager:
                 curiosity_pressure = self.curiosity_manager.calculate_curiosity_pressure(prompt)
                 query_embedding = self.curiosity_manager.get_query_embedding(prompt)
 
-            # Compute base confidence
+            # Get current temperament state
+            current_temperament = self.current_temperament_score
+            mood_label = self.mood_label
+
+            # Adjust parameters based on temperament
+            adjusted_temperature = self.adjust_parameter(
+                base_value=temperature,
+                parameter_type="temperature",
+                curiosity_pressure=curiosity_pressure
+            )
+            
+            adjusted_max_length = self._adjust_max_length(
+                base_length=max_length,
+                temperament_score=current_temperament,
+                curiosity_pressure=curiosity_pressure
+            )
+
+            # Compute base confidence with temperament influence
             base_confidence = self.calculate_confidence_score(
                 self._get_last_logits(),
                 self.base_tokenizer.encode(prompt)
             ) if hasattr(self, '_get_last_logits') else DEFAULT_CONFIDENCE
 
-            # Apply confidence adjustments
+            # Apply confidence adjustments with temperament influence
             adjusted_confidence = self._apply_confidence_adjustments(base_confidence)
 
-            # Prepare base generation parameters
+            # Prepare base generation parameters with temperament-based adjustments
             base_params = {
-                "max_length": max_length,
-                "temperature": temperature,
+                "max_length": adjusted_max_length,
+                "temperature": adjusted_temperature,
                 "top_p": top_p,
                 "num_return_sequences": num_return_sequences,
                 "do_sample": do_sample,
                 **kwargs
             }
 
-            # Adjust generation parameters based on confidence
-            adjusted_params = self._adjust_generation_parameters(adjusted_confidence, base_params)
-
-            # Enhance prompt with mood context
-            mood_context = self._get_mood_context_prompt()
+            # Create dynamic mood context based on temperament state
+            mood_context = self._create_dynamic_mood_context(
+                mood_label=mood_label,
+                temperament_score=current_temperament,
+                confidence=adjusted_confidence
+            )
             enhanced_prompt = f"{mood_context}\n{prompt}"
 
-            # Log generation start with confidence-driven parameters
+            # Log generation start with temperament-driven parameters
             self.logger.record_event(
                 event_type="generation_started",
-                message="Starting text generation with confidence-driven parameters",
+                message="Starting text generation with temperament-driven parameters",
                 level="info",
                 additional_info={
                     "prompt": prompt,
                     "enhanced_prompt": enhanced_prompt,
                     "base_confidence": base_confidence,
                     "adjusted_confidence": adjusted_confidence,
-                    "original_params": base_params,
-                    "adjusted_params": adjusted_params,
-                    "mood_label": self.mood_label,
+                    "original_params": {
+                        "max_length": max_length,
+                        "temperature": temperature,
+                        "top_p": top_p
+                    },
+                    "adjusted_params": base_params,
+                    "mood_label": mood_label,
+                    "temperament_score": current_temperament,
                     "lifecycle_stage": lifecycle_stage
                 }
             )
@@ -995,7 +1018,7 @@ class GenerationManager:
             # Generate text with adjusted parameters
             generated_texts = self._generate_text(
                 prompt=enhanced_prompt,
-                **adjusted_params
+                **base_params
             )
 
             # Check for repetitions in generated text
@@ -1034,7 +1057,7 @@ class GenerationManager:
                 # Update conversation history
                 self.state.history.add_message("assistant", generated_texts[0])
                 
-                # Update confidence history
+                # Update confidence history with temperament context
                 self.state.add_confidence(adjusted_confidence)
                 
                 # Update curiosity state
@@ -1045,17 +1068,24 @@ class GenerationManager:
                         query_embedding=query_embedding
                     )
 
-            # Log generation completion with confidence updates
+                # Update temperament based on generation results
+                self._update_temperament_from_generation(
+                    generated_text=generated_texts[0],
+                    confidence=adjusted_confidence
+                )
+
+            # Log generation completion with temperament updates
             self.logger.record_event(
                 event_type="generation_completed",
-                message="Text generation completed with confidence updates",
+                message="Text generation completed with temperament updates",
                 level="info",
                 additional_info={
                     "prompt": prompt,
                     "generated_texts": generated_texts,
                     "base_confidence": base_confidence,
                     "adjusted_confidence": adjusted_confidence,
-                    "mood_label": self.mood_label,
+                    "mood_label": mood_label,
+                    "temperament_score": current_temperament,
                     "lifecycle_stage": lifecycle_stage,
                     "conversation_length": len(self.state.history.messages)
                 }
@@ -1422,15 +1452,53 @@ class GenerationManager:
                 traceback.format_exc()
             )
 
-    def _get_mood_context_prompt(self) -> str:
-        """Get a mood-based context prompt based on current temperament."""
-        mood = self.mood_label
-        if mood == "Cautious":
-            return "Please provide a careful and well-considered response, focusing on accuracy and reliability."
-        elif mood == "Curious":
-            return "Please provide an exploratory and creative response, considering novel perspectives."
+    def _create_dynamic_mood_context(
+        self,
+        mood_label: str,
+        temperament_score: float,
+        confidence: float
+    ) -> str:
+        """Create a dynamic mood context based on current temperament state."""
+        mood_intensity = abs(temperament_score - 0.5) * 2  # Scale to 0-1
+        
+        if mood_label == "Cautious":
+            return f"[Mood: Cautious (Intensity: {mood_intensity:.2f})] Please provide a careful and well-considered response, focusing on accuracy and reliability."
+        elif mood_label == "Curious":
+            return f"[Mood: Curious (Intensity: {mood_intensity:.2f})] Please provide an exploratory and creative response, considering novel perspectives."
         else:  # Balanced
-            return "Please provide a balanced response, considering both reliability and creativity."
+            return f"[Mood: Balanced (Intensity: {mood_intensity:.2f})] Please provide a balanced response, considering both reliability and creativity."
+
+    def _update_temperament_from_generation(
+        self,
+        generated_text: str,
+        confidence: float
+    ) -> None:
+        """Update temperament based on generation results."""
+        try:
+            # Calculate text characteristics that might influence temperament
+            text_length = len(generated_text)
+            complexity = len(set(generated_text.split())) / len(generated_text.split())
+            
+            # Adjust temperament based on generation characteristics
+            if confidence > 0.7:
+                # Successful generation boosts confidence
+                adjustment = 0.05
+            elif confidence < 0.3:
+                # Low confidence leads to more cautious behavior
+                adjustment = -0.05
+            else:
+                adjustment = 0.0
+            
+            # Apply adjustment with bounds
+            new_score = max(0.0, min(1.0, self.current_temperament_score + adjustment))
+            self.update_temperament(new_score, confidence, "generation")
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to update temperament from generation: {str(e)}"),
+                "temperament_update",
+                traceback.format_exc()
+            )
 
     def _apply_confidence_adjustments(self, base_confidence: float) -> float:
         """Apply confidence adjustments based on temperament and lifecycle."""
