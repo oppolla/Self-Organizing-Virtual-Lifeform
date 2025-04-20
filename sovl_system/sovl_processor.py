@@ -508,6 +508,10 @@ class SOVLProcessor:
                         self.base_tokenizer.unk_token_id
                     }
                 
+                # Handle empty input
+                if not token_ids:
+                    return None
+                
                 # Convert to tensor if needed
                 if isinstance(token_ids, list):
                     token_ids = torch.tensor(token_ids, device=self.device)
@@ -527,20 +531,24 @@ class SOVLProcessor:
                     return None
                 
                 # Single sequence processing
+                # Filter out special tokens and check if any non-special tokens remain
+                filtered = [i for i in token_ids.tolist() if i not in special_ids]
+                if not filtered or len(filtered) < 2 * min_rep_length:
+                    return None
+                
                 return self._detect_repetitions_single(
                     token_ids, special_ids, min_rep_length, max_scan
                 )
                 
         except Exception as e:
             self.logger.log_error(
-                error_msg="Repetition detection failed",
-                error_type="detection_error",
+                error_msg=f"Repetition detection failed: {str(e)}",
+                error_type="repetition_detection_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={
                     "token_ids_shape": str(getattr(token_ids, 'shape', 'N/A')),
                     "min_rep_length": min_rep_length,
-                    "max_scan": max_scan,
-                    "batch_size": batch_size
+                    "max_scan": max_scan
                 }
             )
             return None
@@ -877,5 +885,6 @@ class VibeSculptor:
             "flow": self._compute_flow("", profile),
             "resonance": self._compute_resonance(" ".join(profile.get("inputs", [])), state),
             "curiosity": vibe_scores[-1] if vibe_scores else 0.5,
-            "trend": (v
+            "trend": (vibe_scores[-1] - vibe_scores[0]) / (len(self.vibes) - 1) if len(self.vibes) > 1 else 0.0
+        }
     

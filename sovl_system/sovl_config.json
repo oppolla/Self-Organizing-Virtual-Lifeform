@@ -24,7 +24,18 @@
     "scaffold_unk_id": 0,
     "enable_cross_attention": true,
     "enable_dynamic_cross_attention": false,
-    "injection_strategy": "sequential"
+    "injection_strategy": "sequential",
+    "temp_eager_threshold": 0.8,
+    "temp_sluggish_threshold": 0.6,
+    "temp_mood_influence": 0.0,
+    "temp_curiosity_boost": 0.5,
+    "temp_restless_drop": 0.1,
+    "temp_melancholy_noise": 0.02,
+    "conf_feedback_strength": 0.5,
+    "temp_smoothing_factor": 0.0,
+    "temperament_decay_rate": 0.95,
+    "temperament_history_maxlen": 5,
+    "confidence_history_maxlen": 5
   },
   "training_config": {
     "learning_rate": 0.0003,

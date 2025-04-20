@@ -34,7 +34,18 @@ class ValidationSchema:
                 "scaffold_unk_id": ConfigSchema(field="controls_config.scaffold_unk_id", type=int, default=0, range=(0, None)),
                 "enable_cross_attention": ConfigSchema(field="controls_config.enable_cross_attention", type=bool, default=True),
                 "enable_dynamic_cross_attention": ConfigSchema(field="controls_config.enable_dynamic_cross_attention", type=bool, default=False),
-                "injection_strategy": ConfigSchema(field="controls_config.injection_strategy", type=str, default="sequential", validator=lambda x: x in ["sequential", "parallel"])
+                "injection_strategy": ConfigSchema(field="controls_config.injection_strategy", type=str, default="sequential", validator=lambda x: x in ["sequential", "parallel"]),
+                "temp_eager_threshold": ConfigSchema(field="controls_config.temp_eager_threshold", type=float, default=0.8, range=(0.7, 0.9)),
+                "temp_sluggish_threshold": ConfigSchema(field="controls_config.temp_sluggish_threshold", type=float, default=0.6, range=(0.3, 0.6)),
+                "temp_mood_influence": ConfigSchema(field="controls_config.temp_mood_influence", type=float, default=0.0, range=(0.0, 1.0)),
+                "temp_curiosity_boost": ConfigSchema(field="controls_config.temp_curiosity_boost", type=float, default=0.5, range=(0.0, 0.5)),
+                "temp_restless_drop": ConfigSchema(field="controls_config.temp_restless_drop", type=float, default=0.1, range=(0.0, 0.5)),
+                "temp_melancholy_noise": ConfigSchema(field="controls_config.temp_melancholy_noise", type=float, default=0.02, range=(0.0, 0.1)),
+                "conf_feedback_strength": ConfigSchema(field="controls_config.conf_feedback_strength", type=float, default=0.5, range=(0.0, 1.0)),
+                "temp_smoothing_factor": ConfigSchema(field="controls_config.temp_smoothing_factor", type=float, default=0.0, range=(0.0, 1.0)),
+                "temperament_decay_rate": ConfigSchema(field="controls_config.temperament_decay_rate", type=float, default=0.95, range=(0.0, 1.0)),
+                "temperament_history_maxlen": ConfigSchema(field="controls_config.temperament_history_maxlen", type=int, default=5, range=(3, 10)),
+                "confidence_history_maxlen": ConfigSchema(field="controls_config.confidence_history_maxlen", type=int, default=5, range=(3, 10))
             },
             "training_config": {
                 "learning_rate": ConfigSchema(field="training_config.learning_rate", type=float, default=2e-5, range=(0.0, None), required=True),
@@ -177,7 +188,18 @@ class ValidationSchema:
             },
             "temperament_config": {
                 "mood_influence": ConfigSchema(field="temperament_config.mood_influence", type=float, default=0.5, range=(0.0, 1.0)),
-                "history_maxlen": ConfigSchema(field="temperament_config.history_maxlen", type=int, default=5, range=(1, None))
+                "history_maxlen": ConfigSchema(field="temperament_config.history_maxlen", type=int, default=5, range=(1, None)),
+                "temp_eager_threshold": ConfigSchema(field="controls_config.temp_eager_threshold", type=float, default=0.8, range=(0.7, 0.9)),
+                "temp_sluggish_threshold": ConfigSchema(field="controls_config.temp_sluggish_threshold", type=float, default=0.6, range=(0.3, 0.6)),
+                "temp_mood_influence": ConfigSchema(field="controls_config.temp_mood_influence", type=float, default=0.0, range=(0.0, 1.0)),
+                "temp_curiosity_boost": ConfigSchema(field="controls_config.temp_curiosity_boost", type=float, default=0.5, range=(0.0, 0.5)),
+                "temp_restless_drop": ConfigSchema(field="controls_config.temp_restless_drop", type=float, default=0.1, range=(0.0, 0.5)),
+                "temp_melancholy_noise": ConfigSchema(field="controls_config.temp_melancholy_noise", type=float, default=0.02, range=(0.0, 0.1)),
+                "conf_feedback_strength": ConfigSchema(field="controls_config.conf_feedback_strength", type=float, default=0.5, range=(0.0, 1.0)),
+                "temp_smoothing_factor": ConfigSchema(field="controls_config.temp_smoothing_factor", type=float, default=0.0, range=(0.0, 1.0)),
+                "temperament_decay_rate": ConfigSchema(field="controls_config.temperament_decay_rate", type=float, default=0.95, range=(0.0, 1.0)),
+                "temperament_history_maxlen": ConfigSchema(field="controls_config.temperament_history_maxlen", type=int, default=5, range=(3, 10)),
+                "confidence_history_maxlen": ConfigSchema(field="controls_config.confidence_history_maxlen", type=int, default=5, range=(3, 10))
             },
             "confidence_config": {
                 "history_maxlen": ConfigSchema(field="confidence_config.history_maxlen", type=int, default=5, range=(1, None)),

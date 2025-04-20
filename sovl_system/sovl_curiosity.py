@@ -19,24 +19,24 @@ class Curiosity:
     
     def __init__(
         self,
-        weight_ignorance: float = 0.7,
-        weight_novelty: float = 0.3,
-        metrics_maxlen: int = 1000,
+        config_manager: ConfigManager,
         logger: Optional[Any] = None,
         max_memory_mb: float = 512.0,
         batch_size: int = 32
     ):
-        self._validate_weights(weight_ignorance, weight_novelty)
-        self.weight_ignorance = weight_ignorance
-        self.weight_novelty = weight_novelty
-        self.metrics_maxlen = metrics_maxlen
+        # Get configuration values
+        self.weight_ignorance = config_manager.get("curiosity_config.weight_ignorance", 0.7)
+        self.weight_novelty = config_manager.get("curiosity_config.weight_novelty", 0.3)
+        self.metrics_maxlen = config_manager.get("curiosity_config.novelty_history_maxlen", 1000)
+        
+        self._validate_weights(self.weight_ignorance, self.weight_novelty)
         self.logger = logger
         self.max_memory_mb = max_memory_mb
         self.batch_size = batch_size
         
         # Initialize components
         self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
-        self.metrics = deque(maxlen=metrics_maxlen)
+        self.metrics = deque(maxlen=self.metrics_maxlen)
         self.embedding_cache = {}
         self.lock = threading.Lock()
         self.memory_usage = 0.0
@@ -94,26 +94,16 @@ class Curiosity:
         self,
         base_conf: float,
         scaf_conf: float,
-        memory_embeddings: List[torch.Tensor],
+        state: SOVLState,
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
-        """Compute curiosity score based on confidence and embeddings."""
+        """Compute curiosity score based on confidence and embeddings with confidence awareness."""
         try:
-            # Compress and cache query embedding
-            query_embedding = self._compress_tensor(query_embedding)
-            query_key = hash(query_embedding.cpu().numpy().tobytes())
+            # Get memory embeddings with memory limits
+            memory_embeddings = self._get_valid_memory_embeddings(state)
             
-            with self.lock:
-                if query_key not in self.embedding_cache:
-                    self.embedding_cache[query_key] = {
-                        'tensor': query_embedding,
-                        'last_access': time.time()
-                    }
-                    self._update_memory_usage()
-                    self._prune_cache()
-            
-            # Compute scores
+            # Compute base curiosity score
             ignorance = self._compute_ignorance_score(base_conf, scaf_conf)
             novelty = (
                 self._compute_novelty_score(memory_embeddings, query_embedding, device)
@@ -121,8 +111,58 @@ class Curiosity:
                 else 0.0
             )
             
-            score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
-            return self._clamp_score(score)
+            # Apply lifecycle stage adjustments if available
+            lifecycle_stage = "unknown"
+            lifecycle_weight = 1.0
+            if self.lifecycle_manager:
+                lifecycle_stage = self.lifecycle_manager._lifecycle_stage
+                lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
+            
+            # Apply confidence-based adjustments if available
+            confidence_weight = 1.0
+            if self.confidence_calculator:
+                # Use the average of base and scaffold confidence as the current confidence
+                current_confidence = (base_conf + scaf_conf) / 2.0
+                
+                # Adjust curiosity based on confidence
+                # Higher confidence leads to more exploration
+                confidence_weight = 1.0 + (current_confidence - 0.5) * 0.5
+                
+                # Log confidence-based adjustment
+                self._log_event(
+                    "confidence_adjustment_applied",
+                    message="Applied confidence-based curiosity adjustment",
+                    level="info",
+                    additional_info={
+                        "current_confidence": current_confidence,
+                        "confidence_weight": confidence_weight,
+                        "base_ignorance": ignorance,
+                        "base_novelty": novelty
+                    }
+                )
+            
+            # Calculate final score with all adjustments
+            base_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
+            final_score = base_score * confidence_weight * lifecycle_weight
+            
+            # Log the complete computation
+            self._log_event(
+                "curiosity_computed",
+                message="Curiosity score computed with confidence integration",
+                level="info",
+                additional_info={
+                    "base_score": base_score,
+                    "final_score": final_score,
+                    "lifecycle_stage": lifecycle_stage,
+                    "lifecycle_weight": lifecycle_weight,
+                    "confidence_weight": confidence_weight,
+                    "ignorance": ignorance,
+                    "novelty": novelty,
+                    "memory_embeddings_count": len(memory_embeddings)
+                }
+            )
+            
+            return self._clamp_score(final_score)
             
         except Exception as e:
             self._log_error(f"Curiosity computation failed: {str(e)}")
@@ -242,7 +282,7 @@ class CuriosityError(Exception):
     pass
 
 class CuriosityManager:
-    """Manages curiosity-driven exploration and learning."""
+    """Manages the curiosity system and its components."""
     
     def __init__(
         self,
@@ -253,37 +293,38 @@ class CuriosityManager:
         state_manager=None,
         lifecycle_manager=None,
         temperament_system=None,
-        confidence_calculator=None  # Add confidence calculator
+        confidence_calculator=None
     ):
-        """Initialize the CuriosityManager with configuration and dependencies.
-        
-        Args:
-            config_manager: ConfigManager instance for configuration handling
-            logger: Logger instance for logging
-            error_manager: ErrorHandler instance for error handling
-            device: torch.device for tensor operations
-            state_manager: Optional state manager instance
-            lifecycle_manager: Optional lifecycle manager instance
-            temperament_system: Optional temperament system instance
-            confidence_calculator: Optional confidence calculator instance
-        """
-        if not config_manager:
-            raise ValueError("config_manager cannot be None")
-        if not logger:
-            raise ValueError("logger cannot be None")
-        if not error_manager:
-            raise ValueError("error_manager cannot be None")
-        if not isinstance(config_manager, ConfigManager):
-            raise TypeError("config_manager must be a ConfigManager instance")
-            
         self.config_manager = config_manager
         self.logger = logger
         self.error_manager = error_manager
+        self.device = device
         self.state_manager = state_manager
         self.lifecycle_manager = lifecycle_manager
         self.temperament_system = temperament_system
-        self.confidence_calculator = confidence_calculator  # Store confidence calculator
-        self.device = device
+        self.confidence_calculator = confidence_calculator
+        
+        # Initialize components with validated configuration
+        self.curiosity = Curiosity(
+            config_manager=self.config_manager,
+            logger=self.logger
+        )
+        
+        # Initialize other components
+        self.pressure = CuriosityPressure(
+            base_pressure=self.config_manager.get("curiosity_config.pressure_threshold", 0.7),
+            max_pressure=1.0,
+            min_pressure=0.0,
+            decay_rate=self.config_manager.get("curiosity_config.decay_rate", 0.9)
+        )
+        
+        self.callbacks = CuriosityCallbacks(logger=self.logger)
+        self.exploration_queue = deque(maxlen=self.config_manager.get("curiosity_config.queue_maxlen", 10))
+        
+        # Subscribe to config changes
+        self.config_manager.subscribe(self._on_config_change)
+        
+        # Initialize other attributes
         self.metrics = defaultdict(list)
         self._initialized = False
         self.state = None
@@ -398,19 +439,38 @@ class CuriosityManager:
     def _on_config_change(self) -> None:
         """Handle configuration changes."""
         try:
-            self._initialize_config()
-            self.logger.record_event(
-                event_type="curiosity_config_updated",
+            # Update curiosity weights
+            self.curiosity.weight_ignorance = self.config_manager.get("curiosity_config.weight_ignorance", 0.7)
+            self.curiosity.weight_novelty = self.config_manager.get("curiosity_config.weight_novelty", 0.3)
+            self.curiosity.metrics_maxlen = self.config_manager.get("curiosity_config.novelty_history_maxlen", 1000)
+            
+            # Update pressure parameters
+            self.pressure.base_pressure = self.config_manager.get("curiosity_config.pressure_threshold", 0.7)
+            self.pressure.decay_rate = self.config_manager.get("curiosity_config.decay_rate", 0.9)
+            
+            # Update queue size
+            new_queue_size = self.config_manager.get("curiosity_config.queue_maxlen", 10)
+            if new_queue_size != self.exploration_queue.maxlen:
+                old_queue = list(self.exploration_queue)
+                self.exploration_queue = deque(maxlen=new_queue_size)
+                self.exploration_queue.extend(old_queue[:new_queue_size])
+            
+            self._log_event(
+                "config_updated",
                 message="Curiosity configuration updated",
-                level="info"
+                level="info",
+                additional_info={
+                    "weight_ignorance": self.curiosity.weight_ignorance,
+                    "weight_novelty": self.curiosity.weight_novelty,
+                    "metrics_maxlen": self.curiosity.metrics_maxlen,
+                    "pressure_threshold": self.pressure.base_pressure,
+                    "decay_rate": self.pressure.decay_rate,
+                    "queue_maxlen": new_queue_size
+                }
             )
+            
         except Exception as e:
-            self.logger.record_event(
-                event_type="curiosity_config_update_failed",
-                message=f"Failed to update curiosity configuration: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
+            self._log_error(f"Configuration update failed: {str(e)}")
             
     def _initialize_components(self) -> None:
         """Initialize curiosity components with configuration."""
@@ -423,9 +483,7 @@ class CuriosityManager:
             
             # Initialize components with validated configuration
             self.curiosity = Curiosity(
-                weight_ignorance=weight_ignorance,
-                weight_novelty=weight_novelty,
-                metrics_maxlen=metrics_maxlen,
+                config_manager=self.config_manager,
                 logger=self.logger
             )
             self.callbacks = CuriosityCallbacks(logger=self.logger)
@@ -1012,91 +1070,6 @@ class CuriosityManager:
             })
             return []
             
-    def compute_curiosity(
-        self,
-        base_conf: float,
-        scaf_conf: float,
-        state: SOVLState,
-        query_embedding: torch.Tensor,
-        device: torch.device
-    ) -> float:
-        """Compute curiosity score based on confidence and embeddings with confidence awareness."""
-        try:
-            # Get memory embeddings with memory limits
-            memory_embeddings = self._get_valid_memory_embeddings(state)
-            
-            # Compute base curiosity score
-            ignorance = self._compute_ignorance_score(base_conf, scaf_conf)
-            novelty = (
-                self._compute_novelty_score(memory_embeddings, query_embedding, device)
-                if memory_embeddings and query_embedding is not None
-                else 0.0
-            )
-            
-            # Apply lifecycle stage adjustments if available
-            lifecycle_stage = "unknown"
-            lifecycle_weight = 1.0
-            if self.lifecycle_manager:
-                lifecycle_stage = self.lifecycle_manager._lifecycle_stage
-                lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
-            
-            # Apply confidence-based adjustments if available
-            confidence_weight = 1.0
-            if self.confidence_calculator:
-                # Get current confidence level
-                current_confidence = self.confidence_calculator.calculate_confidence_score(
-                    logits=torch.tensor([]),  # Placeholder, actual logits not needed here
-                    generated_ids=torch.tensor([]),  # Placeholder
-                    state=state,
-                    error_manager=self.error_manager,
-                    context=SystemContext(),  # Placeholder
-                    curiosity_manager=self
-                )
-                
-                # Adjust curiosity based on confidence
-                # Higher confidence leads to more exploration
-                confidence_weight = 1.0 + (current_confidence - 0.5) * 0.5
-                
-                # Log confidence-based adjustment
-                self._log_event(
-                    "confidence_adjustment_applied",
-                    message="Applied confidence-based curiosity adjustment",
-                    level="info",
-                    additional_info={
-                        "current_confidence": current_confidence,
-                        "confidence_weight": confidence_weight,
-                        "base_ignorance": ignorance,
-                        "base_novelty": novelty
-                    }
-                )
-            
-            # Calculate final score with all adjustments
-            base_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
-            final_score = base_score * confidence_weight * lifecycle_weight
-            
-            # Log the complete computation
-            self._log_event(
-                "curiosity_computed",
-                message="Curiosity score computed with confidence integration",
-                level="info",
-                additional_info={
-                    "base_score": base_score,
-                    "final_score": final_score,
-                    "lifecycle_stage": lifecycle_stage,
-                    "lifecycle_weight": lifecycle_weight,
-                    "confidence_weight": confidence_weight,
-                    "ignorance": ignorance,
-                    "novelty": novelty,
-                    "memory_embeddings_count": len(memory_embeddings)
-                }
-            )
-            
-            return self._clamp_score(final_score)
-            
-        except Exception as e:
-            self._log_error(f"Curiosity computation failed: {str(e)}")
-            return 0.5
-
     def get_pressure(self) -> float:
         """Get current pressure with validation, decay, and confidence awareness."""
         try:

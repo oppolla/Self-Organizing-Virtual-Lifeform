@@ -1079,54 +1079,107 @@ class ScaffoldProvider:
             "scaffold_model": None,
             "token_map": None
         }
-        self._scaffold_config = None
-        self._scaffold_state_tensor = None
-        self._hidden_size = None
-        self._num_heads = None
-        self._num_layers = None
-        self._device = None
         
+        # Initialize configuration parameters from schema
+        self._initialize_config()
         self._validate_config()
         
-    def _validate_config(self) -> None:
-        """Validate scaffold provider configuration."""
+    def _initialize_config(self) -> None:
+        """Initialize configuration parameters from the schema."""
         try:
-            required_keys = [
-                "scaffold_config.model_path",
-                "scaffold_config.model_type",
-                "scaffold_config.tokenizer_path",
-                "scaffold_config.quantization_mode"
-            ]
+            # Core scaffold configuration
+            self.enable_scaffold = self._config_manager.get("controls_config.enable_scaffold", True)
+            self.scaffold_weight_cap = self._config_manager.get("controls_config.scaffold_weight_cap", 0.9)
+            self.scaffold_unk_id = self._config_manager.get("controls_config.scaffold_unk_id", 0)
+            self.enable_cross_attention = self._config_manager.get("controls_config.enable_cross_attention", True)
+            self.enable_dynamic_cross_attention = self._config_manager.get("controls_config.enable_dynamic_cross_attention", False)
+            self.injection_strategy = self._config_manager.get("controls_config.injection_strategy", "sequential")
             
-            for key in required_keys:
-                if not self._config_manager.has_key(key):
-                    raise ConfigurationError(f"Missing required config key: {key}")
+            # Memory configuration
+            self.use_scaffold_memory = self._config_manager.get("memory_config.use_scaffold_memory", True)
+            self.scaffold_weight = self._config_manager.get("memory_config.scaffold_weight", 1.0)
+            self.memory_threshold = self._config_manager.get("memory_config.memory_threshold", 0.85)
+            self.memory_decay_rate = self._config_manager.get("memory_config.memory_decay_rate", 0.95)
             
-            model_type = self._config_manager.get("scaffold_config.model_type")
-            if model_type not in ["gpt2", "gptj", "gpt_neox"]:
-                raise ConfigurationError(f"Unsupported model type: {model_type}")
+            # Training configuration
+            self.scaffold_model_name = self._config_manager.get("core_config.scaffold_model_name")
+            self.scaffold_model_path = self._config_manager.get("core_config.scaffold_model_path")
+            self.cross_attn_layers = self._config_manager.get("core_config.cross_attn_layers", [5, 7])
+            self.use_dynamic_layers = self._config_manager.get("core_config.use_dynamic_layers", False)
+            self.layer_selection_mode = self._config_manager.get("core_config.layer_selection_mode", "balanced")
             
-            quantization_mode = self._config_manager.get("scaffold_config.quantization_mode")
-            if quantization_mode not in ["none", "int8", "int4"]:
-                raise ConfigurationError(f"Unsupported quantization mode: {quantization_mode}")
-            
-            self._logger.record_event(
-                event_type="scaffold_config_validated",
-                message="Scaffold configuration validated successfully",
+            self._logger.log_event(
+                event_type="scaffold_config_initialized",
+                message="Scaffold configuration initialized",
                 level="info",
-                additional_info={"timestamp": time.time()}
-            )
-        except Exception as e:
-            self._logger.record_event(
-                event_type="scaffold_config_error",
-                message=f"Failed to validate scaffold config: {str(e)}",
-                level="error",
                 additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
+                    "enable_scaffold": self.enable_scaffold,
+                    "scaffold_weight_cap": self.scaffold_weight_cap,
+                    "enable_cross_attention": self.enable_cross_attention,
+                    "injection_strategy": self.injection_strategy
                 }
             )
-            raise
+            
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Failed to initialize scaffold configuration: {str(e)}",
+                error_type="config_initialization_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise ConfigurationError(f"Failed to initialize scaffold configuration: {str(e)}")
+            
+    def _validate_config(self) -> None:
+        """Validate the scaffold configuration parameters."""
+        try:
+            # Validate core parameters
+            if not isinstance(self.enable_scaffold, bool):
+                raise ValueError("enable_scaffold must be a boolean")
+            if not 0.0 <= self.scaffold_weight_cap <= 1.0:
+                raise ValueError("scaffold_weight_cap must be between 0.0 and 1.0")
+            if not isinstance(self.scaffold_unk_id, int) or self.scaffold_unk_id < 0:
+                raise ValueError("scaffold_unk_id must be a non-negative integer")
+            if not isinstance(self.enable_cross_attention, bool):
+                raise ValueError("enable_cross_attention must be a boolean")
+            if not isinstance(self.enable_dynamic_cross_attention, bool):
+                raise ValueError("enable_dynamic_cross_attention must be a boolean")
+            if self.injection_strategy not in ["sequential", "parallel"]:
+                raise ValueError("injection_strategy must be either 'sequential' or 'parallel'")
+            
+            # Validate memory parameters
+            if not isinstance(self.use_scaffold_memory, bool):
+                raise ValueError("use_scaffold_memory must be a boolean")
+            if not 0.0 <= self.scaffold_weight <= 1.0:
+                raise ValueError("scaffold_weight must be between 0.0 and 1.0")
+            if not 0.0 <= self.memory_threshold <= 1.0:
+                raise ValueError("memory_threshold must be between 0.0 and 1.0")
+            if not 0.0 <= self.memory_decay_rate <= 1.0:
+                raise ValueError("memory_decay_rate must be between 0.0 and 1.0")
+            
+            # Validate model parameters
+            if self.scaffold_model_name and not isinstance(self.scaffold_model_name, str):
+                raise ValueError("scaffold_model_name must be a string")
+            if self.scaffold_model_path and not isinstance(self.scaffold_model_path, str):
+                raise ValueError("scaffold_model_path must be a string")
+            if not isinstance(self.cross_attn_layers, list):
+                raise ValueError("cross_attn_layers must be a list")
+            if not isinstance(self.use_dynamic_layers, bool):
+                raise ValueError("use_dynamic_layers must be a boolean")
+            if self.layer_selection_mode not in ["balanced", "random", "fixed"]:
+                raise ValueError("layer_selection_mode must be one of: balanced, random, fixed")
+            
+            self._logger.log_event(
+                event_type="scaffold_config_validated",
+                message="Scaffold configuration validated successfully",
+                level="info"
+            )
+            
+        except Exception as e:
+            self._logger.log_error(
+                error_msg=f"Scaffold configuration validation failed: {str(e)}",
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise ConfigurationError(f"Scaffold configuration validation failed: {str(e)}")
 
     def initialize_scaffold(self) -> None:
         """Initialize the scaffold model and tokenizer."""

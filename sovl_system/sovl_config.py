@@ -97,9 +97,9 @@ class ConfigStore:
             "core_config": {},
             "lora_config": {},
             "training_config": {"dry_run_params": {}},
-            "curiosity_config": {},
+            "curiosity_config": {"lifecycle_params": {}},
             "cross_attn_config": {},
-            "controls_config": {},
+            "controls_config": {"lifecycle_params": {}},
             "logging_config": {},
             "dynamic_weighting": {},
             "preprocessing": {},
@@ -112,6 +112,10 @@ class ConfigStore:
             "state_config": {},
             "temperament_config": {},
             "confidence_config": {},
+            "model": {},
+            "data_provider": {},
+            "dream_memory_config": {},
+            "scaffold_config": {},
         }
         self.cache: Dict[str, Any] = {}
 
@@ -123,10 +127,22 @@ class ConfigStore:
             section, field = keys
             self.flat_config.setdefault(section, {})[field] = value
             self.structured_config[section][field] = value
-        elif len(keys) == 3 and keys[0] == "training_config" and keys[1] == "dry_run_params":
+        elif len(keys) == 3:
             section, sub_section, field = keys
-            self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
-            self.structured_config[section][sub_section][field] = value
+            if section == "training_config" and sub_section == "dry_run_params":
+                self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
+                self.structured_config[section][sub_section][field] = value
+            elif section == "controls_config" and sub_section == "lifecycle_params":
+                self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
+                self.structured_config[section][sub_section][field] = value
+            elif section == "curiosity_config" and sub_section == "lifecycle_params":
+                self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
+                self.structured_config[section][sub_section][field] = value
+        elif len(keys) == 4:
+            section, sub_section, sub_sub_section, field = keys
+            if section in ["controls_config", "curiosity_config"] and sub_section == "lifecycle_params":
+                self.flat_config.setdefault(section, {}).setdefault(sub_section, {}).setdefault(sub_sub_section, {})[field] = value
+                self.structured_config[section][sub_section][sub_sub_section][field] = value
 
     def get_value(self, key: str, default: Any) -> Any:
         """Retrieve a value from the configuration."""
@@ -153,9 +169,21 @@ class ConfigStore:
             if len(keys) == 2:
                 field = keys[1]
                 self.structured_config[section][field] = self.get_value(schema.field, schema.default)
-            elif len(keys) == 3 and section == "training_config" and keys[1] == "dry_run_params":
+            elif len(keys) == 3:
+                sub_section = keys[1]
                 field = keys[2]
-                self.structured_config[section]["dry_run_params"][field] = self.get_value(schema.field, schema.default)
+                if section == "training_config" and sub_section == "dry_run_params":
+                    self.structured_config[section]["dry_run_params"][field] = self.get_value(schema.field, schema.default)
+                elif section == "controls_config" and sub_section == "lifecycle_params":
+                    self.structured_config[section]["lifecycle_params"][field] = self.get_value(schema.field, schema.default)
+                elif section == "curiosity_config" and sub_section == "lifecycle_params":
+                    self.structured_config[section]["lifecycle_params"][field] = self.get_value(schema.field, schema.default)
+            elif len(keys) == 4:
+                sub_section = keys[1]
+                sub_sub_section = keys[2]
+                field = keys[3]
+                if section in ["controls_config", "curiosity_config"] and sub_section == "lifecycle_params":
+                    self.structured_config[section][sub_section].setdefault(sub_sub_section, {})[field] = self.get_value(schema.field, schema.default)
 
     def update_cache(self, schemas: List[ConfigSchema]) -> None:
         """Update cache with current config values."""
@@ -226,14 +254,6 @@ class FileHandler:
                 time.sleep(0.1)
         return False
 
-class ConfigKey(NamedTuple):
-    """Represents a configuration key with section and field."""
-    section: str
-    field: str
-
-    def __str__(self) -> str:
-        return f"{self.section}.{self.field}"
-
 class ConfigKeys:
     """Type-safe configuration keys."""
     # Processor Config
@@ -241,8 +261,31 @@ class ConfigKeys:
     
     # Controls Config
     CONTROLS_MEMORY_THRESHOLD = ConfigKey("controls_config", "memory_threshold")
+    CONTROLS_BLEND_STRENGTH = ConfigKey("controls_config", "blend_strength")
+    CONTROLS_ATTENTION_WEIGHT = ConfigKey("controls_config", "attention_weight")
+    CONTROLS_TEMP_EAGER_THRESHOLD = ConfigKey("controls_config", "temp_eager_threshold")
     
-    # Add more keys as needed...
+    # Model Config
+    MODEL_PATH = ConfigKey("model", "model_path")
+    MODEL_TYPE = ConfigKey("model", "model_type")
+    MODEL_QUANTIZATION_MODE = ConfigKey("model", "quantization_mode")
+    
+    # Data Provider Config
+    DATA_PROVIDER_TYPE = ConfigKey("data_provider", "provider_type")
+    DATA_PROVIDER_PATH = ConfigKey("data_provider", "data_path")
+    
+    # Training Config
+    TRAINING_GRAD_ACCUM_STEPS = ConfigKey("training_config", "grad_accum_steps")
+    TRAINING_MODEL_NAME = ConfigKey("training_config", "model_name")
+    
+    # Dream Memory Config
+    DREAM_MEMORY_MAX_MEMORIES = ConfigKey("dream_memory_config", "max_memories")
+    
+    # Curiosity Config
+    CURIOSITY_MAX_MEMORY_MB = ConfigKey("curiosity_config", "max_memory_mb")
+    
+    # Hardware Config
+    HARDWARE_MAX_SCAFFOLD_MEMORY_MB = ConfigKey("hardware", "max_scaffold_memory_mb")
 
 class ConfigManager:
     """Manages SOVLSystem configuration with validation, thread safety, and persistence.
@@ -619,7 +662,9 @@ class ConfigManager:
                 "core_config.scaffold_model_name",
                 "training_config.learning_rate",
                 "curiosity_config.enable_curiosity",
-                "cross_attn_config.memory_weight"
+                "cross_attn_config.memory_weight",
+                "model.model_path",
+                "data_provider.data_path",
             ])
 
             cross_attn_layers = self.get("core_config.cross_attn_layers", [5, 7])

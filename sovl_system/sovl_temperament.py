@@ -34,6 +34,8 @@ class TemperamentConfig:
         try:
             # Define required keys and their validation ranges
             required_keys = {
+                "temperament_config.mood_influence": (0.0, 1.0),
+                "temperament_config.history_maxlen": (3, 10),
                 "controls_config.temp_eager_threshold": (0.7, 0.9),
                 "controls_config.temp_sluggish_threshold": (0.3, 0.6),
                 "controls_config.temp_mood_influence": (0.0, 1.0),
@@ -293,7 +295,7 @@ class TemperamentSystem:
             # Get current temperament score and lifecycle stage
             current_score = self.current_score
             lifecycle_params = self.temperament_config.get("controls_config.lifecycle_params", {})
-            stage_params = lifecycle_params.get(self._lifecycle_stage, {})
+            stage_params = lifecycle_params.get(self._lifecycle_stage, {}) if lifecycle_params else {}
             
             # Calculate adjustment based on parameter type
             if parameter_type == "temperature":
@@ -304,9 +306,32 @@ class TemperamentSystem:
                 if curiosity_pressure is not None:
                     adjustment += curiosity_pressure * 0.2  # Scale to +0.2
                 
-                # Apply lifecycle-based adjustments
-                if "temperature_bias" in stage_params:
-                    adjustment += stage_params["temperature_bias"]
+                # Apply lifecycle-based adjustments if available
+                if stage_params and "temperature_bias" in stage_params:
+                    try:
+                        temperature_bias = float(stage_params["temperature_bias"])
+                        if -0.5 <= temperature_bias <= 0.5:  # Validate bias range
+                            adjustment += temperature_bias
+                        else:
+                            self.logger.record_event(
+                                event_type="temperament_parameter_warning",
+                                message="Temperature bias out of valid range, ignoring",
+                                level="warning",
+                                additional_info={
+                                    "temperature_bias": temperature_bias,
+                                    "lifecycle_stage": self._lifecycle_stage
+                                }
+                            )
+                    except (ValueError, TypeError):
+                        self.logger.record_event(
+                            event_type="temperament_parameter_error",
+                            message="Invalid temperature bias value",
+                            level="error",
+                            additional_info={
+                                "temperature_bias": stage_params.get("temperature_bias"),
+                                "lifecycle_stage": self._lifecycle_stage
+                            }
+                        )
                 
                 # Apply adjustment with bounds
                 adjusted_value = base_value + adjustment
@@ -333,17 +358,16 @@ class TemperamentSystem:
                 
             else:
                 raise ValueError(f"Unsupported parameter type: {parameter_type}")
-                
+            
         except Exception as e:
-            self.logger.record_event(
-                event_type="parameter_adjustment_error",
-                message=f"Failed to adjust parameter: {str(e)}",
-                level="error",
+            self.logger.log_error(
+                error_msg=f"Failed to adjust parameter: {str(e)}",
+                error_type="parameter_adjustment_error",
+                stack_trace=traceback.format_exc(),
                 additional_info={
                     "parameter_type": parameter_type,
                     "base_value": base_value,
-                    "curiosity_pressure": curiosity_pressure,
-                    "lifecycle_stage": self._lifecycle_stage
+                    "curiosity_pressure": curiosity_pressure
                 }
             )
             return base_value  # Return base value on error

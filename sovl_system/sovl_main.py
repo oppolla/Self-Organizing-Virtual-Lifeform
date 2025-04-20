@@ -135,7 +135,11 @@ class ModelLoader:
         """
         self.context = context
         self.logger = context.logger
-        self.config = context.config_handler.get_section("model")
+        self.config = {
+            "model_path": context.config_handler.config_manager.get(ConfigKeys.MODEL_PATH),
+            "model_type": context.config_handler.config_manager.get(ConfigKeys.MODEL_TYPE),
+            "quantization_mode": context.config_handler.config_manager.get(ConfigKeys.MODEL_QUANTIZATION_MODE)
+        }
         
         # Validate model configuration
         if not self._validate_model_config():
@@ -148,15 +152,19 @@ class ModelLoader:
     def _validate_model_config(self) -> bool:
         """Validate model configuration section."""
         try:
-            required_fields = ["model_path", "model_type", "quantization_mode"]
+            required_fields = [
+                ConfigKeys.MODEL_PATH,
+                ConfigKeys.MODEL_TYPE,
+                ConfigKeys.MODEL_QUANTIZATION_MODE
+            ]
             for field in required_fields:
-                if field not in self.config:
+                if self.context.config_handler.config_manager.get(field) is None:
                     self.logger.log_error(
                         error_msg=f"Missing required model configuration field: {field}",
                         error_type="config_validation_error",
                         stack_trace=None,
                         additional_info={
-                            "missing_field": field,
+                            "missing_field": str(field),
                             "config_section": "model"
                         }
                     )
@@ -917,12 +925,37 @@ class CuriosityEngine:
     def _create_training_cycle_manager(self) -> TrainingCycleManager:
         """Create and initialize the training cycle manager."""
         try:
+            # Initialize DataManager with data_provider config
+            data_config = self.config_handler.config_manager.get_section("data_provider")
+            provider_type = data_config.get("provider_type", "default")
+            data_path = data_config.get("data_path", "")
+
+            if provider_type not in ["default", "file", "database"]:
+                self.logger.record_event(
+                    event_type="data_config_error",
+                    message=f"Unsupported provider_type: {provider_type}",
+                    level="error"
+                )
+                raise ValueError(f"Unsupported provider_type: {provider_type}")
+
+            if provider_type in ["default", "file"]:
+                data_provider = FileDataProvider(data_path)
+            else:  # database
+                data_provider = DatabaseDataProvider(data_path)
+
+            data_manager = DataManager(
+                provider=data_provider,
+                logger=self.logger,
+                config_manager=self.config_handler.config_manager
+            )
+
             return TrainingCycleManager(
                 config=self.config_handler.config_manager.get_section("sovl_config"),
                 logger=self.logger,
                 device=self.device,
                 state_manager=self.state_tracker,
-                curiosity_manager=self.curiosity_manager
+                curiosity_manager=self.curiosity_manager,
+                data_manager=data_manager  # Pass initialized DataManager
             )
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, "cycle_manager_creation")

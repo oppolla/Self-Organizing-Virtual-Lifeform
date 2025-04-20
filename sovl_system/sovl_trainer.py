@@ -986,8 +986,35 @@ class TrainingCycleManager:
         self.device = device
         self.state_manager = state_manager
         self.curiosity_manager = curiosity_manager
+        self.data_manager = data_manager
+
+        # Training configuration
+        training_config = config.get("training_config", {})
+        self.learning_rate = training_config.get("learning_rate", 1.5e-5)
+        self.batch_size = training_config.get("batch_size", 4)
+        self.grad_accum_steps = training_config.get("grad_accum_steps", 4)  # Renamed from accumulation_steps
+        self.warmup_steps = training_config.get("warmup_steps", 300)
+        self.model_name = training_config.get("model_name", "SmolLM2-360M") 
         
-        # Initialize trainer with current state
+         # Dream memory configuration
+        dream_memory_config = config.get("dream_memory_config", {})
+        self.max_dream_memories = dream_memory_config.get("max_memories", 100)
+        self.dream_base_weight = dream_memory_config.get("base_weight", 0.1)
+        self.dream_max_weight = dream_memory_config.get("max_weight", 1.5)
+        
+        self.logger.record_event(
+            event_type="training_cycle_manager_init",
+            message="TrainingCycleManager initialized",
+            level="info",
+            additional_info={
+                "learning_rate": self.learning_rate,
+                "batch_size": self.batch_size,
+                "grad_accum_steps": self.grad_accum_steps,
+                "model_name": self.model_name,
+                "max_dream_memories": self.max_dream_memories
+            }
+        ) # New parameter
+             # Initialize trainer with current state
         self.trainer = SOVLTrainer(
             config=config,
             state=state_manager.get_state(),
@@ -1029,13 +1056,48 @@ class TrainingCycleManager:
                 self.trainer.state = state
                 self.trainer.curiosity_manager.set_state(state)
             
+            # Get configuration parameters using type-safe keys
+            max_epochs = epochs or self.config_manager.get(ConfigKeys.TRAINING_MAX_EPOCHS, 10)
+            batch_size = batch_size or self.config_manager.get(ConfigKeys.TRAINING_BATCH_SIZE, 4)
+            grad_accum_steps = self.config_manager.get(ConfigKeys.TRAINING_GRAD_ACCUM_STEPS, 4)
+            model_name = self.config_manager.get(ConfigKeys.TRAINING_MODEL_NAME, "SmolLM2-360M")
+            
+            # Dream memory configuration
+            max_dream_memories = self.config_manager.get(ConfigKeys.DREAM_MEMORY_MAX_MEMORIES, 100)
+            dream_base_weight = self.config_manager.get("dream_memory_config.base_weight", 0.1)
+            dream_max_weight = self.config_manager.get("dream_memory_config.max_weight", 1.5)
+            
+            # Manage dream memory (if applicable)
+            if hasattr(self.trainer, 'dream_memory'):
+                # Trim dream memory to max_memories
+                if len(self.trainer.dream_memory) > max_dream_memories:
+                    self.trainer.dream_memory = self.trainer.dream_memory[-max_dream_memories:]
+                    self.logger.record_event(
+                        event_type="dream_memory_trimmed",
+                        message="Dream memory trimmed to max_memories",
+                        level="info",
+                        additional_info={
+                            "max_memories": max_dream_memories,
+                            "conversation_id": self.state.history.conversation_id
+                        }
+                    )
+                
+                # Apply weights to dream memory entries
+                for memory in self.trainer.dream_memory:
+                    memory["weight"] = min(
+                        dream_max_weight,
+                        max(dream_base_weight, memory.get("weight", dream_base_weight))
+                    )
+            
             # Run training cycle through trainer
             results = self.trainer.run_training_cycle(
                 train_data=train_data,
                 validation_data=valid_data,
                 scaffold_provider=scaffold_provider,
-                max_epochs=epochs or self.config.max_epochs,
-                batch_size=batch_size or self.config.batch_size
+                max_epochs=max_epochs,
+                batch_size=batch_size,
+                grad_accum_steps=grad_accum_steps,  # Pass updated parameter
+                model_name=model_name  # Pass new parameter
             )
             
             # Save updated state
@@ -1044,12 +1106,17 @@ class TrainingCycleManager:
             # Log successful training cycle
             self.logger.log_training_event(
                 event_type="training_cycle_complete",
-                epoch=epochs or self.config.max_epochs,
-                batch_size=batch_size or self.config.batch_size,
+                epoch=max_epochs,
+                batch_size=batch_size,
                 data_exposure=results.get("data_exposure", 0.0),
                 conversation_id=self.state.history.conversation_id,
                 state_hash=self.state.state_hash,
-                additional_info=results
+                additional_info={
+                    **results,
+                    "grad_accum_steps": grad_accum_steps,
+                    "model_name": model_name,
+                    "dream_memory_size": len(self.trainer.dream_memory) if hasattr(self.trainer, 'dream_memory') else 0
+                }
             )
             
             return results
@@ -1057,7 +1124,8 @@ class TrainingCycleManager:
         except Exception as e:
             self.logger.record({
                 "error": f"Training cycle failed: {str(e)}",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "conversation_id": self.state.history.conversation_id
             })
             raise
             
