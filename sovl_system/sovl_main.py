@@ -123,192 +123,6 @@ class SystemInitializationError(Exception):
         self.stack_trace = stack_trace
         super().__init__(f"{message}\nConfig path: {config_path}\nStack trace:\n{stack_trace}")
 
-class ModelLoader:
-    """Handles model loading and initialization."""
-    
-    def __init__(self, context: SystemContext):
-        """
-        Initialize model loader with system context.
-        
-        Args:
-            context: System context containing shared resources
-        """
-        self.context = context
-        self.logger = context.logger
-        self.config = context.config_handler.get_section("model")
-        
-        # Validate model configuration
-        if not self._validate_model_config():
-            raise ModelLoadingError(
-                "Invalid model configuration",
-                self.config,
-                traceback.format_exc()
-            )
-            
-    def _validate_model_config(self) -> bool:
-        """Validate model configuration section."""
-        try:
-            required_fields = ["model_path", "model_type", "quantization_mode"]
-            for field in required_fields:
-                if field not in self.config or self.config[field] is None:
-                    self.logger.log_error(
-                        error_msg=f"Missing or invalid model configuration field: {field}",
-                        error_type="config_validation_error",
-                        stack_trace=None,
-                        additional_info={
-                            "missing_field": field,
-                            "config_section": "model"
-                        }
-                    )
-                    return False
-                    
-            # Validate quantization mode
-            if not validate_quantization_mode(self.config["quantization_mode"]):
-                self.logger.log_error(
-                    error_msg=f"Invalid quantization mode: {self.config['quantization_mode']}",
-                    error_type="config_validation_error",
-                    stack_trace=None,
-                    additional_info={
-                        "invalid_value": self.config["quantization_mode"],
-                        "config_section": "model"
-                    }
-                )
-                return False
-                
-            return True
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to validate model configuration: {str(e)}",
-                error_type="config_validation_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_section": "model"
-                }
-            )
-            return False
-            
-    def load_model(self) -> torch.nn.Module:
-        """Load and initialize the model with validated configuration."""
-        try:
-            if not self._validate_model_config():
-                raise ModelLoadingError(
-                    "Cannot load model with invalid configuration",
-                    self.config,
-                    traceback.format_exc()
-                )
-                
-            # Load model with validated configuration
-            model = self._load_model(
-                self.config["model_path"],
-                self.config["model_type"],
-                self.config["quantization_mode"],
-                self.context.device
-            )
-            
-            self.logger.record_event(
-                event_type="model_loaded",
-                message="Model loaded successfully",
-                level="info",
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"],
-                    "device": self.context.device
-                }
-            )
-            
-            return model
-            
-        except NameError as e:
-            self.logger.log_error(
-                error_msg=f"Model loading function not defined: {str(e)}",
-                error_type="model_loading_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"]
-                }
-            )
-            raise ModelLoadingError("Model loading function is not defined.") from e
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="model_loading_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"]
-                }
-            )
-            raise
-
-            
-    def load_model(self) -> torch.nn.Module:
-        """Load and initialize the model with validated configuration."""
-        try:
-            if not self._validate_model_config():
-                raise ModelLoadingError(
-                    "Cannot load model with invalid configuration",
-                    self.config,
-                    traceback.format_exc()
-                )
-                
-            # Load model with validated configuration
-            model = self._load_model(
-                self.config["model_path"],
-                self.config["model_type"],
-                self.config["quantization_mode"],
-                self.context.device
-            )
-            
-            self.logger.record_event(
-                event_type="model_loaded",
-                message="Model loaded successfully",
-                level="info",
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"],
-                    "device": self.context.device
-                }
-            )
-            
-            return model
-            
-        except NameError as e:
-            self.logger.log_error(
-                error_msg=f"Model loading function not defined: {str(e)}",
-                error_type="model_loading_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"]
-                }
-            )
-            raise ModelLoadingError("Model loading function is not defined.") from e
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="model_loading_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "model_path": self.config["model_path"],
-                    "model_type": self.config["model_type"],
-                    "quantization_mode": self.config["quantization_mode"]
-                }
-            )
-            raise
-
-    def _load_model(self, model_path: str, model_type: str, quantization_mode: str, device: str) -> nn.Module:
-        """Load the model based on the provided parameters."""
-        # Placeholder for actual model loading logic
-        # This should be implemented to load the model based on the type and quantization
-        raise NotImplementedError("Model loading logic is not implemented.")
-
 class StateTracker:
     """Tracks system state and history."""
     
@@ -958,7 +772,7 @@ class CuriosityEngine:
     def __init__(
         self,
         config_handler: ConfigHandler,
-        model_loader: ModelLoader,
+        model_manager: ModelManager,
         state_tracker: StateTracker,
         error_manager: ErrorManager,
         logger: Logger,
@@ -969,14 +783,14 @@ class CuriosityEngine:
         
         Args:
             config_handler: Configuration handler
-            model_loader: Model loader instance
+            model_manager: Model manager instance
             state_tracker: State tracker instance
             error_manager: Error manager instance
             logger: Logger instance
             device: Device to use for tensor operations
         """
         self.config_handler = config_handler
-        self.model_loader = model_loader
+        self.model_manager = model_manager
         self.state_tracker = state_tracker
         self.error_manager = error_manager
         self.logger = logger
@@ -1093,7 +907,7 @@ class SOVLSystem(SystemInterface):
         self,
         context: SystemContext,
         config_handler: ConfigHandler,
-        model_loader: ModelLoader,
+        model_manager: ModelManager,
         curiosity_engine: CuriosityEngine,
         memory_monitor: MemoryMonitor,
         state_tracker: StateTracker,
@@ -1105,7 +919,7 @@ class SOVLSystem(SystemInterface):
         Args:
             context: System context containing shared resources
             config_handler: Configuration handler component
-            model_loader: Model loading component
+            model_manager: Model manager component
             curiosity_engine: Curiosity engine component
             memory_monitor: Memory monitoring component
             state_tracker: State tracking component
@@ -1116,7 +930,7 @@ class SOVLSystem(SystemInterface):
             validate_components(
                 context=context,
                 config_handler=config_handler,
-                model_loader=model_loader,
+                model_manager=model_manager,
                 curiosity_engine=curiosity_engine,
                 memory_monitor=memory_monitor,
                 state_tracker=state_tracker,
@@ -1126,7 +940,7 @@ class SOVLSystem(SystemInterface):
             # Store injected components
             self.context = context
             self.config_handler = config_handler
-            self.model_loader = model_loader
+            self.model_manager = model_manager
             self.curiosity_engine = curiosity_engine
             self.memory_monitor = memory_monitor
             self.state_tracker = state_tracker
@@ -1168,7 +982,7 @@ class SOVLSystem(SystemInterface):
             components = [
                 self.curiosity_engine,
                 self.memory_monitor,
-                self.model_loader
+                self.model_manager
             ]
             initialize_component_state(self.state_tracker, components)
         except Exception as e:
@@ -1323,7 +1137,7 @@ class SOVLSystem(SystemInterface):
         """Get status of all system components."""
         try:
             return {
-                "model_loader": hasattr(self, "model_loader"),
+                "model_manager": hasattr(self, "model_manager"),
                 "curiosity_engine": hasattr(self, "curiosity_engine"),
                 "memory_monitor": hasattr(self, "memory_monitor"),
                 "state_tracker": hasattr(self, "state_tracker"),
