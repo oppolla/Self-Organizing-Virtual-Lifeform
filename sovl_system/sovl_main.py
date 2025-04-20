@@ -12,7 +12,7 @@ from collections import deque, defaultdict
 import traceback
 import os
 from threading import Lock
-from sovl_curiosity import CuriosityManager, CuriosityState
+from sovl_curiosity import CuriosityEngine, CuriosityManager
 from sovl_logger import Logger
 from sovl_io import validate_quantization_mode, InsufficientDataError
 from sovl_state import SOVLState, ConversationHistory
@@ -42,7 +42,6 @@ from sovl_utils import (
     sync_component_states,
     validate_component_states
 )
-
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -766,140 +765,6 @@ class MemoryMonitor:
             self.context.error_manager.handle_memory_error(e, model_size)
             return False
 
-class CuriosityEngine:
-    """Manages curiosity-driven exploration and learning."""
-    
-    def __init__(
-        self,
-        config_handler: ConfigHandler,
-        model_manager: ModelManager,
-        state_tracker: StateTracker,
-        error_manager: ErrorManager,
-        logger: Logger,
-        device: str
-    ):
-        """
-        Initialize the curiosity engine with explicit dependencies.
-        
-        Args:
-            config_handler: Configuration handler
-            model_manager: Model manager instance
-            state_tracker: State tracker instance
-            error_manager: Error manager instance
-            logger: Logger instance
-            device: Device to use for tensor operations
-        """
-        self.config_handler = config_handler
-        self.model_manager = model_manager
-        self.state_tracker = state_tracker
-        self.error_manager = error_manager
-        self.logger = logger
-        self.device = device
-        
-        # Initialize components
-        self.curiosity_manager = self._create_curiosity_manager()
-        self.cycle_manager = self._create_training_cycle_manager()
-        
-        # Log initialization
-        self.logger.record_event(
-            event_type="curiosity_engine_initialized",
-            message="Curiosity engine initialized successfully",
-            level="info"
-        )
-        
-    def _create_curiosity_manager(self) -> CuriosityManager:
-        """Create and initialize the curiosity manager."""
-        try:
-            return CuriosityManager(
-                config_manager=self.config_handler.config_manager,
-                logger=self.logger,
-                device=self.device
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0)
-            raise
-            
-    def _create_training_cycle_manager(self) -> TrainingCycleManager:
-        """Create and initialize the training cycle manager."""
-        try:
-            return TrainingCycleManager(
-                config=self.config_handler.config_manager.get_section("sovl_config"),
-                logger=self.logger,
-                device=self.device,
-                state_manager=self.state_tracker,
-                curiosity_manager=self.curiosity_manager
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0)
-            raise
-            
-    def _validate_configuration(self) -> bool:
-        """Validate current configuration state."""
-        try:
-            if not self.config_handler.validate():
-                self.logger.record_event(
-                    event_type="config_validation_failed",
-                    message="Configuration validation failed, attempting recovery",
-                    level="error"
-                )
-                self.config_handler._refresh_configs()
-                if not self.config_handler.validate():
-                    self.logger.record_event(
-                        event_type="config_recovery_failed",
-                        message="Configuration recovery failed",
-                        level="error"
-                    )
-                    return False
-            return True
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Error during configuration validation: {str(e)}",
-                error_type="config_validation_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"error": str(e)}
-            )
-            return False
-            
-    def run_training_cycle(
-        self,
-        train_data: Optional[List] = None,
-        valid_data: Optional[List] = None,
-        epochs: Optional[int] = None,
-        batch_size: Optional[int] = None
-    ) -> None:
-        """Run a training cycle with configuration validation."""
-        try:
-            if not self._validate_configuration():
-                raise RuntimeError("Invalid configuration state")
-                
-            state = self.state_tracker.get_state()
-            
-            results = self.cycle_manager.run_training_cycle(
-                train_data=train_data,
-                valid_data=valid_data,
-                epochs=epochs,
-                batch_size=batch_size
-            )
-            
-            self._log_event("training_complete", {
-                "epochs": epochs,
-                "batch_size": batch_size,
-                "results": results
-            })
-            
-        except Exception as e:
-            self.error_manager.handle_training_error(e, batch_size or 1)
-            raise
-            
-    def _log_event(self, event: str, data: Optional[Dict] = None) -> None:
-        """Log an event with standardized fields."""
-        self.logger.record_event(
-            event_type=f"curiosity_{event}",
-            message=f"Curiosity event: {event}",
-            level="info",
-            additional_info=data
-        )
-
 class SOVLSystem(SystemInterface):
     """Main SOVL system class that manages all components and state."""
     
@@ -965,31 +830,55 @@ class SOVLSystem(SystemInterface):
             )
             
         except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to initialize SOVL system: {str(e)}",
-                error_type="system_initialization_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_path": self.config_handler.config_path if hasattr(self, 'config_handler') else None,
-                    "device": self.context.device if hasattr(self, 'context') else None
+            self.error_manager.handle_error(
+                error_type="system_initialization",
+                error_message=f"Failed to initialize SOVL system: {str(e)}",
+                error_context={
+                    "config_path": config_handler.config_path if config_handler else None,
+                    "device": context.device if context else None
                 }
             )
             raise
 
-    def _initialize_component_state(self) -> None:
-        """Initialize state for all components."""
+    def _initialize_component_state(self):
+        """Initialize the state of all components."""
         try:
-            components = [
-                self.curiosity_engine,
-                self.memory_monitor,
-                self.model_manager
-            ]
-            initialize_component_state(self.state_tracker, components)
+            # Initialize component states
+            self.state_tracker.update_state({
+                "config_handler": {
+                    "status": "initialized",
+                    "config_path": self.config_handler.config_path
+                },
+                "model_manager": {
+                    "status": "initialized",
+                    "active_model": self.model_manager.active_model_name if self.model_manager else None
+                },
+                "curiosity_engine": {
+                    "status": "initialized",
+                    "question_cache_size": len(self.curiosity_engine.question_cache) if self.curiosity_engine else 0
+                },
+                "memory_monitor": {
+                    "status": "initialized",
+                    "memory_usage": self.memory_monitor.get_memory_usage() if self.memory_monitor else None
+                },
+                "state_tracker": {
+                    "status": "initialized",
+                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+                },
+                "error_manager": {
+                    "status": "initialized",
+                    "error_count": len(self.error_manager.error_history) if self.error_manager else 0
+                }
+            })
+            
         except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to initialize component state: {str(e)}",
-                error_type="component_state_initialization_error",
-                stack_trace=traceback.format_exc()
+            self.error_manager.handle_error(
+                error_type="component_state_initialization",
+                error_message=f"Failed to initialize component states: {str(e)}",
+                error_context={
+                    "component": "SOVLSystem",
+                    "method": "_initialize_component_state"
+                }
             )
             raise
 

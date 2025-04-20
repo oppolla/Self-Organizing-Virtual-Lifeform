@@ -13,6 +13,8 @@ from sovl_logger import Logger
 from sovl_trainer import LifecycleManager
 from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
+from sovl_manager import ModelManager
+from sovl_schema import ConfigSchema
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -216,7 +218,6 @@ class Curiosity:
                 **kwargs
             )
 
-
 class CuriosityPressure:
     """Manages curiosity pressure accumulation and eruption."""
     
@@ -245,7 +246,6 @@ class CuriosityPressure:
     def drop_pressure(self, amount: float) -> None:
         """Reduce pressure by a specified amount."""
         self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
-
 
 class CuriosityCallbacks:
     """Handles curiosity-related callbacks."""
@@ -1227,3 +1227,97 @@ class CuriosityManager:
         except Exception as e:
             self._log_error(f"Failed to get pressure stats: {str(e)}")
             return {}
+
+class CuriosityEngine:
+    """Manages curiosity-driven exploration and learning."""
+    
+    def __init__(
+        self,
+        config_handler: ConfigHandler,
+        model_manager: ModelManager,
+        state_tracker: StateTracker,
+        error_manager: ErrorManager,
+        logger: Logger,
+        device: str
+    ):
+        """
+        Initialize the curiosity engine with explicit dependencies.
+        
+        Args:
+            config_handler: Configuration handler
+            model_manager: Model manager instance
+            state_tracker: State tracker instance
+            error_manager: Error manager instance
+            logger: Logger instance
+            device: Device to use for tensor operations
+        """
+        self.config_handler = config_handler
+        self.model_manager = model_manager
+        self.state_tracker = state_tracker
+        self.error_manager = error_manager
+        self.logger = logger
+        self.device = device
+        
+        # Initialize components
+        self.curiosity_manager = self._create_curiosity_manager()
+        self.cycle_manager = self._create_training_cycle_manager()
+        
+        # Log initialization
+        self.logger.record_event(
+            event_type="curiosity_engine_initialized",
+            message="Curiosity engine initialized successfully",
+            level="info"
+        )
+        
+    def _create_curiosity_manager(self) -> CuriosityManager:
+        """Create and initialize the curiosity manager."""
+        try:
+            return CuriosityManager(
+                config_manager=self.config_handler.config_manager,
+                logger=self.logger,
+                device=self.device
+            )
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0)
+            raise
+            
+    def _create_training_cycle_manager(self) -> TrainingCycleManager:
+        """Create and initialize the training cycle manager."""
+        try:
+            return TrainingCycleManager(
+                config=self.config_handler.config_manager.get_section("sovl_config"),
+                logger=self.logger,
+                device=self.device,
+                state_manager=self.state_tracker,
+                curiosity_manager=self.curiosity_manager
+            )
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0)
+            raise
+            
+    def _validate_configuration(self) -> bool:
+        """Validate current configuration state."""
+        try:
+            if not self.config_handler.validate():
+                self.logger.record_event(
+                    event_type="config_validation_failed",
+                    message="Configuration validation failed, attempting recovery",
+                    level="error"
+                )
+                self.config_handler._refresh_configs()
+                if not self.config_handler.validate():
+                    self.logger.record_event(
+                        event_type="config_recovery_failed",
+                        message="Configuration recovery failed",
+                        level="error"
+                    )
+                    return False
+            return True
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Error during configuration validation: {str(e)}",
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error": str(e)}
+            )
+            return False

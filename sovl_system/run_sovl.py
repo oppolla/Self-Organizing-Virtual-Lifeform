@@ -11,7 +11,8 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from sovl_main import SystemContext, SOVLSystem, ModelLoader, StateTracker, ErrorManager, MemoryMonitor, CuriosityEngine
+from sovl_main import SystemContext, SOVLSystem, StateTracker, ErrorManager, MemoryMonitor
+from sovl_curiosity import CuriosityEngine
 from sovl_io import load_training_data, InsufficientDataError
 from sovl_monitor import SystemMonitor
 from sovl_cli import CommandHandler, run_cli
@@ -325,7 +326,7 @@ class SOVLRunner:
                     if component_class is None:  # Handle model loading
                         self.logger.log_event(
                             event_type="component_initialization",
-                            message="Loading model...",
+                            message="Loading language model...",
                             level="info"
                         )
                         self.model_manager.load_models()
@@ -362,12 +363,9 @@ class SOVLRunner:
                         
                         if name == "curiosity engine":
                             component = CuriosityEngine(
-                                config_handler=context.config_manager,
-                                model_loader=next(c for c in components if isinstance(c, ModelLoader)),
-                                state_tracker=next(c for c in components if isinstance(c, StateTracker)),
-                                error_manager=self.error_manager,
-                                logger=context.logger,
-                                device=context.device
+                                config=context.config_manager,
+                                model_manager=self.model_manager,
+                                logger=context.logger
                             )
                         else:  # memory manager
                             component = MemoryManager(
@@ -914,7 +912,7 @@ class SOVLRunner:
         self._register_signal_handlers()
         atexit.register(self.cleanup)
         
-        self.logger.info("Starting SOVL system...")
+        self.logger.info("Waking SOVL system...")
         self.logger.info(f"Configuration: {args}")
         
         try:
@@ -950,7 +948,7 @@ class SOVLRunner:
             if args.mode == 'train':
                 self.logger.log_event(
                     event_type="training",
-                    message="Starting training...",
+                    message="Starting gestation...",
                     level="info"
                 )
                 

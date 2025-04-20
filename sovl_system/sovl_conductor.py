@@ -18,6 +18,8 @@ from collections import deque
 from sovl_state import StateManager
 from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediator
 import random
+from sovl_main import SOVLSystem, SystemContext, ConfigHandler, ModelLoader, MemoryMonitor, StateTracker, ErrorManager
+from sovl_curiosity import CuriosityEngine
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
