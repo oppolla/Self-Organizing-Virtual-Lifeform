@@ -10,6 +10,7 @@ import torch
 from dataclasses import dataclass
 from datetime import datetime
 from sovl_memory import GPUMemoryManager
+from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
 
 @dataclass
 class ErrorContext:
@@ -20,7 +21,7 @@ class ErrorContext:
     timestamp: datetime
     additional_info: Dict[str, Any]
 
-class ErrorManager:
+class ErrorManager(IErrorHandler):
     """Manages error handling and recovery for the SOVL system."""
     
     def __init__(
@@ -31,42 +32,109 @@ class ErrorManager:
         error_cooldown: float = 1.0,
         max_recent_errors: int = 100
     ) -> None:
-        """Initialize the ErrorManager with context and configuration.
-        
-        Args:
-            context: System context containing logger and config manager
-            state_tracker: State tracker for system state management
-            config_manager: ConfigManager instance for configuration handling
-            error_cooldown: Time in seconds before an error is no longer considered recent
-            max_recent_errors: Maximum number of recent errors to track
-            
-        Raises:
-            ValueError: If context, state_tracker, or config_manager is None
-            TypeError: If error_cooldown is not a float or max_recent_errors is not an int
-        """
+        """Initialize the ErrorManager with context and configuration."""
         if not context:
             raise ValueError("context cannot be None")
         if not state_tracker:
             raise ValueError("state_tracker cannot be None")
         if not config_manager:
             raise ValueError("config_manager cannot be None")
-        if not isinstance(error_cooldown, (int, float)):
-            raise TypeError("error_cooldown must be a number")
-        if not isinstance(max_recent_errors, int):
-            raise TypeError("max_recent_errors must be an integer")
             
         self.context = context
         self.state_tracker = state_tracker
         self.config_manager = config_manager
         self.logger = context.logger
-        self.error_counts = defaultdict(int)
-        self.recent_errors = deque(maxlen=max_recent_errors)
         
         # Initialize configuration
         self._initialize_config()
         
+        # Register with ErrorRecordBridge
+        ErrorRecordBridge().register_handler(self)
+        
         # Subscribe to configuration changes
         self.config_manager.subscribe(self._on_config_change)
+
+    def handle_error(self, record: ErrorRecord) -> None:
+        """Handle error records from the ErrorRecordBridge."""
+        try:
+            # Check severity thresholds
+            error_count = ErrorRecordBridge().get_error_count(record.error_type)
+            if error_count >= self.severity_thresholds['critical']:
+                self._handle_critical_error(record)
+            elif error_count >= self.severity_thresholds['warning']:
+                self._handle_warning(record)
+                
+            # Log the error
+            self.logger.record_event(
+                event_type="error",
+                message=record.error_message,
+                level="error",
+                additional_info={
+                    "error_type": record.error_type,
+                    "stack_trace": record.stack_trace,
+                    **record.additional_info
+                }
+            )
+            
+            # Apply recovery strategy if available
+            if record.error_type in self.recovery_strategies:
+                self.recovery_strategies[record.error_type](record)
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to handle error: {str(e)}")
+            traceback.print_exc()
+
+    def record_error(
+        self,
+        error: Exception,
+        error_type: str,
+        context: Dict[str, Any] = None,
+        stack_trace: Optional[str] = None
+    ) -> None:
+        """Record an error through the ErrorRecordBridge."""
+        try:
+            ErrorRecordBridge().record_error(
+                error_type=error_type,
+                error_message=str(error),
+                stack_trace=stack_trace or traceback.format_exc(),
+                additional_info=context or {}
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to record error: {str(e)}")
+            traceback.print_exc()
+
+    def get_error_stats(self) -> Dict[str, Any]:
+        """Get error statistics from ErrorRecordBridge."""
+        return {
+            "error_counts": dict(ErrorRecordBridge()._error_counts),
+            "recent_errors": [record.__dict__ for record in ErrorRecordBridge().get_recent_errors()]
+        }
+
+    def _handle_critical_error(self, record: ErrorRecord) -> None:
+        """Handle critical error threshold exceeded."""
+        self.logger.record_event(
+            event_type="critical_error_threshold",
+            message=f"Critical error threshold exceeded for {record.error_type}",
+            level="critical",
+            additional_info={
+                "error_type": record.error_type,
+                "error_count": ErrorRecordBridge().get_error_count(record.error_type),
+                "threshold": self.severity_thresholds['critical']
+            }
+        )
+
+    def _handle_warning(self, record: ErrorRecord) -> None:
+        """Handle warning threshold exceeded."""
+        self.logger.record_event(
+            event_type="warning_threshold",
+            message=f"Warning threshold exceeded for {record.error_type}",
+            level="warning",
+            additional_info={
+                "error_type": record.error_type,
+                "error_count": ErrorRecordBridge().get_error_count(record.error_type),
+                "threshold": self.severity_thresholds['warning']
+            }
+        )
 
     def _initialize_config(self) -> None:
         """Initialize error handling configuration from ConfigManager."""
@@ -189,171 +257,8 @@ class ErrorManager:
         new_batch_size = max(1, current_batch_size // 2)
         self.config_manager.update("data_config.batch_size", new_batch_size)
         
-    def _is_duplicate_error(self, error: Exception, error_type: str) -> bool:
-        """Check if an error is a duplicate of a recently seen error.
-        
-        Args:
-            error: The exception to check
-            error_type: Type of error (training, curiosity, memory, etc.)
-            
-        Returns:
-            bool: True if the error is a duplicate, False otherwise
-            
-        Raises:
-            TypeError: If error is not an Exception or error_type is not a string
-        """
-        if not isinstance(error, Exception):
-            raise TypeError("error must be an Exception")
-        if not isinstance(error_type, str):
-            raise TypeError("error_type must be a string")
-            
-        current_time = time.time()
-        error_key = f"{error_type}:{type(error).__name__}"
-        
-        # Remove old errors from recent_errors
-        while self.recent_errors and current_time - self.recent_errors[0][1] > self.error_cooldown:
-            self.recent_errors.popleft()
-            
-        # Check for duplicate
-        for recent_error, _ in self.recent_errors:
-            if recent_error == error_key:
-                return True
-                
-        # Add to recent errors
-        self.recent_errors.append((error_key, current_time))
-        return False
-        
-    def handle_error(
-        self,
-        error: Exception,
-        error_type: Literal["training", "curiosity", "memory", "generation", "data"],
-        context: Dict[str, Any]
-    ) -> Optional[str]:
-        """Generic error handling method that centralizes error management.
-        
-        Args:
-            error: The exception that occurred
-            error_type: Type of error (training, curiosity, memory, etc.)
-            context: Additional context about the error
-            
-        Returns:
-            Optional[str]: Recovery message if recovery was attempted, None otherwise
-            
-        Raises:
-            TypeError: If error is not an Exception or error_type is not a valid type
-            ValueError: If context is not a dictionary
-        """
-        if not isinstance(error, Exception):
-            raise TypeError("error must be an Exception")
-        if error_type not in self.recovery_strategies:
-            raise ValueError(f"Invalid error_type: {error_type}")
-        if not isinstance(context, dict):
-            raise ValueError("context must be a dictionary")
-            
-        try:
-            error_key = f"{error_type}:{type(error).__name__}"
-            
-            # Check for duplicate error
-            if self._is_duplicate_error(error, error_type):
-                self.logger.record_event(
-                    event_type=f"duplicate_{error_type}_error",
-                    message=f"Duplicate {error_type} error detected: {error_key}",
-                    level="warning",
-                    additional_info={"error": str(error), **context}
-                )
-                return None
-                
-            # Increment error count
-            self.error_counts[error_key] += 1
-            
-            # Log error
-            self.logger.record_event(
-                event_type=f"{error_type}_error",
-                message=f"{error_type.capitalize()} error: {str(error)}",
-                level="error",
-                additional_info={
-                    "error_key": error_key,
-                    "error_count": self.error_counts[error_key],
-                    **context
-                }
-            )
-            
-            # Determine severity and take action using safe_compare
-            if safe_compare(self.error_counts[error_key], self.severity_thresholds["critical"], mode='gt', logger=self.logger):
-                return self.recovery_strategies[error_type](error_key, context)
-            elif safe_compare(self.error_counts[error_key], self.severity_thresholds["error"], mode='gt', logger=self.logger):
-                return self._adjust_parameters(error_type, context)
-            return None
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="error_handling_failed",
-                message=f"Failed to handle {error_type} error: {str(e)}",
-                level="critical",
-                additional_info={"original_error": str(error), **context}
-            )
-            return None
-            
-    def _adjust_parameters(self, error_type: str, context: Dict[str, Any]) -> Optional[str]:
-        """Adjust system parameters in response to errors.
-        
-        Args:
-            error_type: Type of error that occurred
-            context: Additional context about the error
-            
-        Returns:
-            Optional[str]: Message describing the parameter adjustment, or None if no adjustment was made
-            
-        Raises:
-            TypeError: If error_type is not a string or context is not a dictionary
-            ValueError: If error_type is not a valid type
-        """
-        if not isinstance(error_type, str):
-            raise TypeError("error_type must be a string")
-        if not isinstance(context, dict):
-            raise TypeError("context must be a dictionary")
-        if error_type not in self.parameter_adjustments:
-            raise ValueError(f"Invalid error_type: {error_type}")
-            
-        try:
-            adjustment_func = self.parameter_adjustments[error_type]
-            adjustment_func(context)
-            
-            self.logger.record_event(
-                event_type=f"{error_type}_parameter_adjusted",
-                message=f"Adjusted {error_type} parameters in response to error",
-                level="info",
-                additional_info=context
-            )
-            
-            return f"Adjusted {error_type} parameters"
-        except Exception as e:
-            self.logger.record_event(
-                event_type="parameter_adjustment_failed",
-                message=f"Failed to adjust {error_type} parameters: {str(e)}",
-                level="error",
-                additional_info={"error_type": error_type, **context}
-            )
-            return None
-            
-    def _recover_training(self, error_key: str, context: Dict[str, Any]) -> Optional[str]:
-        """Attempt to recover from a training error.
-        
-        Args:
-            error_key: Key identifying the error
-            context: Additional context about the error
-            
-        Returns:
-            Optional[str]: Recovery message if recovery was attempted, None otherwise
-            
-        Raises:
-            TypeError: If error_key is not a string or context is not a dictionary
-        """
-        if not isinstance(error_key, str):
-            raise TypeError("error_key must be a string")
-        if not isinstance(context, dict):
-            raise TypeError("context must be a dictionary")
-            
+    def _recover_training(self, record: ErrorRecord) -> None:
+        """Attempt to recover from a training error."""
         try:
             # Reset training state
             self.state_tracker.reset_training_state()
@@ -368,41 +273,26 @@ class ErrorManager:
                 message="Reset training state and reduced batch size",
                 level="info",
                 additional_info={
-                    "error_key": error_key,
+                    "error_type": record.error_type,
                     "old_batch_size": current_batch_size,
                     "new_batch_size": new_batch_size,
-                    **context
+                    **record.additional_info
                 }
             )
             
-            return "Reset training state and reduced batch size"
         except Exception as e:
             self.logger.record_event(
                 event_type="training_recovery_failed",
                 message=f"Failed to recover from training error: {str(e)}",
                 level="critical",
-                additional_info={"error_key": error_key, **context}
+                additional_info={
+                    "error_type": record.error_type,
+                    **record.additional_info
+                }
             )
-            return None
-            
-    def _recover_curiosity(self, error_key: str, context: Dict[str, Any]) -> Optional[str]:
-        """Attempt to recover from a curiosity error.
-        
-        Args:
-            error_key: Key identifying the error
-            context: Additional context about the error
-            
-        Returns:
-            Optional[str]: Recovery message if recovery was attempted, None otherwise
-            
-        Raises:
-            TypeError: If error_key is not a string or context is not a dictionary
-        """
-        if not isinstance(error_key, str):
-            raise TypeError("error_key must be a string")
-        if not isinstance(context, dict):
-            raise TypeError("context must be a dictionary")
-            
+
+    def _recover_curiosity(self, record: ErrorRecord) -> None:
+        """Attempt to recover from a curiosity error."""
         try:
             # Reset curiosity state
             self.state_tracker.reset_curiosity_state()
@@ -417,41 +307,26 @@ class ErrorManager:
                 message="Reset curiosity state and reduced pressure threshold",
                 level="info",
                 additional_info={
-                    "error_key": error_key,
+                    "error_type": record.error_type,
                     "old_threshold": current_threshold,
                     "new_threshold": new_threshold,
-                    **context
+                    **record.additional_info
                 }
             )
             
-            return "Reset curiosity state and reduced pressure threshold"
         except Exception as e:
             self.logger.record_event(
                 event_type="curiosity_recovery_failed",
                 message=f"Failed to recover from curiosity error: {str(e)}",
                 level="critical",
-                additional_info={"error_key": error_key, **context}
+                additional_info={
+                    "error_type": record.error_type,
+                    **record.additional_info
+                }
             )
-            return None
-            
-    def _recover_memory(self, error_key: str, context: Dict[str, Any]) -> Optional[str]:
-        """Attempt to recover from a memory error.
-        
-        Args:
-            error_key: Key identifying the error
-            context: Additional context about the error
-            
-        Returns:
-            Optional[str]: Recovery message if recovery was attempted, None otherwise
-            
-        Raises:
-            TypeError: If error_key is not a string or context is not a dictionary
-        """
-        if not isinstance(error_key, str):
-            raise TypeError("error_key must be a string")
-        if not isinstance(context, dict):
-            raise TypeError("context must be a dictionary")
-            
+
+    def _recover_memory(self, record: ErrorRecord) -> None:
+        """Attempt to recover from a memory error."""
         try:
             # Clear memory cache
             self.state_tracker.clear_memory_cache()
@@ -466,41 +341,26 @@ class ErrorManager:
                 message="Cleared memory cache and reduced memory limit",
                 level="info",
                 additional_info={
-                    "error_key": error_key,
+                    "error_type": record.error_type,
                     "old_limit": current_limit,
                     "new_limit": new_limit,
-                    **context
+                    **record.additional_info
                 }
             )
             
-            return "Cleared memory cache and reduced memory limit"
         except Exception as e:
             self.logger.record_event(
                 event_type="memory_recovery_failed",
                 message=f"Failed to recover from memory error: {str(e)}",
                 level="critical",
-                additional_info={"error_key": error_key, **context}
+                additional_info={
+                    "error_type": record.error_type,
+                    **record.additional_info
+                }
             )
-            return None
-            
-    def _recover_generation(self, error_key: str, context: Dict[str, Any]) -> Optional[str]:
-        """Attempt to recover from a generation error.
-        
-        Args:
-            error_key: Key identifying the error
-            context: Additional context about the error
-            
-        Returns:
-            Optional[str]: Recovery message if recovery was attempted, None otherwise
-            
-        Raises:
-            TypeError: If error_key is not a string or context is not a dictionary
-        """
-        if not isinstance(error_key, str):
-            raise TypeError("error_key must be a string")
-        if not isinstance(context, dict):
-            raise TypeError("context must be a dictionary")
-            
+
+    def _recover_generation(self, record: ErrorRecord) -> None:
+        """Attempt to recover from a generation error."""
         try:
             # Reset generation state
             self.state_tracker.reset_generation_state()
@@ -515,41 +375,26 @@ class ErrorManager:
                 message="Reset generation state and reduced temperature",
                 level="info",
                 additional_info={
-                    "error_key": error_key,
+                    "error_type": record.error_type,
                     "old_temperature": current_temp,
                     "new_temperature": new_temp,
-                    **context
+                    **record.additional_info
                 }
             )
             
-            return "Reset generation state and reduced temperature"
         except Exception as e:
             self.logger.record_event(
                 event_type="generation_recovery_failed",
                 message=f"Failed to recover from generation error: {str(e)}",
                 level="critical",
-                additional_info={"error_key": error_key, **context}
+                additional_info={
+                    "error_type": record.error_type,
+                    **record.additional_info
+                }
             )
-            return None
-            
-    def _recover_data(self, error_key: str, context: Dict[str, Any]) -> Optional[str]:
-        """Attempt to recover from a data error.
-        
-        Args:
-            error_key: Key identifying the error
-            context: Additional context about the error
-            
-        Returns:
-            Optional[str]: Recovery message if recovery was attempted, None otherwise
-            
-        Raises:
-            TypeError: If error_key is not a string or context is not a dictionary
-        """
-        if not isinstance(error_key, str):
-            raise TypeError("error_key must be a string")
-        if not isinstance(context, dict):
-            raise TypeError("context must be a dictionary")
-            
+
+    def _recover_data(self, record: ErrorRecord) -> None:
+        """Attempt to recover from a data error."""
         try:
             # Reset data state
             self.state_tracker.reset_data_state()
@@ -564,22 +409,23 @@ class ErrorManager:
                 message="Reset data state and reduced batch size",
                 level="info",
                 additional_info={
-                    "error_key": error_key,
+                    "error_type": record.error_type,
                     "old_batch_size": current_batch_size,
                     "new_batch_size": new_batch_size,
-                    **context
+                    **record.additional_info
                 }
             )
             
-            return "Reset data state and reduced batch size"
         except Exception as e:
             self.logger.record_event(
                 event_type="data_recovery_failed",
                 message=f"Failed to recover from data error: {str(e)}",
                 level="critical",
-                additional_info={"error_key": error_key, **context}
+                additional_info={
+                    "error_type": record.error_type,
+                    **record.additional_info
+                }
             )
-            return None
 
 class ErrorHandler:
     """Handles error logging, recovery, and monitoring for the SOVL system."""

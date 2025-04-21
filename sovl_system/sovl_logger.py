@@ -6,11 +6,13 @@ import time
 import logging
 from datetime import datetime
 from threading import Lock, RLock
-from typing import List, Dict, Union, Optional, Callable, Any, Tuple
-from dataclasses import dataclass
+from typing import List, Dict, Union, Optional, Callable, Any, Tuple, Literal
+from dataclasses import dataclass, field
 import torch
 import traceback
-from collections import deque
+from collections import deque, defaultdict
+from sovl_config import ConfigManager
+from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
 
 @dataclass
 class LoggerConfig:
@@ -24,6 +26,19 @@ class LoggerConfig:
     prune_interval_hours: int = 24  # How often to prune old logs
     memory_threshold_mb: int = 100  # Memory threshold to trigger aggressive pruning
     gpu_memory_threshold: float = 0.85  # GPU memory usage threshold (0-1)
+    
+    # Error handling configuration
+    error_cooldown: float = 1.0  # Time in seconds before an error is no longer considered recent
+    max_recent_errors: int = 100  # Maximum number of recent errors to track
+    error_handling_config: Dict[str, Any] = field(default_factory=lambda: {
+        "max_history_per_error": 10,
+        "critical_threshold": 5,
+        "warning_threshold": 10,
+        "retry_attempts": 3,
+        "retry_delay": 1.0,
+        "memory_recovery_attempts": 3,
+        "memory_recovery_delay": 1.0
+    })
 
     _RANGES = {
         "max_size_mb": (0, 100),
@@ -31,7 +46,9 @@ class LoggerConfig:
         "max_log_age_days": (1, 365),
         "prune_interval_hours": (1, 168),
         "memory_threshold_mb": (10, 1000),
-        "gpu_memory_threshold": (0.1, 1.0)
+        "gpu_memory_threshold": (0.1, 1.0),
+        "error_cooldown": (0.1, 60.0),
+        "max_recent_errors": (10, 1000)
     }
 
     def __post_init__(self):
@@ -44,6 +61,13 @@ class LoggerConfig:
             value = getattr(self, key)
             if not (min_val <= value <= max_val):
                 raise ValueError(f"{key} must be between {min_val} and {max_val}, got {value}")
+        
+        # Validate error handling config
+        if not isinstance(self.error_handling_config, dict):
+            raise ValueError("error_handling_config must be a dictionary")
+        required_error_keys = {"max_history_per_error", "critical_threshold", "warning_threshold"}
+        if not all(key in self.error_handling_config for key in required_error_keys):
+            raise ValueError(f"error_handling_config must contain all required keys: {required_error_keys}")
 
     def update(self, **kwargs) -> None:
         """Update configuration with validation."""
@@ -61,6 +85,12 @@ class LoggerConfig:
             elif key == "rotation_count":
                 if not isinstance(value, int) or value < 0:
                     raise ValueError("rotation_count must be a non-negative integer")
+            elif key == "error_handling_config":
+                if not isinstance(value, dict):
+                    raise ValueError("error_handling_config must be a dictionary")
+                required_keys = {"max_history_per_error", "critical_threshold", "warning_threshold"}
+                if not all(k in value for k in required_keys):
+                    raise ValueError(f"error_handling_config must contain all required keys: {required_keys}")
             else:
                 raise ValueError(f"Unknown configuration parameter: {key}")
             setattr(self, key, value)
@@ -329,7 +359,7 @@ class LogManager:
             except Exception as e:
                 logging.error(f"Failed to write log batch: {str(e)}")
 
-class Logger(ILoggerClient):
+class Logger(IErrorHandler):
     """Main logger class for the SOVL system."""
     _instance = None
     _lock = RLock()
@@ -344,541 +374,116 @@ class Logger(ILoggerClient):
         if not hasattr(self, '_initialized'):
             self._initialized = True
             self._log_queue = deque(maxlen=1000)
-            self._event_queue = deque(maxlen=100)
-            self._error_queue = deque(maxlen=50)
-            self._debug_mode = False
-            self._log_level = logging.INFO
             self._lock = RLock()
+            self._severity_thresholds = {
+                'warning': 10,
+                'error': 5,
+                'critical': 3
+            }
+            # Register with ErrorRecordBridge
+            ErrorRecordBridge().register_handler(self)
             
-    def set_level(self, level: int) -> None:
-        """Set the logging level."""
+    def handle_error(self, record: ErrorRecord) -> None:
+        """Handle error records from the ErrorRecordBridge."""
         with self._lock:
-            self._log_level = level
-            self._debug_mode = level == logging.DEBUG
-            
-    def is_debug_enabled(self) -> bool:
-        """Check if debug mode is enabled."""
-        return self._debug_mode
-        
-    def get_recent_events(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get recent events from the event queue."""
-        with self._lock:
-            return list(self._event_queue)[-limit:]
-            
-    def get_recent_errors(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Get recent errors from the error queue."""
-        with self._lock:
-            return list(self._error_queue)[-limit:]
-            
-    def get_debug_stats(self) -> Dict[str, Any]:
-        """Get debug statistics about the logging system."""
-        with self._lock:
-            return {
-                "debug_mode": self._debug_mode,
-                "log_level": self._log_level,
-                "queue_sizes": {
-                    "log_queue": len(self._log_queue),
-                    "event_queue": len(self._event_queue),
-                    "error_queue": len(self._error_queue)
-                },
-                "queue_limits": {
-                    "log_queue": self._log_queue.maxlen,
-                    "event_queue": self._event_queue.maxlen,
-                    "error_queue": self._error_queue.maxlen
+            # Check severity thresholds
+            error_count = ErrorRecordBridge().get_error_count(record.error_type)
+            if error_count >= self._severity_thresholds['critical']:
+                self._handle_critical_error(record)
+            elif error_count >= self._severity_thresholds['warning']:
+                self._handle_warning(record)
+                
+            # Log the error
+            self.record_event(
+                event_type="error",
+                message=record.error_message,
+                level="error",
+                additional_info={
+                    "error_type": record.error_type,
+                    "stack_trace": record.stack_trace,
+                    **record.additional_info
                 }
-            }
+            )
             
-    def record_event(self, event_type: str, message: str, level: str = "info", additional_info: Dict[str, Any] = None) -> None:
-        """Record an event with timestamp and optional additional information."""
-        with self._lock:
-            event = {
-                "event_type": event_type,
-                "message": message,
-                "level": level,
-                "timestamp": datetime.now().isoformat()
-            }
-            if additional_info:
-                event["additional_info"] = additional_info
-                
-            self._event_queue.append(event)
-            
-            if level == "error":
-                self._error_queue.append(event)
-                
-            if self._debug_mode or level in ["error", "warning"]:
-                print(f"[{level.upper()}] {event_type}: {message}")
-                if additional_info:
-                    print(f"Additional Info: {json.dumps(additional_info, indent=2)}")
-                    
     def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, additional_info: Dict[str, Any] = None) -> None:
         """Log an error with detailed information."""
         with self._lock:
-            error = {
-                "error_type": error_type or "unknown_error",
-                "message": error_msg,
-                "timestamp": datetime.now().isoformat(),
-                "stack_trace": stack_trace
-            }
-            if additional_info:
-                error["additional_info"] = additional_info
-                
-            self._error_queue.append(error)
+            # Record through the bridge
+            ErrorRecordBridge().record_error(
+                error_type=error_type or "unknown_error",
+                error_message=error_msg,
+                stack_trace=stack_trace,
+                additional_info=additional_info
+            )
             
-            if self._debug_mode:
-                print(f"[ERROR] {error_type}: {error_msg}")
-                if stack_trace:
-                    print(f"Stack Trace:\n{stack_trace}")
-                if additional_info:
-                    print(f"Additional Info: {json.dumps(additional_info, indent=2)}")
-                    
-    def clear_queues(self) -> None:
-        """Clear all event and error queues."""
+    def get_error_stats(self) -> Dict[str, Any]:
+        """Get error statistics."""
         with self._lock:
-            self._log_queue.clear()
-            self._event_queue.clear()
-            self._error_queue.clear()
-            
-    def get_log_level_name(self) -> str:
-        """Get the current log level name."""
-        level_names = {
-            logging.DEBUG: "DEBUG",
-            logging.INFO: "INFO",
-            logging.WARNING: "WARNING",
-            logging.ERROR: "ERROR",
-            logging.CRITICAL: "CRITICAL"
-        }
-        return level_names.get(self._log_level, "UNKNOWN")
+            return {
+                "error_counts": dict(ErrorRecordBridge()._error_counts),
+                "recent_errors": [record.__dict__ for record in ErrorRecordBridge().get_recent_errors()]
+            }
+
+    def _handle_critical_error(self, record: ErrorRecord) -> None:
+        """Handle critical error threshold exceeded."""
+        with self._lock:
+            self.record_event(
+                event_type="critical_error_threshold",
+                message=f"Critical error threshold exceeded for {record.error_type}",
+                level="critical",
+                additional_info={
+                    "error_type": record.error_type,
+                    "error_count": ErrorRecordBridge().get_error_count(record.error_type),
+                    "threshold": self._severity_thresholds['critical']
+                }
+            )
+
+    def _handle_warning(self, record: ErrorRecord) -> None:
+        """Handle warning threshold exceeded."""
+        with self._lock:
+            self.record_event(
+                event_type="warning_threshold",
+                message=f"Warning threshold exceeded for {record.error_type}",
+                level="warning",
+                additional_info={
+                    "error_type": record.error_type,
+                    "error_count": ErrorRecordBridge().get_error_count(record.error_type),
+                    "threshold": self._severity_thresholds['warning']
+                }
+            )
 
 class LoggingManager:
-    """Manages logging setup and configuration for the SOVL system."""
-
-    _DEFAULT_CONFIG = {
-        "logging.max_size_mb": 10,
-        "logging.compress_old": True,
-        "logging.rotation_count": 5,
-        "logging.level": "INFO"
-    }
-
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        log_dir: str = "logs",
-        system_log_file: str = "sovl_system.log",
-        debug_log_file: str = "sovl_debug.log"
-    ):
-        """
-        Initialize the logging manager with configuration and file paths.
-
-        Args:
-            config_manager: ConfigManager instance for accessing logging settings.
-            log_dir: Directory to store log files.
-            system_log_file: Name of the system log file.
-            debug_log_file: Name of the debug log file.
-        """
-        if not isinstance(config_manager, ConfigManager):
-            raise TypeError("config_manager must be an instance of ConfigManager")
+    """Manager class for the logging system."""
+    _instance = None
+    _lock = RLock()
+    
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+            return cls._instance
             
-        self.config_manager = config_manager
-        self.log_dir = log_dir
-        self.system_log_file = os.path.join(log_dir, system_log_file)
-        self.debug_log_file = os.path.join(log_dir, debug_log_file)
-        self.loggers = {}
-        
-        # Configure fallback logger first
-        self._configure_fallback_logger()
-        
-        # Ensure logging configuration exists
-        self._ensure_logging_config()
-        self._validate_config()
-        self._setup_logging()
-
-    def _configure_fallback_logger(self) -> None:
-        """Configure the fallback logger with proper handlers and formatting."""
-        # Get the fallback logger
-        fallback_logger = logging.getLogger(__name__)
-        
-        # Set log level from config or default to INFO
-        log_level = self.config_manager.get(
-            "logging.level",
-            self._DEFAULT_CONFIG["logging.level"]
-        )
-        fallback_logger.setLevel(getattr(logging, log_level))
-        
-        # Remove any existing handlers to avoid duplicates
-        for handler in fallback_logger.handlers[:]:
-            fallback_logger.removeHandler(handler)
-        
-        # Create and configure console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(getattr(logging, log_level))
-        
-        # Create detailed formatter
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        console_handler.setFormatter(formatter)
-        
-        # Add handler to logger
-        fallback_logger.addHandler(console_handler)
-        
-        # Log successful configuration
-        fallback_logger.info(
-            f"Configured fallback logger with level {log_level}"
-        )
-
-    def _ensure_logging_config(self) -> None:
-        """Ensure logging configuration exists in config manager."""
-        try:
-            # Get or create logging section
-            logging_config = self.config_manager.get_section("logging", {})
+    def __init__(self):
+        if not hasattr(self, '_initialized'):
+            self._initialized = True
+            self._logger = Logger()
+            self._config = LoggerConfig()
+            self._file_handler = _FileHandler(self._config)
+            self._log_validator = _LogValidator()
             
-            # Set default values if not present
-            for key, default_value in self._DEFAULT_CONFIG.items():
-                if key not in logging_config:
-                    self.config_manager.set(key, default_value)
-                    
-        except Exception as e:
-            raise RuntimeError(f"Failed to ensure logging configuration: {str(e)}")
-
-    def _validate_config(self) -> None:
-        """Validate logging configuration."""
-        try:
-            max_size = self.config_manager.get(
-                "logging.max_size_mb",
-                self._DEFAULT_CONFIG["logging.max_size_mb"]
-            )
-            if max_size <= 0:
-                raise ValueError("Log file size must be positive")
-        except Exception as e:
-            print(f"Logging configuration validation failed: {str(e)}")
-            raise
-
-    def _setup_logging(self) -> None:
-        """Set up logging configuration and handlers."""
-        # Create log directory if it doesn't exist
-        os.makedirs(self.log_dir, exist_ok=True)
-
-        # Validate and get configuration values
-        try:
-            max_size_mb = self.config_manager.get(
-                "logging.max_size_mb",
-                self._DEFAULT_CONFIG["logging.max_size_mb"]
-            )
-            if not isinstance(max_size_mb, (int, float)) or max_size_mb <= 0:
-                raise ValueError(
-                    f"Invalid logging.max_size_mb: {max_size_mb}. Must be a positive number."
-                )
-
-            compress_old = self.config_manager.get(
-                "logging.compress_old",
-                self._DEFAULT_CONFIG["logging.compress_old"]
-            )
-            if not isinstance(compress_old, bool):
-                raise ValueError(
-                    f"Invalid logging.compress_old: {compress_old}. Must be a boolean."
-                )
-
-            rotation_count = self.config_manager.get(
-                "logging.rotation_count",
-                self._DEFAULT_CONFIG["logging.rotation_count"]
-            )
-            if not isinstance(rotation_count, int) or rotation_count < 0:
-                raise ValueError(
-                    f"Invalid logging.rotation_count: {rotation_count}. Must be a non-negative integer."
-                )
-
-            # Configure system logger with validated settings
-            system_config = LoggerConfig(
-                log_file=self.system_log_file,
-                max_size_mb=max_size_mb,
-                compress_old=compress_old,
-                max_in_memory_logs=1000,
-                rotation_count=rotation_count
-            )
-            self.loggers["system"] = Logger(system_config)
-
-            # Configure debug logger with same validated settings
-            debug_config = LoggerConfig(
-                log_file=self.debug_log_file,
-                max_size_mb=max_size_mb,
-                compress_old=compress_old,
-                max_in_memory_logs=1000,
-                rotation_count=rotation_count
-            )
-            self.loggers["debug"] = Logger(debug_config)
-
-            # Log successful setup
-            self.loggers["system"].log_event(
-                event_type="logging_initialized",
-                message="Logging system initialized successfully",
-                level="info",
-                additional_info={
-                    "max_size_mb": max_size_mb,
-                    "compress_old": compress_old,
-                    "rotation_count": rotation_count
-                }
-            )
-
-        except ValueError as e:
-            # Log configuration error and re-raise
-            logging.getLogger(__name__).error(
-                f"Invalid logging configuration: {str(e)}"
-            )
-            raise
-        except Exception as e:
-            # Log unexpected error and re-raise
-            logging.getLogger(__name__).error(
-                f"Failed to setup logging: {str(e)}",
-                exc_info=True
-            )
-            raise
-
-    def setup_logging(self) -> Logger:
-        """
-        Set up and return the main logger.
-
-        Returns:
-            The main logger instance
-        """
-        if not self.loggers:
-            self._setup_logging()
-        return self.loggers["system"]
-
-    def get_logger(self, name: str) -> Logger:
-        """
-        Get a logger instance by name.
-
-        Args:
-            name: The name of the logger to retrieve.
-
-        Returns:
-            The requested logger instance.
-
-        Raises:
-            KeyError: If the logger name is not found.
-        """
-        if name not in self.loggers:
-            raise KeyError(f"Logger '{name}' not found")
-        return self.loggers[name]
-
+    def get_logger(self) -> Logger:
+        """Get the logger instance."""
+        return self._logger
+        
     def update_config(self, new_config: Dict[str, Any]) -> None:
-        """
-        Update logging configuration and reconfigure loggers.
-
-        Args:
-            new_config: Dictionary containing new configuration values.
-        """
-        # Update configuration
-        for key, value in new_config.items():
-            if key.startswith("logging."):
-                self.config_manager.set(key, value)
-
-        # Revalidate and reconfigure
-        self._validate_config()
-        self._setup_logging()
-
-    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, 
-                  conversation_id: str = None, state_hash: str = None, **kwargs) -> None:
-        """Log an error with standardized format."""
-        self.get_logger("system").log_error(
-            error_msg=error_msg,
-            error_type=error_type,
-            stack_trace=stack_trace,
-            conversation_id=conversation_id,
-            state_hash=state_hash,
-            **kwargs
-        )
-
-    def log_memory_usage(self, phase: str, device: torch.device, **kwargs) -> None:
-        """Log memory usage for a specific phase and device."""
-        try:
-            # Get memory stats from appropriate manager based on device
-            if device.type == 'cuda':
-                gpu_manager = kwargs.get('gpu_manager')
-                if gpu_manager:
-                    gpu_stats = gpu_manager.get_gpu_usage()
-                    memory_stats = {
-                        'gpu_usage': gpu_stats.get('usage', 0.0),
-                        'gpu_allocated': gpu_stats.get('allocated', 0.0),
-                        'gpu_cached': gpu_stats.get('cached', 0.0)
-                    }
-                else:
-                    memory_stats = {'gpu_usage': 0.0, 'gpu_allocated': 0.0, 'gpu_cached': 0.0}
-            else:
-                ram_manager = kwargs.get('ram_manager')
-                if ram_manager:
-                    ram_stats = ram_manager.check_memory_health()
-                    memory_stats = {
-                        'ram_usage': ram_stats.get('usage', 0.0),
-                        'ram_available': ram_stats.get('available', 0.0),
-                        'ram_total': ram_stats.get('total', 0.0)
-                    }
-                else:
-                    memory_stats = {'ram_usage': 0.0, 'ram_available': 0.0, 'ram_total': 0.0}
-
-            # Add memoria stats if available
-            memoria_manager = kwargs.get('memoria_manager')
-            if memoria_manager:
-                memoria_stats = memoria_manager.get_state()
-                memory_stats.update({
-                    'memoria_usage': memoria_stats.get('usage', 0.0),
-                    'memoria_capacity': memoria_stats.get('capacity', 0.0)
-                })
-
-            self.record_event(
-                event_type="memory_usage",
-                message=f"Memory usage for {phase} on {device.type}",
-                level="info",
-                additional_info={
-                    "phase": phase,
-                    "device": str(device),
-                    "memory_stats": memory_stats,
-                    **kwargs
-                }
-            )
-        except Exception as e:
-            self.log_error(
-                error_msg=f"Failed to log memory usage: {str(e)}",
-                error_type="memory_logging_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    def log_memory_health(self, model_size: int, **kwargs) -> None:
-        """Log comprehensive memory health metrics."""
-        try:
-            memory_health = {}
+        """Update the logging configuration."""
+        with self._lock:
+            self._config.update(new_config)
+            self._file_handler = _FileHandler(self._config)
             
-            # Get GPU memory health
-            gpu_manager = kwargs.get('gpu_manager')
-            if gpu_manager:
-                gpu_stats = gpu_manager.get_gpu_usage()
-                memory_health['gpu'] = {
-                    'usage': gpu_stats.get('usage', 0.0),
-                    'allocated': gpu_stats.get('allocated', 0.0),
-                    'cached': gpu_stats.get('cached', 0.0),
-                    'model_size': model_size
-                }
-            
-            # Get RAM health
-            ram_manager = kwargs.get('ram_manager')
-            if ram_manager:
-                ram_stats = ram_manager.check_memory_health()
-                memory_health['ram'] = {
-                    'usage': ram_stats.get('usage', 0.0),
-                    'available': ram_stats.get('available', 0.0),
-                    'total': ram_stats.get('total', 0.0)
-                }
-            
-            # Get Memoria health
-            memoria_manager = kwargs.get('memoria_manager')
-            if memoria_manager:
-                memoria_stats = memoria_manager.get_state()
-                memory_health['memoria'] = {
-                    'usage': memoria_stats.get('usage', 0.0),
-                    'capacity': memoria_stats.get('capacity', 0.0)
-                }
-            
-            # Get overall memory monitor stats if available
-            memory_monitor = kwargs.get('memory_monitor')
-            if memory_monitor:
-                monitor_stats = memory_monitor.get_memory_usage()
-                memory_health['monitor'] = {
-                    'cpu_usage': monitor_stats.get('cpu_usage', 0.0),
-                    'ram_usage': monitor_stats.get('ram_usage', 0.0),
-                    'gpu_usage': monitor_stats.get('gpu_usage', 0.0)
-                }
-
-            self.record_event(
-                event_type="memory_health",
-                message="Comprehensive memory health check",
-                level="info",
-                additional_info={
-                    "memory_health": memory_health,
-                    "model_size": model_size,
-                    **kwargs
-                }
-            )
-        except Exception as e:
-            self.log_error(
-                error_msg=f"Failed to log memory health: {str(e)}",
-                error_type="memory_health_logging_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    def log_training_event(self, event_type: str, epoch: int = None, loss: float = None,
-                          batch_size: int = None, data_exposure: float = None,
-                          conversation_id: str = None, state_hash: str = None, **kwargs) -> None:
-        """Log training-related events."""
-        self.get_logger("system").log_training_event(
-            event_type=event_type,
-            epoch=epoch,
-            loss=loss,
-            batch_size=batch_size,
-            data_exposure=data_exposure,
-            conversation_id=conversation_id,
-            state_hash=state_hash,
-            **kwargs
-        )
-
-    def log_generation_event(self, prompt: str, response: str, confidence_score: float,
-                            generation_params: dict = None, conversation_id: str = None,
-                            state_hash: str = None, **kwargs) -> None:
-        """Log generation-related events."""
-        self.get_logger("system").log_generation_event(
-            prompt=prompt,
-            response=response,
-            confidence_score=confidence_score,
-            generation_params=generation_params,
-            conversation_id=conversation_id,
-            state_hash=state_hash,
-            **kwargs
-        )
-
-    def log_cleanup_event(self, phase: str, success: bool, error: str = None,
-                         conversation_id: str = None, state_hash: str = None, **kwargs) -> None:
-        """Log cleanup-related events."""
-        self.get_logger("system").log_cleanup_event(
-            phase=phase,
-            success=success,
-            error=error,
-            conversation_id=conversation_id,
-            state_hash=state_hash,
-            **kwargs
-        )
-
-    def record(self, entry: Dict) -> None:
-        """Write a validated log entry."""
-        self.get_logger("system").record(entry)
-
-    def cleanup(self) -> None:
-        """Clean up logging resources for all loggers."""
-        for name, logger in self.loggers.items():
-            try:
-                logger.cleanup()
-                self.get_logger("system").log_event(
-                    event_type="logger_cleanup",
-                    message=f"Successfully cleaned up logger {name}",
-                    level="info"
-                )
-            except Exception as e:
-                # Use system logger to log the error
-                self.get_logger("system").log_error(
-                    error_msg=f"Failed to clean up logger {name}: {str(e)}",
-                    error_type="cleanup_error",
-                    stack_trace=traceback.format_exc()
-                )
-                # Also log to debug logger for more detailed information
-                self.get_logger("debug").log_event(
-                    event_type="logger_cleanup_error",
-                    message=f"Detailed error during cleanup of logger {name}",
-                    level="error",
-                    additional_info={
-                        "error": str(e),
-                        "logger_name": name,
-                        "stack_trace": traceback.format_exc()
-                    }
-                )
+    def get_config(self) -> LoggerConfig:
+        """Get the current logging configuration."""
+        return self._config
 
 class LoggingError(Exception):
     """Raised for logging-related errors."""

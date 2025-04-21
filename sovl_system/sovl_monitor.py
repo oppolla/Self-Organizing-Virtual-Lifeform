@@ -8,6 +8,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_events import MemoryEventDispatcher, MemoryEventTypes
 from sovl_state import SOVLState, StateManager
+from sovl_error import ErrorManager
 import time
 import traceback
 import curses
@@ -22,7 +23,8 @@ class SystemMonitor:
         config_manager: ConfigManager,
         logger: Logger,
         ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
+        gpu_manager: GPUMemoryManager,
+        error_manager: ErrorManager
     ):
         """
         Initialize system monitor.
@@ -32,11 +34,13 @@ class SystemMonitor:
             logger: Logger instance for logging events
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
+            error_manager: ErrorManager instance for error handling
         """
         self._config_manager = config_manager
         self._logger = logger
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
+        self._error_manager = error_manager
         
     def _collect_metrics(self) -> Dict[str, Any]:
         """Collect system metrics."""
@@ -45,15 +49,33 @@ class SystemMonitor:
             ram_stats = self.ram_manager.check_memory_health()
             gpu_stats = self.gpu_manager.check_memory_health()
             
-            return {
+            metrics = {
                 "ram_stats": ram_stats,
                 "gpu_stats": gpu_stats
             }
+            
+            # Check for concerning metrics
+            if ram_stats.get("usage_percent", 0) > 90:
+                self._error_manager.handle_error(
+                    error_type="memory",
+                    error_message="RAM usage critically high",
+                    context={"ram_stats": ram_stats}
+                )
+                
+            if gpu_stats.get("usage_percent", 0) > 95:
+                self._error_manager.handle_error(
+                    error_type="memory",
+                    error_message="GPU memory usage critically high",
+                    context={"gpu_stats": gpu_stats}
+                )
+                
+            return metrics
+            
         except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to collect metrics: {str(e)}",
-                error_type="metrics_collection_error",
-                stack_trace=traceback.format_exc()
+            self._error_manager.handle_error(
+                error_type="monitoring",
+                error_message=f"Failed to collect metrics: {str(e)}",
+                context={"stack_trace": traceback.format_exc()}
             )
             return {
                 "ram_stats": {"status": "error"},
@@ -68,7 +90,8 @@ class MemoryMonitor:
         config_manager: ConfigManager,
         logger: Logger,
         ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
+        gpu_manager: GPUMemoryManager,
+        error_manager: ErrorManager
     ):
         """
         Initialize the memory monitor.
@@ -78,11 +101,13 @@ class MemoryMonitor:
             logger: Logger instance for logging events
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
+            error_manager: ErrorManager instance for error handling
         """
         self._config_manager = config_manager
         self._logger = logger
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
+        self._error_manager = error_manager
         
     def check_memory_health(self) -> Dict[str, Any]:
         """Check memory health across all memory managers."""
@@ -90,16 +115,26 @@ class MemoryMonitor:
             ram_health = self.ram_manager.check_memory_health()
             gpu_health = self.gpu_manager.check_memory_health()
             
+            # Check for memory issues
+            if ram_health.get("status") == "critical":
+                self._error_manager.handle_memory_error(
+                    Exception("Critical RAM usage detected"),
+                    ram_health.get("usage_mb", 0)
+                )
+                
+            if gpu_health.get("status") == "critical":
+                self._error_manager.handle_memory_error(
+                    Exception("Critical GPU memory usage detected"),
+                    gpu_health.get("usage_mb", 0)
+                )
+                
             return {
                 "ram_health": ram_health,
                 "gpu_health": gpu_health
             }
+            
         except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to check memory health: {str(e)}",
-                error_type="memory_health_error",
-                stack_trace=traceback.format_exc()
-            )
+            self._error_manager.handle_memory_error(e, 0)
             return {
                 "ram_health": {"status": "error"},
                 "gpu_health": {"status": "error"}
@@ -115,6 +150,7 @@ class TraitsMonitor:
         state: SOVLState,
         curiosity_manager: CuriosityManager,
         training_manager: TrainingCycleManager,
+        error_manager: ErrorManager,
         update_interval: float = 0.5  # Update every 0.5 seconds
     ):
         """
@@ -126,6 +162,7 @@ class TraitsMonitor:
             state: SOVLState instance for accessing system state
             curiosity_manager: CuriosityManager for curiosity metrics
             training_manager: TrainingCycleManager for lifecycle metrics
+            error_manager: ErrorManager instance for error handling
             update_interval: How often to update the display in seconds
         """
         self._config_manager = config_manager
@@ -133,6 +170,7 @@ class TraitsMonitor:
         self._state = state
         self._curiosity_manager = curiosity_manager
         self._training_manager = training_manager
+        self._error_manager = error_manager
         self._update_interval = update_interval
         
         # Store history of last 100 values for each trait
@@ -221,13 +259,31 @@ class TraitsMonitor:
             self._lifecycle_history.append(traits['lifecycle'])
             self._temperament_history.append(traits['temperament'])
             
+            # Check for erratic behavior
+            for trait_name, history in [
+                ('curiosity', self._curiosity_history),
+                ('confidence', self._confidence_history),
+                ('lifecycle', self._lifecycle_history),
+                ('temperament', self._temperament_history)
+            ]:
+                if self._is_trait_erratic(trait_name, history):
+                    self._error_manager.handle_error(
+                        error_type="traits",
+                        error_message=f"Erratic behavior detected in {trait_name}",
+                        context={
+                            "trait_name": trait_name,
+                            "current_value": traits[trait_name],
+                            "history": list(history)[-10:]
+                        }
+                    )
+            
             return traits
             
         except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to collect trait values: {str(e)}",
-                error_type="trait_collection_error",
-                stack_trace=traceback.format_exc()
+            self._error_manager.handle_error(
+                error_type="traits",
+                error_message=f"Failed to collect trait values: {str(e)}",
+                context={"stack_trace": traceback.format_exc()}
             )
             return {
                 'curiosity': 0.0,

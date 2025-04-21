@@ -376,12 +376,15 @@ class SOVLRunner:
                     
                     # Handle memory monitor with RAM and GPU managers
                     elif name == "memory monitor":
+                        if not self.error_manager:
+                            raise RuntimeError("ErrorManager must be initialized before MemoryMonitor")
                         component = MemoryMonitor(
                             config_manager=context.config_manager,
                             logger=context.logger,
                             memoria_manager=memoria_manager,  # Will be updated later
                             ram_manager=ram_manager,
-                            gpu_manager=gpu_manager
+                            gpu_manager=gpu_manager,
+                            error_manager=self.error_manager
                         )
                         stage2_components.append(component)
                         components.append(component)
@@ -426,12 +429,15 @@ class SOVLRunner:
                     raise
             
             # Initialize TraitsMonitor after other components are ready
+            if not self.error_manager:
+                raise RuntimeError("ErrorManager must be initialized before TraitsMonitor")
             self.traits_monitor = TraitsMonitor(
                 config_manager=context.config_manager,
                 logger=self.logger,
                 state=self.state_manager.get_state(),
                 curiosity_manager=next(c for c in components if isinstance(c, CuriosityEngine)),
-                training_manager=next(c for c in components if isinstance(c, TrainingCycleManager))
+                training_manager=next(c for c in components if isinstance(c, TrainingCycleManager)),
+                error_manager=self.error_manager
             )
             
             self.logger.log_event(

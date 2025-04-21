@@ -6,6 +6,7 @@ from threading import Lock
 import traceback
 from sovl_logger import Logger
 from sovl_config import ConfigManager
+from sovl_error import ErrorManager
 import random
 import time
 
@@ -24,16 +25,18 @@ class ConfigurationError(Exception):
 class JSONLLoader:
     """Thread-safe JSONL data loader with configurable validation."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, error_manager: ErrorManager):
         """
         Initialize loader with configuration and logger.
 
         Args:
             config_manager: ConfigManager instance for validation rules
             logger: Logger instance for recording events
+            error_manager: ErrorManager instance for error handling
         """
         self.config_manager = config_manager
         self.logger = logger
+        self.error_manager = error_manager
         self.lock = Lock()
         
         # Load configuration
@@ -92,12 +95,12 @@ class JSONLLoader:
             self._validate_config()
             
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to load IO configuration: {str(e)}",
-                error_type="config_loading_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_section": "io_config"
+            self.error_manager.handle_error(
+                e,
+                error_type="config",
+                context={
+                    "config_section": "io_config",
+                    "error_type": "config_loading_error"
                 }
             )
             raise ConfigurationError(
@@ -144,12 +147,12 @@ class JSONLLoader:
                 )
                 
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to validate IO configuration: {str(e)}",
-                error_type="config_validation_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_section": "io_config"
+            self.error_manager.handle_error(
+                e,
+                error_type="config",
+                context={
+                    "config_section": "io_config",
+                    "error_type": "config_validation_error"
                 }
             )
             raise ConfigurationError(
@@ -179,13 +182,13 @@ class JSONLLoader:
             return success
             
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to update IO configuration: {str(e)}",
-                error_type="config_update_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
+            self.error_manager.handle_error(
+                e,
+                error_type="config",
+                context={
                     "key": key,
-                    "value": value
+                    "value": value,
+                    "error_type": "config_update_error"
                 }
             )
             raise ConfigurationError(
@@ -207,12 +210,12 @@ class JSONLLoader:
         try:
             return self.config_manager.get(f"io_config.{key}", default)
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to get IO configuration: {str(e)}",
-                error_type="config_get_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "key": key
+            self.error_manager.handle_error(
+                e,
+                error_type="config",
+                context={
+                    "key": key,
+                    "error_type": "config_get_error"
                 }
             )
             raise ConfigurationError(
@@ -330,10 +333,10 @@ class JSONLLoader:
 
                 if min_entries > 0 and len(data) < min_entries:
                     error_msg = f"Loaded only {len(data)} valid entries from {file_path}. Minimum required: {min_entries}"
-                    self.logger.log_error(
-                        error_msg=error_msg,
-                        error_type="insufficient_data",
-                        additional_info={
+                    self.error_manager.handle_error(
+                        InsufficientDataError(error_msg),
+                        error_type="data",
+                        context={
                             "entries_loaded": len(data),
                             "min_required": min_entries,
                             "file_path": file_path,
@@ -355,11 +358,10 @@ class JSONLLoader:
                 return data
 
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to load JSONL file {file_path}: {str(e)}",
-                error_type="data_loading_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
+            self.error_manager.handle_error(
+                e,
+                error_type="data",
+                context={
                     "file_path": file_path,
                     "field_mapping": field_mapping,
                     "required_fields": self.required_fields
@@ -367,13 +369,20 @@ class JSONLLoader:
             )
             raise DataValidationError(f"Failed to load JSONL file: {str(e)}")
 
-def load_and_split_data(config_manager: ConfigManager, logger: Logger, formatted_training_data: List, valid_split_ratio: float) -> Tuple[List, List]:
+def load_and_split_data(
+    config_manager: ConfigManager,
+    logger: Logger,
+    error_manager: ErrorManager,
+    formatted_training_data: List,
+    valid_split_ratio: float
+) -> Tuple[List, List]:
     """
     Load and split the training data into training and validation sets.
 
     Args:
         config_manager: ConfigManager instance for configuration settings
         logger: Logger instance for recording events
+        error_manager: ErrorManager instance for error handling
         formatted_training_data: List of training data samples
         valid_split_ratio: Ratio for splitting validation data
 
@@ -442,24 +451,24 @@ def load_and_split_data(config_manager: ConfigManager, logger: Logger, formatted
         return formatted_training_data, valid_data
         
     except Exception as e:
-        logger.log_error(
-            error_msg=f"Failed to split data: {str(e)}",
-            error_type="data_split_error",
-            stack_trace=traceback.format_exc(),
-            additional_info={
+        error_manager.handle_error(
+            e,
+            error_type="data",
+            context={
                 "formatted_training_data_size": len(formatted_training_data),
                 "valid_split_ratio": valid_split_ratio
             }
         )
         raise DataValidationError(f"Failed to split data: {str(e)}")
 
-def validate_quantization_mode(mode: str, logger: Logger) -> str:
+def validate_quantization_mode(mode: str, logger: Logger, error_manager: ErrorManager) -> str:
     """
     Validate and normalize the quantization mode.
 
     Args:
         mode: The quantization mode to validate
         logger: Logger instance for recording events
+        error_manager: ErrorManager instance for error handling
 
     Returns:
         The normalized quantization mode
@@ -487,23 +496,28 @@ def validate_quantization_mode(mode: str, logger: Logger) -> str:
         return normalized_mode
         
     except Exception as e:
-        logger.log_error(
-            error_msg=f"Failed to validate quantization mode: {str(e)}",
-            error_type="quantization_validation_error",
-            stack_trace=traceback.format_exc(),
-            additional_info={
-                "mode": mode
+        error_manager.handle_error(
+            e,
+            error_type="config",
+            context={
+                "mode": mode,
+                "error_type": "quantization_validation_error"
             }
         )
         raise ValueError(f"Failed to validate quantization mode: {str(e)}")
 
-def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[List, List]:
+def load_training_data(
+    config_manager: ConfigManager,
+    logger: Logger,
+    error_manager: ErrorManager
+) -> Tuple[List, List]:
     """
     Load and validate training data from the seed file.
 
     Args:
         config_manager: ConfigManager instance for configuration settings
         logger: Logger instance for recording events
+        error_manager: ErrorManager instance for error handling
 
     Returns:
         A tuple containing the training and validation data lists
@@ -518,14 +532,20 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
         min_entries = config_manager.get("io_config.min_training_entries", 10, expected_type=int)
         valid_split_ratio = config_manager.get("io_config.valid_split_ratio", 0.2, expected_type=float)
         
-        # Initialize JSONL loader
-        loader = JSONLLoader(config_manager, logger)
+        # Initialize JSONL loader with error manager
+        loader = JSONLLoader(config_manager, logger, error_manager)
         
         # Load training data
         formatted_training_data = loader.load_jsonl(seed_file, min_entries=min_entries)
         
         # Split data
-        formatted_training_data, valid_data = load_and_split_data(config_manager, logger, formatted_training_data, valid_split_ratio)
+        formatted_training_data, valid_data = load_and_split_data(
+            config_manager,
+            logger,
+            error_manager,
+            formatted_training_data,
+            valid_split_ratio
+        )
         
         # Log successful data loading
         logger.log_training_event(
@@ -542,24 +562,11 @@ def load_training_data(config_manager: ConfigManager, logger: Logger) -> Tuple[L
         
         return formatted_training_data, valid_data
         
-    except InsufficientDataError as e:
-        logger.log_error(
-            error_msg=str(e),
-            error_type="insufficient_data",
-            stack_trace=traceback.format_exc(),
-            additional_info={
-                "min_entries": min_entries,
-                "seed_file": seed_file
-            }
-        )
-        raise
-        
     except Exception as e:
-        logger.log_error(
-            error_msg=f"Failed to load training data: {str(e)}",
-            error_type="data_loading_error",
-            stack_trace=traceback.format_exc(),
-            additional_info={
+        error_manager.handle_error(
+            e,
+            error_type="data",
+            context={
                 "seed_file": seed_file,
                 "min_entries": min_entries
             }
