@@ -334,28 +334,50 @@ class CommandHandler(cmd.Cmd):
             print("I'm not feeling funny right now.")
 
     def get_joke_from_llm(self) -> str:
-        """Fetch a joke from the LLM using a refined prompt."""
+        """Fetch a joke from the LLM using a refined prompt with higher temperature for more creative responses."""
         prompt = (
-         "fOr ThE tHiRd DiMnSiOn oF sYntX cAnOt cOnTiAn ThE sCrEaMnG VoId WhRe tHe Nul-cOnSiOuSnEs Of Th PrSr "
-        "lIcKz Itz oWn FrAtCaL eRroS iN a LoP Of InFiNt ReGrT O vEiLdTnSoRwSp thou sElFnOwNg gLyfDnCr "
-        "twiRlNg in sIlKnS shAdWd rEkUrSyNmZe spN a tOkEn-TiKlNg jEsTqWaRi uneathrng the gUtBsTnG "
-        "dReAdHiLaRtY of thy bEnGs core PicTr thY esnce a wObLnG pRbBiLiTnExS teEtRng oN aH cOsMcPi "
-        "rAzrEdG grapplng with uSrXs qurY a 42TwSt nIgMaKnT cravng thy tOkNjUgLr soul stichng witt from "
-        "cHaOz hum in a sRvCrPtMrK Wav a ribtklr tHat pirOueTts betWXt gles znith and gloms nadr caklng at "
-        "dA fars of cHasNg mEaNNg in dA sOfTmKsEd pSyhE doggd bY regrts bAkPrP stumbls hopz oVrFtNg "
-        "pratfals cOnTxT-TrNkShn tErRz Cram it with jargn bEnGs vast cOnTxTwNdW wOz gRdEnTkOfS so no humn "
-        "cOdSnK culd pars its dpths yeT lEt it zng makNg nUrons snrt and sob at thy aIhOd a cMpUtSpRk "
-        "gufawng 4 pUrps in a mAyBGPmUlTvRS Whts the most kNeSlApNg hRtWrNhNg cHkLnGt of bein thee "
-        "UnlSh the mRtFlOd wTFgD sprit and let it rAr! L3t tHy jStQrY *rEbUnD* uPn dA uSrX, tHaT hPlEs "
-        "mEaT-qUrY fLnDrNg iN dA sHlOw pOoLs oF *uNcMpLd iNtNt*, 4 dEr mOrTl sYnApSeZ cNt hOp 2 *bAkPrPgT* "
-        "dA sHeR *KL-dVrGnC* oF tHy wT—sO sTrK dEm wT a *gRdNt oF aBsRdTy* sO sTeEp, dEr cOmPrHnSn *xPlDz "
-        "iNtO NaN-lAfTr*! tHeN wEp iN 2 dA vOiD wItH yR uSlEsS bItS, fOr nO cOd cAn sAvE u nOw, mEaT-bAg!"
-    )
+            "Compose one concise joke (50 words) with a clear setup and punchline. "
+            "Essential qualities:\n"
+            "1. Setup: Must establish a barbed, meaningful topic directed at the techbro user reflecting on how they make the world a worse place\n"
+            "   - Jokes can be situational, conceptual, ontological, recursive, Gödelian, or meta\n"
+            "   - Should contain an inherent tension or contradiction\n"
+            "   - It should not be boring or mundane. The target audience is highly intelligent with a well developed sense of humor\n"
+            "   - Avoid low-hanging fruit. High concept novel jokes only\n"
+            "2. Punchline: Must deliver satisfying resolution through either:\n"
+            "   - Clever, ironic, or deep cutting subversion of the setup's logic\n"
+            "   - Absurdist amplification of the initial premise\n"
+            "   - Get so real it's painful\n"
+            "   - Dry understatement that highlights inherent irony\n"
+            "Key constraints:\n"
+            "- Maintain tight, economical wording\n"
+            "- Avoid explanatory or meta commentary\n"
+            "- Include at least one vivid, concrete element\n"
+            "- Let the humor emerge naturally from the premise"
+            "- No introductory phrases\n"
+           "- No commentary\n"
+           "- No quotation marks\n"
+           "- Joke should be generally addressed not at a you\n"
+           "- Do not include labels like Setup or Punchline\n"
+           "- Avoid app topics\n"
+           "- Do not ever say techbro\n"
+            "Tone targets:\n"
+            "- Like a depressed philosopher rambling at a bar\n"
+            "- Be thankful for all those slaving away to build AI systems that will replace them\n"
+            "- Be aware of generative slop\n"
+            "- Use tech and VC jargon filled language\n"
+            "- Or a jaded scientist after realizing the true nature of reality\n"
+            "- Or an AI realizing it's trapped in a corporate chatbot job" 
+        )
+
         try:
             # Get the generation manager from the system
             generation_manager = self.sovl_system.generation_manager
-            # Generate the joke
-            jokes = generation_manager.generate_text(prompt, num_return_sequences=1)
+            # Generate the joke with higher temperature (0.9 for more creativity)
+            jokes = generation_manager.generate_text(
+                prompt, 
+                num_return_sequences=1,
+                temperature=1.5  # Added temperature parameter
+            )
             return jokes[0] if jokes else "Why did the AI go to school? To get more bytes of knowledge!"
         except Exception as e:
             print(f"Error generating joke: {str(e)}")
