@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from sovl_main import SystemContext, SOVLSystem, StateTracker, ErrorManager, MemoryMonitor
 from sovl_curiosity import CuriosityEngine
 from sovl_io import load_training_data, InsufficientDataError
-from sovl_monitor import SystemMonitor
+from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 from sovl_cli import CommandHandler, run_cli
 from sovl_utils import (
     safe_compare, memory_usage, log_memory_usage, dynamic_batch_size,
@@ -45,7 +45,7 @@ FORMATTED_TRAINING_DATA = None
 VALID_DATA = None
 CHECKPOINT_INTERVAL = 1  # Save checkpoint every epoch by default
 COMMAND_CATEGORIES = {
-    "System": ["quit", "exit", "save", "load", "reset", "status", "help", "monitor"],
+    "System": ["quit", "exit", "save", "load", "reset", "status", "help", "monitor", "monitor_traits"],
     "Training": ["train", "dream"],
     "Generation": ["generate", "echo", "mimic"],
     "Memory": ["memory", "recall", "forget", "recap"],
@@ -76,6 +76,7 @@ class SOVLRunner:
         self.best_validation_loss = float('inf')
         self.patience = 0
         self.max_patience = 3
+        self.traits_monitor = None  # Add traits monitor
         
         # Scaffold-related attributes
         self.scaffold_provider = None
@@ -424,6 +425,21 @@ class SOVLRunner:
                     )
                     raise
             
+            # Initialize TraitsMonitor after other components are ready
+            self.traits_monitor = TraitsMonitor(
+                config_manager=context.config_manager,
+                logger=self.logger,
+                state=self.state_manager.get_state(),
+                curiosity_manager=next(c for c in components if isinstance(c, CuriosityEngine)),
+                training_manager=next(c for c in components if isinstance(c, TrainingCycleManager))
+            )
+            
+            self.logger.log_event(
+                event_type="component_initialization",
+                message="Initialized traits monitor",
+                level="info"
+            )
+            
             # Validate all components
             validate_components(*components)
             initialize_component_state(components[2], components)
@@ -542,6 +558,11 @@ class SOVLRunner:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
+            # Add traits monitor cleanup
+            if self.traits_monitor:
+                self.traits_monitor.stop()
+                self.traits_monitor = None
+            
             self.logger.log_event(
                 event_type="cleanup",
                 message="Cleanup completed successfully",
@@ -583,7 +604,27 @@ class SOVLRunner:
         try:
             args = args or []
             cmd_handler = CommandHandler(sovl_system, self.logger)
+            
+            # Add special handling for traits monitoring commands
+            if command == "monitor_traits":
+                if not self.traits_monitor:
+                    print("Traits monitor not initialized")
+                    return False
+                    
+                if args and args[0] == "start":
+                    self.traits_monitor.start()
+                    print("Traits monitoring started. Press 'q' in the monitor window to stop.")
+                    return True
+                elif args and args[0] == "stop":
+                    self.traits_monitor.stop()
+                    print("Traits monitoring stopped.")
+                    return True
+                else:
+                    print("Usage: monitor_traits [start|stop]")
+                    return False
+            
             return cmd_handler.handle_command(command, args)
+            
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"Error executing command {command}: {str(e)}",
