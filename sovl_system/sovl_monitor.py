@@ -1,7 +1,6 @@
 from typing import Dict, Any, List
 from threading import Thread, Event, Lock
 from collections import deque
-from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_trainer import TrainingCycleManager
 from sovl_curiosity import CuriosityManager
@@ -22,7 +21,6 @@ class SystemMonitor:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager
     ):
@@ -32,13 +30,11 @@ class SystemMonitor:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         
@@ -71,7 +67,6 @@ class MemoryMonitor:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager
     ):
@@ -81,13 +76,11 @@ class MemoryMonitor:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         
