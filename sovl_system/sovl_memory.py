@@ -14,6 +14,7 @@ from sovl_hardware import HardwareManager
 from sovl_error import ErrorManager, ErrorRecord
 import gc
 import torch.cuda as cuda
+import contextlib
 
 class RAMManager:
     """Manages RAM memory for the SOVL system."""
@@ -558,3 +559,189 @@ class GPUMemoryManager:
                 stack_trace=traceback.format_exc()
             )
             raise
+
+class GenerationMemoryManager:
+    """Manages memory for text generation tasks in the SOVL system."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger, ram_manager: RAMManager, gpu_manager: GPUMemoryManager):
+        """Initialize GenerationMemoryManager with configuration and memory managers."""
+        self._config_manager = config_manager
+        self._logger = logger
+        self._memory_lock = Lock()
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        
+        # Initialize memory tracking
+        self._tensor_metadata = defaultdict(dict)
+        self._embedding_cache = {}
+        self._max_cache_size = 1000
+        
+        # Initialize memory threshold
+        self.memory_threshold = min(
+            self.ram_manager.memory_threshold,
+            self.gpu_manager.gpu_threshold
+        )
+        
+        # Log initialization
+        self._logger.record_event(
+            event_type="generation_memory_manager_initialized",
+            message="Generation memory manager initialized",
+            level="info"
+        )
+
+    def manage_memory(self) -> None:
+        """Manage memory usage with adaptive thresholds."""
+        try:
+            # Update memory threshold adaptively
+            self.memory_threshold = self._calculate_adaptive_threshold()
+            
+            # Check memory health with adaptive threshold
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            if ram_health["usage_percentage"] > self.memory_threshold:
+                self.ram_manager.recover_memory_threshold(self.memory_threshold)
+            
+            if gpu_health["usage_percentage"] > self.memory_threshold:
+                self.gpu_manager.recover_memory_threshold(self.memory_threshold)
+                self._offload_old_tensors()
+            
+            # Log memory health with adaptive threshold
+            self._log_memory_health()
+            
+        except Exception as e:
+            self._handle_error("memory_management", e)
+
+    def _offload_old_tensors(self) -> None:
+        """Move old tensors to CPU with tracking."""
+        try:
+            current_time = time.time()
+            tensors_to_offload = []
+            
+            # Identify tensors to offload
+            for tensor_id, metadata in self._tensor_metadata.items():
+                if current_time - metadata['last_access'] > 300:  # 5 minutes
+                    tensors_to_offload.append((tensor_id, metadata))
+            
+            # Batch process offloading using memory managers
+            if tensors_to_offload:
+                with self._memory_lock:
+                    for tensor_id, metadata in tensors_to_offload:
+                        tensor = metadata['tensor']
+                        if tensor.device.type == 'cuda':
+                            # Use GPU memory manager for proper CUDA memory handling
+                            self.gpu_manager.free_gpu_memory(tensor.data_ptr())
+                            # Move to RAM using RAM manager
+                            cpu_tensor = tensor.cpu()
+                            self._tensor_metadata[tensor_id]['tensor'] = cpu_tensor
+                            self._tensor_metadata[tensor_id]['device'] = 'cpu'
+                            
+            # Log offloading results
+            self._logger.record_event(
+                event_type="tensor_offload",
+                message=f"Offloaded {len(tensors_to_offload)} tensors",
+                level="info"
+            )
+        except Exception as e:
+            self._handle_error("tensor_offload", e)
+
+    def check_memory_health(self) -> bool:
+        """Check memory health with adaptive thresholds."""
+        try:
+            # Update memory threshold adaptively
+            self.memory_threshold = self._calculate_adaptive_threshold()
+            
+            # Check both RAM and GPU health
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            # Calculate overall health score
+            ram_score = 1.0 - (ram_health["usage_percentage"] / 100.0)
+            gpu_score = 1.0 - (gpu_health["usage_percentage"] / 100.0)
+            overall_score = (ram_score + gpu_score) / 2.0
+            
+            # Trigger cleanup if health score is below threshold
+            if overall_score < self.memory_threshold:
+                self.manage_memory()
+                return False
+                
+            return True
+            
+        except Exception as e:
+            self._handle_error("memory_health_check", e)
+            return False
+
+    def _calculate_adaptive_threshold(self) -> float:
+        """Calculate adaptive memory threshold based on system load and model size."""
+        try:
+            base_threshold = self.memory_threshold
+            model_size = sum(p.numel() * p.element_size() for p in self._config_manager.get("model_parameters", []))
+            total_memory = self.gpu_manager.get_gpu_usage()["total_memory"]
+            system_load = self.ram_manager.check_memory_health()["usage_percentage"]
+            
+            # Calculate adaptive threshold
+            adaptive_threshold = base_threshold * (1 - system_load) * (1 - model_size/total_memory)
+            return max(0.7, min(0.95, adaptive_threshold))
+        except Exception as e:
+            self._handle_error("adaptive_threshold_calculation", e)
+            return self.memory_threshold
+
+    def optimize_batch_size(self, current_batch_size: int) -> int:
+        """Optimize batch size based on memory availability."""
+        try:
+            memory_usage = self.gpu_manager.get_gpu_usage()["usage_percentage"]
+            if memory_usage > 0.9:
+                return max(1, current_batch_size // 2)
+            elif memory_usage < 0.5:
+                return min(self._config_manager.get("max_batch_size", 32), current_batch_size * 2)
+            return current_batch_size
+        except Exception as e:
+            self._handle_error("batch_size_optimization", e)
+            return current_batch_size
+
+    def _log_memory_health(self) -> None:
+        """Log detailed memory health status with adaptive thresholds."""
+        try:
+            # Get current memory stats
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_health = self.gpu_manager.check_memory_health()
+            
+            # Calculate memory pressure
+            ram_pressure = ram_health["usage_percentage"] / 100.0
+            gpu_pressure = gpu_health["usage_percentage"] / 100.0
+            
+            # Log memory health details
+            self._logger.info(
+                f"Memory Health Status:\n"
+                f"  RAM Usage: {ram_health['used']:.2f}GB / {ram_health['total']:.2f}GB "
+                f"({ram_health['usage_percentage']:.1f}%)\n"
+                f"  GPU Usage: {gpu_health['used']:.2f}GB / {gpu_health['total']:.2f}GB "
+                f"({gpu_health['usage_percentage']:.1f}%)\n"
+                f"  Memory Pressure: RAM={ram_pressure:.2f}, GPU={gpu_pressure:.2f}\n"
+                f"  Adaptive Threshold: {self.memory_threshold:.2f}"
+            )
+            
+        except Exception as e:
+            self._handle_error("memory_logging", e)
+
+    def _handle_error(self, context: str, error: Exception) -> None:
+        """Handle errors using the logger."""
+        try:
+            self._logger.log_error(
+                error_msg=f"Memory management error in {context}: {str(error)}",
+                error_type=f"memory_{context}_error",
+                stack_trace=traceback.format_exc()
+            )
+        except Exception as e:
+            print(f"Failed to handle error: {str(e)}")  # Fallback error handling
+
+    @contextlib.contextmanager
+    def memory_context(self):
+        """Context manager for memory-intensive operations."""
+        try:
+            # Check memory before operation
+            self.manage_memory()
+            yield
+        finally:
+            # Clean up after operation
+            self.manage_memory()

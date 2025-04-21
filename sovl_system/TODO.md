@@ -483,7 +483,7 @@ Data Provider: Update CuriosityManager to handle data_provider.provider_type and
 sovl_temperament.py:
 New Parameters: Add support for controls_config parameters (temp_eager_threshold, temp_melancholy_noise, lifecycle_params, etc.) in TemperamentManager.
 
-## streamline the logic between sovl_state.json and sovl_trainer.py. The current path between the conversation history to the training is convoluted.
+
 
 
 

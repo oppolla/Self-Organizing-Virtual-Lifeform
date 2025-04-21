@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple, Union, Dict, Any
+from typing import List, Optional, Tuple, Union, Dict, Any, Callable
 from collections import defaultdict
 import time
 import traceback
@@ -16,6 +16,78 @@ from sovl_io import ConfigurationError
 from sovl_curiosity import CuriosityManager
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
+import contextlib
+import functools
+
+class ScaffoldError(Exception):
+    """Base exception for scaffold-related errors."""
+    def __init__(self, message: str, operation: str, context: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.operation = operation
+        self.context = context or {}
+        self.timestamp = time.time()
+
+class ScaffoldErrorHandler:
+    """Centralized error handling for scaffold operations."""
+    
+    def __init__(self, logger: Logger, error_handler: Optional[ErrorHandler] = None):
+        self.logger = logger
+        self.error_handler = error_handler
+        self._lock = Lock()
+        
+    def handle_error(
+        self,
+        error: Exception,
+        operation: str,
+        context: Optional[Dict[str, Any]] = None,
+        severity: str = "error"
+    ) -> None:
+        """Handle scaffold errors with consistent logging and recovery."""
+        with self._lock:
+            error_context = {
+                "operation": operation,
+                "timestamp": time.time(),
+                "severity": severity,
+                **(context or {})
+            }
+            
+            # Log error through both systems if available
+            if self.error_handler:
+                self.error_handler.handle_scaffold_error(error, error_context)
+            
+            self.logger.record_event(
+                event_type=f"scaffold_{operation}_error",
+                message=str(error),
+                level=severity,
+                additional_info={
+                    "error_type": type(error).__name__,
+                    "stack_trace": traceback.format_exc(),
+                    **error_context
+                }
+            )
+
+def scaffold_operation(operation_name: str):
+    """Decorator for consistent error handling in scaffold operations."""
+    def decorator(func: Callable):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except Exception as e:
+                error_handler = getattr(self, '_error_handler', None)
+                if error_handler:
+                    error_handler.handle_error(
+                        error=e,
+                        operation=operation_name,
+                        context={
+                            "function": func.__name__,
+                            "args": str(args),
+                            "kwargs": str(kwargs)
+                        }
+                    )
+                raise
+        return wrapper
+    return decorator
 
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
@@ -313,11 +385,11 @@ def build_scaffold_token_mapping(
     """
     return ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, logger, config)
 
-class SparseMaskFactory:
-    """Handles creation of sparse attention masks."""
+class AttentionUtils:
+    """Unified utilities for attention mask creation and preparation."""
     
     @staticmethod
-    def create(
+    def create_sparse_mask(
         seq_len: int,
         sparse_pattern: str,
         window_size: int,
@@ -344,22 +416,21 @@ class SparseMaskFactory:
         except Exception as e:
             if logger:
                 logger.record_event(
-                    event_type="sparse_mask_creation_failed",
+                    event_type="attention_mask_creation_failed",
                     message=f"Sparse mask creation failed: {str(e)}",
                     level="error",
                     additional_info={
                         "sparse_pattern": sparse_pattern,
+                        "seq_len": seq_len,
+                        "window_size": window_size,
                         "timestamp": time.time(),
                         "stack_trace": traceback.format_exc()
                     }
                 )
             raise
 
-class AttentionMaskPreparer:
-    """Prepares attention masks for multi-head attention."""
-    
     @staticmethod
-    def prepare(
+    def prepare_attention_mask(
         attention_mask: torch.Tensor,
         batch_size: int,
         num_heads: int,
@@ -367,28 +438,39 @@ class AttentionMaskPreparer:
         device: torch.device,
         logger: Optional[Logger] = None
     ) -> torch.Tensor:
-        """Prepare attention mask in additive format."""
+        """Prepare attention mask for multi-head attention."""
         try:
             with NumericalGuard():
                 if attention_mask is None:
                     return None
+                    
+                # Validate dimensions
                 if attention_mask.dim() < 2 or attention_mask.dim() > 4:
-                    raise ValueError(f"Invalid attention mask dimensions: {attention_mask.shape}")
+                    raise ValueError(f"Invalid mask dimensions: {attention_mask.shape}")
                 
+                # Handle boolean masks
                 if attention_mask.dtype == torch.bool:
-                    attention_mask = attention_mask.float().masked_fill(~attention_mask, float('-inf'))
+                    attention_mask = attention_mask.float().masked_fill(
+                        ~attention_mask, float('-inf')
+                    )
+                # Convert to float if needed
                 elif attention_mask.dtype != torch.float:
                     attention_mask = attention_mask.float()
                 
+                # Add batch and head dimensions if needed
                 if attention_mask.dim() == 2:
                     attention_mask = attention_mask.unsqueeze(0).unsqueeze(1)
                 elif attention_mask.dim() == 3:
                     attention_mask = attention_mask.unsqueeze(1)
                 
+                # Expand to match required shape
                 if attention_mask.shape != (batch_size, num_heads, seq_len, seq_len):
-                    attention_mask = attention_mask.expand(batch_size, num_heads, seq_len, seq_len)
+                    attention_mask = attention_mask.expand(
+                        batch_size, num_heads, seq_len, seq_len
+                    )
                 
                 return attention_mask.to(device)
+                
         except Exception as e:
             if logger:
                 logger.record_event(
@@ -397,11 +479,21 @@ class AttentionMaskPreparer:
                     level="error",
                     additional_info={
                         "mask_shape": list(attention_mask.shape) if attention_mask is not None else None,
+                        "target_shape": [batch_size, num_heads, seq_len, seq_len],
                         "timestamp": time.time(),
                         "stack_trace": traceback.format_exc()
                     }
                 )
             raise
+
+    @staticmethod
+    def combine_masks(
+        sparse_mask: torch.Tensor,
+        attention_mask: torch.Tensor,
+        device: torch.device
+    ) -> torch.Tensor:
+        """Combine sparse and attention masks."""
+        return (sparse_mask & attention_mask).to(device)
 
 class LayerDiscoveryStrategy:
     """Strategy for discovering transformer layers in a model."""
@@ -1188,350 +1280,85 @@ class InsufficientDataError(Exception):
     pass
 
 class ScaffoldProvider:
-    """Provides scaffold-related functionality and state management."""
+    """Provides scaffold functionality for the SOVL system."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
-        """
-        Initialize the ScaffoldProvider with configuration manager and logger.
+    def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorHandler):
+        self.config_manager = config_manager
+        self.logger = logger
+        self._error_handler = ScaffoldErrorHandler(logger, error_handler)
+        self._scaffold_state = None
+        self._lock = Lock()
         
-        Args:
-            config_manager: Configuration manager instance
-            logger: Logger instance for structured logging
-        """
-        self._config_manager = config_manager
-        self._logger = logger
-        self.memoria_manager = MemoriaManager(config_manager, logger)
-        self.ram_manager = RAMManager(config_manager, logger)
-        self.gpu_manager = GPUMemoryManager(config_manager, logger)
-        
-    def _initialize_config(self) -> None:
-        """Initialize configuration and memory managers."""
-        try:
-            # Initialize memory managers
-            self.memoria_manager._initialize_storage()
-            self.ram_manager._initialize_ram()
-            self.gpu_manager._initialize_gpu()
+    @scaffold_operation("validate_config")
+    def validate_scaffold_config(self, config: Dict[str, Any]) -> None:
+        """Validate scaffold configuration."""
+        required_fields = ["token_mapping", "attention_config", "memory_config"]
+        for field in required_fields:
+            if field not in config:
+                raise ConfigurationError(f"Missing required field: {field}")
+                
+        if not isinstance(config["token_mapping"], dict):
+            raise ConfigurationError("token_mapping must be a dictionary")
             
-            # Log successful initialization
-            self._logger.record_event(
-                event_type="scaffold_initialized",
-                message="Scaffold initialized successfully",
+        self.logger.record_event(
+            event_type="scaffold_config_validation",
+            message="Scaffold configuration validated successfully",
+            level="info"
+        )
+        
+    @scaffold_operation("initialize")
+    def initialize_scaffold_state(self, config: Dict[str, Any]) -> None:
+        """Initialize scaffold state with configuration."""
+        try:
+            self.validate_scaffold_config(config)
+            
+            with self._lock:
+                self._scaffold_state = {
+                    "token_mapping": config["token_mapping"],
+                    "attention_config": config["attention_config"],
+                    "memory_config": config["memory_config"],
+                    "last_updated": time.time()
+                }
+                
+            self.logger.record_event(
+                event_type="scaffold_initialization",
+                message="Scaffold state initialized successfully",
                 level="info"
             )
+            
         except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to initialize scaffold: {str(e)}",
-                error_type="scaffold_error",
-                stack_trace=traceback.format_exc()
+            self._error_handler.handle_error(
+                error=e,
+                operation="initialize_scaffold_state",
+                context={"config": str(config)}
             )
             raise
-
-    def initialize_scaffold(self) -> None:
-        """Initialize the scaffold model and tokenizer."""
-        try:
-            with self._lock:
-                if self._scaffold_state["is_initialized"]:
-                    return
-                
-                model_path = self._config_manager.get("scaffold_config.model_path")
-                model_type = self._config_manager.get("scaffold_config.model_type")
-                tokenizer_path = self._config_manager.get("scaffold_config.tokenizer_path")
-                quantization_mode = self._config_manager.get("scaffold_config.quantization_mode")
-                
-                # Load the scaffold model
-                scaffold_model = self._load_model(
-                    model_path=model_path,
-                    model_type=model_type,
-                    quantization_mode=quantization_mode
-                )
-                if scaffold_model is None:
-                    raise RuntimeError("Failed to load scaffold model.")
-                
-                # Load the tokenizer
-                scaffold_tokenizer = self._load_tokenizer(tokenizer_path)
-                if scaffold_tokenizer is None:
-                    raise RuntimeError("Failed to load scaffold tokenizer.")
-                
-                self._scaffold_state["scaffold_model"] = scaffold_model
-                self._scaffold_state["token_map"] = self._build_token_map(
-                    base_tokenizer=scaffold_model.tokenizer,
-                    scaffold_tokenizer=scaffold_tokenizer
-                )
-                
-                self._scaffold_state["is_initialized"] = True
-                self._scaffold_state["last_update"] = time.time()
-                
-                self._logger.record_event(
-                    event_type="scaffold_initialized",
-                    message="Scaffold model and tokenizer initialized successfully",
-                    level="info",
-                    additional_info={
-                        "model_type": model_type,
-                        "quantization_mode": quantization_mode,
-                        "timestamp": time.time()
-                    }
-                )
-        except Exception as e:
-            self._logger.record_event(
-                event_type="scaffold_initialization_error",
-                message=f"Failed to initialize scaffold: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
+            
+    @scaffold_operation("update")
+    def update_scaffold_state(self, updates: Dict[str, Any]) -> None:
+        """Update scaffold state with new values."""
+        if not self._scaffold_state:
+            raise ScaffoldError(
+                "Scaffold state not initialized",
+                operation="update_scaffold_state"
             )
-            raise
-
-    def _load_model(self, model_path: str, model_type: str, quantization_mode: str) -> nn.Module:
-        """Load scaffold model (placeholder implementation)."""
-        # Note: Actual implementation would load the model based on type and quantization
-        raise NotImplementedError("Model loading not implemented")
-
-    def _load_tokenizer(self, tokenizer_path: str) -> Any:
-        """Load scaffold tokenizer (placeholder implementation)."""
-        # Note: Actual implementation would load the tokenizer
-        raise NotImplementedError("Tokenizer loading not implemented")
-
-    def _build_token_map(self, base_tokenizer: Any, scaffold_tokenizer: Any) -> Dict:
-        """Build token map between base and scaffold tokenizers."""
-        try:
-            # Initialize token map storage
-            token_map = self.token_map_storage.get_state()
             
-            # Build token map
-            for base_token, base_id in base_tokenizer.get_vocab().items():
-                normalized = base_token.replace("Ġ", "").replace("##", "")
-                scaffold_ids = scaffold_tokenizer.encode(
-                    normalized, add_special_tokens=False, max_length=3, truncation=True
-                )
-                
-                if not scaffold_ids or scaffold_ids == [scaffold_tokenizer.unk_token_id]:
-                    scaffold_ids = [scaffold_tokenizer.unk_token_id]
-                
-                token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
-            
-            # Store token map
-            self.token_map_storage.load_state(token_map)
-            
-            return token_map
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="token_map_error",
-                message=f"Failed to build token map: {str(e)}",
-                level="error",
-                additional_info={"timestamp": time.time()}
-            )
-            raise
-
-    def get_scaffold_context(
-        self, 
-        scaffold_inputs: Dict[str, torch.Tensor],
-        scaffold_model: nn.Module
-    ) -> torch.Tensor:
-        """Get scaffold context for the current input."""
-        try:
-            # Check memory health before processing
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_usage = self.gpu_manager.get_gpu_usage()
-            
-            if ram_health["usage_percent"] > 0.9 or gpu_usage["usage_percent"] > 0.9:
-                self.logger.record_event(
-                    event_type="memory_warning",
-                    message="High memory usage detected during scaffold context generation",
-                    level="warning",
-                    additional_info={
-                        "ram_usage": ram_health["usage_percent"],
-                        "gpu_usage": gpu_usage["usage_percent"]
-                    }
-                )
-            
-            # Get scaffold hidden states
-            hidden_states = self.get_scaffold_hidden_states(scaffold_inputs, scaffold_model)
-            
-            # Store in scaffold context storage
-            self.scaffold_context_storage.update("current", hidden_states)
-            
-            return hidden_states
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="scaffold_context_error",
-                message=f"Failed to get scaffold context: {str(e)}",
-                level="error",
-                additional_info={"timestamp": time.time()}
-            )
-            raise
-    
-    def validate_scaffold_config(self) -> bool:
-        """Validate scaffold configuration."""
-        try:
-            self._validate_config()
-            return True
-        except Exception as e:
-            self._logger.record_event(
-                event_type="scaffold_error",
-                message="Failed to validate scaffold config",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            raise
-    
-    def initialize_scaffold_state(self, model_name: str, device: str) -> bool:
-        """Initialize scaffold state."""
-        try:
-            from transformers import AutoConfig
-            self._scaffold_config = AutoConfig.from_pretrained(model_name)
-            
-            required_attrs = ["hidden_size", "num_attention_heads", "num_hidden_layers", "max_position_embeddings"]
-            for attr in required_attrs:
-                if not hasattr(self._scaffold_config, attr):
-                    raise ValueError(f"Scaffold model config missing {attr}")
-
-            with self._lock:
-                self._hidden_size = self._scaffold_config.hidden_size
-                self._num_heads = self._scaffold_config.num_attention_heads
-                self._num_layers = self._scaffold_config.num_hidden_layers
-                self._device = device
-
-                self._scaffold_state_tensor = torch.zeros(
-                    (1, self._scaffold_config.max_position_embeddings, self._hidden_size),
-                    device=self._device
-                )
-                
-                self._logger.record_event(
-                    event_type="scaffold_state_initialized",
-                    message="Scaffold state initialized successfully",
-                    level="info",
-                    additional_info={
-                        "hidden_size": self._hidden_size,
-                        "num_heads": self._num_heads,
-                        "num_layers": self._num_layers,
-                        "max_position_embeddings": self._scaffold_config.max_position_embeddings,
-                        "device": str(self._device),
-                        "timestamp": time.time()
-                    }
-                )
-
-            return True
-        except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {
-                "operation": "state_initialization",
-                "model_name": model_name,
-                "device": device
-            })
-            return False
-
-    def verify_scaffold_compatibility(self, base_config: Any) -> bool:
-        """Verify scaffold compatibility with base model."""
-        try:
-            if not self._scaffold_config:
-                raise ValueError("Scaffold config not initialized")
-
-            if self._scaffold_config.hidden_size % base_config.hidden_size != 0:
-                self._logger.record_event(
-                    event_type="scaffold_compatibility_error",
-                    message="Incompatible hidden sizes",
-                    level="error",
-                    additional_info={
-                        "scaffold_size": self._scaffold_config.hidden_size,
-                        "base_size": base_config.hidden_size,
-                        "timestamp": time.time()
-                    }
-                )
-                return False
-
-            if self._scaffold_config.num_attention_heads % base_config.num_attention_heads != 0:
-                self._logger.record_event(
-                    event_type="scaffold_compatibility_error",
-                    message="Incompatible number of attention heads",
-                    level="error",
-                    additional_info={
-                        "scaffold_heads": self._scaffold_config.num_attention_heads,
-                        "base_heads": base_config.num_attention_heads,
-                        "timestamp": time.time()
-                    }
-                )
-                return False
-
-            return True
-        except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {
-                "operation": "compatibility_verification",
-                "base_config": base_config
-            })
-            return False
-
-    def get_scaffold_stats(self) -> Dict:
-        """Get scaffold statistics."""
-        try:
-            with self._lock:
-                stats = {
-                    "hidden_size": self._hidden_size,
-                    "num_heads": self._num_heads,
-                    "num_layers": self._num_layers,
-                    "token_map_size": len(self._scaffold_state["token_map"]) if self._scaffold_state["token_map"] else 0,
-                    "has_hidden_states": self._scaffold_state_tensor is not None,
-                    "config_valid": self._validate_config() is None,
-                    "device": str(self._device) if self._device else None,
-                    "timestamp": time.time()
-                }
-                return stats
-        except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {"operation": "stats_retrieval"})
-            return {}
-
-    def reset_scaffold_state(self) -> None:
-        """Reset scaffold state."""
         with self._lock:
-            self._scaffold_state["token_map"] = None
-            self._scaffold_state_tensor = None
-            self._logger.record_event(
-                event_type="scaffold_state_reset",
-                message="Scaffold state reset successfully",
-                level="info",
-                additional_info={"timestamp": time.time()}
+            self._scaffold_state.update(updates)
+            self._scaffold_state["last_updated"] = time.time()
+            
+        self.logger.record_event(
+            event_type="scaffold_update",
+            message="Scaffold state updated successfully",
+            level="info"
+        )
+        
+    @scaffold_operation("get_state")
+    def get_scaffold_state(self) -> Dict[str, Any]:
+        """Get current scaffold state."""
+        if not self._scaffold_state:
+            raise ScaffoldError(
+                "Scaffold state not initialized",
+                operation="get_scaffold_state"
             )
-
-    def get_scaffold_hidden_states(
-        self, 
-        scaffold_inputs: Dict[str, torch.Tensor],
-        scaffold_model: nn.Module
-    ) -> torch.Tensor:
-        """Get scaffold hidden states."""
-        try:
-            if not self._scaffold_state["is_initialized"]:
-                raise RuntimeError("ScaffoldProvider not initialized")
-                
-            if self._scaffold_state_tensor is None:
-                raise ValueError("Scaffold hidden states not initialized")
-                
-            if not isinstance(scaffold_inputs, dict):
-                raise ValueError("scaffold_inputs must be a dictionary")
-                
-            if 'input_ids' not in scaffold_inputs or 'attention_mask' not in scaffold_inputs:
-                raise ValueError("scaffold_inputs must contain 'input_ids' and 'attention_mask'")
-                
-            with torch.no_grad():
-                scaffold_outputs = scaffold_model(
-                    **{k: v for k, v in scaffold_inputs.items() if k in ['input_ids', 'attention_mask']},
-                    output_hidden_states=True
-                )
-                hidden_states = (
-                    scaffold_outputs.hidden_states[-1]
-                    if hasattr(scaffold_outputs, 'hidden_states')
-                    else scaffold_outputs.base_model_output.hidden_states[-1]
-                )
-                self._scaffold_state_tensor = hidden_states.detach()
-                
-            return self._scaffold_state_tensor
-        except Exception as e:
-            self._error_handler.handle_scaffold_error(e, {
-                "operation": "hidden_states_retrieval",
-                "inputs_shape": {k: v.shape for k, v in scaffold_inputs.items()}
-            })
-            raise
+        return self._scaffold_state.copy()

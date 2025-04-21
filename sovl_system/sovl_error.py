@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from sovl_memory import GPUMemoryManager
 from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
+from functools import wraps
 
 @dataclass
 class ErrorContext:
@@ -426,6 +427,136 @@ class ErrorManager(IErrorHandler):
                     **record.additional_info
                 }
             )
+
+    def handle_generation_error(
+        self,
+        error: Exception,
+        context: str,
+        additional_info: Optional[Dict[str, Any]] = None,
+        state: Optional[SOVLState] = None
+    ) -> None:
+        """Handle generation-specific errors with enhanced context and recovery."""
+        try:
+            # Gather comprehensive error context
+            error_context = self.gather_error_context(error, context, state, additional_info)
+            
+            # Select and apply recovery strategy
+            strategy = self.select_recovery_strategy(error, context)
+            recovery_result = self._apply_recovery_strategy(strategy, error_context)
+            
+            # Update error context with recovery information
+            error_context["recovery"] = recovery_result
+            
+            # Record the error
+            self.record_error(
+                error=error,
+                error_type=f"generation_{context}",
+                context=error_context
+            )
+            
+            # Log error with recovery information
+            self.logger.log_error(
+                error_msg=str(error),
+                error_type=type(error).__name__,
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "context": context,
+                    "recovery_strategy": strategy,
+                    "recovery_success": recovery_result["success"]
+                }
+            )
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to handle generation error: {str(e)}",
+                error_type="generation_error_handling_error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def _apply_recovery_strategy(self, strategy: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply the selected recovery strategy with enhanced error handling."""
+        result = {"strategy": strategy, "success": False, "details": {}}
+        
+        try:
+            if strategy == "full_memory_reset":
+                # Reset both RAM and GPU memory
+                if hasattr(self.context, 'memory_manager'):
+                    self.context.memory_manager.manage_memory()
+                if hasattr(self.context, 'gpu_manager'):
+                    self.context.gpu_manager.manage_memory()
+                result["details"]["actions"] = ["ram_cleanup", "gpu_cleanup"]
+                result["success"] = True
+                
+            elif strategy == "gpu_memory_cleanup":
+                # Clean up GPU memory
+                if hasattr(self.context, 'gpu_manager'):
+                    self.context.gpu_manager.manage_memory()
+                result["details"]["actions"] = ["gpu_cleanup"]
+                result["success"] = True
+                
+            elif strategy == "ram_memory_cleanup":
+                # Clean up RAM memory
+                if hasattr(self.context, 'ram_manager'):
+                    self.context.ram_manager.manage_memory()
+                result["details"]["actions"] = ["ram_cleanup"]
+                result["success"] = True
+                
+            elif strategy == "device_reset":
+                # Reset device state
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                result["details"]["actions"] = ["device_reset"]
+                result["success"] = True
+                
+            elif strategy == "config_reset":
+                # Reset configuration
+                if hasattr(self.context, 'config_manager'):
+                    self.context.config_manager.reset_section("generation_config")
+                result["details"]["actions"] = ["config_reset"]
+                result["success"] = True
+                
+            else:
+                # Default strategy: try memory cleanup first
+                if hasattr(self.context, 'memory_manager'):
+                    self.context.memory_manager.manage_memory()
+                result["details"]["actions"] = ["default_cleanup"]
+                result["success"] = True
+                
+            # Log recovery attempt
+            self.logger.log_info(
+                message=f"Applied recovery strategy: {strategy}",
+                details=result["details"]
+            )
+            
+            return result
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to apply recovery strategy: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc()
+            )
+            result["details"]["error"] = str(e)
+            return result
+
+    def error_handler(context: str):
+        """Decorator for consistent error handling and logging."""
+        def decorator(func):
+            @wraps(func)
+            def wrapper(self, *args, **kwargs):
+                try:
+                    return func(self, *args, **kwargs)
+                except Exception as e:
+                    state = kwargs.get('state', None)
+                    self.error_manager.handle_generation_error(
+                        error=e,
+                        context=context,
+                        state=state
+                    )
+                    raise
+            return wrapper
+        return decorator
 
 class ErrorHandler:
     """Handles error logging, recovery, and monitoring for the SOVL system."""
