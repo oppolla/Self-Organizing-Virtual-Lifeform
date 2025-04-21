@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_memory import GPUMemoryManager, RAMManager
+from sovl_error import ErrorManager, ErrorRecord, ErrorRecordBridge
+from sovl_state import StateTracker
 
 """
 Facade for hardware access, abstracting GPU and CPU operations to decouple
@@ -69,10 +71,100 @@ class HardwareManager:
         self._last_memory_query: float = 0.0
         self._cached_memory_stats: Optional[Dict[str, float]] = None
         self._cuda_available = self._check_cuda_availability()
+        
+        # Initialize error manager
+        self.error_manager = ErrorManager(
+            context=self,  # Pass self as context
+            state_tracker=StateTracker(),  # Create a minimal state tracker
+            config_manager=config_manager,
+            error_cooldown=1.0
+        )
+        
+        # Register hardware-specific recovery strategies
+        self._register_recovery_strategies()
+        
         self._log_training_event("hardware_initialized", {
             "cuda_available": self._cuda_available,
             "mock_memory_total_mb": self._config.mock_memory_total_mb
         })
+
+    def _register_recovery_strategies(self) -> None:
+        """Register hardware-specific error recovery strategies."""
+        self.error_manager.recovery_strategies.update({
+            "cuda_error": self._recover_cuda_error,
+            "memory_allocation": self._recover_memory_allocation,
+            "device_error": self._recover_device_error
+        })
+
+    def _recover_cuda_error(self, record: ErrorRecord) -> None:
+        """Recovery strategy for CUDA errors."""
+        try:
+            # Clear CUDA cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Reset CUDA state
+            self._cuda_available = self._check_cuda_availability()
+            
+            self.logger.record_event(
+                event_type="cuda_error_recovery",
+                message="Recovered from CUDA error",
+                level="info",
+                additional_info={"error_type": record.error_type}
+            )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to recover from CUDA error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def _recover_memory_allocation(self, record: ErrorRecord) -> None:
+        """Recovery strategy for memory allocation errors."""
+        try:
+            # Clear memory cache
+            self.clear_memory_cache()
+            
+            # Reduce memory limits if needed
+            if "memory_usage" in record.additional_info:
+                current_usage = record.additional_info["memory_usage"]
+                if current_usage > self._config.mock_memory_total_mb * 0.9:
+                    new_limit = max(1024, self._config.mock_memory_total_mb * 0.8)
+                    self._config.mock_memory_total_mb = new_limit
+            
+            self.logger.record_event(
+                event_type="memory_allocation_recovery",
+                message="Recovered from memory allocation error",
+                level="info",
+                additional_info={"new_memory_limit": self._config.mock_memory_total_mb}
+            )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to recover from memory allocation error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def _recover_device_error(self, record: ErrorRecord) -> None:
+        """Recovery strategy for device errors."""
+        try:
+            # Reset device state
+            self._cuda_available = self._check_cuda_availability()
+            
+            # Fall back to CPU if needed
+            if not self._cuda_available:
+                self.logger.record_event(
+                    event_type="device_fallback",
+                    message="Falling back to CPU device",
+                    level="warning"
+                )
+            
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to recover from device error: {str(e)}",
+                error_type="recovery_error",
+                stack_trace=traceback.format_exc()
+            )
 
     def _check_cuda_availability(self) -> bool:
         """
@@ -117,10 +209,13 @@ class HardwareManager:
                     'usage_percentage': ram_stats.get('usage_percent', 0.0)
                 }
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to get memory stats: {str(e)}",
+            self.error_manager.record_error(
+                error=e,
                 error_type="memory_stats_error",
-                stack_trace=traceback.format_exc()
+                context={
+                    "device": str(device) if device else "cpu",
+                    "operation": "get_memory_stats"
+                }
             )
             return {}
 
@@ -147,7 +242,14 @@ class HardwareManager:
                     }
                 return {}
         except Exception as e:
-            self._log_error("Failed to get detailed memory stats", e)
+            self.error_manager.record_error(
+                error=e,
+                error_type="detailed_memory_stats_error",
+                context={
+                    "device": str(device) if device else "cpu",
+                    "operation": "get_detailed_memory_stats"
+                }
+            )
             return {}
 
     def clear_memory_cache(self, device: Optional[torch.device] = None) -> None:
@@ -168,7 +270,14 @@ class HardwareManager:
                         "device": str(device or "cuda:0")
                     })
         except Exception as e:
-            self._log_error("Failed to clear memory cache", e)
+            self.error_manager.record_error(
+                error=e,
+                error_type="memory_cache_error",
+                context={
+                    "device": str(device) if device else "cpu",
+                    "operation": "clear_memory_cache"
+                }
+            )
             raise HardwareError(f"Clear memory cache failed: {str(e)}")
 
     def get_device_properties(self, device: Optional[torch.device] = None) -> Dict[str, Any]:
@@ -199,7 +308,14 @@ class HardwareManager:
                     "minor": 0
                 }
         except Exception as e:
-            self._log_error("Failed to get device properties", e)
+            self.error_manager.record_error(
+                error=e,
+                error_type="device_properties_error",
+                context={
+                    "device": str(device) if device else "cpu",
+                    "operation": "get_device_properties"
+                }
+            )
             raise HardwareError(f"Device properties query failed: {str(e)}")
 
     def is_cuda_available(self) -> bool:
@@ -221,7 +337,14 @@ class HardwareManager:
         try:
             return torch.device("cuda:0" if self._cuda_available else "cpu")
         except Exception as e:
-            self._log_error("Failed to get default device", e)
+            self.error_manager.record_error(
+                error=e,
+                error_type="device_selection_error",
+                context={
+                    "operation": "get_default_device",
+                    "cuda_available": self._cuda_available
+                }
+            )
             return torch.device("cpu")
 
     def _log_training_event(self, event_type: str, additional_info: Dict[str, Any], level: str = "info") -> None:
