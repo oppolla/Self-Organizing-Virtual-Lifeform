@@ -9,7 +9,7 @@ from sovl_utils import NumericalGuard
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import SOVLTrainer
 from sovl_scaffold import CrossAttentionInjector
-from sovl_error import ErrorManager, ConfigurationError
+from sovl_error import ErrorManager, ConfigurationError, ErrorRecord
 
 @dataclass
 class ValidationRange:
@@ -50,6 +50,16 @@ class SOVLTuner:
         "num_heads": ValidationRange(1, None, "Number of attention heads"),
         "initializer_range": ValidationRange(0.0, None, "Initializer range"),
         "use_dynamic_layers": ValidationRange(True, False, "Dynamic layer usage"),
+        "base_model_name": ValidationRange(None, None, "Base model name"),
+        "base_model_path": ValidationRange(None, None, "Base model path"),
+        "scaffold_model_name": ValidationRange(None, None, "Scaffold model name"),
+        "scaffold_model_path": ValidationRange(None, None, "Scaffold model path"),
+        "cross_attn_layers": ValidationRange([4, 6], None, "Cross attention layers"),
+        "layer_selection_mode": ValidationRange("balanced", ["balanced", "random", "fixed"], "Layer selection mode"),
+        "custom_layers": ValidationRange(None, None, "Custom layers"),
+        "gradient_checkpointing": ValidationRange(True, False, "Gradient checkpointing"),
+        "migration_mode": ValidationRange(True, False, "Migration mode"),
+        "device": ValidationRange("cuda", ["cuda", "cpu"], "Device"),
     },
     "model": {
         "quantization_mode": ValidationRange("fp16", "int8", "Quantization mode"),
@@ -127,6 +137,13 @@ class SOVLTuner:
         "enable_prompt_driven_dreams": ValidationRange(True, False, "Enable prompt-driven dreams"),
         "use_scaffold_memory": ValidationRange(True, False, "Use scaffold memory"),
         "use_token_map_memory": ValidationRange(True, False, "Use token map memory"),
+        "model_name": ValidationRange(None, None, "Model name"),
+        "dry_run": ValidationRange(True, False, "Dry run"),
+        "dry_run_params": ValidationRange(None, None, "Dry run parameters"),
+        "use_amp": ValidationRange(True, False, "Use AMP"),
+        "scheduler_type": ValidationRange("linear", ["linear", "cosine", "constant"], "Scheduler type"),
+        "checkpoint_path": ValidationRange(None, None, "Checkpoint path"),
+        "metrics_to_track": ValidationRange(None, None, "Metrics to track"),
     },
     "scaffold_config": {
         "quantization_mode": ValidationRange("fp16", "int8", "Quantization mode"),
@@ -193,6 +210,9 @@ class SOVLTuner:
     "logging_config": {
         "max_log_size_mb": ValidationRange(1, None, "Maximum log size in MB"),
         "backup_count": ValidationRange(0, None, "Backup count"),
+        "log_dir": ValidationRange(None, None, "Log directory"),
+        "log_file": ValidationRange(None, None, "Log file"),
+        "log_level": ValidationRange("INFO", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], "Log level"),
     },
     "error_config": {
         "error_cooldown": ValidationRange(0.0, None, "Error cooldown"),
@@ -209,11 +229,40 @@ class SOVLTuner:
         "max_retries": ValidationRange(0, None, "Maximum retries"),
     },
     "memory_config": {
-        "max_memory_mb": ValidationRange(1, None, "ETL Memory in MB"),
-        "garbage_collection_threshold": ValidationRange(0.0, 1.0, "Garbage collection threshold"),
+        "memoria": {
+            "max_memory_mb": ValidationRange(1, None, "Maximum memory in MB"),
+            "garbage_collection_threshold": ValidationRange(0.0, 1.0, "Garbage collection threshold"),
+            "memory_decay_rate": ValidationRange(0.0, 1.0, "Memory decay rate"),
+            "enable_memory_compression": ValidationRange(True, False, "Enable memory compression"),
+            "compression_ratio": ValidationRange(0.0, 1.0, "Compression ratio"),
+            "max_compressed_memory_mb": ValidationRange(1, None, "Maximum compressed memory in MB"),
+        },
+        "ram": {
+            "max_ram_mb": ValidationRange(1, None, "Maximum RAM in MB"),
+            "ram_threshold": ValidationRange(0.0, 1.0, "RAM threshold"),
+            "enable_ram_compression": ValidationRange(True, False, "Enable RAM compression"),
+            "ram_compression_ratio": ValidationRange(0.0, 1.0, "RAM compression ratio"),
+            "max_compressed_ram_mb": ValidationRange(1, None, "Maximum compressed RAM in MB"),
+        },
+        "gpu": {
+            "max_gpu_memory_mb": ValidationRange(1, None, "Maximum GPU memory in MB"),
+            "gpu_memory_threshold": ValidationRange(0.0, 1.0, "GPU memory threshold"),
+            "enable_gpu_memory_compression": ValidationRange(True, False, "Enable GPU memory compression"),
+            "gpu_compression_ratio": ValidationRange(0.0, 1.0, "GPU compression ratio"),
+            "max_compressed_gpu_memory_mb": ValidationRange(1, None, "Maximum compressed GPU memory in MB"),
+        },
+        "manager": {
+            "enable_memoria_manager": ValidationRange(True, False, "Enable memoria manager"),
+            "enable_ram_manager": ValidationRange(True, False, "Enable RAM manager"),
+            "enable_gpu_memory_manager": ValidationRange(True, False, "Enable GPU memory manager"),
+            "memory_sync_interval": ValidationRange(1, None, "Memory sync interval"),
+            "enable_memory_monitoring": ValidationRange(True, False, "Enable memory monitoring"),
+            "memory_monitoring_interval": ValidationRange(1, None, "Memory monitoring interval"),
+        }
     },
     "state_config": {
         "max_history": ValidationRange(1, None, "Maximum history"),
+        "state_file": ValidationRange(None, None, "State file"),
     },
     "confidence_config": {
         "history_maxlen": ValidationRange(1, None, "History max length"),
@@ -224,13 +273,38 @@ class SOVLTuner:
         "base_weight": ValidationRange(0.0, 1.0, "Base weight"),
         "max_weight": ValidationRange(0.0, None, "Maximum weight"),
     },
+    "lifecycle_config": {
+        "fatigue_factor_cap": ValidationRange(0.0, 0.5, "Fatigue factor cap"),
+        "fatigue_scaling_factor": ValidationRange(1.0, 5.0, "Fatigue scaling factor"),
+    },
+    "data_provider": {
+        "provider_type": ValidationRange(None, None, "Provider type"),
+        "data_path": ValidationRange(None, None, "Data path"),
+    },
+    "gestation_weighting": {
+        "quality_metrics": {
+            "code": ValidationRange(0.1, 3.0, "Code weight"),
+            "url": ValidationRange(0.1, 3.0, "URL weight"),
+            "question": ValidationRange(0.1, 3.0, "Question weight"),
+            "exclamation": ValidationRange(0.1, 3.0, "Exclamation weight"),
+            "emoji": ValidationRange(0.1, 3.0, "Emoji weight"),
+        },
+        "content_weights": {
+            "word_count_ratio_scale": ValidationRange(0.1, 3.0, "Word count ratio scale"),
+            "optimal_word_length_range": {
+                "min": ValidationRange(0, None, "Minimum word length"),
+                "max": ValidationRange(0, None, "Maximum word length"),
+                "weight": ValidationRange(0.1, 3.0, "Word length weight"),
+            }
+        }
+    },
 }
 
     def __init__(
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        error_manager: Optional[ErrorManager] = None,
+        error_manager: ErrorManager,
         curiosity_manager: Optional[ICuriosityManager] = None,
         trainer: Optional[ITrainer] = None,
         cross_attention_injector: Optional[ICrossAttentionInjector] = None
@@ -254,18 +328,46 @@ class SOVLTuner:
             "lora_config": config_manager.get_section("lora_config"),
         }
 
-        # Error handling state
-        self._last_error_time = 0.0
-        self._error_cooldown = 1.0  # seconds
-        self._error_counts = defaultdict(int)
-
         # Confidence monitoring
         self._confidence_history = deque(maxlen=100)
         self._last_confidence_check = 0.0
         self._confidence_check_interval = 60.0  # seconds
 
+        # Register tuner-specific error handlers
+        self._register_error_handlers()
+
         # Validate configuration on initialization
         self._validate_initial_config()
+
+    def _register_error_handlers(self) -> None:
+        """Register tuner-specific error handlers with the error manager."""
+        self.error_manager.register_handler("tuner_error", self._handle_tuner_error)
+        self.error_manager.register_handler("config_validation_error", self._handle_config_validation_error)
+        self.error_manager.register_handler("parameter_validation_error", self._handle_parameter_validation_error)
+
+    def _handle_tuner_error(self, error: Exception, context: Dict[str, Any]) -> None:
+        """Handle tuner-specific errors."""
+        if "confidence" in context:
+            self._monitor_confidence(context["confidence"])
+
+    def _handle_config_validation_error(self, error: Exception, context: Dict[str, Any]) -> None:
+        """Handle configuration validation errors."""
+        if isinstance(error, ConfigurationError):
+            self.logger.log_training_event(
+                event_type="config_validation_error",
+                message=str(error),
+                level="error",
+                additional_info=context
+            )
+
+    def _handle_parameter_validation_error(self, error: Exception, context: Dict[str, Any]) -> None:
+        """Handle parameter validation errors."""
+        self.logger.log_training_event(
+            event_type="param_validation_error",
+            message=str(error),
+            level="error",
+            additional_info=context
+        )
 
     def _validate_initial_config(self) -> None:
         """Validate all configuration sections during initialization."""
@@ -339,133 +441,14 @@ class SOVLTuner:
             for section, rules in validation_rules.items():
                 self.config_manager.validate_section(section, rules)
 
-        except ConfigurationError as e:
-            self._log_error(
+        except Exception as e:
+            self.error_manager.handle_error(
+                error=e,
                 error_type="config_validation_error",
-                message="Configuration validation failed",
-                error=str(e),
-                stack_trace=traceback.format_exc()
+                severity=2,
+                additional_info={"operation": "initial_config_validation"}
             )
             raise
-        except Exception as e:
-            self._log_error(
-                error_type="config_validation_error",
-                message="Unexpected error during configuration validation",
-                error=str(e),
-                stack_trace=traceback.format_exc()
-            )
-            raise ConfigurationError(f"Unexpected error during configuration validation: {str(e)}")
-
-    def _log_error(self, error_type: str, message: str, error: str, stack_trace: str, **kwargs) -> None:
-        """Log an error with consistent formatting."""
-        self.logger.log_error(
-            error_type=error_type,
-            message=message,
-            error=error,
-            stack_trace=stack_trace,
-            additional_info=kwargs
-        )
-
-    def _handle_error(self, error: Exception, error_type: str, context: Dict[str, Any]) -> None:
-        """Handle errors with cooldown and delegation to ErrorManager."""
-        current_time = time.time()
-        error_key = f"{error_type}:{type(error).__name__}"
-
-        # Check for duplicate errors within cooldown
-        if current_time - self._last_error_time < self._error_cooldown:
-            self.logger.log_training_event(
-                event_type="duplicate_error",
-                message=f"Duplicate error detected within cooldown period: {error_key}",
-                level="warning",
-                additional_info={"error_type": error_type, "error_key": error_key, "context": context}
-            )
-            return
-
-        self._last_error_time = current_time
-        self._error_counts[error_key] += 1
-
-        # Log error
-        self._log_error(
-            error_type="tuner_error",
-            message=f"Error in {error_type}: {str(error)}",
-            error=str(error),
-            stack_trace=traceback.format_exc(),
-            error_key=error_key,
-            error_count=self._error_counts[error_key],
-            context=context
-        )
-
-        # Delegate to ErrorManager if available
-        if self.error_manager:
-            try:
-                error_handlers = {
-                    "training": lambda: self.error_manager.handle_training_error(error, context.get("batch_size", 1)),
-                    "curiosity": lambda: self.error_manager.handle_curiosity_error(error, context.get("event_type", "unknown")),
-                    "memory": lambda: self.error_manager.handle_memory_error(error, context.get("model_size", 0)),
-                }
-                handler = error_handlers.get(error_type, lambda: self.error_manager.handle_generation_error(error, context.get("prompt", "")))
-                handler()
-            except Exception as e:
-                self._log_error(
-                    error_type="error_handling_failed",
-                    message=f"Failed to handle error: {str(e)}",
-                    error=str(e),
-                    stack_trace=traceback.format_exc(),
-                    original_error=str(error),
-                    context=context
-                )
-
-    def _get_validation_range(self, section: str, key: str) -> ValidationRange:
-        """Retrieve validation range for a configuration parameter."""
-        try:
-            ranges = self.CONFIG_RANGES.get(section, {})
-            range_info = ranges.get(key)
-            if not range_info:
-                raise ValueError(f"No validation range defined for {section}.{key}")
-            return range_info
-        except Exception as e:
-            self._log_error(
-                error_type="validation_range_error",
-                message=f"Failed to get validation range for {section}.{key}",
-                error=str(e),
-                stack_trace=traceback.format_exc()
-            )
-            raise ConfigurationError(f"Failed to get validation range for {section}.{key}: {str(e)}")
-
-    def validate_param(self, param_name: str, value: Any) -> bool:
-        """Validate a parameter against its allowed range or type."""
-        try:
-            section, key = param_name.split(".", 1)
-            validation_rules = self.config_manager.get_validation_rules(section, key)
-            if not validation_rules:
-                self.logger.log_training_event(
-                    event_type="param_validation_warning",
-                    message=f"No validation rules found for {param_name}",
-                    level="warning",
-                    additional_info={"param_name": param_name, "value": value}
-                )
-                return True
-
-            validator = validation_rules.get("validator")
-            if validator and not validator(value):
-                self.logger.log_training_event(
-                    event_type="param_validation_error",
-                    message=f"Parameter validation failed for {key}",
-                    level="error",
-                    additional_info={"param_name": param_name, "value": value, "validation_rules": validation_rules}
-                )
-                return False
-            return True
-        except Exception as e:
-            self._log_error(
-                error_type="param_validation_error",
-                message=f"Failed to validate parameter: {param_name}",
-                error=str(e),
-                stack_trace=traceback.format_exc(),
-                param_name=param_name,
-                value=value
-            )
-            return False
 
     def _monitor_confidence(self, confidence: float) -> None:
         """Monitor confidence scores and adjust parameters if needed."""
@@ -518,11 +501,11 @@ class SOVLTuner:
                         additional_info={"old_pressure": current_pressure, "new_pressure": self.curiosity_manager.get_pressure(), "mean_confidence": mean_conf}
                     )
         except Exception as e:
-            self._log_error(
+            self.error_manager.handle_error(
+                error=e,
                 error_type="confidence_monitoring_error",
-                message=f"Error in confidence monitoring: {str(e)}",
-                error=str(e),
-                stack_trace=traceback.format_exc()
+                severity=1,
+                additional_info={"confidence": confidence}
             )
 
     def tune_parameters(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -546,7 +529,12 @@ class SOVLTuner:
             )
             return tuned_params
         except Exception as e:
-            self._handle_error(error=e, error_type="training", context={"metrics": metrics, "batch_size": metrics.get("batch_size", 1)})
+            self.error_manager.handle_error(
+                error=e,
+                error_type="parameter_tuning_error",
+                severity=2,
+                additional_info={"metrics": metrics, "batch_size": metrics.get("batch_size", 1)}
+            )
             raise
 
     def _adjust_parameters(self, current_params: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -584,8 +572,46 @@ class SOVLTuner:
                         )
             return tuned_params
         except Exception as e:
-            self._handle_error(error=e, error_type="parameter_adjustment", context={"current_params": current_params, "metrics": metrics})
+            self.error_manager.handle_error(
+                error=e,
+                error_type="parameter_adjustment_error",
+                severity=2,
+                additional_info={"current_params": current_params, "metrics": metrics}
+            )
             raise
+
+    def validate_param(self, param_name: str, value: Any) -> bool:
+        """Validate a parameter against its allowed range or type."""
+        try:
+            section, key = param_name.split(".", 1)
+            validation_rules = self.config_manager.get_validation_rules(section, key)
+            if not validation_rules:
+                self.logger.log_training_event(
+                    event_type="param_validation_warning",
+                    message=f"No validation rules found for {param_name}",
+                    level="warning",
+                    additional_info={"param_name": param_name, "value": value}
+                )
+                return True
+
+            validator = validation_rules.get("validator")
+            if validator and not validator(value):
+                self.error_manager.handle_error(
+                    error=ConfigurationError(f"Parameter validation failed for {key}"),
+                    error_type="parameter_validation_error",
+                    severity=1,
+                    additional_info={"param_name": param_name, "value": value, "validation_rules": validation_rules}
+                )
+                return False
+            return True
+        except Exception as e:
+            self.error_manager.handle_error(
+                error=e,
+                error_type="parameter_validation_error",
+                severity=2,
+                additional_info={"param_name": param_name, "value": value}
+            )
+            return False
 
     def _update_config_batch(
         self, updates: Dict[str, Any], section: str, notify_component: Optional[callable] = None
@@ -594,26 +620,36 @@ class SOVLTuner:
         if not updates:
             return True
 
-        success = self.config_manager.update_batch(updates, rollback_on_failure=True)
-        if success:
-            for key, value in updates.items():
-                param = key.split(".")[-1]
-                self._config_sections[section][param] = value
-            self.config_manager.save_config()
-            if notify_component:
-                notify_component(updates)
-            self.logger.log_training_event(
-                event_type=f"{section}_updated",
-                message=f"{section.capitalize()} parameters updated successfully",
-                additional_info={"updated_params": list(updates.keys())}
+        try:
+            success = self.config_manager.update_batch(updates, rollback_on_failure=True)
+            if success:
+                for key, value in updates.items():
+                    param = key.split(".")[-1]
+                    self._config_sections[section][param] = value
+                self.config_manager.save_config()
+                if notify_component:
+                    notify_component(updates)
+                self.logger.log_training_event(
+                    event_type=f"{section}_updated",
+                    message=f"{section.capitalize()} parameters updated successfully",
+                    additional_info={"updated_params": list(updates.keys())}
+                )
+            else:
+                self.error_manager.handle_error(
+                    error=ConfigurationError(f"Failed to update {section} parameters"),
+                    error_type="config_update_error",
+                    severity=1,
+                    additional_info={"section": section, "attempted_params": list(updates.keys())}
+                )
+            return success
+        except Exception as e:
+            self.error_manager.handle_error(
+                error=e,
+                error_type="config_update_error",
+                severity=2,
+                additional_info={"section": section, "updates": updates}
             )
-        else:
-            self.logger.log_training_event(
-                event_type=f"{section}_update_failed",
-                message=f"Failed to update {section} parameters",
-                additional_info={"attempted_params": list(updates.keys())}
-            )
-        return success
+            return False
 
     def tune_curiosity(self, **kwargs: Any) -> bool:
         """Tune curiosity-related parameters with transactional safety."""
@@ -849,11 +885,11 @@ class SOVLTuner:
                     }
                 )
             except Exception as e:
-                self._log_error(
+                self.error_manager.handle_error(
+                    error=e,
                     error_type="scaffold_influence_error",
-                    message=f"Failed to validate layer weights: {str(e)}",
-                    error=str(e),
-                    stack_trace=traceback.format_exc()
+                    severity=2,
+                    additional_info={"operation": "layer_weights_validation"}
                 )
                 return False
 
@@ -881,11 +917,11 @@ class SOVLTuner:
             )
             return True
         except Exception as e:
-            self._log_error(
+            self.error_manager.handle_error(
+                error=e,
                 error_type="scaffold_influence_error",
-                message=f"Failed to set scaffold influence: {str(e)}",
-                error=str(e),
-                stack_trace=traceback.format_exc()
+                severity=2,
+                additional_info={"operation": "set_scaffold_influence"}
             )
             return False
 

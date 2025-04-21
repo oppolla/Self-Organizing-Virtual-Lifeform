@@ -31,7 +31,16 @@
     "enable_dynamic_cross_attention": false,
     "injection_strategy": "sequential",
     "blend_strength": 0.5,
-    "attention_weight": 0.5
+    "attention_weight": 0.5,
+    "max_tokens_per_mapping": 3,
+    "mapping_similarity_threshold": 0.7,
+    "allow_bidirectional_mapping": false,
+    "fallback_strategy": "split",
+    "normalization_level": "basic",
+    "min_semantic_similarity": 0.5,
+    "max_meaning_drift": 0.3,
+    "enable_periodic_validation": true,
+    "conflict_resolution_strategy": "keep_highest_conf"
   },
   "temperament_config": {
     "mood_influence": 0.3,

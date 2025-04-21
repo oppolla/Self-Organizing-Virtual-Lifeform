@@ -6,7 +6,6 @@ from collections import defaultdict
 import time
 import traceback
 from threading import Lock
-import contextlib
 import math
 from sovl_logger import Logger
 from sovl_config import ConfigManager
@@ -21,12 +20,159 @@ from sovl_memory import RAMManager, GPUMemoryManager
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
     
-    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any):
+    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any, config: Optional[Dict[str, Any]] = None):
         self.base_tokenizer = base_tokenizer
         self.scaffold_tokenizer = scaffold_tokenizer
         self.logger = logger
+        
+        # Initialize mapping strategy parameters
+        self.max_tokens_per_mapping = config.get('max_tokens_per_mapping', 3) if config else 3
+        self.mapping_similarity_threshold = config.get('mapping_similarity_threshold', 0.7) if config else 0.7
+        self.allow_bidirectional_mapping = config.get('allow_bidirectional_mapping', False) if config else False
+        self.fallback_strategy = config.get('fallback_strategy', 'split') if config else 'split'
+        self.normalization_level = config.get('normalization_level', 'basic') if config else 'basic'
+        
+        # Initialize quality control parameters
+        self.min_semantic_similarity = config.get('min_semantic_similarity', 0.5) if config else 0.5
+        self.max_meaning_drift = config.get('max_meaning_drift', 0.3) if config else 0.3
+        self.enable_periodic_validation = config.get('enable_periodic_validation', True) if config else True
+        self.conflict_resolution_strategy = config.get('conflict_resolution_strategy', 'keep_highest_conf') if config else 'keep_highest_conf'
+        
         self.token_map = defaultdict(lambda: {'ids': [scaffold_tokenizer.unk_token_id], 'weight': 1.0})
         self._initialize_token_maps()
+        
+    def _normalize_token(self, token: str) -> str:
+        """Normalize token based on configured level."""
+        if self.normalization_level == 'none':
+            return token
+        elif self.normalization_level == 'basic':
+            return token.replace("Ġ", "").replace("##", "")
+        else:  # aggressive
+            return token.replace("Ġ", "").replace("##", "").lower()
+            
+    def _handle_fallback(self, token: str, base_id: int) -> List[int]:
+        """Handle token mapping fallback based on configured strategy."""
+        if self.fallback_strategy == 'split':
+            # Split token into smaller parts
+            parts = [token[i:i+2] for i in range(0, len(token), 2)]
+            scaffold_ids = []
+            for part in parts:
+                ids = self.scaffold_tokenizer.encode(part, add_special_tokens=False)
+                scaffold_ids.extend(ids)
+            return scaffold_ids[:self.max_tokens_per_mapping]
+            
+        elif self.fallback_strategy == 'merge':
+            # Try to merge with similar tokens
+            similar_tokens = self._find_similar_tokens(token)
+            if similar_tokens:
+                return similar_tokens[0]['ids']
+            return [self.scaffold_tokenizer.unk_token_id]
+            
+        elif self.fallback_strategy == 'nearest':
+            # Find nearest token in vocabulary
+            nearest = self._find_nearest_token(token)
+            if nearest:
+                return [nearest]
+            return [self.scaffold_tokenizer.unk_token_id]
+            
+        else:  # 'unk'
+            return [self.scaffold_tokenizer.unk_token_id]
+            
+    def _find_similar_tokens(self, token: str) -> List[Dict]:
+        """Find tokens with similar patterns."""
+        similar = []
+        for base_id, mapping in self.token_map.items():
+            base_token = self.base_tokenizer.decode([base_id])
+            if self._calculate_similarity(token, base_token) > self.mapping_similarity_threshold:
+                similar.append(mapping)
+        return similar
+        
+    def _find_nearest_token(self, token: str) -> Optional[int]:
+        """Find the nearest token in the scaffold vocabulary."""
+        min_distance = float('inf')
+        nearest_id = None
+        
+        for scaffold_id in self.scaffold_tokenizer.get_vocab().values():
+            scaffold_token = self.scaffold_tokenizer.decode([scaffold_id])
+            distance = self._calculate_similarity(token, scaffold_token)
+            if distance < min_distance:
+                min_distance = distance
+                nearest_id = scaffold_id
+                
+        return nearest_id if min_distance < self.mapping_similarity_threshold else None
+        
+    def _calculate_similarity(self, token1: str, token2: str) -> float:
+        """Calculate similarity between two tokens."""
+        # Simple character-based similarity
+        set1 = set(token1)
+        set2 = set(token2)
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+        return intersection / union if union > 0 else 0.0
+        
+    def _validate_mapping_quality(self, base_token: str, scaffold_ids: List[int]) -> bool:
+        """Validate mapping quality based on configured parameters."""
+        if not scaffold_ids:
+            return False
+            
+        # Check semantic similarity
+        scaffold_token = self.scaffold_tokenizer.decode(scaffold_ids)
+        similarity = self._calculate_similarity(base_token, scaffold_token)
+        if similarity < self.min_semantic_similarity:
+            return False
+            
+        # Check meaning drift
+        if self._calculate_meaning_drift(base_token, scaffold_token) > self.max_meaning_drift:
+            return False
+            
+        return True
+        
+    def _calculate_meaning_drift(self, token1: str, token2: str) -> float:
+        """Calculate semantic drift between tokens."""
+        # This is a placeholder for a more sophisticated semantic drift calculation
+        # In practice, this could use embeddings or other semantic similarity measures
+        return 1.0 - self._calculate_similarity(token1, token2)
+        
+    def _build_token_map(self):
+        """Build main token mapping with enhanced strategies."""
+        for base_token, base_id in self.base_tokenizer.get_vocab().items():
+            normalized = self._normalize_token(base_token)
+            scaffold_ids = self.scaffold_tokenizer.encode(
+                normalized, 
+                add_special_tokens=False, 
+                max_length=self.max_tokens_per_mapping, 
+                truncation=True
+            )
+            
+            # Handle empty or invalid mappings
+            if not scaffold_ids or scaffold_ids == [self.scaffold_tokenizer.unk_token_id]:
+                scaffold_ids = self._handle_fallback(normalized, base_id)
+                
+            # Validate mapping quality
+            if not self._validate_mapping_quality(normalized, scaffold_ids):
+                scaffold_ids = self._handle_fallback(normalized, base_id)
+                
+            # Store mapping with initial weight
+            self.token_map[base_id] = {
+                'ids': scaffold_ids,
+                'weight': 1.0,
+                'confidence': 1.0
+            }
+            
+    def _resolve_conflict(self, base_id: int, new_mapping: Dict, existing_mapping: Dict) -> Dict:
+        """Resolve mapping conflicts based on configured strategy."""
+        if self.conflict_resolution_strategy == 'keep_first':
+            return existing_mapping
+        elif self.conflict_resolution_strategy == 'keep_last':
+            return new_mapping
+        elif self.conflict_resolution_strategy == 'keep_highest_conf':
+            return new_mapping if new_mapping['confidence'] > existing_mapping['confidence'] else existing_mapping
+        else:  # 'merge'
+            return {
+                'ids': list(set(existing_mapping['ids'] + new_mapping['ids'])),
+                'weight': max(existing_mapping['weight'], new_mapping['weight']),
+                'confidence': max(existing_mapping['confidence'], new_mapping['confidence'])
+            }
         
     def _initialize_token_maps(self):
         """Initialize token maps between base and scaffold tokenizers."""
@@ -65,40 +211,6 @@ class ScaffoldTokenMapper:
         special_token_map = {
             self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id if self.scaffold_tokenizer.pad_token_id is not None else self.scaffold_tokenizer.unk_token_id,
             self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id if self.scaffold_tokenizer.eos_token_id is not None else self.scaffold_tokenizer.unk_token_id,
-            self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
-        }
-        
-        for base_id, scaffold_id in special_token_map.items():
-            self.token_map[base_id] = {'ids': [scaffold_id], 'weight': 1.0}
-            
-    def _build_token_map(self):
-        """Build main token mapping."""
-        for base_token, base_id in self.base_tokenizer.get_vocab().items():
-            normalized = base_token.replace("Ġ", "").replace("##", "")
-            scaffold_ids = self.scaffold_tokenizer.encode(
-                normalized, add_special_tokens=False, max_length=3, truncation=True
-            )
-            
-            # Ensure scaffold_ids is not empty and contains valid tokens
-            if not scaffold_ids or scaffold_ids == [self.scaffold_tokenizer.unk_token_id]:
-                scaffold_ids = [self.scaffold_tokenizer.unk_token_id]  # Fallback to unknown token
-            
-            # Check if base_token exists in the base tokenizer's vocabulary
-            if base_id in self.base_tokenizer.get_vocab().values():
-                self.token_map[base_id] = {'ids': scaffold_ids, 'weight': 1.0}
-            else:
-                self.logger.record_event(
-                    event_type="invalid_token_mapping",
-                    message=f"Base token '{base_token}' not found in base tokenizer vocabulary.",
-                    level="warning",
-                    additional_info={"timestamp": time.time()}
-                )
-            
-    def _initialize_special_token_map(self):
-        """Initialize special token mapping."""
-        special_token_map = {
-            self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id,
-            self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id or self.scaffold_tokenizer.sep_token_id,
             self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
         }
         
@@ -172,7 +284,12 @@ class ScaffoldTokenMapper:
             )
             raise
 
-def build_scaffold_token_mapping(base_tokenizer: Any, scaffold_tokenizer: Any, logger: Logger) -> ScaffoldTokenMapper:
+def build_scaffold_token_mapping(
+    base_tokenizer: Any, 
+    scaffold_tokenizer: Any, 
+    logger: Logger,
+    config: Optional[Dict[str, Any]] = None
+) -> ScaffoldTokenMapper:
     """
     Create a ScaffoldTokenMapper instance.
     
@@ -180,11 +297,21 @@ def build_scaffold_token_mapping(base_tokenizer: Any, scaffold_tokenizer: Any, l
         base_tokenizer: The tokenizer for the base model
         scaffold_tokenizer: The tokenizer for the scaffold model
         logger: Logger instance for structured logging
+        config: Optional configuration dictionary containing mapping parameters:
+            - max_tokens_per_mapping: Maximum scaffold tokens per base token (default: 3)
+            - mapping_similarity_threshold: Similarity threshold for alternative mappings (default: 0.7)
+            - allow_bidirectional_mapping: Enable bidirectional token mapping (default: False)
+            - fallback_strategy: Strategy for handling failed mappings (default: 'split')
+            - normalization_level: Token normalization aggressiveness (default: 'basic')
+            - min_semantic_similarity: Minimum semantic similarity threshold (default: 0.5)
+            - max_meaning_drift: Maximum allowed semantic drift (default: 0.3)
+            - enable_periodic_validation: Enable periodic mapping validation (default: True)
+            - conflict_resolution_strategy: Strategy for resolving mapping conflicts (default: 'keep_highest_conf')
     
     Returns:
         ScaffoldTokenMapper: Initialized token mapper instance
     """
-    return ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, logger)
+    return ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, logger, config)
 
 class SparseMaskFactory:
     """Handles creation of sparse attention masks."""

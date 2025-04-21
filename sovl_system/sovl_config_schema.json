@@ -469,6 +469,62 @@
       "type": ["object", "null"],
       "description": "Token mapping configuration",
       "default": null
+    },
+    "max_tokens_per_mapping": {
+      "type": "integer",
+      "description": "Maximum scaffold tokens per base token",
+      "minimum": 1,
+      "maximum": 5,
+      "default": 3
+    },
+    "mapping_similarity_threshold": {
+      "type": "number",
+      "description": "Similarity threshold for alternative mappings",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.7
+    },
+    "allow_bidirectional_mapping": {
+      "type": "boolean",
+      "description": "Enable bidirectional token mapping",
+      "default": false
+    },
+    "fallback_strategy": {
+      "type": "string",
+      "description": "Strategy for handling failed mappings",
+      "enum": ["split", "merge", "nearest", "unk"],
+      "default": "split"
+    },
+    "normalization_level": {
+      "type": "string",
+      "description": "Token normalization aggressiveness",
+      "enum": ["none", "basic", "aggressive"],
+      "default": "basic"
+    },
+    "min_semantic_similarity": {
+      "type": "number",
+      "description": "Minimum semantic similarity threshold",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.5
+    },
+    "max_meaning_drift": {
+      "type": "number",
+      "description": "Maximum allowed semantic drift",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "default": 0.3
+    },
+    "enable_periodic_validation": {
+      "type": "boolean",
+      "description": "Enable periodic mapping validation",
+      "default": true
+    },
+    "conflict_resolution_strategy": {
+      "type": "string",
+      "description": "Strategy for resolving mapping conflicts",
+      "enum": ["keep_first", "keep_last", "keep_highest_conf", "merge"],
+      "default": "keep_highest_conf"
     }
   },
   "required": [],
