@@ -1,36 +1,49 @@
-from typing import Optional, Any, List, Dict, Tuple, Callable
+# Standard library imports
+from typing import Optional, Any, List, Dict, Tuple, Callable, TYPE_CHECKING
+import time
+import traceback
+import os
+from collections import deque, defaultdict
+from threading import Lock
+
+# Third-party imports
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from peft import LoraConfig, get_peft_model, TaskType
-import time
-import random
 import bitsandbytes as bnb
-import json
-from collections import deque, defaultdict
-import traceback
-import os
-from threading import Lock
-from sovl_curiosity import CuriosityEngine, CuriosityManager
-from sovl_logger import Logger
-from sovl_io import validate_quantization_mode, InsufficientDataError
-from sovl_state import SOVLState, ConversationHistory
-from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
+
+# Core components
 from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
-from sovl_scaffold import CrossAttentionInjector, ScaffoldManager, CrossAttentionLayer, ScaffoldTokenMapper
-from sovl_processor import LogitsProcessor, SOVLProcessor
-from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
-from sovl_experience import MemoriaManager
-from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_manager import ModelManager
-from sovl_generation import GenerationManager
-from sovl_tuner import SOVLTuner
+from sovl_state import SOVLState, ConversationHistory, StateManager
 from sovl_error import ErrorHandler
-from sovl_state import StateManager
-from sovl_confidence import calculate_confidence_score
+from sovl_logger import Logger
 from sovl_events import EventDispatcher
 from sovl_interfaces import SystemInterface
+
+# Model and processing
+from sovl_manager import ModelManager
+from sovl_processor import LogitsProcessor, SOVLProcessor
+from sovl_generation import GenerationManager
+from sovl_tuner import SOVLTuner
+
+# Memory and state management
+from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_experience import MemoriaManager
+from sovl_state import StateManager
+
+# AI components
+from sovl_curiosity import CuriosityEngine, CuriosityManager
+from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
+from sovl_scaffold import (
+    CrossAttentionInjector,
+    ScaffoldManager,
+    CrossAttentionLayer,
+    ScaffoldTokenMapper
+)
+
+# Utilities
 from sovl_utils import (
     detect_repetitions,
     safe_compare,
@@ -42,76 +55,189 @@ from sovl_utils import (
     sync_component_states,
     validate_component_states
 )
+from sovl_confidence import calculate_confidence_score
+from sovl_io import validate_quantization_mode, InsufficientDataError
+from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
 
-from typing import TYPE_CHECKING
+# Type checking imports
 if TYPE_CHECKING:
     from sovl_conductor import SOVLOrchestrator
+
+# System-wide configuration constants
+class SystemConstants:
+    """System-wide configuration constants."""
+    DEFAULT_DEVICE = "cuda"
+    DEFAULT_CONFIG_PATH = "sovl_config.json"
+    
+    # Memory thresholds
+    MIN_MEMORY_THRESHOLD = 0.1
+    MAX_MEMORY_THRESHOLD = 0.95
+    DEFAULT_MEMORY_THRESHOLD = 0.85
+    
+    # Error handling
+    MAX_ERROR_HISTORY = 100
+    ERROR_COOLDOWN = 1.0
+    
+    # State management
+    MAX_STATE_HISTORY = 100
+    MAX_STATE_CHANGES = 50
+    
+    # Component initialization
+    COMPONENT_INIT_TIMEOUT = 30.0  # seconds
+    COMPONENT_RETRY_DELAY = 1.0    # seconds
+    
+    # Logging
+    LOG_BUFFER_SIZE = 1000
+    LOG_FLUSH_INTERVAL = 5.0  # seconds
 
 class SystemContext:
     """Manages system-wide context and resources."""
     
-    def __init__(self, config_path: str, device: str = "cuda"):
-        """
-        Initialize system context with shared resources.
+    _instance = None
+    _lock = Lock()
+    
+    def __new__(cls, *args, **kwargs):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+    
+    def __init__(self, config_path: str = SystemConstants.DEFAULT_CONFIG_PATH):
+        if self._initialized:
+            return
+            
+        self._initialized = True
+        self._lock = Lock()
+        self._resource_locks = defaultdict(Lock)
+        self._component_states = {}
+        self._error_history = deque(maxlen=SystemConstants.MAX_ERROR_HISTORY)
+        self._last_error_time = 0
         
-        Args:
-            config_path: Path to configuration file
-            device: Device to use for tensor operations
-        """
-        self.config_path = config_path
-        self.device = device
+        # Initialize core components
+        self.config_manager = ConfigManager(config_path)
         self.logger = Logger()
-        self.event_dispatcher = EventDispatcher(self.logger)
+        self.error_handler = ErrorHandler()
+        self.event_dispatcher = EventDispatcher()
         
-        # Initialize config manager with event dispatcher
-        self.config_handler = ConfigHandler(config_path, self.logger, self.event_dispatcher)
+        # Initialize state tracking
+        self.state_tracker = StateTracker()
+        self.conversation_history = ConversationHistory()
         
-        # Validate initial configuration
-        if not self.config_handler.validate():
-            raise SystemInitializationError(
-                "Failed to validate initial configuration",
-                config_path,
-                traceback.format_exc()
-            )
+        # Initialize memory managers
+        self.ram_manager = RAMManager()
+        self.gpu_manager = GPUMemoryManager()
         
-        # Subscribe to configuration changes
-        self.event_dispatcher.subscribe("config_change", self._on_config_change)
+        # Initialize AI components
+        self.curiosity_engine = CuriosityEngine()
+        self.temperament_system = TemperamentSystem()
+        self.scaffold_manager = ScaffoldManager()
         
-    def _on_config_change(self) -> None:
-        """Handle configuration changes and propagate them to affected components."""
-        try:
-            # Validate configuration after change
-            if not self.config_handler.validate():
-                self.logger.log_error(
-                    error_msg="Configuration validation failed after change",
-                    error_type="config_validation_error",
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "config_path": self.config_path,
-                        "timestamp": time.time()
-                    }
-                )
-                return
-                
-            self.logger.record_event(
-                event_type="config_change",
-                message="Configuration changed and validated successfully",
-                level="info",
-                additional_info={
-                    "timestamp": time.time(),
-                    "config_path": self.config_path
-                }
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=str(e),
-                error_type="config_change_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "config_path": self.config_path,
-                    "timestamp": time.time()
-                }
-            )
+        # Initialize model components
+        self.model_manager = ModelManager()
+        self.processor = SOVLProcessor()
+        self.generation_manager = GenerationManager()
+        
+        # Initialize training components
+        self.trainer = SOVLTrainer()
+        self.training_cycle_manager = TrainingCycleManager()
+        
+        # Initialize experience management
+        self.memoria_manager = MemoriaManager()
+        
+        # Initialize system state
+        self._initialize_system_state()
+        
+    def _initialize_system_state(self):
+        """Initialize the system state with default values."""
+        self.system_state = {
+            'is_initialized': False,
+            'is_training': False,
+            'is_generating': False,
+            'memory_usage': 0.0,
+            'error_count': 0,
+            'last_error': None,
+            'component_states': {}
+        }
+        
+    @synchronized
+    def get_resource_lock(self, resource_name: str) -> Lock:
+        """Get a lock for a specific resource."""
+        return self._resource_locks[resource_name]
+        
+    @synchronized
+    def update_component_state(self, component_name: str, state: Dict[str, Any]):
+        """Update the state of a component in a thread-safe manner."""
+        with self.get_resource_lock(component_name):
+            self._component_states[component_name] = state
+            self.system_state['component_states'][component_name] = state
+            
+    @synchronized
+    def get_component_state(self, component_name: str) -> Dict[str, Any]:
+        """Get the current state of a component in a thread-safe manner."""
+        with self.get_resource_lock(component_name):
+            return self._component_states.get(component_name, {})
+            
+    @synchronized
+    def record_error(self, error: Exception, context: Dict[str, Any] = None):
+        """Record an error in a thread-safe manner."""
+        current_time = time.time()
+        if current_time - self._last_error_time < SystemConstants.ERROR_COOLDOWN:
+            return
+            
+        self._last_error_time = current_time
+        error_info = {
+            'timestamp': current_time,
+            'error': str(error),
+            'context': context or {},
+            'traceback': traceback.format_exc()
+        }
+        
+        self._error_history.append(error_info)
+        self.system_state['error_count'] += 1
+        self.system_state['last_error'] = error_info
+        
+        # Notify error handler
+        self.error_handler.handle_error(error, context)
+        
+    @synchronized
+    def get_error_history(self) -> List[Dict[str, Any]]:
+        """Get the error history in a thread-safe manner."""
+        return list(self._error_history)
+        
+    @synchronized
+    def clear_error_history(self):
+        """Clear the error history in a thread-safe manner."""
+        self._error_history.clear()
+        self.system_state['error_count'] = 0
+        self.system_state['last_error'] = None
+        
+    @synchronized
+    def update_memory_usage(self):
+        """Update memory usage statistics in a thread-safe manner."""
+        ram_usage = self.ram_manager.get_usage()
+        gpu_usage = self.gpu_manager.get_usage()
+        
+        self.system_state['memory_usage'] = {
+            'ram': ram_usage,
+            'gpu': gpu_usage
+        }
+        
+    @synchronized
+    def get_system_state(self) -> Dict[str, Any]:
+        """Get the current system state in a thread-safe manner."""
+        self.update_memory_usage()
+        return self.system_state.copy()
+        
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with error handling."""
+        if exc_type is not None:
+            self.record_error(exc_val, {'context': 'SystemContext cleanup'})
+        return False
 
 class SystemInitializationError(Exception):
     """Custom exception for system initialization failures."""

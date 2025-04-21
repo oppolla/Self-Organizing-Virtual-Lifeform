@@ -7,10 +7,14 @@ import json
 import signal
 import atexit
 import time
+import functools
+import threading
+import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
 from sovl_main import SystemContext, SOVLSystem, StateTracker, ErrorManager, MemoryMonitor
 from sovl_curiosity import CuriosityEngine
 from sovl_io import load_training_data, InsufficientDataError
@@ -37,6 +41,52 @@ from sovl_scaffold import (
     ScaffoldProvider,
     build_scaffold_token_mapping
 )
+
+def error_handler(func):
+    """Decorator for consistent error handling and logging."""
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        except Exception as e:
+            error_context = {
+                "function": func.__name__,
+                "args": args,
+                "kwargs": kwargs,
+                "traceback": traceback.format_exc()
+            }
+            self.logger.log_error(
+                error_msg=str(e),
+                error_type=type(e).__name__,
+                error_context=error_context
+            )
+            raise
+    return wrapper
+
+class ResourceManager:
+    """Manages system resources with thread-safe operations."""
+    def __init__(self):
+        self.resources = defaultdict(int)
+        self._lock = threading.Lock()
+        
+    def acquire(self, resource_type: str, amount: int) -> bool:
+        """Acquire specified amount of a resource type."""
+        with self._lock:
+            available = self.resources[resource_type]
+            if available >= amount:
+                self.resources[resource_type] = available - amount
+                return True
+            return False
+            
+    def release(self, resource_type: str, amount: int):
+        """Release specified amount of a resource type."""
+        with self._lock:
+            self.resources[resource_type] += amount
+            
+    def set_resource(self, resource_type: str, amount: int):
+        """Set the total amount of a resource type."""
+        with self._lock:
+            self.resources[resource_type] = amount
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -297,173 +347,72 @@ class SOVLRunner:
             self.logger.log_error(f"Failed to initialize scaffold components: {str(e)}")
             raise
 
+    @error_handler
     def _initialize_components(self, context: SystemContext) -> Tuple:
         """Initialize core SOVL components with proper dependency handling."""
-        components = []
-        component_classes = [
-            (ModelLoader, "model loader"),
-            (None, "model"),  # Model is loaded separately
-            (StateTracker, "state tracker"),
-            (ErrorManager, "error manager"),
-            (MemoryMonitor, "memory monitor"),
-            (CuriosityEngine, "curiosity engine"),
-            (MemoriaManager, "memory manager"),
-            (RAMManager, "RAM manager"),
-            (GPUMemoryManager, "GPU manager")
-        ]
+        # Define component dependencies
+        dependency_graph = {
+            "model_loader": set(),
+            "state_tracker": set(),
+            "error_manager": {"state_tracker"},
+            "memory_monitor": {"error_manager", "ram_manager", "gpu_manager"},
+            "curiosity_engine": {"error_manager", "state_tracker"},
+            "memoria_manager": {"error_manager", "state_tracker"}
+        }
         
-        try:
-            # Initialize ModelManager first
-            self.model_manager = ModelManager(
-                config_manager=context.config_manager,
-                logger=self.logger,
-                device=context.device
-            )
+        components = {}
+        initialized = set()
+        
+        def initialize_component(name: str):
+            """Recursively initialize a component and its dependencies."""
+            if name in initialized:
+                return
             
-            # Initialize memory managers first
-            ram_manager = RAMManager(context.config_manager, context.logger)
-            gpu_manager = GPUMemoryManager(context.config_manager, context.logger)
+            # Initialize dependencies first
+            for dep in dependency_graph.get(name, set()):
+                if dep not in initialized:
+                    initialize_component(dep)
             
-            # Keep track of initialized components
-            memoria_manager = None
+            # Component-specific initialization
+            if name == "model_loader":
+                components[name] = ModelLoader(context)
+            elif name == "state_tracker":
+                components[name] = StateTracker(context)
+            elif name == "error_manager":
+                components[name] = ErrorManager(context, components["state_tracker"])
+            elif name == "memory_monitor":
+                components[name] = MemoryMonitor(
+                    context,
+                    components["error_manager"],
+                    components.get("ram_manager"),
+                    components.get("gpu_manager")
+                )
+            elif name == "curiosity_engine":
+                components[name] = CuriosityEngine(
+                    context,
+                    components["error_manager"],
+                    components["state_tracker"]
+                )
+            elif name == "memoria_manager":
+                components[name] = MemoriaManager(
+                    context,
+                    components["error_manager"],
+                    components["state_tracker"]
+                )
             
-            # Initialize components in stages
-            stage1_components = []  # Basic components without dependencies
-            stage2_components = []  # Components with basic dependencies
-            stage3_components = []  # Components with complex dependencies
-            
-            for component_class, name in component_classes:
-                try:
-                    if component_class is None:  # Handle model loading
-                        self.logger.log_event(
-                            event_type="component_initialization",
-                            message="Loading language model...",
-                            level="info"
-                        )
-                        self.model_manager.load_models()
-                        self.model = self.model_manager.get_base_model()
-                        self.tokenizer = self.model_manager.get_tokenizer()
-                        components.append(self.model)
-                        continue
-                    
-                    # Handle memory managers separately as they're already initialized
-                    if name == "RAM manager":
-                        components.append(ram_manager)
-                        continue
-                    
-                    if name == "GPU manager":
-                        components.append(gpu_manager)
-                        continue
-                    
-                    # Stage 1: Basic components
-                    if name in ["model loader", "state tracker"]:
-                        component = initialize_component(component_class, context)
-                        stage1_components.append(component)
-                        components.append(component)
-                    
-                    # Stage 2: Components with basic dependencies
-                    elif name == "error manager":
-                        if not any(isinstance(c, StateTracker) for c in components):
-                            raise RuntimeError("StateTracker must be initialized before ErrorManager")
-                        component = ErrorManager(
-                            context=context,
-                            state_tracker=next(c for c in components if isinstance(c, StateTracker)),
-                            config_manager=context.config_manager
-                        )
-                        self.error_manager = component
-                        stage2_components.append(component)
-                        components.append(component)
-                    
-                    # Handle memory monitor with RAM and GPU managers
-                    elif name == "memory monitor":
-                        if not self.error_manager:
-                            raise RuntimeError("ErrorManager must be initialized before MemoryMonitor")
-                        component = MemoryMonitor(
-                            config_manager=context.config_manager,
-                            logger=context.logger,
-                            memoria_manager=memoria_manager,  # Will be updated later
-                            ram_manager=ram_manager,
-                            gpu_manager=gpu_manager,
-                            error_manager=self.error_manager
-                        )
-                        stage2_components.append(component)
-                        components.append(component)
-                    
-                    # Stage 3: Components with complex dependencies
-                    elif name in ["curiosity engine", "memory manager"]:
-                        if not self.error_manager:
-                            raise RuntimeError("ErrorManager must be initialized before " + name)
-                        if not any(isinstance(c, StateTracker) for c in components):
-                            raise RuntimeError("StateTracker must be initialized before " + name)
-                        
-                        if name == "curiosity engine":
-                            component = CuriosityEngine(
-                                config=context.config_manager,
-                                model_manager=self.model_manager,
-                                logger=context.logger
-                            )
-                        else:  # memoria manager
-                            component = MemoriaManager(context.config_manager, context.logger)
-                            memoria_manager = component
-                            
-                            # Update memory monitor with memoria manager
-                            for c in components:
-                                if isinstance(c, MemoryMonitor):
-                                    c.memoria_manager = memoria_manager
-                                    break
-                        
-                        stage3_components.append(component)
-                        components.append(component)
-                    
-                    self.logger.log_event(
-                        event_type="component_initialization",
-                        message=f"Initialized {name}",
-                        level="info"
-                    )
-                    
-                except Exception as e:
-                    self.logger.log_error(
-                        error_msg=f"Failed to initialize {name}: {str(e)}",
-                        error_type="component_initialization_error"
-                    )
-                    raise
-            
-            # Initialize TraitsMonitor after other components are ready
-            if not self.error_manager:
-                raise RuntimeError("ErrorManager must be initialized before TraitsMonitor")
-            self.traits_monitor = TraitsMonitor(
-                config_manager=context.config_manager,
-                logger=self.logger,
-                state=self.state_manager.get_state(),
-                curiosity_manager=next(c for c in components if isinstance(c, CuriosityEngine)),
-                training_manager=next(c for c in components if isinstance(c, TrainingCycleManager)),
-                error_manager=self.error_manager
-            )
-            
+            initialized.add(name)
             self.logger.log_event(
                 event_type="component_initialization",
-                message="Initialized traits monitor",
+                message=f"Initialized {name}",
                 level="info"
             )
-            
-            # Validate all components
-            validate_components(*components)
-            initialize_component_state(components[2], components)
-            
-            self.logger.log_event(
-                event_type="component_initialization",
-                message="All components initialized successfully",
-                level="info"
-            )
-            return tuple(components)
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Component initialization failed: {str(e)}",
-                error_type="component_initialization_error"
-            )
-            raise
-    
+        
+        # Initialize all components
+        for component_name in dependency_graph.keys():
+            initialize_component(component_name)
+        
+        return tuple(components.values())
+
     def _initialize_optimizer(self, model: torch.nn.Module) -> None:
         """Initialize optimizer and learning rate scheduler."""
         try:
@@ -639,11 +588,38 @@ class SOVLRunner:
             print(f"Error: {str(e)}")
             return False
     
-    def save_checkpoint(self, force: bool = False, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
-        """Save system state checkpoint."""
+    @error_handler
+    async def _async_save_checkpoint(self, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
+        """Asynchronously save system checkpoint."""
         current_time = time.time()
+        checkpoint_data = {
+            "timestamp": current_time,
+            "model_state": self.model.state_dict(),
+            "optimizer_state": optimizer.state_dict() if optimizer else None,
+            "component_states": {
+                name: comp.to_dict() for name, comp in self.components.items()
+                if self._validate_component_serialization(comp, name)
+            }
+        }
+        
+        # Use temporary file for atomic writes
+        temp_path = Path("checkpoints") / f"temp_{current_time}.pt"
+        final_path = Path("checkpoints") / f"checkpoint_{current_time}.pt"
+        
+        # Save to temporary file
+        torch.save(checkpoint_data, temp_path)
+        
+        # Atomic rename
+        temp_path.rename(final_path)
+        
+        self.last_checkpoint_time = current_time
+        return True
+
+    @error_handler
+    def save_checkpoint(self, force: bool = False, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
+        """Save system state checkpoint with async support."""
         if not force and self.last_checkpoint_time is not None:
-            if current_time - self.last_checkpoint_time < self.checkpoint_interval:
+            if time.time() - self.last_checkpoint_time < self.checkpoint_interval:
                 return False
                 
         try:
@@ -653,48 +629,8 @@ class SOVLRunner:
                 level="info"
             )
             
-            # Validate component serialization before saving
-            for name, component in self.components.items():
-                if not self._validate_component_serialization(component, name):
-                    self.logger.log_error(
-                        error_msg=f"Cannot save checkpoint: Component {name} serialization validation failed",
-                        error_type="checkpoint_error"
-                    )
-                    return False
-            
-            # Save model state using ModelManager
-            model_path = None
-            if self.model_manager:
-                model_path = self.model_manager.save_model_state(current_time)
-                
-            # Save system state
-            state_path = Path("checkpoints") / f"state_{int(current_time)}.json"
-            state_data = {
-                "timestamp": current_time,
-                "model_path": str(model_path) if model_path else None,
-                "components": {
-                    name: component.to_dict() 
-                    for name, component in self.components.items()
-                    if self._validate_component_serialization(component, name)
-                }
-            }
-            
-            # Save optimizer state if provided
-            if optimizer is not None:
-                optimizer_path = Path("checkpoints") / f"optimizer_{int(current_time)}.pt"
-                torch.save(optimizer.state_dict(), optimizer_path)
-                state_data["optimizer_path"] = str(optimizer_path)
-            
-            with open(state_path, 'w') as f:
-                json.dump(state_data, f)
-                
-            self.last_checkpoint_time = current_time
-            self.logger.log_event(
-                event_type="checkpoint",
-                message=f"Checkpoint saved successfully to {state_path}",
-                level="info"
-            )
-            return True
+            # Run async save
+            return asyncio.run(self._async_save_checkpoint(optimizer))
             
         except Exception as e:
             self.logger.log_error(
@@ -702,7 +638,7 @@ class SOVLRunner:
                 error_type="checkpoint_error"
             )
             return False
-            
+
     def load_checkpoint(self, checkpoint_path: str, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
         """Load system state from checkpoint."""
         try:
@@ -783,8 +719,9 @@ class SOVLRunner:
                 error_type="checkpoint_cleanup_error"
             )
 
+    @error_handler
     def _run_validation(self, valid_data: List[Dict[str, Any]], batch_size: int) -> Dict[str, float]:
-        """Run validation loop and compute metrics."""
+        """Run validation with automatic mixed precision and memory optimization."""
         if not valid_data:
             self.logger.log_event(
                 event_type="validation",
@@ -801,53 +738,36 @@ class SOVLRunner:
             )
             
             self.model.eval()
-            total_loss = 0.0
+            metrics = defaultdict(float)
             total_batches = 0
-            metrics = {metric: 0.0 for metric in self.context.config_manager.get("training.metrics_to_track", ["loss", "accuracy", "confidence"])}
+            
+            # Initialize gradient scaler for mixed precision
+            scaler = torch.cuda.amp.GradScaler()
             
             with torch.no_grad():
                 for i in range(0, len(valid_data), batch_size):
-                    try:
-                        batch = valid_data[i:i + batch_size]
-                        if not batch:
-                            continue
-                            
+                    batch = valid_data[i:i + batch_size]
+                    if not batch:
+                        continue
+                        
+                    # Use automatic mixed precision
+                    with torch.cuda.amp.autocast():
                         inputs = self._prepare_batch(batch)
                         outputs = self.model(**inputs)
                         loss = self._calculate_loss(outputs, inputs)
                         
-                        total_loss += loss.item()
-                        total_batches += 1
+                    # Update metrics
+                    metrics["loss"] += loss.item()
+                    total_batches += 1
+                    
+                    # Clear cache periodically
+                    if i % (batch_size * 10) == 0:
+                        torch.cuda.empty_cache()
                         
-                        if "accuracy" in metrics:
-                            preds = outputs.logits.argmax(dim=-1)
-                            mask = inputs["labels"] != -100
-                            correct = (preds[mask] == inputs["labels"][mask]).sum().item()
-                            total = mask.sum().item()
-                            metrics["accuracy"] += correct / total if total > 0 else 0.0
-                            
-                        if "perplexity" in metrics:
-                            metrics["perplexity"] += torch.exp(loss).item()
-                            
-                        if "confidence" in metrics:
-                            probs = torch.softmax(outputs.logits, dim=-1)
-                            max_probs = probs.max(dim=-1)[0]
-                            metrics["confidence"] += max_probs[mask].mean().item()
-                            
-                    except Exception as e:
-                        self.logger.log_error(
-                            error_msg=f"Error processing batch {i}: {str(e)}",
-                            error_type="validation_batch_error"
-                        )
-                        continue
-            
+            # Calculate average metrics
             if total_batches > 0:
-                metrics["loss"] = total_loss / total_batches
-                for metric in metrics:
-                    if metric != "loss":
-                        metrics[metric] /= total_batches
-            
-            return metrics
+                return {k: v/total_batches for k, v in metrics.items()}
+            return {}
             
         except Exception as e:
             self.logger.log_error(
@@ -856,37 +776,46 @@ class SOVLRunner:
             )
             return {}
 
+    @error_handler
     def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """Prepare batch for model input."""
-        try:
-            if self.tokenizer is None:
-                raise ValueError("Tokenizer not initialized")
-                
-            # Tokenize and prepare inputs
-            texts = [item["text"] for item in batch]
-            inputs = self.tokenizer(
-                texts,
-                padding=True,
-                truncation=True,
-                max_length=self.context.config_manager.get("training.max_seq_length", 512),
-                return_tensors="pt"
-            )
+        """Prepare batch for model input with parallel processing."""
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer not initialized")
             
-            # Move to device
-            inputs = {k: v.to(self.context.device) for k, v in inputs.items()}
-            
-            # Prepare labels
-            inputs["labels"] = inputs["input_ids"].clone()
-            inputs["labels"][inputs["labels"] == self.tokenizer.pad_token_id] = -100
-            
-            return inputs
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Batch preparation error: {str(e)}",
-                error_type="batch_preparation_error"
-            )
-            raise
+        # Extract texts for parallel processing
+        texts = [item["text"] for item in batch]
+        
+        # Use thread pool for parallel tokenization
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            tokenized = list(executor.map(
+                lambda text: self.tokenizer(
+                    text,
+                    truncation=True,
+                    max_length=self.context.config_manager.get("training.max_seq_length", 512)
+                ),
+                texts
+            ))
+        
+        # Find maximum sequence length in batch
+        max_length = max(len(t["input_ids"]) for t in tokenized)
+        batch_size = len(tokenized)
+        
+        # Initialize tensors with padding
+        input_ids = torch.full((batch_size, max_length), self.tokenizer.pad_token_id)
+        attention_mask = torch.zeros((batch_size, max_length))
+        
+        # Fill tensors with tokenized data
+        for i, tokens in enumerate(tokenized):
+            length = len(tokens["input_ids"])
+            input_ids[i, :length] = torch.tensor(tokens["input_ids"])
+            attention_mask[i, :length] = 1
+        
+        # Move tensors to appropriate device
+        device = self.context.device
+        return {
+            "input_ids": input_ids.to(device),
+            "attention_mask": attention_mask.to(device)
+        }
 
     def _calculate_loss(self, outputs: torch.Tensor, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Calculate loss for the model outputs."""
