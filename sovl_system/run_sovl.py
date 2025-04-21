@@ -95,7 +95,7 @@ FORMATTED_TRAINING_DATA = None
 VALID_DATA = None
 CHECKPOINT_INTERVAL = 1  # Save checkpoint every epoch by default
 COMMAND_CATEGORIES = {
-    "System": ["quit", "exit", "save", "load", "reset", "status", "help", "monitor", "monitor_traits"],
+    "System": ["quit", "exit", "save", "load", "reset", "status", "help", "monitor"],
     "Training": ["train", "dream"],
     "Generation": ["generate", "echo", "mimic"],
     "Memory": ["memory", "recall", "forget", "recap"],
@@ -560,26 +560,61 @@ class SOVLRunner:
             args = args or []
             cmd_handler = CommandHandler(sovl_system, self.logger)
             
-            # Add special handling for traits monitoring commands
-            if command == "monitor_traits":
-                if not self.traits_monitor:
-                    print("Traits monitor not initialized")
+            # Unified monitor command
+            if command == "monitor":
+                if not args:
+                    # Default behavior: show status of both monitoring systems
+                    print("\nMonitoring Status:")
+                    print("-----------------")
+                    
+                    # System monitoring status
+                    system_status = cmd_handler.get_monitor_status()
+                    print(f"System Monitor: {system_status}")
+                    
+                    # Traits monitoring status
+                    if self.traits_monitor:
+                        traits_status = "running" if self.traits_monitor.is_running() else "stopped"
+                        print(f"Traits Monitor: {traits_status}")
+                    else:
+                        print("Traits Monitor: not initialized")
+                        
+                    print("\nUsage: monitor [system|traits] [start|stop|status]")
+                    return True
+                    
+                monitor_type = args[0]
+                action = args[1] if len(args) > 1 else "status"
+                
+                if monitor_type == "traits":
+                    if not self.traits_monitor:
+                        print("Traits monitor not initialized")
+                        return False
+                        
+                    if action == "start":
+                        self.traits_monitor.start()
+                        print("Traits monitoring started. Press 'q' in the monitor window to stop.")
+                        return True
+                    elif action == "stop":
+                        self.traits_monitor.stop()
+                        print("Traits monitoring stopped.")
+                        return True
+                    elif action == "status":
+                        status = "running" if self.traits_monitor.is_running() else "stopped"
+                        print(f"Traits monitor is {status}")
+                        return True
+                elif monitor_type == "system":
+                    # Handle system monitoring
+                    if action == "start":
+                        return cmd_handler.start_monitoring()
+                    elif action == "stop":
+                        return cmd_handler.stop_monitoring()
+                    elif action == "status":
+                        return cmd_handler.get_monitor_status()
+                else:
+                    print("Invalid monitor type. Use 'system' or 'traits'")
                     return False
                     
-                if args and args[0] == "start":
-                    self.traits_monitor.start()
-                    print("Traits monitoring started. Press 'q' in the monitor window to stop.")
-                    return True
-                elif args and args[0] == "stop":
-                    self.traits_monitor.stop()
-                    print("Traits monitoring stopped.")
-                    return True
-                else:
-                    print("Usage: monitor_traits [start|stop]")
-                    return False
-            
             return cmd_handler.handle_command(command, args)
-            
+                
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"Error executing command {command}: {str(e)}",

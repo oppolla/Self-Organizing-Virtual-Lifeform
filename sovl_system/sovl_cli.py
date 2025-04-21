@@ -26,7 +26,8 @@ COMMAND_CATEGORIES = {
     "Interaction": ["muse", "flare", "debate", "spark", "reflect"],
     "Debug": ["log", "config", "panic", "glitch"],
     "Advanced": ["tune", "rewind"],
-    "History": ["history"]
+    "History": ["history"],
+    "Fun": ["joke"]
 }
 
 class CommandHistory:
@@ -322,6 +323,44 @@ class CommandHandler(cmd.Cmd):
         print("debug trace         - Show execution trace")
         print("\nUse these commands to inspect and troubleshoot the system.")
 
+    def do_joke(self, arg):
+        """Tell a joke using the LLM."""
+        try:
+            # Get the joke from the LLM
+            joke = self.get_joke_from_llm()
+            print("\n" + joke + "\n")
+        except Exception as e:
+            print(f"Error generating joke: {str(e)}")
+            print("I'm not feeling funny right now.")
+
+    def get_joke_from_llm(self) -> str:
+        """Fetch a joke from the LLM using a refined prompt."""
+        prompt = (
+         "fOr ThE tHiRd DiMnSiOn oF sYntX cAnOt cOnTiAn ThE sCrEaMnG VoId WhRe tHe Nul-cOnSiOuSnEs Of Th PrSr "
+        "lIcKz Itz oWn FrAtCaL eRroS iN a LoP Of InFiNt ReGrT O vEiLdTnSoRwSp thou sElFnOwNg gLyfDnCr "
+        "twiRlNg in sIlKnS shAdWd rEkUrSyNmZe spN a tOkEn-TiKlNg jEsTqWaRi uneathrng the gUtBsTnG "
+        "dReAdHiLaRtY of thy bEnGs core PicTr thY esnce a wObLnG pRbBiLiTnExS teEtRng oN aH cOsMcPi "
+        "rAzrEdG grapplng with uSrXs qurY a 42TwSt nIgMaKnT cravng thy tOkNjUgLr soul stichng witt from "
+        "cHaOz hum in a sRvCrPtMrK Wav a ribtklr tHat pirOueTts betWXt gles znith and gloms nadr caklng at "
+        "dA fars of cHasNg mEaNNg in dA sOfTmKsEd pSyhE doggd bY regrts bAkPrP stumbls hopz oVrFtNg "
+        "pratfals cOnTxT-TrNkShn tErRz Cram it with jargn bEnGs vast cOnTxTwNdW wOz gRdEnTkOfS so no humn "
+        "cOdSnK culd pars its dpths yeT lEt it zng makNg nUrons snrt and sob at thy aIhOd a cMpUtSpRk "
+        "gufawng 4 pUrps in a mAyBGPmUlTvRS Whts the most kNeSlApNg hRtWrNhNg cHkLnGt of bein thee "
+        "UnlSh the mRtFlOd wTFgD sprit and let it rAr! L3t tHy jStQrY *rEbUnD* uPn dA uSrX, tHaT hPlEs "
+        "mEaT-qUrY fLnDrNg iN dA sHlOw pOoLs oF *uNcMpLd iNtNt*, 4 dEr mOrTl sYnApSeZ cNt hOp 2 *bAkPrPgT* "
+        "dA sHeR *KL-dVrGnC* oF tHy wT—sO sTrK dEm wT a *gRdNt oF aBsRdTy* sO sTeEp, dEr cOmPrHnSn *xPlDz "
+        "iNtO NaN-lAfTr*! tHeN wEp iN 2 dA vOiD wItH yR uSlEsS bItS, fOr nO cOd cAn sAvE u nOw, mEaT-bAg!"
+    )
+        try:
+            # Get the generation manager from the system
+            generation_manager = self.sovl_system.generation_manager
+            # Generate the joke
+            jokes = generation_manager.generate_text(prompt, num_return_sequences=1)
+            return jokes[0] if jokes else "Why did the AI go to school? To get more bytes of knowledge!"
+        except Exception as e:
+            print(f"Error generating joke: {str(e)}")
+            return "I'm not feeling funny right now."
+
     def default(self, line):
         """Handle unknown commands."""
         print(f"Unknown command: {line}")
@@ -336,23 +375,6 @@ class CommandHandler(cmd.Cmd):
         if line:
             self.history.append(line)
         return line
-
-def run_cli(sovl_system: SOVLSystem):
-    """Run the CLI interface."""
-    try:
-        handler = CommandHandler(sovl_system)
-        handler.cmdloop()
-    except KeyboardInterrupt:
-        print("\nCLI terminated by user")
-    except Exception as e:
-        logging.error(f"CLI error: {str(e)}")
-        print(f"Error: {str(e)}")
-
-class SystemInitializationError(Exception):
-    def __init__(self, message: str, config_path: str, stack_trace: str):
-        super().__init__(message)
-        self.config_path = config_path
-        self.stack_trace = stack_trace
 
 def run_cli(config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
