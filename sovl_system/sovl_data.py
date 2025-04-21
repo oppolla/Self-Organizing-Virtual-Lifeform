@@ -13,6 +13,58 @@ from collections import defaultdict
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from threading import Lock
+from dataclasses import dataclass, field
+
+@dataclass
+class DataStats:
+    """Tracks data loading and quality statistics."""
+    total_entries: int = 0
+    valid_entries: int = 0
+    invalid_entries: int = 0
+    last_load_time: float = 0.0
+    average_entry_length: float = 0.0
+    validation_errors: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    data_quality_score: float = 0.0
+    data_diversity_score: float = 0.0
+    last_update_time: float = 0.0
+
+    def update(self, total_entries: int, valid_entries: int, invalid_entries: int,
+              validation_errors: Dict[str, int], average_entry_length: float) -> None:
+        """Update data statistics."""
+        self.total_entries = total_entries
+        self.valid_entries = valid_entries
+        self.invalid_entries = invalid_entries
+        self.last_load_time = time.time()
+        self.average_entry_length = average_entry_length
+        self.validation_errors = validation_errors
+        self.last_update_time = time.time()
+        self.data_quality_score = valid_entries / total_entries if total_entries > 0 else 0.0
+        self.data_diversity_score = min(1.0, average_entry_length / 1000.0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "total_entries": self.total_entries, "valid_entries": self.valid_entries,
+            "invalid_entries": self.invalid_entries, "last_load_time": self.last_load_time,
+            "average_entry_length": self.average_entry_length, "validation_errors": dict(self.validation_errors),
+            "data_quality_score": self.data_quality_score, "data_diversity_score": self.data_diversity_score,
+            "last_update_time": self.last_update_time
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DataStats':
+        """Create from dictionary."""
+        stats = cls()
+        stats.total_entries = data.get("total_entries", 0)
+        stats.valid_entries = data.get("valid_entries", 0)
+        stats.invalid_entries = data.get("invalid_entries", 0)
+        stats.last_load_time = data.get("last_load_time", 0.0)
+        stats.average_entry_length = data.get("average_entry_length", 0.0)
+        stats.validation_errors = defaultdict(int, data.get("validation_errors", {}))
+        stats.data_quality_score = data.get("data_quality_score", 0.0)
+        stats.data_diversity_score = data.get("data_diversity_score", 0.0)
+        stats.last_update_time = data.get("last_update_time", 0.0)
+        return stats
 
 class DataProvider(ABC):
     """Abstract interface for data providers."""
@@ -435,99 +487,42 @@ class FileDataProvider(DataProvider):
         )
 
 class DataManager:
-    """Manages data operations and memory usage."""
+    """Manages data loading, validation, and statistics."""
     
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        logger: Logger,
-        memoria_manager: MemoriaManager,
-        ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
-    ):
-        """
-        Initialize data manager.
+    def __init__(self, config_manager: ConfigManager, logger: Logger, state: Optional[SOVLState] = None):
+        """Initialize the data manager."""
+        self.config_manager = config_manager
+        self.logger = logger
+        self.state = state
+        self.data_stats = DataStats()
         
-        Args:
-            config_manager: Config manager for fetching configuration values
-            logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
-            ram_manager: RAMManager instance for RAM memory management
-            gpu_manager: GPUMemoryManager instance for GPU memory management
-        """
-        self._config_manager = config_manager
-        self._logger = logger
-        self.memoria_manager = memoria_manager
-        self.ram_manager = ram_manager
-        self.gpu_manager = gpu_manager
-        
-    def check_memory_health(self) -> Dict[str, Any]:
-        """Check memory health across all memory managers."""
+    def load_and_split(self, data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Load and split data into training and validation sets."""
         try:
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
-            
-            return {
-                "ram_health": ram_health,
-                "gpu_health": gpu_health
-            }
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to check memory health: {str(e)}",
-                error_type="memory_health_error",
-                stack_trace=traceback.format_exc()
-            )
-            return {
-                "ram_health": {"status": "error"},
-                "gpu_health": {"status": "error"}
-            }
-
-    def load_and_split(
-        self,
-        source: Optional[str] = None,
-        split_ratio: Optional[float] = None
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """
-        Load data from source and split into training and validation sets.
-        
-        Args:
-            source: Optional source path for data. If None, uses default from config.
-            split_ratio: Optional ratio for validation split. If None, uses default from config.
-            
-        Returns:
-            Tuple of (formatted_training_data, valid_data)
-            
-        Raises:
-            RuntimeError: If DataManager is not properly initialized
-            ValueError: If data validation fails
-            InsufficientDataError: If insufficient valid data is available
-        """
-        # Check initialization
-        self._check_initialization()
-        
-        try:
-            # Use defaults if not provided
-            source = source or self._config_manager.get("core_config.data_source", "sovl_seed.jsonl")
-            split_ratio = split_ratio or self._config_manager.get("core_config.valid_split_ratio", 0.2)
-            
-            # Validate split ratio
-            if not 0 < split_ratio < 1:
-                raise ValueError(f"Invalid split ratio: {split_ratio}. Must be between 0 and 1.")
-                
-            # Load and validate data
-            self._logger.record_event(
-                event_type="data_load_start",
-                message=f"Loading data from {source}",
-                level="info"
-            )
-            
-            data = self.provider.load_data(source)
-            
-            # Calculate statistics
             total_entries = len(data)
-            valid_entries = len([d for d in data if self._is_valid_entry(d)])
-            invalid_entries = total_entries - valid_entries
-            avg_entry_length = sum(len(str(d)) for d in data) / total_entries if total_entries > 0 else 0
+            valid_entries = 0
+            invalid_entries = 0
+            validation_errors = defaultdict(int)
+            total_length = 0
+            
+            for entry in data:
+                if self._validate_entry(entry):
+                    valid_entries += 1
+                    total_length += len(entry.get("prompt", ""))
+                else:
+                    invalid_entries += 1
+                    validation_errors["invalid_format"] += 1
+            
+            avg_entry_length = safe_divide(total_length, valid_entries)
+            
+            # Update local stats
+            self.data_stats.update(
+                total_entries=total_entries,
+                valid_entries=valid_entries,
+                invalid_entries=invalid_entries,
+                validation_errors=validation_errors,
+                average_entry_length=avg_entry_length
+            )
             
             # Update state if available
             if self.state:
@@ -535,342 +530,30 @@ class DataManager:
                     "total_entries": total_entries,
                     "valid_entries": valid_entries,
                     "invalid_entries": invalid_entries,
+                    "validation_errors": validation_errors,
                     "avg_entry_length": avg_entry_length
                 })
-                
-            # Validate data size
-            if valid_entries < self.min_entries:
-                raise InsufficientDataError(
-                    f"Insufficient valid data: {valid_entries} entries, "
-                    f"minimum required: {self.min_entries}"
-                )
-                
+            
             # Split data
+            split_ratio = self.config_manager.get("data_config.validation_split_ratio", 0.2)
             split_idx = int(len(data) * (1 - split_ratio))
-            formatted_training_data = data[:split_idx]
-            valid_data = data[split_idx:]
-            
-            # Log success
-            self._logger.record_event(
-                event_type="data_load_success",
-                message="Data loaded and split successfully",
-                level="info",
-                additional_info={
-                    "source": source,
-                    "total_entries": total_entries,
-                    "valid_entries": valid_entries,
-                    "invalid_entries": invalid_entries,
-                    "avg_entry_length": avg_entry_length,
-                    "train_size": len(formatted_training_data),
-                    "valid_size": len(valid_data),
-                    "split_ratio": split_ratio
-                }
-            )
-            
-            return formatted_training_data, valid_data
+            return data[:split_idx], data[split_idx:]
             
         except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to load and split data: {str(e)}",
-                error_type="data_load_error",
-                stack_trace=traceback.format_exc()
-            )
+            self.logger.log_error(f"Failed to load and split data: {str(e)}", error_type="data_loading_error")
             raise
-
-    def _get_conversation_id(self) -> str:
-        """Get the current conversation ID from state or generate a default."""
-        if self.state and hasattr(self.state, 'history') and hasattr(self.state.history, 'conversation_id'):
-            return self.state.history.conversation_id
-        return "data_operation"
-
-    def _load_data(self, source: str, min_entries: int) -> List[Dict[str, Any]]:
-        """Load data with logging."""
-        data = self.provider.load_data(source, min_entries)
-        if not data:
-            self._logger.record_event(
-                event_type="data_load_warning",
-                message=f"No data loaded from {source}",
-                level="warning",
-                additional_info={
-                    "source": source,
-                    "min_entries": min_entries,
-                    "conversation_id": self._get_conversation_id()
-                }
-            )
-        return data
-
-    def _split_data(
-        self, data: List[Dict[str, Any]], split_ratio: float
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Split data into training and validation sets with validation.
-        
-        Args:
-            data: List of data entries to split
-            split_ratio: Fraction of data to use for validation (must be between 0 and 1)
             
-        Returns:
-            Tuple of (formatted_training_data, valid_data)
-            
-        Raises:
-            ValueError: If split_ratio is invalid or data is empty
-        """
+    def get_data_stats(self) -> Dict[str, Any]:
+        """Get current data statistics."""
+        return self.data_stats.to_dict()
+
+    def _validate_entry(self, entry: Dict[str, Any]) -> bool:
+        """Validate a single data entry."""
         try:
-            # Validate split ratio
-            self._validate_split_ratio(split_ratio)
-            
-            # Handle empty data
-            if not data:
-                self._logger.record_event(
-                    event_type="data_split_warning",
-                    message="Attempted to split empty data",
-                    level="warning"
-                )
-                return [], []
-                
-            # Ensure data is a list
-            if not isinstance(data, list):
-                self._logger.record_event(
-                    event_type="data_split_error",
-                    message=f"Data must be a list, got {type(data)}",
-                    level="error"
-                )
-                raise ValueError("data must be a list")
-                
-            # Get configuration for batch size and max shuffle size
-            batch_size = self._config_manager.get("core_config.batch_size", 1000)
-            max_shuffle_size = self._config_manager.get("core_config.max_shuffle_size", 10000)
-            
-            # For large datasets, use batch-based shuffling
-            if len(data) > max_shuffle_size:
-                self._logger.record_event(
-                    event_type="data_split_info",
-                    message=f"Large dataset detected ({len(data)} entries), using batch-based shuffling",
-                    level="info",
-                    additional_info={
-                        "max_shuffle_size": max_shuffle_size,
-                        "batch_size": batch_size
-                    }
-                )
-                
-                # Calculate split indices
-                total_size = len(data)
-                train_size = int(total_size * (1 - split_ratio))
-                valid_size = total_size - train_size
-                
-                # Initialize empty lists for train and validation data
-                formatted_training_data = []
-                valid_data = []
-                
-                # Process data in batches
-                random.seed(self.random_seed)
-                indices = list(range(total_size))
-                random.shuffle(indices)
-                
-                for i in range(0, total_size, batch_size):
-                    batch_indices = indices[i:i + batch_size]
-                    batch_data = [data[idx] for idx in batch_indices]
-                    
-                    # Add to appropriate split based on current sizes
-                    if len(formatted_training_data) < train_size:
-                        formatted_training_data.extend(batch_data[:train_size - len(formatted_training_data)])
-                        if len(formatted_training_data) == train_size and len(valid_data) < valid_size:
-                            valid_data.extend(batch_data[train_size - len(formatted_training_data):])
-                    else:
-                        valid_data.extend(batch_data)
-                
-                # Log successful split with batch processing
-                self._logger.record_event(
-                    event_type="data_split_success",
-                    message="Data successfully split using batch processing",
-                    level="info",
-                    additional_info={
-                        "total_entries": total_size,
-                        "train_entries": len(formatted_training_data),
-                        "valid_entries": len(valid_data),
-                        "split_ratio": split_ratio,
-                        "batch_size": batch_size,
-                        "max_shuffle_size": max_shuffle_size,
-                        "conversation_id": self._get_conversation_id()
-                    }
-                )
-                
-                return formatted_training_data, valid_data
-                
-            # For smaller datasets, use standard shuffling
-            random.seed(self.random_seed)
-            shuffled_data = data.copy()
-            random.shuffle(shuffled_data)
-            split_idx = int(len(shuffled_data) * (1 - split_ratio))
-            
-            # Ensure we don't get empty splits
-            if split_idx == 0 or split_idx == len(shuffled_data):
-                self._logger.record_event(
-                    event_type="data_split_warning",
-                    message="Split would result in empty dataset",
-                    level="warning",
-                    additional_info={
-                        "split_idx": split_idx,
-                        "data_length": len(shuffled_data),
-                        "split_ratio": split_ratio
-                    }
-                )
-                # Adjust split to ensure non-empty sets
-                split_idx = max(1, min(len(shuffled_data) - 1, split_idx))
-                
-            # Perform split
-            formatted_training_data = shuffled_data[:split_idx]
-            valid_data = shuffled_data[split_idx:]
-            
-            # Log successful split
-            self._logger.record_event(
-                event_type="data_split_success",
-                message="Data successfully split into training and validation sets",
-                level="info",
-                additional_info={
-                    "total_entries": len(data),
-                    "train_entries": len(formatted_training_data),
-                    "valid_entries": len(valid_data),
-                    "split_ratio": split_ratio,
-                    "conversation_id": self._get_conversation_id()
-                }
-            )
-            
-            return formatted_training_data, valid_data
-            
-        except Exception as e:
-            # Handle any unexpected errors during splitting
-            self._logger.log_error(
-                error_msg=f"Failed to split data: {str(e)}",
-                error_type="data_split_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
-
-    def validate_data(self, data: List[Dict[str, Any]]) -> bool:
-        """
-        Validate data using the current provider.
-        
-        Args:
-            data: List of data entries to validate.
-        
-        Returns:
-            True if valid, False otherwise.
-        """
-        try:
-            return self.provider.validate_data(data)
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to validate data: {str(e)}",
-                error_type="data_validation_error",
-                stack_trace=traceback.format_exc()
-            )
+            required_fields = self.config_manager.get("data_config.required_fields", [])
+            for field in required_fields:
+                if field not in entry:
+                    return False
+            return True
+        except Exception:
             return False
-
-    def get_data_stats(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Compute statistics about the data.
-        
-        Args:
-            data: List of data entries.
-        
-        Returns:
-            Dictionary with statistics (e.g., entry count, prompt lengths).
-        """
-        if not data:
-            return {"entry_count": 0, "avg_prompt_length": 0.0, "has_response": False}
-        
-        stats = {
-            "entry_count": len(data),
-            "avg_prompt_length": 0.0,
-            "has_response": False
-        }
-        
-        prompt_lengths = [len(entry.get("prompt", "")) for entry in data]
-        stats["has_response"] = any("response" in entry for entry in data)
-        stats["avg_prompt_length"] = (
-            sum(prompt_lengths) / len(prompt_lengths) if prompt_lengths else 0.0
-        )
-        
-        return stats
-
-    def _handle_validation_error(self, source: str, entry_count: int) -> None:
-        """Handle data validation errors."""
-        self._logger.record_event(
-            event_type="data_validation_error",
-            message=f"Validation failed for {entry_count} entries from {source}",
-            level="error",
-            additional_info={
-                "source": source,
-                "entry_count": entry_count
-            }
-        )
-
-    def _handle_data_error(self, error: Exception, source: str, min_entries: int) -> None:
-        """Handle general data errors."""
-        self._logger.log_error(
-            error_msg=f"Failed to load data from {source}: {str(error)}",
-            error_type="data_load_error",
-            stack_trace=traceback.format_exc()
-        )
-
-    def _log_split_success(self, source: str, total: int, train: int, valid: int, split_ratio: float) -> None:
-        """Log successful data split."""
-        self._logger.record_event(
-            event_type="data_split_success",
-            message=f"Successfully split {total} entries into {train} training and {valid} validation entries",
-            level="info",
-            additional_info={
-                "source": source,
-                "total_entries": total,
-                "training_entries": train,
-                "validation_entries": valid,
-                "split_ratio": split_ratio
-            }
-        )
-
-    def _validate_data(self, data: List[Dict]) -> Tuple[List[Dict], List[Dict], Dict[str, int]]:
-        """Validate data entries and track validation statistics.
-        
-        Args:
-            data: List of data entries to validate
-            
-        Returns:
-            Tuple of (valid_data, invalid_data, validation_errors)
-            where validation_errors is a dict mapping error types to counts
-        """
-        if not data:
-            return [], [], {}
-            
-        valid_data = []
-        invalid_data = []
-        validation_errors = defaultdict(int)
-        
-        for entry in data:
-            try:
-                if self._is_valid_entry(entry):
-                    valid_data.append(entry)
-                else:
-                    invalid_data.append(entry)
-                    validation_errors["invalid_format"] += 1
-            except Exception as e:
-                invalid_data.append(entry)
-                validation_errors[str(type(e).__name__)] += 1
-                
-        return valid_data, invalid_data, dict(validation_errors)
-
-    def split_data(self, data: List, valid_split_ratio: float) -> Tuple[List, List]:
-        """Split data into training and validation sets."""
-        split_idx = int(len(data) * (1 - valid_split_ratio))
-        formatted_training_data = data[:split_idx]
-        valid_data = data[split_idx:]
-        
-        return formatted_training_data, valid_data
-
-    def prepare_training_data(self, data: List, config: Dict) -> Tuple[List, List]:
-        """Prepare training data according to configuration."""
-        formatted_training_data = []
-        valid_data = []
-        
-        # ... rest of the function ...
-        
-        return formatted_training_data, valid_data

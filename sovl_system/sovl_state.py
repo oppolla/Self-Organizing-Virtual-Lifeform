@@ -18,6 +18,7 @@ from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
 from sovl_records import ConfidenceHistory
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_data import DataStats
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -678,57 +679,6 @@ class ConversationHistory:
             history.add_message(msg["role"], msg["content"])
         return history
 
-@dataclass
-class DataStats:
-    """Tracks data loading and quality statistics."""
-    total_entries: int = 0
-    valid_entries: int = 0
-    invalid_entries: int = 0
-    last_load_time: float = 0.0
-    average_entry_length: float = 0.0
-    validation_errors: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
-    data_quality_score: float = 0.0
-    data_diversity_score: float = 0.0
-    last_update_time: float = 0.0
-
-    def update(self, total_entries: int, valid_entries: int, invalid_entries: int,
-              validation_errors: Dict[str, int], average_entry_length: float) -> None:
-        """Update data statistics."""
-        self.total_entries = total_entries
-        self.valid_entries = valid_entries
-        self.invalid_entries = invalid_entries
-        self.last_load_time = time.time()
-        self.average_entry_length = average_entry_length
-        self.validation_errors = validation_errors
-        self.last_update_time = time.time()
-        self.data_quality_score = valid_entries / total_entries if total_entries > 0 else 0.0
-        self.data_diversity_score = min(1.0, average_entry_length / 1000.0)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "total_entries": self.total_entries, "valid_entries": self.valid_entries,
-            "invalid_entries": self.invalid_entries, "last_load_time": self.last_load_time,
-            "average_entry_length": self.average_entry_length, "validation_errors": dict(self.validation_errors),
-            "data_quality_score": self.data_quality_score, "data_diversity_score": self.data_diversity_score,
-            "last_update_time": self.last_update_time
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'DataStats':
-        """Create from dictionary."""
-        stats = cls()
-        stats.total_entries = data.get("total_entries", 0)
-        stats.valid_entries = data.get("valid_entries", 0)
-        stats.invalid_entries = data.get("invalid_entries", 0)
-        stats.last_load_time = data.get("last_load_time", 0.0)
-        stats.average_entry_length = data.get("average_entry_length", 0.0)
-        stats.validation_errors = defaultdict(int, data.get("validation_errors", {}))
-        stats.data_quality_score = data.get("data_quality_score", 0.0)
-        stats.data_diversity_score = data.get("data_diversity_score", 0.0)
-        stats.last_update_time = data.get("last_update_time", 0.0)
-        return stats
-
 class SOVLState(StateBase):
     """Manages the state of the SOVL system."""
     STATE_VERSION = "1.0"
@@ -740,7 +690,52 @@ class SOVLState(StateBase):
         self.memoria_manager = MemoriaManager(config_manager, logger)
         self.ram_manager = RAMManager(config_manager, logger)
         self.gpu_manager = GPUMemoryManager(config_manager, logger)
+        self.data_stats = DataStats()
         
+    def _initialize_state(self) -> None:
+        """Initialize state components."""
+        try:
+            self.seen_prompts = set()
+            self.temperament_score = 0.0
+            self.last_temperament_score = 0.0
+            self.temperament_history = deque(maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5))
+            self.dream_memory = deque(maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10))
+            self.total_dream_memory_mb = 0.0
+            self.history = ConversationHistory(
+                maxlen=self.config_manager.get("controls_config.max_messages", 100),
+                conversation_id=str(uuid.uuid4())
+            )
+            self.version = self.STATE_VERSION
+            self._memory_threshold = self.config_manager.get("memory_config.memory_threshold", 0.85)
+            self._memory_decay_rate = self.config_manager.get("memory_config.memory_decay_rate", 0.95)
+            self.log_event(
+                "state_initialized", "SOVL state components initialized",
+                conversation_id=self.history.conversation_id, state_hash=self.state_hash()
+            )
+        except Exception as e:
+            self.log_error(f"Failed to initialize state components: {str(e)}", error_type="state_component_initialization_error")
+            raise
+
+    def update_data_stats(self, stats: Dict[str, Any]) -> None:
+        """Update data statistics."""
+        try:
+            self.data_stats.update(
+                total_entries=stats.get("total_entries", 0),
+                valid_entries=stats.get("valid_entries", 0),
+                invalid_entries=stats.get("invalid_entries", 0),
+                validation_errors=stats.get("validation_errors", defaultdict(int)),
+                average_entry_length=stats.get("avg_entry_length", 0.0)
+            )
+            self.log_event(
+                "data_stats_updated", "Data statistics updated",
+                total_entries=self.data_stats.total_entries,
+                valid_entries=self.data_stats.valid_entries,
+                invalid_entries=self.data_stats.invalid_entries
+            )
+        except Exception as e:
+            self.log_error(f"Failed to update data statistics: {str(e)}", error_type="data_stats_update_error")
+            raise
+
     def _update_memory_usage(self) -> None:
         """Update memory usage statistics."""
         try:
@@ -763,31 +758,6 @@ class SOVLState(StateBase):
                 error_type="memory_update_error",
                 stack_trace=traceback.format_exc()
             )
-
-    def _initialize_state(self) -> None:
-        """Initialize state components."""
-        try:
-            self.seen_prompts = set()
-            self.temperament_score = 0.0
-            self.last_temperament_score = 0.0
-            self.temperament_history = deque(maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5))
-            self.dream_memory = deque(maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10))  # Ensure maxlen is set correctly
-            self.total_dream_memory_mb = 0.0
-            self.history = ConversationHistory(
-                maxlen=self.config_manager.get("controls_config.max_messages", 100),
-                conversation_id=str(uuid.uuid4())
-            )
-            self.data_stats = DataStats()
-            self.version = self.STATE_VERSION
-            self._memory_threshold = self.config_manager.get("memory_config.memory_threshold", 0.85)
-            self._memory_decay_rate = self.config_manager.get("memory_config.memory_decay_rate", 0.95)
-            self.log_event(
-                "state_initialized", "SOVL state components initialized",
-                conversation_id=self.history.conversation_id, state_hash=self.state_hash()
-            )
-        except Exception as e:
-            self.log_error(f"Failed to initialize state components: {str(e)}", error_type="state_component_initialization_error")
-            raise
 
     @synchronized("lock")
     def _prune_dream_memory(self) -> None:
