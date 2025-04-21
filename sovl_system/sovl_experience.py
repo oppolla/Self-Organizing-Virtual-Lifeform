@@ -13,7 +13,7 @@ from sovl_config import ConfigManager
 import gc
 
 class MemoriaManager:
-    """Manages the core memory system for SOVL."""
+    """Manages the core remembering system for SOVL."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger):
         """Initialize MemoriaManager with configuration and logger."""
