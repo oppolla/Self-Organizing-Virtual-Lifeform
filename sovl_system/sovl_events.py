@@ -10,6 +10,7 @@ from sovl_config import ConfigManager
 from sovl_state import StateManager, SOVLState
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_error import ErrorManager, ErrorRecord, EventError
 import traceback
 
 # Type alias for callbacks - clearer name
@@ -78,7 +79,7 @@ class StateEventDispatcher(EventDispatcher):
         self.subscribe(StateEventTypes.STATE_CACHE_CLEARED, self._handle_cache_clear, priority=5)
         
     async def _handle_state_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle state update events."""
+        """Handle state update events with error management."""
         try:
             state = event_data.get('state')
             if not isinstance(state, SOVLState):
@@ -96,21 +97,36 @@ class StateEventDispatcher(EventDispatcher):
             self.state_manager.update_state(state)
             
         except Exception as e:
-            self._log_error(
-                Exception(f"Failed to handle state update: {str(e)}"),
-                "state_update",
-                traceback.format_exc()
+            self.error_manager.record_error(
+                error=e,
+                error_type="state_event_error",
+                context={
+                    "event_type": StateEventTypes.STATE_UPDATED,
+                    "event_data": event_data
+                }
             )
             
     async def _handle_state_error(self, event_data: Dict[str, Any]) -> None:
-        """Handle state error events."""
-        error_msg = event_data.get('error_msg', 'Unknown state error')
-        error_type = event_data.get('error_type', 'state_error')
-        self._log_error(
-            Exception(error_msg),
-            error_type,
-            event_data.get('stack_trace')
-        )
+        """Handle state error events with error management."""
+        try:
+            error_msg = event_data.get('error_msg', 'Unknown state error')
+            error_type = event_data.get('error_type', 'state_error')
+            
+            self.error_manager.record_error(
+                error=Exception(error_msg),
+                error_type=error_type,
+                context={
+                    "event_type": StateEventTypes.STATE_ERROR,
+                    "error_data": event_data
+                }
+            )
+            
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="state_error_handling_error",
+                context={"event_data": event_data}
+            )
         
     async def _handle_cache_update(self, event_data: Dict[str, Any]) -> None:
         """Handle state cache update events."""
@@ -168,7 +184,7 @@ class StateEventDispatcher(EventDispatcher):
                 traceback.format_exc()
             )
 
-class MemoryEventDispatcher:
+class MemoryEventDispatcher(EventDispatcher):
     """Dispatches memory-related events to registered handlers."""
     
     def __init__(
@@ -189,16 +205,13 @@ class MemoryEventDispatcher:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
         """
+        super().__init__(config_manager, logger)
         self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
-        self.config_manager = config_manager
-        self.logger = logger
-        self._handlers = defaultdict(list)
-        self._lock = Lock()
         self._memory_events_history = deque(maxlen=100)
         
-        # Register default handlers
+        # Register memory event handlers
         self._register_default_handlers()
 
     def _register_default_handlers(self) -> None:
@@ -213,56 +226,60 @@ class MemoryEventDispatcher:
         self.subscribe(MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED, self._handle_scaffold_context_update, priority=15)
 
     async def _handle_memory_threshold(self, event: MemoryEvent) -> None:
-        """Handle memory threshold events."""
+        """Handle memory threshold events with error management."""
         try:
-            if event.event_type == MemoryEventType.THRESHOLD_EXCEEDED:
-                # Check both RAM and GPU memory
-                ram_health = self.ram_manager.check_memory_health()
-                gpu_health = self.gpu_manager.check_memory_health()
+            # Record memory event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
+                'memory_type': event.memory_type,
+                'threshold': event.threshold
+            })
+            
+            # Handle memory threshold
+            if event.memory_type == 'ram':
+                await self.ram_manager.handle_threshold(event.threshold)
+            elif event.memory_type == 'gpu':
+                await self.gpu_manager.handle_threshold(event.threshold)
+            else:
+                raise ValueError(f"Unknown memory type: {event.memory_type}")
                 
-                if not ram_health['is_healthy'] or not gpu_health['is_healthy']:
-                    self.logger.warning(
-                        "Memory threshold exceeded",
-                        extra={
-                            'ram_health': ram_health,
-                            'gpu_health': gpu_health
-                        }
-                    )
-                    
-                    # Trigger cleanup if needed
-                    if not ram_health['is_healthy']:
-                        self.ram_manager.cleanup()
-                    if not gpu_health['is_healthy']:
-                        self.gpu_manager.cleanup()
-                    
-                    # Update memory stats
-                    self.memoria_manager.update_memory_stats()
         except Exception as e:
-            self.logger.error(f"Error handling memory threshold: {str(e)}", exc_info=True)
+            self.error_manager.record_error(
+                error=e,
+                error_type="memory_event_error",
+                context={
+                    "event_type": MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
+                    "event": event.__dict__
+                }
+            )
 
     async def _handle_dream_memory_append(self, event_data: Dict[str, Any]) -> None:
-        """Handle dream memory append events."""
+        """Handle dream memory append events with error management."""
         try:
-            tensor = event_data.get('tensor')
-            weight = event_data.get('weight', 1.0)
-            metadata = event_data.get('metadata', {})
-            
-            if tensor is None:
-                raise ValueError("No tensor provided for dream memory append")
+            memory = event_data.get('memory')
+            if not memory:
+                raise ValueError("No memory provided for append")
                 
-            # Record append event
+            # Record memory event
             self._memory_events_history.append({
                 'timestamp': time.time(),
                 'event_type': MemoryEventTypes.DREAM_MEMORY_APPENDED,
-                'weight': weight,
-                'metadata': metadata
+                'memory_id': memory.id if hasattr(memory, 'id') else None
             })
             
-            # Append to dream memory
-            self.memoria_manager.append_dream_memory(tensor, weight, metadata)
+            # Append memory
+            await self.memoria_manager.append_dream_memory(memory)
             
         except Exception as e:
-            self.logger.error(f"Error handling dream memory append: {str(e)}", exc_info=True)
+            self.error_manager.record_error(
+                error=e,
+                error_type="memory_event_error",
+                context={
+                    "event_type": MemoryEventTypes.DREAM_MEMORY_APPENDED,
+                    "event_data": event_data
+                }
+            )
 
     async def _handle_dream_memory_prune(self, event_data: Dict[str, Any]) -> None:
         """Handle dream memory prune events."""
@@ -357,6 +374,8 @@ class EventDispatcher:
         '_notification_depth',
         '_deferred_unsubscriptions',
         '_config_manager',
+        'error_manager',
+        '_error_thresholds'
     )
 
     def __init__(self, config_manager: ConfigManager, logger: Optional[Logger] = None):
@@ -374,9 +393,52 @@ class EventDispatcher:
         self._logger = logger or Logger(LoggerConfig(log_file="sovl_events.log"))
         self._notification_depth: int = 0
         self._deferred_unsubscriptions: Dict[str, Set[EventHandler]] = defaultdict(set)
+        
+        # Initialize error management
+        self._initialize_error_manager()
 
-        # Initialize configuration
-        self._initialize_config()
+    def _initialize_error_manager(self) -> None:
+        """Initialize error management system."""
+        self.error_manager = ErrorManager(
+            context=self,
+            state_tracker=None,  # Will be set by the system
+            config_manager=self._config_manager
+        )
+        
+        # Set error thresholds
+        self._error_thresholds = {
+            "event_validation_error": 3,
+            "handler_execution_error": 5,
+            "state_event_error": 3,
+            "memory_event_error": 3,
+            "channel_error": 2
+        }
+        
+        # Register recovery strategies
+        self._register_recovery_strategies()
+
+    def _register_recovery_strategies(self) -> None:
+        """Register error recovery strategies."""
+        self.error_manager.register_recovery_strategy(
+            "event_validation_error",
+            self._recover_event_validation
+        )
+        self.error_manager.register_recovery_strategy(
+            "handler_execution_error",
+            self._recover_handler_execution
+        )
+        self.error_manager.register_recovery_strategy(
+            "state_event_error",
+            self._recover_state_event
+        )
+        self.error_manager.register_recovery_strategy(
+            "memory_event_error",
+            self._recover_memory_event
+        )
+        self.error_manager.register_recovery_strategy(
+            "channel_error",
+            self._recover_channel
+        )
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
@@ -863,6 +925,147 @@ class EventDispatcher:
                     message=f"Cleaned up channel '{valid_channel}'",
                     level="debug"
                 )
+
+    def _recover_event_validation(self, record: ErrorRecord) -> None:
+        """Recover from event validation errors."""
+        try:
+            # Log recovery attempt
+            self._logger.record_event(
+                "error_recovery",
+                f"Attempting to recover from event validation error: {record.error_type}",
+                "warning",
+                {"error_context": record.context}
+            )
+            
+            # Reset event validation state
+            if "event_type" in record.context:
+                event_type = record.context["event_type"]
+                if event_type in self._subscribers:
+                    # Revalidate handlers for this event type
+                    self._validate_handlers(event_type)
+            
+            # Clear error count for this type
+            self.error_manager.clear_error_count(record.error_type)
+            
+        except Exception as e:
+            self._logger.record_event(
+                "error_recovery_failed",
+                f"Failed to recover from event validation error: {str(e)}",
+                "error",
+                {"original_error": str(record.error)}
+            )
+
+    def _recover_handler_execution(self, record: ErrorRecord) -> None:
+        """Recover from handler execution errors."""
+        try:
+            # Log recovery attempt
+            self._logger.record_event(
+                "error_recovery",
+                f"Attempting to recover from handler execution error: {record.error_type}",
+                "warning",
+                {"error_context": record.context}
+            )
+            
+            # Remove problematic handler if identified
+            if "handler" in record.context:
+                handler = record.context["handler"]
+                event_type = record.context.get("event_type")
+                if event_type and handler:
+                    self.unsubscribe(event_type, handler)
+            
+            # Clear error count for this type
+            self.error_manager.clear_error_count(record.error_type)
+            
+        except Exception as e:
+            self._logger.record_event(
+                "error_recovery_failed",
+                f"Failed to recover from handler execution error: {str(e)}",
+                "error",
+                {"original_error": str(record.error)}
+            )
+
+    def _recover_state_event(self, record: ErrorRecord) -> None:
+        """Recover from state event errors."""
+        try:
+            # Log recovery attempt
+            self._logger.record_event(
+                "error_recovery",
+                f"Attempting to recover from state event error: {record.error_type}",
+                "warning",
+                {"error_context": record.context}
+            )
+            
+            # Reset state event handling
+            if "state" in record.context:
+                state = record.context["state"]
+                if isinstance(state, SOVLState):
+                    # Reinitialize state handling
+                    self._initialize_state_handling()
+            
+            # Clear error count for this type
+            self.error_manager.clear_error_count(record.error_type)
+            
+        except Exception as e:
+            self._logger.record_event(
+                "error_recovery_failed",
+                f"Failed to recover from state event error: {str(e)}",
+                "error",
+                {"original_error": str(record.error)}
+            )
+
+    def _recover_memory_event(self, record: ErrorRecord) -> None:
+        """Recover from memory event errors."""
+        try:
+            # Log recovery attempt
+            self._logger.record_event(
+                "error_recovery",
+                f"Attempting to recover from memory event error: {record.error_type}",
+                "warning",
+                {"error_context": record.context}
+            )
+            
+            # Reset memory event handling
+            self._initialize_memory_handling()
+            
+            # Clear error count for this type
+            self.error_manager.clear_error_count(record.error_type)
+            
+        except Exception as e:
+            self._logger.record_event(
+                "error_recovery_failed",
+                f"Failed to recover from memory event error: {str(e)}",
+                "error",
+                {"original_error": str(record.error)}
+            )
+
+    def _recover_channel(self, record: ErrorRecord) -> None:
+        """Recover from channel errors."""
+        try:
+            # Log recovery attempt
+            self._logger.record_event(
+                "error_recovery",
+                f"Attempting to recover from channel error: {record.error_type}",
+                "warning",
+                {"error_context": record.context}
+            )
+            
+            # Reset problematic channel
+            if "channel" in record.context:
+                channel = record.context["channel"]
+                if channel in self._channels:
+                    self.cleanup_channel(channel)
+                    self._channels[channel] = asyncio.Queue()
+            
+            # Clear error count for this type
+            self.error_manager.clear_error_count(record.error_type)
+            
+        except Exception as e:
+            self._logger.record_event(
+                "error_recovery_failed",
+                f"Failed to recover from channel error: {str(e)}",
+                "error",
+                {"original_error": str(record.error)}
+            )
 
 class EventManager:
     def __init__(self, config_manager: ConfigManager, logger: Logger):

@@ -11,6 +11,7 @@ import time
 from sovl_logger import Logger
 from transformers import AutoConfig
 from sovl_schema import ValidationSchema  # Import ValidationSchema from sovl_schema.py
+from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 
 @dataclass
 class ConfigSchema:
@@ -313,6 +314,7 @@ class ConfigManager:
         self.DEFAULT_SCHEMA = self._load_schema()
         self.validator.register(self.DEFAULT_SCHEMA)
         self._initialize_config()
+        self._initialize_error_manager()
 
     def _load_schema(self) -> List[ConfigSchema]:
         """Load schema from ValidationSchema and flatten to a list for validation."""
@@ -324,17 +326,18 @@ class ConfigManager:
         return flat_schema
 
     def _initialize_config(self) -> None:
-        with self.lock:
-            self.store.flat_config = self.file_handler.load()
-            self._validate_and_set_defaults()
-            self.store.rebuild_structured(self.DEFAULT_SCHEMA)
-            self.store.update_cache(self.DEFAULT_SCHEMA)
-            self._last_config_hash = self._compute_config_hash()
-            self._log_event("config_load", "Configuration loaded successfully", "info", {
-                "config_file": self.config_file,
-                "config_hash": self._last_config_hash,
-                "schema_version": self.get("logging_config.schema_version", "1.1")
-            })
+        """Initialize configuration from file."""
+        try:
+            config = self.file_handler.load()
+            self.store.flat_config = config
+            self._compute_config_hash()
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="config_load_error",
+                context={"config_file": self.config_file}
+            )
+            raise ConfigurationError(f"Failed to initialize configuration: {str(e)}")
 
     def _compute_config_hash(self) -> str:
         try:
@@ -400,29 +403,34 @@ class ConfigManager:
             return self.store.get_section(section)
 
     def update(self, key: str, value: Any) -> bool:
+        """Update a configuration value."""
         try:
-            with self.lock:
-                if self._frozen:
-                    self._log_error("Cannot update: configuration is frozen", {"key": key})
-                    return False
+            if self._frozen:
+                self.error_manager.record_error(
+                    error=ConfigurationError("Configuration is frozen"),
+                    error_type="update_error",
+                    context={"key": key, "value": value}
+                )
+                return False
 
-                is_valid, corrected_value = self.validator.validate(key, value)
-                if not is_valid:
-                    return False
+            if not self.validate_value(key, value):
+                self.error_manager.record_error(
+                    error=ConfigurationError(f"Invalid value for key {key}"),
+                    error_type="validation_error",
+                    context={"key": key, "value": value}
+                )
+                return False
 
-                old_hash = self._last_config_hash
-                self.store.set_value(key, corrected_value)
-                self._last_config_hash = self._compute_config_hash()
-                self._notify_subscribers()
-                self._log_event("config_update", f"Updated configuration key: {key}", "info", {
-                    "key": key,
-                    "value": corrected_value,
-                    "old_hash": old_hash,
-                    "new_hash": self._last_config_hash
-                })
-                return True
+            old_value = self.store.get_value(key)
+            self.store.set_value(key, value)
+            self._notify_subscribers()
+            return True
         except Exception as e:
-            self._log_error(f"Failed to update config key {key}", {"key": key, "error": str(e)})
+            self.error_manager.record_error(
+                error=e,
+                error_type="update_error",
+                context={"key": key, "value": value}
+            )
             return False
 
     def subscribe(self, callback: Callable[[], None]) -> None:
@@ -442,51 +450,65 @@ class ConfigManager:
                     self._log_error("Failed to notify subscriber of config change", {"error": str(e)})
 
     def update_batch(self, updates: Dict[str, Any], rollback_on_failure: bool = True) -> bool:
-        if not updates:
-            return True
-
-        with self.lock:
+        """Update multiple configuration values at once."""
+        old_values = {}
+        try:
             if self._frozen:
-                self._log_error("Cannot update batch: configuration is frozen", {"updates": list(updates.keys())})
+                self.error_manager.record_error(
+                    error=ConfigurationError("Configuration is frozen"),
+                    error_type="update_error",
+                    context={"updates": updates}
+                )
                 return False
 
-            backup = self.store.flat_config.copy()
-            successful_updates = {}
-            try:
-                for key, value in updates.items():
-                    is_valid, corrected_value = self.validator.validate(key, value)
-                    if not is_valid:
-                        raise ValueError(f"Invalid value for {key}: {value}")
-                    self.store.set_value(key, corrected_value)
-                    successful_updates[key] = corrected_value
+            # Store old values for potential rollback
+            for key in updates:
+                old_values[key] = self.store.get_value(key)
 
-                if not self.file_handler.save(self.store.flat_config):
-                    raise RuntimeError("Failed to save configuration")
+            # Validate all updates first
+            for key, value in updates.items():
+                if not self.validate_value(key, value):
+                    self.error_manager.record_error(
+                        error=ConfigurationError(f"Invalid value for key {key}"),
+                        error_type="validation_error",
+                        context={"key": key, "value": value}
+                    )
+                    if rollback_on_failure:
+                        self._rollback_updates(old_values)
+                    return False
 
-                self._last_config_hash = self._compute_config_hash()
-                self._notify_subscribers()
-                return True
-            except Exception as e:
-                if rollback_on_failure:
-                    self.store.flat_config = backup
-                    self.store.rebuild_structured(self.DEFAULT_SCHEMA)
-                    self.store.update_cache(self.DEFAULT_SCHEMA)
-                    self._last_config_hash = self._compute_config_hash()
-                    self._log_event("config_rollback", f"Configuration rollback triggered: {str(e)}", "error", {
-                        "failed_updates": list(updates.keys()),
-                        "successful_updates": list(successful_updates.keys())
-                    })
-                else:
-                    self._log_error("Configuration update failed", {
-                        "failed_updates": list(updates.keys()),
-                        "successful_updates": list(successful_updates.keys()),
-                        "error": str(e)
-                    })
-                return False
+            # Apply updates
+            for key, value in updates.items():
+                self.store.set_value(key, value)
+
+            self._notify_subscribers()
+            return True
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="update_error",
+                context={"updates": updates}
+            )
+            if rollback_on_failure:
+                self._rollback_updates(old_values)
+            return False
 
     def save_config(self, file_path: Optional[str] = None, compress: bool = False, max_retries: int = 3) -> bool:
-        with self.lock:
-            return self.file_handler.save(self.store.flat_config, file_path, compress, max_retries)
+        """Save configuration to file."""
+        try:
+            return self.file_handler.save(
+                self.store.flat_config,
+                file_path or self.config_file,
+                compress,
+                max_retries
+            )
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="config_save_error",
+                context={"file_path": file_path or self.config_file}
+            )
+            return False
 
     def diff_config(self, old_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         try:
@@ -656,67 +678,54 @@ class ConfigManager:
             return False
 
     def validate_or_raise(self, model_config: Optional[Any] = None) -> None:
+        """Validate configuration and raise appropriate errors."""
         try:
-            self.validate_keys([
-                "core_config.model_name",
-                "core_config.scaffold_model_name",
-                "training_config.learning_rate",
-                "curiosity_config.enable_curiosity",
-                "cross_attn_config.memory_weight",
-                "model.model_path",
-                "data_provider.data_path",
-            ])
+            # Validate required keys
+            self.validate_keys(self.REQUIRED_KEYS)
 
-            cross_attn_layers = self.get("core_config.cross_attn_layers", [5, 7])
-            if not isinstance(cross_attn_layers, list):
-                raise ValueError("core_config.cross_attn_layers must be a list")
+            # Validate model-specific configuration if provided
+            if model_config and not self.validate_with_model(model_config):
+                self.error_manager.record_error(
+                    error=ConfigurationError("Model configuration validation failed"),
+                    error_type="validation_error",
+                    context={"model_config": str(model_config)}
+                )
+                raise ConfigurationError("Model configuration validation failed")
 
-            if not self.get("core_config.use_dynamic_layers", False) and model_config is not None:
-                base_model_name = self.get("core_config.model_name", "gpt2")
-                try:
-                    base_config = model_config or AutoConfig.from_pretrained(base_model_name)
-                    invalid_layers = [l for l in cross_attn_layers if not (0 <= l < base_config.num_hidden_layers)]
-                    if invalid_layers:
-                        raise ValueError(f"Invalid cross_attn_layers: {invalid_layers} for {base_config.num_hidden_layers} layers")
-                except Exception as e:
-                    raise ValueError(f"Failed to validate cross-attention layers: {str(e)}")
-
-            if self.get("core_config.layer_selection_mode", "balanced") == "custom":
-                custom_layers = self.get("core_config.custom_layers", [])
-                if not isinstance(custom_layers, list):
-                    raise ValueError("core_config.custom_layers must be a list")
-
-                if model_config is not None:
-                    try:
-                        base_model_name = self.get("core_config.model_name", "gpt2")
-                        base_config = model_config or AutoConfig.from_pretrained(base_model_name)
-                        invalid_custom = [l for l in custom_layers if not (0 <= l < base_config.num_hidden_layers)]
-                        if invalid_custom:
-                            raise ValueError(f"Invalid custom_layers: {invalid_custom} for {base_model_name}")
-                    except Exception as e:
-                        raise ValueError(f"Failed to validate custom layers: {str(e)}")
-
-            self._log_event("config_validation", "Configuration validation successful", "info", {
-                "config_snapshot": self.get_state()["config"]
-            })
+            # Validate all sections
+            for section in self.store.structured_config:
+                if not self.validate_section(section, self.REQUIRED_SECTION_KEYS.get(section, [])):
+                    self.error_manager.record_error(
+                        error=ConfigurationError(f"Section {section} validation failed"),
+                        error_type="validation_error",
+                        context={"section": section}
+                    )
+                    raise ConfigurationError(f"Section {section} validation failed")
         except Exception as e:
-            self._log_error("Configuration validation failed", {"error": str(e)})
-            raise ValueError(f"Configuration validation failed: {str(e)}")
+            self.error_manager.record_error(
+                error=e,
+                error_type="validation_error",
+                context={"model_config": str(model_config) if model_config else None}
+            )
+            raise
 
     def validate_value(self, key: str, value: Any) -> bool:
+        """Validate a configuration value."""
         try:
-            with self.lock:
-                schema = next((s for s in self.DEFAULT_SCHEMA if s.field == key), None)
-                if not schema:
-                    self._log_error(f"Unknown configuration key: {key}", {"key": key})
-                    return False
-
-                is_valid, _ = self.validator.validate(key, value)
-                if not is_valid:
-                    self._log_error(f"Invalid value for {key}: {value}", {"key": key, "value": value})
-                return is_valid
+            valid, _ = self.validator.validate(key, value)
+            if not valid:
+                self.error_manager.record_error(
+                    error=ConfigurationError(f"Invalid value for key {key}"),
+                    error_type="validation_error",
+                    context={"key": key, "value": value}
+                )
+            return valid
         except Exception as e:
-            self._log_error(f"Failed to validate value for {key}", {"key": key, "error": str(e)})
+            self.error_manager.record_error(
+                error=e,
+                error_type="validation_error",
+                context={"key": key, "value": value}
+            )
             return False
 
     def validate_with_model(self, model_config: Any) -> bool:
@@ -766,6 +775,183 @@ class ConfigManager:
             "enable_memory_monitoring": self.get("memory_config.enable_memory_monitoring", True),
             "memory_monitoring_interval": self.get("memory_config.memory_monitoring_interval", 5)
         })
+
+    def _initialize_error_manager(self) -> None:
+        """Initialize error manager with config-specific settings."""
+        self.error_manager = ErrorManager(
+            context=self,
+            state_tracker=None,  # Config doesn't need state tracking
+            config_manager=self,
+            error_cooldown=1.0
+        )
+        
+        # Register config-specific error thresholds
+        self.error_manager.severity_thresholds.update({
+            "config_load": 3,     # 3 load failures before critical
+            "config_save": 3,     # 3 save failures before critical
+            "validation": 5,      # 5 validation failures before critical
+            "schema": 2,          # 2 schema failures before critical
+            "update": 5           # 5 update failures before critical
+        })
+        
+        # Register recovery strategies
+        self._register_recovery_strategies()
+        
+    def _register_recovery_strategies(self) -> None:
+        """Register configuration-specific error recovery strategies."""
+        self.error_manager.recovery_strategies.update({
+            "config_load_error": self._recover_config_load,
+            "config_save_error": self._recover_config_save,
+            "validation_error": self._recover_validation,
+            "schema_error": self._recover_schema,
+            "update_error": self._recover_update
+        })
+        
+    def _recover_config_load(self, record: ErrorRecord) -> None:
+        """Recovery strategy for config loading errors."""
+        try:
+            # Reset to default configuration
+            self._initialize_config()
+            # Attempt to load from backup if available
+            self._load_from_backup()
+            self.logger.record_event(
+                event_type="config_recovery",
+                message="Recovered from config load error",
+                level="info"
+            )
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="recovery_error",
+                context={"original_error": record.error_type}
+            )
+            
+    def _recover_config_save(self, record: ErrorRecord) -> None:
+        """Recovery strategy for config saving errors."""
+        try:
+            # Create backup of current config
+            self._create_backup()
+            # Retry save with compression
+            self.save_config(compress=True)
+            self.logger.record_event(
+                event_type="config_recovery",
+                message="Recovered from config save error",
+                level="info"
+            )
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="recovery_error",
+                context={"original_error": record.error_type}
+            )
+            
+    def _recover_validation(self, record: ErrorRecord) -> None:
+        """Recovery strategy for validation errors."""
+        try:
+            # Reset affected section to defaults
+            section = record.context.get("section")
+            if section:
+                self._reset_section_to_defaults(section)
+            self.logger.record_event(
+                event_type="config_recovery",
+                message="Recovered from validation error",
+                level="info"
+            )
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="recovery_error",
+                context={"original_error": record.error_type}
+            )
+            
+    def _recover_schema(self, record: ErrorRecord) -> None:
+        """Recovery strategy for schema errors."""
+        try:
+            # Reload schema
+            self._load_schema()
+            # Revalidate all config
+            self._validate_and_set_defaults()
+            self.logger.record_event(
+                event_type="config_recovery",
+                message="Recovered from schema error",
+                level="info"
+            )
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="recovery_error",
+                context={"original_error": record.error_type}
+            )
+            
+    def _recover_update(self, record: ErrorRecord) -> None:
+        """Recovery strategy for update errors."""
+        try:
+            # Rollback the failed update
+            if "updates" in record.context:
+                self._rollback_updates(record.context["updates"])
+            self.logger.record_event(
+                event_type="config_recovery",
+                message="Recovered from update error",
+                level="info"
+            )
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="recovery_error",
+                context={"original_error": record.error_type}
+            )
+            
+    def _load_from_backup(self) -> None:
+        """Attempt to load configuration from backup file."""
+        backup_file = f"{self.config_file}.backup"
+        if os.path.exists(backup_file):
+            try:
+                self.file_handler = FileHandler(backup_file, self.logger)
+                self._initialize_config()
+            except Exception as e:
+                self.error_manager.record_error(
+                    error=e,
+                    error_type="backup_load_error",
+                    context={"backup_file": backup_file}
+                )
+                
+    def _create_backup(self) -> None:
+        """Create a backup of the current configuration."""
+        backup_file = f"{self.config_file}.backup"
+        try:
+            with open(self.config_file, 'r') as src, open(backup_file, 'w') as dst:
+                dst.write(src.read())
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="backup_creation_error",
+                context={"backup_file": backup_file}
+            )
+            
+    def _reset_section_to_defaults(self, section: str) -> None:
+        """Reset a configuration section to its default values."""
+        try:
+            defaults = self.validator.get_defaults_for_section(section)
+            for key, value in defaults.items():
+                self.store.set_value(f"{section}.{key}", value)
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="section_reset_error",
+                context={"section": section}
+            )
+            
+    def _rollback_updates(self, updates: Dict[str, Any]) -> None:
+        """Rollback failed configuration updates."""
+        try:
+            for key, old_value in updates.items():
+                self.store.set_value(key, old_value)
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="rollback_error",
+                context={"updates": updates}
+            )
 
 if __name__ == "__main__":
     from sovl_logger import LoggerConfig

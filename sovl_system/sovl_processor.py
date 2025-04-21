@@ -11,13 +11,12 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_records import ConfidenceHistory
 from transformers import PreTrainedTokenizer
-from sovl_confidence import ConfidenceCalculator, ErrorManager, SystemContext, CuriosityManager
-
+from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
+from sovl_error import ErrorManager, ErrorRecord
 
 class LogitsError(Exception):
     """Custom exception for logits processing failures."""
     pass
-
 
 class EventType(Enum):
     """Enum for logging event types."""
@@ -29,7 +28,6 @@ class EventType(Enum):
     TOKEN_MAP_UPDATE = "token_map_updated"
     ERROR = "error"
     WARNING = "warning"
-
 
 @dataclass
 class ProcessorConfig:
@@ -286,7 +284,116 @@ class SOVLProcessor:
         self._lock = Lock()
         self._validator = TensorValidator(device, logger)
         
+        # Initialize error manager
+        self._initialize_error_manager()
+        
         self._log_init()
+
+    def _initialize_error_manager(self) -> None:
+        """Initialize error manager with processor-specific configuration."""
+        self.error_manager = ErrorManager(
+            context=self,
+            state_tracker=None,
+            config_manager=self.config_manager,
+            error_cooldown=1.0
+        )
+        
+        # Register processor-specific thresholds
+        self.error_manager.severity_thresholds.update({
+            "tensor_validation": 3,  # 3 validation failures before critical
+            "confidence_calc": 5,    # 5 calculation failures before critical
+            "vibe_sculpting": 2,     # 2 vibe sculpting failures before critical
+            "repetition_detection": 3 # 3 detection failures before critical
+        })
+        
+        # Register recovery strategies
+        self.error_manager.recovery_strategies.update({
+            "tensor_validation_error": self._recover_tensor_validation,
+            "confidence_calc_error": self._recover_confidence_calc,
+            "vibe_sculpting_error": self._recover_vibe_sculpting,
+            "repetition_detection_error": self._recover_repetition_detection
+        })
+
+    def _recover_tensor_validation(self, record: ErrorRecord) -> None:
+        """Recovery strategy for tensor validation errors."""
+        try:
+            # Clear tensor caches
+            torch.cuda.empty_cache()
+            
+            # Reset validator state
+            self._validator = TensorValidator(self.device, self.logger)
+            
+            self.logger.record_event(
+                "tensor_validation_recovery",
+                "Reset tensor validator",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                "validation_recovery_failed",
+                f"Failed to recover from tensor validation error: {str(e)}",
+                level="error"
+            )
+
+    def _recover_confidence_calc(self, record: ErrorRecord) -> None:
+        """Recovery strategy for confidence calculation errors."""
+        try:
+            # Reset confidence calculator
+            self.confidence_calculator = ConfidenceCalculator(self.config_manager, self.logger)
+            
+            # Clear confidence history
+            self._confidence_history.clear_history()
+            
+            self.logger.record_event(
+                "confidence_calc_recovery",
+                "Reset confidence calculator",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                "confidence_recovery_failed",
+                f"Failed to recover from confidence calculation error: {str(e)}",
+                level="error"
+            )
+
+    def _recover_vibe_sculpting(self, record: ErrorRecord) -> None:
+        """Recovery strategy for vibe sculpting errors."""
+        try:
+            # Reset vibe history
+            self._curiosity_queue.clear()
+            
+            # Reset last update timestamp
+            self._last_curiosity_update = 0.0
+            
+            self.logger.record_event(
+                "vibe_sculpting_recovery",
+                "Reset vibe sculpting state",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                "vibe_recovery_failed",
+                f"Failed to recover from vibe sculpting error: {str(e)}",
+                level="error"
+            )
+
+    def _recover_repetition_detection(self, record: ErrorRecord) -> None:
+        """Recovery strategy for repetition detection errors."""
+        try:
+            # Reset repetition detection parameters to defaults
+            self.config = ProcessorConfig.from_config_manager(self.config_manager)
+            
+            self.logger.record_event(
+                "repetition_detection_recovery",
+                "Reset repetition detection parameters",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                "repetition_recovery_failed",
+                f"Failed to recover from repetition detection error: {str(e)}",
+                level="error"
+            )
 
     def _log_init(self) -> None:
         """Log initialization event."""
@@ -332,78 +439,72 @@ class SOVLProcessor:
                 
             return None
 
-    def calculate_confidence(
-        self,
-        logits: Union[torch.Tensor, List[torch.Tensor]],
-        generated_ids: Optional[torch.Tensor] = None,
-        temperament_influence: Optional[float] = None,
-        timestamp: Optional[float] = None,
-        state: Optional[SOVLState] = None,
-        error_manager: Optional[ErrorManager] = None,
-        context: Optional[SystemContext] = None,
-        curiosity_manager: Optional[CuriosityManager] = None
-    ) -> float:
+    def validate_logits(self, logits: torch.Tensor) -> bool:
         """
-        Calculate confidence score using the integrated confidence calculator.
+        Validate logits tensor using the validator.
 
         Args:
-            logits: Input logits (batch, seq_len, vocab_size).
-            generated_ids: Optional mask for valid positions (batch, seq_len).
-            temperament_influence: Temperament score (-1.0 to 1.0).
-            timestamp: Optional timestamp for curiosity parameter synchronization.
-            state: Current SOVL state.
-            error_manager: Error handling manager.
-            context: System context.
-            curiosity_manager: Optional curiosity manager.
+            logits: Logits tensor to validate.
 
         Returns:
-            float: Confidence score between 0.0 and 1.0.
-
-        Raises:
-            LogitsError: If processing fails.
+            bool: True if validation passes, False otherwise.
         """
         try:
-            with self._lock, NumericalGuard():
-                # Validate inputs
-                logits = self._validator.validate_logits(logits)
-                generated_ids = self._validator.validate_generated_ids(generated_ids, logits)
-                
-                # Get current curiosity pressure if available
-                curiosity_pressure = None
-                if timestamp is not None and timestamp - self._last_curiosity_update >= self._curiosity_update_interval:
-                    curiosity_pressure = self._get_curiosity_params()
-                
-                # Calculate confidence using the confidence calculator
-                confidence = self.confidence_calculator.calculate_confidence_score(
-                    logits=logits,
-                    generated_ids=generated_ids,
-                    state=state,
-                    error_manager=error_manager,
-                    context=context,
-                    curiosity_manager=curiosity_manager
+            if not self._validator.validate_tensor(logits):
+                self.error_manager.record_error(
+                    "tensor_validation_error",
+                    "Logits tensor validation failed",
+                    severity=2,
+                    context={"tensor_shape": logits.shape}
                 )
-                
-                # Apply additional adjustments if needed
-                if curiosity_pressure is not None:
-                    confidence *= (1.0 - curiosity_pressure * self.CURIOSITY_BOOST)
-                
-                if temperament_influence is not None:
-                    confidence *= (1.0 + temperament_influence * self.TEMPERAMENT_SCALE)
-                
-                # Ensure confidence is within bounds
-                confidence = max(self.MIN_CONFIDENCE, min(self.MAX_CONFIDENCE, confidence))
-                
-                # Add to history
-                self._confidence_history.add_confidence(confidence)
-                
-                # Log the confidence calculation
-                self._log_confidence(confidence, logits, temperament_influence, curiosity_pressure)
-                
-                return confidence
-                
+                return False
+            return True
         except Exception as e:
-            self._log_confidence_error(e, logits, generated_ids, temperament_influence, curiosity_pressure)
-            raise LogitsError(f"Confidence calculation failed: {str(e)}")
+            self.error_manager.record_error(
+                "tensor_validation_error",
+                f"Error during logits validation: {str(e)}",
+                severity=3,
+                context={"error": str(e)}
+            )
+            return False
+
+    def calculate_confidence(self, logits: torch.Tensor) -> float:
+        """
+        Calculate confidence score for the given logits.
+
+        Args:
+            logits: Logits tensor to calculate confidence for.
+
+        Returns:
+            float: Confidence score between 0 and 1.
+        """
+        try:
+            # Validate logits first
+            if not self.validate_logits(logits):
+                return self.MIN_CONFIDENCE
+
+            # Calculate confidence
+            confidence = self.confidence_calculator.calculate_confidence(logits)
+            
+            # Validate confidence value
+            if not (self.MIN_CONFIDENCE <= confidence <= self.MAX_CONFIDENCE):
+                self.error_manager.record_error(
+                    "confidence_calc_error",
+                    f"Invalid confidence value: {confidence}",
+                    severity=2,
+                    context={"confidence": confidence}
+                )
+                return self.MIN_CONFIDENCE
+
+            return confidence
+        except Exception as e:
+            self.error_manager.record_error(
+                "confidence_calc_error",
+                f"Error calculating confidence: {str(e)}",
+                severity=3,
+                context={"error": str(e)}
+            )
+            return self.MIN_CONFIDENCE
 
     def get_confidence_history(self) -> Deque[float]:
         """Get the confidence history."""
@@ -650,6 +751,82 @@ class SOVLProcessor:
                 "curiosity_pressure": curiosity
             }
         )
+
+    def vibe_sculpt(self, logits: torch.Tensor, state: SOVLState) -> torch.Tensor:
+        """
+        Apply vibe sculpting to the logits.
+
+        Args:
+            logits: Input logits tensor.
+            state: Current SOVL state.
+
+        Returns:
+            torch.Tensor: Sculpted logits.
+        """
+        try:
+            # Validate logits first
+            if not self.validate_logits(logits):
+                return logits
+
+            # Apply vibe sculpting
+            sculpted_logits = self.vibe_sculptor.sculpt(logits, state)
+            
+            # Validate sculpted logits
+            if not self.validate_logits(sculpted_logits):
+                self.error_manager.record_error(
+                    "vibe_sculpt_error",
+                    "Invalid sculpted logits",
+                    severity=2,
+                    context={"original_shape": logits.shape, "sculpted_shape": sculpted_logits.shape}
+                )
+                return logits
+
+            return sculpted_logits
+        except Exception as e:
+            self.error_manager.record_error(
+                "vibe_sculpt_error",
+                f"Error during vibe sculpting: {str(e)}",
+                severity=3,
+                context={"error": str(e)}
+            )
+            return logits
+
+    def detect_repetition(self, logits: torch.Tensor, state: SOVLState) -> bool:
+        """
+        Detect repetition in the logits.
+
+        Args:
+            logits: Input logits tensor.
+            state: Current SOVL state.
+
+        Returns:
+            bool: True if repetition is detected, False otherwise.
+        """
+        try:
+            # Validate logits first
+            if not self.validate_logits(logits):
+                return False
+
+            # Check for repetition
+            is_repetitive = self.repetition_detector.detect(logits, state)
+            
+            if is_repetitive:
+                self.error_manager.record_error(
+                    "repetition_detected",
+                    "Repetition detected in logits",
+                    severity=1,
+                    context={"logits_shape": logits.shape}
+                )
+
+            return is_repetitive
+        except Exception as e:
+            self.error_manager.record_error(
+                "repetition_detection_error",
+                f"Error detecting repetition: {str(e)}",
+                severity=3,
+                context={"error": str(e)}
+            )
+            return False
 
 class SoulLogitsProcessor(LogitsProcessor):
     """Boosts token probabilities for .soul file keywords during generation.
