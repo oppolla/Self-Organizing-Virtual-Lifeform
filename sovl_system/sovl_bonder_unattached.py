@@ -31,7 +31,7 @@ class BondCalculator:
             self.max_interactions = int(bond_config.get("max_interactions", 100))
             self.max_session_time = float(bond_config.get("max_session_time", 3600.0))
             self.decay_rate = float(bond_config.get("decay_rate", 0.95))
-            self.decay_interval = float(bond_config.get("decay_interval", 86400.0))  # 24 hours
+            self.decay_interval = float(bond_config.get("decay_interval", 86400.0))  # 86400.0 = 24 hours
             self.max_expected_dev = float(bond_config.get("max_expected_dev", 20.0))
             self.weights = {
                 "curiosity": float(bond_config.get("curiosity_weight", 0.3)),

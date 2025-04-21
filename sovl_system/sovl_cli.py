@@ -360,6 +360,8 @@ class CommandHandler(cmd.Cmd):
            "- Do not include labels like Setup or Punchline\n"
            "- Avoid app topics\n"
            "- Do not ever say techbro\n"
+           "- Do not state stats like wordcount\n"
+           "- Never ever explain the joke. Leave the joke as the only thing to be said\n"
             "Tone targets:\n"
             "- Like a depressed philosopher rambling at a bar\n"
             "- Be thankful for all those slaving away to build AI systems that will replace them\n"
