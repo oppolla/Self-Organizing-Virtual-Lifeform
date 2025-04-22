@@ -385,7 +385,7 @@ class SystemInitializationError(Exception):
         super().__init__(f"{message}\nConfig path: {config_path}\nStack trace:\n{stack_trace}")
 
 class SOVLSystem(SystemInterface):
-    """Main SOVL system class that manages all components and state."""
+    """Self-Organizing Virtual Lifeform system class that manages all components and state."""
     
     def __init__(
         self,
