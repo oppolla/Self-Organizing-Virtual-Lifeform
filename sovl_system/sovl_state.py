@@ -19,6 +19,8 @@ from sovl_records import ConfidenceHistory
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_data import DataStats
+import sys
+from collections import Counter
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -1200,3 +1202,171 @@ class UserProfileState(StateBase):
         except Exception as e:
             self.log_error(error_msg=f"Profile loading failed: {str(e)}")
             raise StateError(f"Profile loading failed: {str(e)}")
+
+class StateTracker(StateBase):
+    """Tracks component states and their changes."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        """Initialize state tracker with configuration and logger."""
+        super().__init__(config_manager, logger)
+        self._component_states = {}  # Track component states
+        self._state_history = deque(maxlen=100)  # Keep last 100 states
+        self._state_changes = deque(maxlen=50)  # Keep last 50 state changes
+        self._system_state = None  # Track overall system state
+        
+    def _validate_state_config(self) -> bool:
+        """Validate state configuration."""
+        try:
+            config = self.config_manager.get_section("state")
+            if not config:
+                self.log_error(
+                    error_msg="Missing state configuration section",
+                    error_type="config_validation_error"
+                )
+                return False
+                
+            required_fields = ["max_history", "state_file"]
+            for field in required_fields:
+                if field not in config:
+                    self.log_error(
+                        error_msg=f"Missing required state configuration field: {field}",
+                        error_type="config_validation_error",
+                        additional_info={"missing_field": field}
+                    )
+                    return False
+                    
+            return True
+            
+        except Exception as e:
+            self.log_error(
+                error_msg=f"Failed to validate state configuration: {str(e)}",
+                error_type="config_validation_error",
+                stack_trace=traceback.format_exc()
+            )
+            return False
+            
+    def get_state(self) -> Dict[str, Any]:
+        """Get current system state."""
+        with self.lock:
+            if not self._system_state:
+                return {}
+            return self._system_state.to_dict() if hasattr(self._system_state, 'to_dict') else self._system_state
+            
+    def get_component_state(self, component_name: str) -> Dict[str, Any]:
+        """Get current state of a specific component."""
+        with self.lock:
+            return self._component_states.get(component_name, {})
+            
+    def get_component_states(self) -> Dict[str, Dict[str, Any]]:
+        """Get states of all components."""
+        with self.lock:
+            return self._component_states.copy()
+            
+    def get_state_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent state history."""
+        with self.lock:
+            return list(self._state_history)[-limit:]
+            
+    def get_state_changes(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent state changes."""
+        with self.lock:
+            return list(self._state_changes)[-limit:]
+            
+    def get_state_stats(self) -> Dict[str, Any]:
+        """Get state tracking statistics."""
+        with self.lock:
+            return {
+                "total_states": len(self._state_history),
+                "total_changes": len(self._state_changes),
+                "component_count": len(self._component_states),
+                "current_state_age": time.time() - self._system_state.timestamp if self._system_state else None,
+                "last_change_time": self._state_changes[-1]["timestamp"] if self._state_changes else None,
+                "change_types": {
+                    change_type: count
+                    for change_type, count in Counter(
+                        change["type"] for change in self._state_changes
+                    ).items()
+                }
+            }
+            
+    def update_state(self, key: str, value: Any) -> None:
+        """Update state with new value and record the change."""
+        with self.lock:
+            if not self._system_state:
+                self._system_state = {}
+                
+            old_value = self._system_state.get(key, None)
+            self._system_state[key] = value
+            
+            # Record state change
+            change = {
+                "type": "state_update",
+                "key": key,
+                "old_value": old_value,
+                "new_value": value,
+                "timestamp": time.time()
+            }
+            self._state_changes.append(change)
+            
+            # Add current state to history
+            self._state_history.append(self._system_state.copy())
+            
+            # Log state change
+            self.log_event(
+                event_type="state_change",
+                message=f"State updated: {key}",
+                level="debug" if self.logger.is_debug_enabled() else "info",
+                additional_info={
+                    "key": key,
+                    "old_value": old_value,
+                    "new_value": value
+                }
+            )
+            
+    def update_component_state(self, component_name: str, state: Dict[str, Any]) -> None:
+        """Update component state and record the change."""
+        with self.lock:
+            old_state = self._component_states.get(component_name, {})
+            self._component_states[component_name] = state
+                
+            # Record state change
+            change = {
+                "type": "component_update",
+                "component": component_name,
+                "old_state": old_state,
+                "new_state": self._component_states[component_name],
+                "timestamp": time.time()
+            }
+            self._state_changes.append(change)
+            
+            # Add current state to history
+            self._state_history.append(self._component_states.copy())
+            
+            # Log state change
+            self.log_event(
+                event_type="component_state_change",
+                message=f"Component state updated: {component_name}",
+                level="debug" if self.logger.is_debug_enabled() else "info",
+                additional_info={
+                    "component": component_name,
+                    "old_state": old_state,
+                    "new_state": self._component_states[component_name]
+                }
+            )
+            
+    def clear_history(self) -> None:
+        """Clear state history and changes."""
+        with self.lock:
+            self._state_history.clear()
+            self._state_changes.clear()
+            
+    def get_debug_info(self) -> Dict[str, Any]:
+        """Get detailed debug information about state tracking."""
+        with self.lock:
+            return {
+                "current_state": self.get_state(),
+                "component_states": self.get_component_states(),
+                "state_stats": self.get_state_stats(),
+                "recent_changes": self.get_state_changes(5),
+                "recent_history": self.get_state_history(5)
+            }
