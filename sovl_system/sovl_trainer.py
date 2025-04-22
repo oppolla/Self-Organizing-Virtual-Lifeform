@@ -22,10 +22,15 @@ from sovl_experience import MemoriaManager, MetadataProcessor
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 
+# File-level: Core training module for SOVL.
+# - Manages loading of training configuration, setting up optimizers and schedulers,
+#   executing training and validation loops, handling checkpoints, and orchestrating
+#   complex multi-phase workflows (gestation, dreaming, sleep sessions).
+
+# TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
 class TrainingConfig:
-    """Configuration for training parameters."""
-    
+    # LoggingConfig: parameters for log file management and training error handling.
     @dataclass
     class LoggingConfig:
         """Logging configuration parameters."""
@@ -50,6 +55,7 @@ class TrainingConfig:
             "memory_recovery_delay": 1.0
         })
     
+    # OptimizerConfig: hyperparameters for the training optimizer.
     @dataclass
     class OptimizerConfig:
         """Optimizer configuration parameters."""
@@ -59,6 +65,7 @@ class TrainingConfig:
         grad_accum_steps: int = 4
         max_grad_norm: float = 1.0
         
+    # SchedulerConfig: settings for learning rate schedule (warmup, total steps, etc.).
     @dataclass
     class SchedulerConfig:
         """Learning rate scheduler configuration."""
@@ -68,6 +75,7 @@ class TrainingConfig:
         cosine_min_lr: float = 1e-6
         warmup_ratio: float = 0.1
         
+    # MemoryConfig: batch size, sequence length, mixed precision, and patience.
     @dataclass
     class MemoryConfig:
         """Memory and batch configuration."""
@@ -76,6 +84,7 @@ class TrainingConfig:
         use_amp: bool = True
         max_patience: int = 2
         
+    # TrainingParams: core loop parameters like epochs, validation frequency, and checkpoints.
     @dataclass
     class TrainingParams:
         """Core training parameters."""
@@ -86,6 +95,7 @@ class TrainingConfig:
         dropout_rate: float = 0.1
         metrics_to_track: List[str] = field(default_factory=lambda: ["loss", "accuracy", "confidence"])
     
+    # Initialize TrainingConfig by pulling values from ConfigManager and validating.
     def __init__(self, config_manager: ConfigManager):
         """Initialize training configuration from ConfigManager."""
         self.config_manager = config_manager
@@ -96,6 +106,7 @@ class TrainingConfig:
         self.logging = self.LoggingConfig()
         self._load_config()
         
+    # Load and validate all config sections (optimizer, scheduler, memory, params, logging).
     def _load_config(self) -> None:
         """Load and validate training configuration."""
         try:
@@ -164,6 +175,7 @@ class TrainingConfig:
                 traceback.format_exc()
             )
             
+    # Assert correctness of loaded configuration (value ranges, types, etc.).
     def _validate(self) -> None:
         """Validate configuration parameters."""
         try:
@@ -213,6 +225,7 @@ class TrainingConfig:
         except AssertionError as e:
             raise ConfigurationError(f"Invalid training configuration: {str(e)}")
             
+    # Update a training config key, propagate to ConfigManager, and reload settings.
     def update(self, key: str, value: Any) -> bool:
         """Update a configuration parameter."""
         try:
@@ -231,6 +244,7 @@ class TrainingConfig:
                 traceback.format_exc()
             )
             
+    # Retrieve a training config parameter via ConfigManager.
     def get(self, key: str, default: Any = None) -> Any:
         """Get a configuration parameter."""
         try:
@@ -241,6 +255,7 @@ class TrainingConfig:
                 traceback.format_exc()
             )
             
+    # Validate that all required keys exist in the 'training' section.
     def validate_section(self) -> bool:
         """Validate the training configuration section."""
         try:
@@ -261,6 +276,7 @@ class TrainingConfig:
                 traceback.format_exc()
             )
 
+# TrainingManager: sets up optimizer and scheduler, prepares batches, and runs train/validate steps.
 class TrainingManager:
     """Manages core training operations."""
     
@@ -464,6 +480,7 @@ class TrainingManager:
         self.best_metrics = checkpoint["best_metrics"]
         self.metrics_history = defaultdict(list, checkpoint["metrics_history"])
 
+# TrainingEventHandler: processes training lifecycle events for logging and monitoring.
 class TrainingEventHandler:
     """Handles training-related events and updates system state."""
     
@@ -517,6 +534,7 @@ class TrainingEventHandler:
             "state_hash": self.state.get_state_hash()
         })
 
+# TrainingWorkflowManager: orchestrates full multi-phase training cycles (train, sleep, gestation, dream).
 class TrainingWorkflowManager:
     """Manages training cycles, sleep training, and gestation/dream cycles."""
     
@@ -652,6 +670,7 @@ class TrainingWorkflowManager:
             self.logger.error(f"Error in dream cycle: {str(e)}")
             raise
 
+# TrainingCycleManager: manages individual phases like gestation for experiential training.
 class TrainingCycleManager:
     def __init__(self, config_manager: ConfigManager, logger: Logger):
         self._config_manager = config_manager
@@ -685,6 +704,7 @@ class TrainingCycleManager:
             )
             return 1
 
+# SOVLTrainer: top-level interface tying config, managers, and execution logic for end-to-end training.
 class SOVLTrainer:
     """Manages training operations and memory usage."""
     

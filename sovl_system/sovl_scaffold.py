@@ -19,6 +19,9 @@ from sovl_memory import RAMManager, GPUMemoryManager
 import contextlib
 import functools
 
+# File-level: Core scaffold module for SOVL.
+# - Manages error handling, token mapping, sparse attention utilities,
+#   cross-attention injection, and scaffold state management.
 class ScaffoldError(Exception):
     """Base exception for scaffold-related errors."""
     def __init__(self, message: str, operation: str, context: Optional[Dict[str, Any]] = None):
@@ -27,6 +30,7 @@ class ScaffoldError(Exception):
         self.context = context or {}
         self.timestamp = time.time()
 
+# Centralized handler for scaffold errors and recovery.
 class ScaffoldErrorHandler:
     """Centralized error handling for scaffold operations."""
     
@@ -66,6 +70,7 @@ class ScaffoldErrorHandler:
                 }
             )
 
+# Decorator to wrap scaffold operations with consistent error handling.
 def scaffold_operation(operation_name: str):
     """Decorator for consistent error handling in scaffold operations."""
     def decorator(func: Callable):
@@ -89,6 +94,7 @@ def scaffold_operation(operation_name: str):
         return wrapper
     return decorator
 
+# Builds and maintains mappings from base-token IDs to scaffold-token IDs.
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
     
@@ -356,6 +362,7 @@ class ScaffoldTokenMapper:
             )
             raise
 
+# Factory to create a configured ScaffoldTokenMapper.
 def build_scaffold_token_mapping(
     base_tokenizer: Any, 
     scaffold_tokenizer: Any, 
@@ -385,6 +392,7 @@ def build_scaffold_token_mapping(
     """
     return ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, logger, config)
 
+# Utilities for creating and combining sparse attention masks.
 class AttentionUtils:
     """Unified utilities for attention mask creation and preparation."""
     
@@ -495,6 +503,7 @@ class AttentionUtils:
         """Combine sparse and attention masks."""
         return (sparse_mask & attention_mask).to(device)
 
+# Strategy to discover model layers for injection.
 class LayerDiscoveryStrategy:
     """Strategy for discovering transformer layers in a model."""
     
@@ -551,6 +560,7 @@ class LayerDiscoveryStrategy:
             )
             raise
 
+# Implements cross-attention mechanics between base and scaffold representations.
 class CrossAttentionLayer(nn.Module):
     """Cross attention layer for scaffold integration with dynamic weighting."""
     
@@ -759,6 +769,7 @@ class CrossAttentionLayer(nn.Module):
             )
             raise
 
+# Injects cross-attention layers into a base model using specified strategies.
 class CrossAttentionInjector:
     """Injector for adding cross-attention layers to a transformer model."""
     
@@ -1279,6 +1290,7 @@ class InsufficientDataError(Exception):
     """Exception raised when there is insufficient data for scaffold operations."""
     pass
 
+# High-level provider for scaffold state: init, update, validation.
 class ScaffoldProvider:
     """Provides scaffold functionality for the SOVL system."""
     

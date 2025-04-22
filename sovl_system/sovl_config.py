@@ -13,6 +13,7 @@ from transformers import AutoConfig
 from sovl_schema import ValidationSchema  # Import ValidationSchema from sovl_schema.py
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 
+# ConfigSchema defines validation rules and defaults for configuration fields.
 @dataclass
 class ConfigSchema:
     """Defines validation rules for configuration fields."""
@@ -24,6 +25,7 @@ class ConfigSchema:
     required: bool = False
     nullable: bool = False
 
+# SchemaValidator checks config values against schemas and logs issues.
 class SchemaValidator:
     """Handles configuration schema validation logic."""
     
@@ -89,6 +91,7 @@ class SchemaValidator:
 
         return True, value
 
+# ConfigStore maintains both flat and structured views for efficient lookups and organized access.
 class ConfigStore:
     """Manages configuration storage and structure."""
 
@@ -190,6 +193,7 @@ class ConfigStore:
         """Update cache with current config values."""
         self.cache = {schema.field: self.get_value(schema.field, schema.default) for schema in schemas}
 
+# FileHandler loads and saves configuration files with retry logic.
 class FileHandler:
     """Handles configuration file operations."""
 
@@ -255,6 +259,7 @@ class FileHandler:
                 time.sleep(0.1)
         return False
 
+# ConfigKeys provides type-safe keys for accessing configuration values.
 class ConfigKeys:
     """Type-safe configuration keys."""
     # Processor Config
@@ -288,6 +293,7 @@ class ConfigKeys:
     # Hardware Config
     HARDWARE_MAX_SCAFFOLD_MEMORY_MB = ConfigKey("hardware", "max_scaffold_memory_mb")
 
+# ConfigManager orchestrates configuration lifecycle: loading, validation, updates, notifications, and persistence.
 class ConfigManager:
     """Manages SOVLSystem configuration with validation, thread safety, and persistence.
     

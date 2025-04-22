@@ -43,6 +43,9 @@ from sovl_scaffold import (
     ScaffoldTokenMapper
 )
 
+# Monitoring components
+from sovl_monitor import MemoryMonitor, SystemMonitor, TraitsMonitor
+
 # Utilities
 from sovl_utils import (
     detect_repetitions,
@@ -867,55 +870,6 @@ class ErrorManager:
                 level="info"
             )
 
-class MemoryMonitor:
-    """Monitors system memory usage."""
-    
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        logger: Logger,
-        memoria_manager: MemoriaManager,  # For experiential aspects
-        ram_manager: RAMManager,          # For RAM memory management
-        gpu_manager: GPUMemoryManager     # For GPU memory management
-    ):
-        """
-        Initialize memory monitor.
-        
-        Args:
-            config_manager: Config manager for fetching configuration values
-            logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for experiential memory management
-            ram_manager: RAMManager instance for RAM memory management
-            gpu_manager: GPUMemoryManager instance for GPU memory management
-        """
-        self._config_manager = config_manager
-        self._logger = logger
-        self.memoria_manager = memoria_manager  # Manages experiential memory
-        self.ram_manager = ram_manager          # Manages RAM resources
-        self.gpu_manager = gpu_manager          # Manages GPU resources
-        
-    def check_memory_health(self) -> Dict[str, Any]:
-        """Check memory health across hardware memory managers."""
-        try:
-            # Only use RAM and GPU managers for hardware memory health
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.get_gpu_usage()
-            
-            return {
-                "ram_health": ram_health,
-                "gpu_health": gpu_health
-            }
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to check memory health: {str(e)}",
-                error_type="memory_health_error",
-                stack_trace=traceback.format_exc()
-            )
-            return {
-                "ram_health": {"status": "error"},
-                "gpu_health": {"status": "error"}
-            }
-
 class SOVLSystem(SystemInterface):
     """Main SOVL system class that manages all components and state."""
     
@@ -965,6 +919,24 @@ class SOVLSystem(SystemInterface):
             # Initialize thread safety
             self._lock = Lock()
             
+            # Initialize monitoring components
+            self.system_monitor = SystemMonitor(
+                config_manager=context.config_manager,
+                logger=context.logger,
+                ram_manager=context.ram_manager,
+                gpu_manager=context.gpu_manager,
+                error_manager=error_manager
+            )
+            
+            self.traits_monitor = TraitsMonitor(
+                config_manager=context.config_manager,
+                logger=context.logger,
+                state=state_tracker.state,
+                curiosity_manager=curiosity_engine.curiosity_manager,
+                training_manager=context.training_cycle_manager,
+                error_manager=error_manager
+            )
+            
             # Initialize component state
             self._initialize_component_state()
             
@@ -1010,7 +982,15 @@ class SOVLSystem(SystemInterface):
                 },
                 "memory_monitor": {
                     "status": "initialized",
-                    "memory_usage": self.memory_monitor.get_memory_usage() if self.memory_monitor else None
+                    "memory_usage": self.memory_monitor.check_memory_health() if self.memory_monitor else None
+                },
+                "system_monitor": {
+                    "status": "initialized",
+                    "metrics": self.system_monitor._collect_metrics() if self.system_monitor else None
+                },
+                "traits_monitor": {
+                    "status": "initialized",
+                    "traits": self.traits_monitor._get_current_traits() if self.traits_monitor else None
                 },
                 "state_tracker": {
                     "status": "initialized",
@@ -1132,12 +1112,15 @@ class SOVLSystem(SystemInterface):
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get current memory statistics."""
         try:
-            ram_stats = self.ram_manager.check_memory_health()
-            gpu_stats = self.gpu_manager.get_gpu_usage()
+            # Use system monitor for comprehensive metrics
+            metrics = self.system_monitor._collect_metrics()
+            
+            # Add memory health check
+            memory_health = self.memory_monitor.check_memory_health()
             
             return {
-                "ram": ram_stats,
-                "gpu": gpu_stats
+                "metrics": metrics,
+                "memory_health": memory_health
             }
             
         except Exception as e:
@@ -1267,4 +1250,42 @@ class SOVLSystem(SystemInterface):
                     stack_trace=traceback.format_exc()
                 )
                 raise ValueError("Invalid state update") from e
+
+    def start_monitoring(self) -> None:
+        """Start all monitoring systems."""
+        try:
+            # Start traits monitoring
+            self.traits_monitor.start()
+            
+            self.context.logger.record_event(
+                event_type="monitoring_started",
+                message="System monitoring started",
+                level="info"
+            )
+            
+        except Exception as e:
+            self.error_manager.handle_error(
+                error_type="monitoring_start_error",
+                error_message=f"Failed to start monitoring: {str(e)}",
+                error_context={"component": "SOVLSystem"}
+            )
+
+    def stop_monitoring(self) -> None:
+        """Stop all monitoring systems."""
+        try:
+            # Stop traits monitoring
+            self.traits_monitor.stop()
+            
+            self.context.logger.record_event(
+                event_type="monitoring_stopped",
+                message="System monitoring stopped",
+                level="info"
+            )
+            
+        except Exception as e:
+            self.error_manager.handle_error(
+                error_type="monitoring_stop_error",
+                error_message=f"Failed to stop monitoring: {str(e)}",
+                error_context={"component": "SOVLSystem"}
+            )
 
