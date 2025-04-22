@@ -975,6 +975,139 @@ class GenerationManager:
         
         return generated_texts
 
+    @state_managed_operation("backchannel_scaffold_prompt")
+    def backchannel_scaffold_prompt(
+        self, 
+        prompt: str, 
+        max_new_tokens: int = 100, 
+        scaffold_index: int = 0,
+        return_logits: bool = False,
+        return_hidden_states: bool = False,
+        **kwargs
+    ) -> Union[str, Dict[str, Any]]:
+        """Backchannel communication method to directly prompt the scaffold model.
+        This is a debug/development feature for direct scaffold interaction.
+        
+        Args:
+            prompt: The input prompt to send to the scaffold model
+            max_new_tokens: Maximum number of new tokens to generate (default: 100)
+            scaffold_index: Index of scaffold model to use if multiple are loaded (default: 0)
+            return_logits: Whether to return the raw logits from generation (default: False)
+            return_hidden_states: Whether to return hidden states (default: False)
+            **kwargs: Additional generation parameters to pass to the model
+                     Supports all standard Hugging Face generation parameters
+        
+        Returns:
+            Union[str, Dict[str, Any]]: Either the generated text string or a dictionary
+            containing the generated text and additional requested information
+        
+        Raises:
+            IndexError: If scaffold_index is invalid
+            RuntimeError: If the scaffold model is not properly initialized
+            ValueError: If the input parameters are invalid
+        """
+        try:
+
+            # TODO: Add multi-scaffold model selection here
+
+            # Memory optimization: Check memory health before proceeding
+            if not self.check_memory_health():
+                self.memory_manager.manage_memory()
+
+            # Validate scaffold index and model early
+            if not (0 <= scaffold_index < len(self.scaffolds)):
+                raise IndexError(f"Invalid scaffold_index {scaffold_index}. Only {len(self.scaffolds)} scaffolds available")
+            
+            scaffold_model = self.scaffolds[scaffold_index]
+            if not scaffold_model:
+                raise RuntimeError("Scaffold model not properly initialized")
+            
+       
+
+            # Optimize generation config with smart defaults
+            max_length = kwargs.get('max_length', min(512, len(prompt) + max_new_tokens))
+            generation_config = {
+                'output_scores': return_logits,
+                'output_hidden_states': return_hidden_states,
+                'return_dict_in_generate': return_logits or return_hidden_states,
+                'max_new_tokens': max_new_tokens,
+                'pad_token_id': self.scaffold_tokenizer.pad_token_id,
+                'early_stopping': kwargs.get('early_stopping', True),  # Enable early stopping by default
+                'do_sample': kwargs.get('do_sample', True),  # Enable sampling by default
+                'num_beams': kwargs.get('num_beams', 1),  # Default to greedy if no beam search specified
+                **kwargs
+            }
+
+            # Batch and device optimization
+            inputs = self.scaffold_tokenizer(
+                prompt,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=max_length
+            )
+            
+            # Move to device efficiently
+            inputs = {k: v.to(self.device, non_blocking=True) for k, v in inputs.items()}
+            
+            # Generation with memory optimization
+            with torch.no_grad(), self.memory_manager.track_memory("scaffold_generation"):
+                outputs = scaffold_model.generate(
+                    **inputs,
+                    **generation_config
+                )
+
+            # Efficient result handling
+            if return_logits or return_hidden_states:
+                result = {}
+                # Extract text efficiently
+                generated_ids = outputs.sequences[0] if hasattr(outputs, 'sequences') else outputs[0]
+                result['text'] = self.scaffold_tokenizer.decode(
+                    generated_ids,
+                    skip_special_tokens=True
+                )
+                
+                # Only process requested outputs
+                if return_logits and hasattr(outputs, 'scores'):
+                    with torch.cuda.amp.autocast(enabled=True):
+                        result['logits'] = torch.stack(outputs.scores, dim=0)
+                
+                if return_hidden_states and hasattr(outputs, 'hidden_states'):
+                    with torch.cuda.amp.autocast(enabled=True):
+                        result['hidden_states'] = outputs.hidden_states
+                
+                # Add metadata with performance metrics
+                result['metadata'] = {
+                    'scaffold_index': scaffold_index,
+                    'model_name': self.scaffold_tokenizer.name_or_path,
+                    'generation_params': generation_config,
+                    'input_length': len(inputs['input_ids'][0]),
+                    'output_length': len(generated_ids),
+                    'memory_usage': self.memory_manager.get_memory_usage(),
+                    'generation_time': time.time()  # For tracking generation duration
+                }
+                
+                return result
+            else:
+                # Fast path for text-only return
+                return self.scaffold_tokenizer.decode(
+                    outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0],
+                    skip_special_tokens=True
+                )
+            
+        except Exception as e:
+            self._handle_error("backchannel_scaffold_prompt", e, {
+                'scaffold_index': scaffold_index,
+                'prompt_length': len(prompt),
+                'generation_params': kwargs,
+                'memory_usage': self.memory_manager.get_memory_usage()
+            })
+            raise
+        finally:
+            # Ensure memory cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     @state_managed_operation("update_temperament")
     def update_temperament(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
         """Update the temperament system with new values."""

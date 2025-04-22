@@ -2,14 +2,16 @@
 
 ## General Taks:
 
-- multi scaffold support improvements, multi scaffold name system: scaffold0 scaffold1. name selextor system? death of scaffold?
-- add direct speech to scaffold model so it is able to be communicated with
-- integrate sovl_bonder
-- look into migrating dream and curiosity question out of sovl main
+1. multi scaffold support improvements, multi scaffold name system: scaffold0 scaffold1. name selextor system? death of scaffold?
+2.  add direct speech to scaffold model so it is able to be communicated with
+3.  integrate sovl_bonder
+4.  look into migrating dream and curiosity question out of sovl main
+5. add temperament_pressure. Use empty prompt, (or maybe refined one?)
+6. further develop initialization and startup feel
 
 
 
-- further develop initialization and startup feel
+
 
 - Model Evaluation Mode
    What's Missing: There’s no dedicated mode or command for evaluating the model on a test dataset (separate from training or generation). This is crucial for assessing final model performance.
@@ -331,163 +333,6 @@ aspiration_config:
     recency: 0.2
     vibe: 0.1
 ```
-## CONFIG MODULE UPDATES FOR EXPOSURE TO JSON
-
-Module-by-Module Assessment
-sovl_main.py:
-Role: Orchestrates the SOVL system, initializing components like SystemContext, ModelLoader, StateTracker, ErrorManager, MemoryMonitor, CuriosityEngine, and SOVLSystem. It uses ConfigHandler to load and validate sovl_config.json.
-
-Dependencies:
-Accesses model section (model_path, model_type, quantization_mode) via ModelLoader.
-
-Accesses data_provider section indirectly via CuriosityEngine’s DataManager.provider.
-
-Uses error_config, state_config, memory_config, and other sections for component initialization.
-
-Impact of Updates:
-The new model section is already expected by ModelLoader, and its parameters (model_path, model_type, quantization_mode) are validated by the updated schema.
-
-The data_provider section is referenced by CuriosityEngine for DataManager.provider. If DataManager expects specific provider_type values (e.g., file, database) or processes data_path, it may require logic to handle the new section.
-
-Modified parameters (e.g., error_config.warning_threshold=5.0) are compatible with ErrorManager’s recovery actions, as they were tuned to align with its logic.
-
-Required Changes:
-DataManager: If DataManager in sovl_main.py has hardcoded logic for provider_type or assumes a different data loading mechanism, it may need an update to handle data_provider.provider_type="default" and data_path. Without the DataManager code, I can’t confirm, but this is a potential point of failure.
-
-ConfigHandler: If ConfigHandler (assumed to be part of SystemContext) caches or processes configuration sections differently, it should be checked to ensure it loads the new model and data_provider sections correctly.
-
-No other changes are strictly required, as the schema update ensures validation, and existing parameters (e.g., state_config.max_history) are unchanged or compatible.
-
-sovl_trainer.py:
-Role: Manages training logic, including TrainingCycleManager, which uses training_config and interacts with sovl_config for parameters like learning_rate, batch_size, and dream_memory_maxlen.
-
-Dependencies:
-Uses training_config extensively (e.g., model_name, learning_rate, grad_accum_steps, warmup_steps).
-
-Interacts with dream_memory_config indirectly through dream-related parameters (dream_memory_weight, max_dream_memory_mb).
-
-Impact of Updates:
-Renamed accumulation_steps to grad_accum_steps in sovl_config.json and sovl_schema.py. If sovl_trainer.py references accumulation_steps, it will fail to find the parameter.
-
-Updated defaults (e.g., learning_rate=1.5e-5, warmup_steps=300, dream_memory_maxlen=3) are compatible, as sovl_trainer.py was analyzed to support these values.
-
-New dream_memory_config section (max_memories, base_weight, max_weight) may require TrainingCycleManager to handle dream memory limits explicitly if it manages dream storage.
-
-Required Changes:
-Rename accumulation_steps to grad_accum_steps: Update sovl_trainer.py to reference training_config.grad_accum_steps instead of accumulation_steps in training logic (e.g., gradient accumulation loops).
-
-Dream Memory Handling: If TrainingCycleManager directly manages dream memory storage, add logic to respect dream_memory_config.max_memories=100 and weight parameters (base_weight=0.1, max_weight=1.5). Without the full sovl_trainer.py code, I can’t confirm the extent, but this is likely needed.
-
-No other changes are required, as other parameters (e.g., model_name="SmolLM2-360M") align with existing logic.
-
-sovl_scaffold.py:
-Role: Manages scaffold model integration, using scaffold_config and controls_config for parameters like model_path, quantization_mode, and scaffold_weight.
-
-Dependencies:
-Uses scaffold_config (model_path, model_type, tokenizer_path, quantization_mode).
-
-Uses controls_config (enable_scaffold, scaffold_weight_cap, blend_strength, attention_weight).
-
-Uses hardware.max_scaffold_memory_mb for memory constraints.
-
-Impact of Updates:
-The scaffold_config section is new but matches the expected structure in sovl_scaffold.py (e.g., model_path, tokenizer_path).
-
-New controls_config parameters (e.g., blend_strength=0.5, attention_weight=0.5) may not be handled if sovl_scaffold.py doesn’t expect them.
-
-hardware.max_scaffold_memory_mb=128 is new and may require ScaffoldManager to enforce this limit.
-
-Required Changes:
-Handle New controls_config Parameters: If ScaffoldManager or related logic doesn’t process blend_strength, attention_weight, or temperament-related parameters (e.g., temp_eager_threshold), add logic to incorporate these for scaffold blending and attention weighting.
-
-Enforce max_scaffold_memory_mb: Update ScaffoldManager to check hardware.max_scaffold_memory_mb during memory allocation to avoid exceeding 128 MB.
-
-No other changes are required, as scaffold_config parameters are already expected.
-
-sovl_curiosity.py:
-Role: Manages curiosity-driven exploration via CuriosityManager, using curiosity_config for parameters like pressure_threshold, decay_rate, and lifecycle_params.
-
-Dependencies:
-Uses curiosity_config extensively (e.g., attention_weight, pressure_threshold, max_memory_mb, lifecycle_params).
-
-Interacts with data_provider indirectly via DataManager in sovl_main.py.
-
-Impact of Updates:
-New parameters (max_memory_mb, pressure_change_cooldown, min_pressure, max_pressure, pressure_decay_rate, metrics_maxlen) and updated defaults (e.g., pressure_threshold=0.55, decay_rate=0.95) are compatible, as they were added based on sovl_curiosity.py’s requirements.
-
-The lifecycle_params structure matches the configuration, but CuriosityManager must process the updated active.novelty_boost=0.35.
-
-The data_provider section may affect curiosity if CuriosityManager accesses DataManager.provider.
-
-Required Changes:
-Handle New Parameters: Ensure CuriosityManager uses max_memory_mb=512.0, pressure_change_cooldown=1.0, min_pressure=0.1, max_pressure=0.9, pressure_decay_rate=0.95, and metrics_maxlen=1000. These were marked as TODO in sovl_config.json, suggesting sovl_curiosity.py already expects them, but verify implementation.
-
-Data Provider Integration: If CuriosityManager directly accesses DataManager.provider, ensure it supports data_provider.provider_type="default" and data_path. This may require minor logic updates.
-
-No other changes are required, as updated defaults (e.g., attention_weight=0.3) align with existing logic.
-
-sovl_temperament.py:
-Role: Manages temperament-driven behavior, using temperament_config, confidence_config, and controls_config for parameters like mood_influence, temp_mood_influence, and lifecycle_params.
-
-Dependencies:
-Uses temperament_config (mood_influence, history_maxlen).
-
-Uses confidence_config (history_maxlen, weight).
-
-Uses controls_config for temperament parameters (e.g., temp_eager_threshold, lifecycle_params).
-
-Impact of Updates:
-Updated temperament_config.mood_influence=0.3 (from 0.5) is compatible.
-
-New controls_config parameters (e.g., temp_eager_threshold=0.7, temp_melancholy_noise=0.02, lifecycle_params) may not be handled if sovl_temperament.py doesn’t expect them.
-
-Required Changes:
-Handle New controls_config Parameters: Update TemperamentManager (or equivalent) to process temp_eager_threshold, temp_sluggish_threshold, temp_mood_influence, temp_curiosity_boost, temp_restless_drop, temp_melancholy_noise, conf_feedback_strength, temp_smoothing_factor, temperament_decay_rate, and lifecycle_params. These were marked as TODO in sovl_config.json, suggesting partial implementation, but full support is needed.
-
-No other changes are required, as temperament_config and confidence_config updates are minor.
-
-ConfigHandler (Assumed in SystemContext):
-Role: Loads and validates sovl_config.json against sovl_schema.py, likely part of SystemContext in sovl_main.py.
-
-Dependencies:
-Parses the entire configuration and applies schema validation.
-
-Subscribes to configuration changes via event_dispatcher.subscribe("config_change").
-
-Impact of Updates:
-The updated sovl_schema.py ensures validation of new sections (model, data_provider, dream_memory_config) and modified parameters.
-
-If ConfigHandler has hardcoded section names or caching logic, it may need to refresh its parsing to include model and data_provider.
-
-Required Changes:
-Verify Section Parsing: Ensure ConfigHandler dynamically loads all sections without assuming a fixed structure. If it caches specific sections (e.g., excluding model), update it to include new sections.
-
-No other changes are required, as the schema update handles validation.
-
-Summary of Required Changes
-The schema update (sovl_schema.py) is not sufficient on its own, as several modules need minor updates to handle new or renamed parameters. Below is a summary of the required changes:
-sovl_main.py:
-DataManager: Update DataManager to support data_provider.provider_type="default" and data_path for data loading. This is critical for CuriosityEngine’s operation.
-
-ConfigHandler: Verify that ConfigHandler dynamically loads new sections (model, data_provider). Update parsing logic if it excludes these sections.
-
-sovl_trainer.py:
-Rename Parameter: Replace references to training_config.accumulation_steps with training_config.grad_accum_steps in training logic.
-
-Dream Memory: Add support for dream_memory_config.max_memories=100, base_weight=0.1, and max_weight=1.5 in TrainingCycleManager if it manages dream storage.
-
-sovl_scaffold.py:
-New Parameters: Add logic to handle controls_config.blend_strength, attention_weight, and temperament-related parameters (temp_eager_threshold, etc.) in ScaffoldManager.
-
-Memory Limit: Enforce hardware.max_scaffold_memory_mb=128 in memory allocation.
-
-sovl_curiosity.py:
-New Parameters: Ensure CuriosityManager processes curiosity_config.max_memory_mb, pressure_change_cooldown, min_pressure, max_pressure, pressure_decay_rate, and metrics_maxlen.
-
-Data Provider: Update CuriosityManager to handle data_provider.provider_type and data_path if it accesses DataManager.provider.
-
-sovl_temperament.py:
-New Parameters: Add support for controls_config parameters (temp_eager_threshold, temp_melancholy_noise, lifecycle_params, etc.) in TemperamentManager.
 
 
 
