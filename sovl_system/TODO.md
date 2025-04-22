@@ -2,7 +2,8 @@
 
 ## General Taks:
 
-- multi scaffold support improvements
+- multi scaffold support improvements, multi scaffold name system: scaffold0 scaffold1. name selextor system? death of scaffold?
+- add direct speech to scaffold model so it is able to be communicated with
 - 
 
 
