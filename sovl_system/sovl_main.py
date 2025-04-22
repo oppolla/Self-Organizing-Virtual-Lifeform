@@ -15,7 +15,7 @@ from peft import LoraConfig, get_peft_model, TaskType
 import bitsandbytes as bnb
 
 # Core components
-from sovl_config import ConfigManager, ConfigHandler, ValidationSchema
+from sovl_config import ConfigManager, ValidationSchema
 from sovl_state import SOVLState, ConversationHistory, StateManager, StateTracker
 from sovl_error import ErrorManager, ErrorHandler
 from sovl_logger import Logger

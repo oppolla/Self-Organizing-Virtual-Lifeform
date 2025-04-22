@@ -13,10 +13,6 @@ from sovl_logger import Logger
 from sovl_trainer import TrainingCycleManager
 from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
-from sovl_manager import ModelManager
-from sovl_schema import ConfigSchema
-from sovl_experience import MemoriaManager
-from sovl_memory import RAMManager, GPUMemoryManager
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -37,11 +33,6 @@ class Curiosity:
         self.logger = logger
         self.max_memory_mb = max_memory_mb
         self.batch_size = batch_size
-        
-        # Initialize memory managers
-        self.memoria_manager = MemoriaManager(config_manager, logger)
-        self.ram_manager = RAMManager(config_manager, logger)
-        self.gpu_manager = GPUMemoryManager(config_manager, logger)
         
         # Initialize components
         self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
@@ -385,11 +376,6 @@ class CuriosityManager:
         self.lifecycle_manager = lifecycle_manager
         self.temperament_system = temperament_system
         self.confidence_calculator = confidence_calculator
-        
-        # Initialize memory managers
-        self.memoria_manager = MemoriaManager(config_manager, logger)
-        self.ram_manager = RAMManager(config_manager, logger)
-        self.gpu_manager = GPUMemoryManager(config_manager, logger)
         
         # Initialize components
         self.curiosity = Curiosity(config_manager, logger)

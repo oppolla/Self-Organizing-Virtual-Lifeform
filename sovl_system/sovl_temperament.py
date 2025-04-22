@@ -2,7 +2,7 @@ import time
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 import traceback
-from sovl_config import ConfigManager, ConfigHandler
+from sovl_config import ConfigManager
 from sovl_state import SOVLState
 from sovl_logger import Logger
 from sovl_events import EventDispatcher

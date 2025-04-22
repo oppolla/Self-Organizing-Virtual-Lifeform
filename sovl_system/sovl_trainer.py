@@ -9,8 +9,7 @@ import os
 import threading
 import random
 from collections import deque, defaultdict
-from torch.optim.lr_scheduler import get_linear_schedule_with_warmup
-from transformers import AutoModelForCausalLM
+from transformers import get_linear_schedule_with_warmup, AutoModelForCausalLM
 import traceback
 from sovl_scaffold import ScaffoldProvider
 from sovl_error import ErrorManager

@@ -17,10 +17,6 @@ import threading
 import math
 from torch import nn
 from sovl_error import ErrorHandler
-from sovl_manager import ModelManager
-from sovl_schema import ConfigSchema
-from sovl_experience import MemoriaManager
-from sovl_memory import RAMManager, GPUMemoryManager
 
 # Constants
 DEFAULT_CONFIDENCE = 0.5

@@ -393,3 +393,95 @@ def initialize_component_state(state_tracker: Any, components: List[Any]) -> Non
         validate_component_states(state_tracker, components)
     except Exception as e:
         raise ValueError(f"Failed to initialize component state: {str(e)}")
+
+def validate_layer_indices(
+    layers: Union[List[int], int],
+    total_layers: int,
+    logger: Optional[Logger] = None
+) -> bool:
+    """
+    Validate that layer indices are within valid range for a model.
+    
+    Args:
+        layers: Single layer index or list of layer indices to validate
+        total_layers: Total number of layers in the model
+        logger: Optional logger for warning messages
+        
+    Returns:
+        bool: True if all indices are valid, False otherwise
+    """
+    try:
+        # Type validation
+        if not isinstance(total_layers, int) or total_layers <= 0:
+            if logger:
+                logger.log_warning(
+                    "Invalid total_layers value",
+                    additional_info={
+                        "total_layers": total_layers,
+                        "expected_type": "positive integer"
+                    }
+                )
+            return False
+
+        # Convert single layer index to list and validate type
+        if isinstance(layers, int):
+            layer_list = [layers]
+        elif isinstance(layers, list):
+            layer_list = layers
+        else:
+            if logger:
+                logger.log_warning(
+                    "Invalid layers type",
+                    additional_info={
+                        "layers": layers,
+                        "expected_type": "int or List[int]"
+                    }
+                )
+            return False
+
+        # Basic validation
+        if not layer_list:
+            if logger:
+                logger.log_warning(
+                    "Empty layer list",
+                    additional_info={"total_layers": total_layers}
+                )
+            return False
+
+        # Check for duplicates
+        if len(layer_list) != len(set(layer_list)):
+            if logger:
+                logger.log_warning(
+                    "Duplicate layer indices found",
+                    additional_info={"layers": layer_list}
+                )
+            return False
+
+        # Validate all indices in one pass
+        invalid_indices = [
+            idx for idx in layer_list 
+            if not isinstance(idx, int) or idx < 0 or idx >= total_layers
+        ]
+        
+        if invalid_indices:
+            if logger:
+                logger.log_warning(
+                    "Invalid layer indices found",
+                    additional_info={
+                        "invalid_indices": invalid_indices,
+                        "total_layers": total_layers,
+                        "valid_range": f"0 to {total_layers - 1}"
+                    }
+                )
+            return False
+
+        return True
+        
+    except Exception as e:
+        if logger:
+            logger.log_error(
+                error_msg=f"Layer validation failed: {str(e)}",
+                error_type="layer_validation_error",
+                stack_trace=traceback.format_exc()
+            )
+        return False
