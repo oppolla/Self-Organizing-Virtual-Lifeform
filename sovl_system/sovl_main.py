@@ -4,7 +4,7 @@ import time
 import traceback
 import os
 from collections import deque, defaultdict
-from threading import Lock
+from threading import Lock, RLock
 
 # Third-party imports
 import torch
@@ -31,7 +31,6 @@ from sovl_tuner import SOVLTuner
 # Memory and state management
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_experience import MemoriaManager
-from sovl_state import StateManager
 
 # AI components
 from sovl_curiosity import CuriosityManager
@@ -79,6 +78,7 @@ class SystemConstants:
     # Error handling
     MAX_ERROR_HISTORY = 100
     ERROR_COOLDOWN = 1.0
+    ERROR_CLEANUP_INTERVAL = 3600  # 1 hour in seconds
     
     # State management
     MAX_STATE_HISTORY = 100
@@ -96,7 +96,7 @@ class SystemContext:
     """Manages system-wide context and resources."""
     
     _instance = None
-    _lock = Lock()
+    _lock = RLock()  # Using RLock for reentrant locking
     
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -110,100 +110,152 @@ class SystemContext:
             return
             
         self._initialized = True
-        self._lock = Lock()
-        self._resource_locks = defaultdict(Lock)
+        self._lock = RLock()  # Using RLock for reentrant locking
+        self._resource_locks = defaultdict(RLock)  # Using RLock for reentrant locking
         self._component_states = {}
         self._error_history = deque(maxlen=SystemConstants.MAX_ERROR_HISTORY)
         self._last_error_time = 0
+        self._last_error_cleanup = 0
+        self._initialization_complete = threading.Event()  # Add initialization completion tracking
+        self._startup_monitor = None  # Track startup monitor thread
         
-        # Initialize core components
-        self.config_manager = ConfigManager(config_path)
-        self.logger = Logger()
-        self.error_handler = ErrorHandler()
-        self.event_dispatcher = EventDispatcher()
+        try:
+            # Initialize core components in dependency order
+            self.config_manager = ConfigManager(config_path)
+            self.logger = Logger()
+            self.error_handler = ErrorHandler()
+            self.event_dispatcher = EventDispatcher()
+            
+            # Initialize memory managers
+            self.ram_manager = RAMManager()
+            self.gpu_manager = GPUMemoryManager()
+            
+            # Initialize experience management
+            self.memoria_manager = MemoriaManager()
+            
+            # Initialize state management
+            self.state_manager = StateManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                memoria_manager=self.memoria_manager,
+                ram_manager=self.ram_manager,
+                gpu_manager=self.gpu_manager
+            )
+            
+            # Initialize state tracking
+            self.state_tracker = StateTracker(
+                config_manager=self.config_manager,
+                logger=self.logger
+            )
+            
+            # Initialize AI components
+            self.curiosity_manager = CuriosityManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                error_manager=self.error_handler,
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                state_manager=self.state_manager
+            )
+            self.temperament_system = TemperamentSystem()
+            self.scaffold_manager = ScaffoldManager()
+            
+            # Initialize model components
+            self.model_manager = ModelManager()
+            self.processor = SOVLProcessor()
+            self.generation_manager = GenerationManager()
+            
+            # Initialize training components
+            self.trainer = SOVLTrainer()
+            self.training_cycle_manager = TrainingCycleManager()
+            
+            # Initialize system state
+            self._initialize_system_state()
+            
+            # Start memory monitoring
+            self._start_memory_monitoring()
+            
+            # Signal initialization complete
+            self._initialization_complete.set()
+            
+        except Exception as e:
+            self._handle_initialization_error(e)
+            raise SystemInitializationError(
+                message=f"Failed to initialize system context: {str(e)}",
+                config_path=config_path,
+                stack_trace=traceback.format_exc()
+            )
+    
+    def _handle_initialization_error(self, error: Exception):
+        """Handle initialization errors safely."""
+        try:
+            if hasattr(self, 'logger'):
+                self.logger.log_error(
+                    error_msg=f"System initialization failed: {str(error)}",
+                    error_type="system_initialization",
+                    stack_trace=traceback.format_exc()
+                )
+        except Exception:
+            # If logger is not available, print to stderr
+            print(f"Critical error during initialization: {str(error)}", file=sys.stderr)
+    
+    def _start_memory_monitoring(self):
+        """Start proactive memory monitoring during initialization."""
+        def monitor_memory():
+            while not self._initialization_complete.is_set():
+                try:
+                    self.update_memory_usage()
+                    self._cleanup_old_errors()
+                    time.sleep(1)  # Check every second during initialization
+                except Exception as e:
+                    if hasattr(self, 'logger'):
+                        self.logger.log_error(
+                            error_msg=f"Startup memory monitoring error: {str(e)}",
+                            error_type="startup_monitoring",
+                            stack_trace=traceback.format_exc()
+                        )
+                    time.sleep(5)  # Wait longer on error
         
-        # Initialize memory managers
-        self.ram_manager = RAMManager()
-        self.gpu_manager = GPUMemoryManager()
-        
-        # Initialize experience management
-        self.memoria_manager = MemoriaManager()
-        
-        # Initialize state management
-        self.state_manager = StateManager(
-            config_manager=self.config_manager,
-            logger=self.logger,
-            memoria_manager=self.memoria_manager,
-            ram_manager=self.ram_manager,
-            gpu_manager=self.gpu_manager
-        )
-        
-        # Initialize state tracking
-        self.state_tracker = StateTracker(
-            config_manager=self.config_manager,
-            logger=self.logger
-        )
-        
-        # Initialize AI components
-        self.curiosity_manager = CuriosityManager(
-            config_manager=self.config_manager,
-            logger=self.logger,
-            error_manager=self.error_handler,
-            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            state_manager=self.state_manager
-        )
-        self.temperament_system = TemperamentSystem()
-        self.scaffold_manager = ScaffoldManager()
-        
-        # Initialize model components
-        self.model_manager = ModelManager()
-        self.processor = SOVLProcessor()
-        self.generation_manager = GenerationManager()
-        
-        # Initialize training components
-        self.trainer = SOVLTrainer()
-        self.training_cycle_manager = TrainingCycleManager()
-        
-        # Initialize system state
-        self._initialize_system_state()
-        
-    def _initialize_system_state(self):
-        """Initialize the system state with default values."""
-        self.system_state = {
-            'is_initialized': False,
-            'is_training': False,
-            'is_generating': False,
-            'memory_usage': 0.0,
-            'error_count': 0,
-            'last_error': None,
-            'component_states': {}
-        }
-        
-    @synchronized
-    def get_resource_lock(self, resource_name: str) -> Lock:
+        self._startup_monitor = threading.Thread(target=monitor_memory, daemon=True)
+        self._startup_monitor.start()
+    
+    def _cleanup_old_errors(self):
+        """Clean up old errors from history."""
+        current_time = time.time()
+        if current_time - self._last_error_cleanup > SystemConstants.ERROR_CLEANUP_INTERVAL:
+            with self._lock:
+                # Remove errors older than 24 hours
+                cutoff_time = current_time - 86400  # 24 hours in seconds
+                self._error_history = deque(
+                    (e for e in self._error_history if e['timestamp'] > cutoff_time),
+                    maxlen=SystemConstants.MAX_ERROR_HISTORY
+                )
+                self._last_error_cleanup = current_time
+    
+    @synchronized("_lock")
+    def get_resource_lock(self, resource_name: str) -> RLock:
         """Get a lock for a specific resource."""
         return self._resource_locks[resource_name]
-        
-    @synchronized
+    
+    @synchronized("_lock")
     def update_component_state(self, component_name: str, state: Dict[str, Any]):
         """Update the state of a component in a thread-safe manner."""
         with self.get_resource_lock(component_name):
             self._component_states[component_name] = state
             self.system_state['component_states'][component_name] = state
-            
-    @synchronized
+    
+    @synchronized("_lock")
     def get_component_state(self, component_name: str) -> Dict[str, Any]:
         """Get the current state of a component in a thread-safe manner."""
         with self.get_resource_lock(component_name):
-            return self._component_states.get(component_name, {})
-            
-    @synchronized
+            return self._component_states.get(component_name, {}).copy()
+    
+    @synchronized("_lock")
     def record_error(self, error: Exception, context: Dict[str, Any] = None):
         """Record an error in a thread-safe manner."""
         current_time = time.time()
         if current_time - self._last_error_time < SystemConstants.ERROR_COOLDOWN:
             return
-            
+        
         self._last_error_time = current_time
         error_info = {
             'timestamp': current_time,
@@ -212,51 +264,116 @@ class SystemContext:
             'traceback': traceback.format_exc()
         }
         
-        self._error_history.append(error_info)
-        self.system_state['error_count'] += 1
-        self.system_state['last_error'] = error_info
+        with self._lock:
+            self._error_history.append(error_info)
+            self.system_state['error_count'] += 1
+            self.system_state['last_error'] = error_info
         
         # Notify error handler
         self.error_handler.handle_error(error, context)
-        
-    @synchronized
+    
+    @synchronized("_lock")
     def get_error_history(self) -> List[Dict[str, Any]]:
         """Get the error history in a thread-safe manner."""
         return list(self._error_history)
-        
-    @synchronized
+    
+    @synchronized("_lock")
     def clear_error_history(self):
         """Clear the error history in a thread-safe manner."""
-        self._error_history.clear()
-        self.system_state['error_count'] = 0
-        self.system_state['last_error'] = None
-        
-    @synchronized
+        with self._lock:
+            self._error_history.clear()
+            self.system_state['error_count'] = 0
+            self.system_state['last_error'] = None
+    
+    @synchronized("_lock")
     def update_memory_usage(self):
         """Update memory usage statistics in a thread-safe manner."""
-        ram_usage = self.ram_manager.get_usage()
-        gpu_usage = self.gpu_manager.get_usage()
-        
-        self.system_state['memory_usage'] = {
-            'ram': ram_usage,
-            'gpu': gpu_usage
-        }
-        
-    @synchronized
+        try:
+            ram_usage = self.ram_manager.get_usage()
+            gpu_usage = self.gpu_manager.get_usage()
+            
+            with self._lock:
+                self.system_state['memory_usage'] = {
+                    'ram': ram_usage,
+                    'gpu': gpu_usage
+                }
+                
+                # Check for memory thresholds
+                if ram_usage > SystemConstants.MAX_MEMORY_THRESHOLD:
+                    self._handle_memory_threshold_exceeded('ram', ram_usage)
+                if gpu_usage > SystemConstants.MAX_MEMORY_THRESHOLD:
+                    self._handle_memory_threshold_exceeded('gpu', gpu_usage)
+                    
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.log_error(
+                    error_msg=f"Memory update failed: {str(e)}",
+                    error_type="memory_update",
+                    stack_trace=traceback.format_exc()
+                )
+    
+    def _handle_memory_threshold_exceeded(self, memory_type: str, usage: float):
+        """Handle memory threshold exceeded events."""
+        try:
+            self.logger.log_warning(
+                f"{memory_type.upper()} memory threshold exceeded",
+                additional_info={
+                    "usage": usage,
+                    "threshold": SystemConstants.MAX_MEMORY_THRESHOLD
+                }
+            )
+            
+            # Trigger memory cleanup
+            if memory_type == 'ram':
+                self.ram_manager.cleanup()
+            else:
+                self.gpu_manager.cleanup()
+                
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.log_error(
+                    error_msg=f"Memory threshold handling failed: {str(e)}",
+                    error_type="memory_threshold",
+                    stack_trace=traceback.format_exc()
+                )
+    
+    @synchronized("_lock")
     def get_system_state(self) -> Dict[str, Any]:
         """Get the current system state in a thread-safe manner."""
         self.update_memory_usage()
         return self.system_state.copy()
-        
+    
     def __enter__(self):
         """Context manager entry."""
         return self
-        
+    
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with error handling."""
         if exc_type is not None:
             self.record_error(exc_val, {'context': 'SystemContext cleanup'})
         return False
+
+    def _complete_initialization(self):
+        """Complete initialization and hand off to main monitoring."""
+        try:
+            # Signal startup monitoring to stop
+            self._initialization_complete.set()
+            
+            # Wait for startup monitor to finish
+            if self._startup_monitor:
+                self._startup_monitor.join(timeout=5)
+            
+            # Start main monitoring systems
+            self.start_monitoring()
+            
+        except Exception as e:
+            self.error_handler.handle_error(
+                error_type="initialization_completion",
+                error_message=f"Failed to complete initialization: {str(e)}",
+                error_context={
+                    "initialization_state": self._initialization_complete.is_set()
+                }
+            )
 
 class SystemInitializationError(Exception):
     """Custom exception for system initialization failures."""
@@ -314,7 +431,7 @@ class SOVLSystem(SystemInterface):
             self.error_manager = error_manager
             
             # Initialize thread safety
-            self._lock = Lock()
+            self._lock = RLock()  # Using RLock for reentrant locking
             
             # Initialize monitoring components
             self.system_monitor = SystemMonitor(
@@ -399,53 +516,44 @@ class SOVLSystem(SystemInterface):
                 }
             }
             
-            # Save component states using StateManager
-            self.context.state_manager.save_state(component_states)
-            
+            # Update component states in a thread-safe manner
+            with self._lock:
+                for component_name, state in component_states.items():
+                    self.context.update_component_state(component_name, state)
+                    
         except Exception as e:
             self.error_manager.handle_error(
-                error_type="component_state_initialization",
+                error_type="component_initialization",
                 error_message=f"Failed to initialize component states: {str(e)}",
                 error_context={
-                    "component": "SOVLSystem",
-                    "method": "_initialize_component_state"
+                    "component_states": component_states
                 }
             )
             raise
 
     @synchronized("_lock")
     def toggle_memory(self, enable: bool) -> bool:
-        """Enable or disable memory management."""
+        """Toggle memory management features."""
         try:
-            if not hasattr(self.memory_monitor, 'memory_manager'):
-                self.context.logger.record_event(
-                    event_type="memory_error",
-                    message="Memory manager not initialized",
-                    level="error"
-                )
-                return False
+            if enable:
+                # Enable memory management
+                self.memory_monitor.start_monitoring()
+                self.context.ram_manager.enable_cleanup()
+                self.context.gpu_manager.enable_cleanup()
+            else:
+                # Disable memory management
+                self.memory_monitor.stop_monitoring()
+                self.context.ram_manager.disable_cleanup()
+                self.context.gpu_manager.disable_cleanup()
                 
-            self.memory_monitor.memory_manager.set_enabled(enable)
-            self.context.logger.record_event(
-                event_type="memory_toggle",
-                message=f"Memory management {'enabled' if enable else 'disabled'}",
-                level="info",
-                additional_info={
-                    "enabled": enable,
-                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
-                }
-            )
             return True
             
         except Exception as e:
-            self.error_manager.handle_memory_error(e, 0)  # 0 for memory size since this is a toggle operation
-            self.context.logger.log_error(
-                error_msg=f"Failed to toggle memory management: {str(e)}",
-                error_type="memory_toggle_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "enabled": enable,
-                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+            self.error_manager.handle_error(
+                error_type="memory_toggle",
+                error_message=f"Failed to toggle memory management: {str(e)}",
+                error_context={
+                    "enable": enable
                 }
             )
             return False
@@ -453,221 +561,266 @@ class SOVLSystem(SystemInterface):
     def generate_curiosity_question(self) -> Optional[str]:
         """Generate a curiosity-driven question."""
         try:
-            if not hasattr(self.curiosity_manager, 'generate_question'):
-                self.context.logger.record_event(
-                    event_type="curiosity_error",
-                    message="Curiosity manager not properly initialized",
-                    level="error"
-                )
-                return None
+            with self._lock:
+                if not self.curiosity_manager:
+                    raise ValueError("Curiosity manager not initialized")
+                    
+                question = self.curiosity_manager.generate_question()
+                if question:
+                    self.context.logger.record_event(
+                        event_type="curiosity_question_generated",
+                        message="Generated new curiosity question",
+                        level="info",
+                        additional_info={
+                            "question": question
+                        }
+                    )
+                return question
                 
-            question = self.curiosity_manager.generate_question()
-            
-            self.context.logger.record_event(
-                event_type="curiosity_question_generated",
-                message="Generated curiosity question",
-                level="info",
-                additional_info={"question": question}
-            )
-            return question
-            
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0)
-            self.context.logger.log_error(
-                error_msg=f"Failed to generate curiosity question: {str(e)}",
-                error_type="curiosity_question_error",
-                stack_trace=traceback.format_exc()
+            self.error_manager.handle_error(
+                error_type="curiosity_question",
+                error_message=f"Failed to generate curiosity question: {str(e)}"
             )
             return None
 
     def dream(self) -> bool:
-        """Run a dream cycle to explore new ideas."""
+        """Execute a dreaming cycle."""
         try:
-            if not hasattr(self.curiosity_manager, 'queue_exploration'):
-                self.context.logger.record_event(
-                    event_type="curiosity_error",
-                    message="Curiosity manager not properly initialized",
-                    level="error"
-                )
-                return False
+            with self._lock:
+                if not self.model_manager or not self.curiosity_manager:
+                    raise ValueError("Required components not initialized")
+                    
+                # Generate curiosity question
+                question = self.generate_curiosity_question()
+                if not question:
+                    return False
+                    
+                # Process the question
+                response = self.model_manager.generate_response(question)
+                if not response:
+                    return False
+                    
+                # Update memory and state
+                self.context.memoria_manager.add_experience(question, response)
+                self.state_tracker.update_state({
+                    "last_dream": time.time(),
+                    "dream_question": question,
+                    "dream_response": response
+                })
                 
-            self.curiosity_manager.queue_exploration("dream_cycle")
-            
-            self.context.logger.record_event(
-                event_type="dream_cycle_started",
-                message="Started dream cycle",
-                level="info"
-            )
-            return True
-            
+                return True
+                
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0)
-            self.context.logger.log_error(
-                error_msg=f"Failed to start dream cycle: {str(e)}",
-                error_type="dream_cycle_error",
-                stack_trace=traceback.format_exc()
+            self.error_manager.handle_error(
+                error_type="dream_cycle",
+                error_message=f"Failed to execute dream cycle: {str(e)}"
             )
             return False
 
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get current memory statistics."""
         try:
-            # Use system monitor for comprehensive metrics
-            metrics = self.system_monitor._collect_metrics()
-            
-            # Add memory health check
-            memory_health = self.memory_monitor.check_memory_health()
-            
-            return {
-                "metrics": metrics,
-                "memory_health": memory_health
-            }
-            
+            with self._lock:
+                return {
+                    "ram": self.context.ram_manager.get_usage(),
+                    "gpu": self.context.gpu_manager.get_usage(),
+                    "memoria": len(self.context.memoria_manager.get_experiences())
+                }
+                
         except Exception as e:
-            self.error_manager.handle_memory_error(e, 0)
-            return {"error": str(e)}
+            self.error_manager.handle_error(
+                error_type="memory_stats",
+                error_message=f"Failed to get memory statistics: {str(e)}"
+            )
+            return {}
 
     def get_recent_errors(self) -> List[Dict[str, Any]]:
-        """Get list of recent errors from error manager."""
+        """Get recent error history."""
         try:
-            if not hasattr(self, 'error_manager'):
-                return []
+            with self._lock:
+                return self.context.get_error_history()
                 
-            return self.error_manager.get_recent_errors()
-            
         except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get recent errors: {str(e)}",
-                error_type="error_retrieval_error",
-                stack_trace=traceback.format_exc()
+            self.error_manager.handle_error(
+                error_type="error_history",
+                error_message=f"Failed to get error history: {str(e)}"
             )
             return []
 
     def get_component_status(self) -> Dict[str, bool]:
         """Get the status of all components."""
-        return {
-            "config_handler": hasattr(self, "config_handler"),
-            "model_manager": hasattr(self, "model_manager"),
-            "curiosity_manager": hasattr(self, "curiosity_manager"),
-            "memory_monitor": hasattr(self, "memory_monitor"),
-            "state_tracker": hasattr(self, "state_tracker"),
-            "error_manager": hasattr(self, "error_manager")
-        }
+        try:
+            with self._lock:
+                return {
+                    "config_handler": bool(self.config_handler),
+                    "model_manager": bool(self.model_manager),
+                    "curiosity_manager": bool(self.curiosity_manager),
+                    "memory_monitor": bool(self.memory_monitor),
+                    "state_tracker": bool(self.state_tracker),
+                    "error_manager": bool(self.error_manager),
+                    "system_monitor": bool(self.system_monitor),
+                    "traits_monitor": bool(self.traits_monitor)
+                }
+                
+        except Exception as e:
+            self.error_manager.handle_error(
+                error_type="component_status",
+                error_message=f"Failed to get component status: {str(e)}"
+            )
+            return {}
 
     def get_system_state(self) -> Dict[str, Any]:
         """Get the current system state."""
-        return {
-            "curiosity_manager": {
-                "is_initialized": hasattr(self, "curiosity_manager"),
-                "exploration_queue_size": len(self.curiosity_manager.exploration_queue) if hasattr(self.curiosity_manager, 'exploration_queue') else 0
-            },
-            "memory_usage": self.memory_monitor.get_memory_metrics() if hasattr(self, "memory_monitor") else {},
-            "error_count": len(self.error_manager.get_recent_errors()) if hasattr(self, "error_manager") else 0
-        }
+        try:
+            with self._lock:
+                return {
+                    "memory_stats": self.get_memory_stats(),
+                    "component_status": self.get_component_status(),
+                    "recent_errors": self.get_recent_errors(),
+                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+                }
+                
+        except Exception as e:
+            self.error_manager.handle_error(
+                error_type="system_state",
+                error_message=f"Failed to get system state: {str(e)}"
+            )
+            return {}
 
     def set_debug_mode(self, enabled: bool) -> None:
         """Enable or disable debug mode."""
         try:
-            if enabled:
-                self.context.logger.set_level(logging.DEBUG)
-                self.context.logger.record_event(
-                    event_type="debug_mode_change",
-                    message="Debug mode enabled",
-                    level="debug"
-                )
-            else:
-                self.context.logger.set_level(logging.INFO)
-                self.context.logger.record_event(
-                    event_type="debug_mode_change",
-                    message="Debug mode disabled",
-                    level="info"
-                )
+            with self._lock:
+                self.context.logger.set_debug_mode(enabled)
+                if self.system_monitor:
+                    self.system_monitor.set_debug_mode(enabled)
+                if self.traits_monitor:
+                    self.traits_monitor.set_debug_mode(enabled)
+                    
         except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to set debug mode: {str(e)}",
-                error_type="debug_mode_error",
-                stack_trace=traceback.format_exc()
+            self.error_manager.handle_error(
+                error_type="debug_mode",
+                error_message=f"Failed to set debug mode: {str(e)}",
+                error_context={
+                    "enabled": enabled
+                }
             )
 
     def get_execution_trace(self) -> List[Dict[str, Any]]:
-        """Get recent execution trace from logger."""
+        """Get the execution trace of recent operations."""
         try:
-            if not hasattr(self.context, 'logger'):
-                return []
+            with self._lock:
+                return self.context.logger.get_execution_trace()
                 
-            return self.context.logger.get_recent_events()
-            
         except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get execution trace: {str(e)}",
-                error_type="trace_retrieval_error",
-                stack_trace=traceback.format_exc()
+            self.error_manager.handle_error(
+                error_type="execution_trace",
+                error_message=f"Failed to get execution trace: {str(e)}"
             )
             return []
 
     def get_state(self) -> Dict[str, Any]:
-        """Get the current system state."""
-        with self._lock:
-            return self.state_tracker.get_state()
+        """Get the current state of the system."""
+        try:
+            with self._lock:
+                return self.state_tracker.state.to_dict() if self.state_tracker.state else {}
+                
+        except Exception as e:
+            self.error_manager.handle_error(
+                error_type="state_retrieval",
+                error_message=f"Failed to get system state: {str(e)}"
+            )
+            return {}
 
     def update_state(self, state_dict: Dict[str, Any]) -> None:
-        """Update the system state with the provided dictionary."""
-        with self._lock:
-            try:
-                # Use StateManager for core state updates
-                self.context.state_manager.save_state(state_dict)
+        """Update the system state."""
+        try:
+            with self._lock:
+                if not self.state_tracker:
+                    raise ValueError("State tracker not initialized")
+                    
+                self.state_tracker.update_state(state_dict)
                 
-                self.context.logger.record_event(
-                    event_type="state_updated",
-                    message="System state updated successfully",
-                    level="info",
-                    additional_info={
-                        "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+        except Exception as e:
+            self.error_manager.handle_error(
+                error_type="state_update",
+                error_message=f"Failed to update system state: {str(e)}",
+                error_context={
+                    "state_dict": state_dict
+                }
+            )
+
+    def start_monitoring(self):
+        """Start system monitoring."""
+        with self._lock:
+            if not self._initialization_complete.is_set():
+                self._complete_initialization()
+                return
+                
+            try:
+                # Start memory monitoring if not already running
+                if not hasattr(self, '_monitor_thread') or not self._monitor_thread.is_alive():
+                    self._monitor_thread = threading.Thread(target=self._monitor_memory, daemon=True)
+                    self._monitor_thread.start()
+                    self.logger.log_info("Main memory monitoring started")
+                
+                # Start other monitoring systems
+                self.state_tracker.start_monitoring()
+                self.error_handler.start_monitoring()
+                
+            except Exception as e:
+                self.error_handler.handle_error(
+                    error_type="monitoring_startup",
+                    error_message=f"Failed to start monitoring: {str(e)}",
+                    error_context={
+                        "initialization_state": self._initialization_complete.is_set(),
+                        "monitor_thread_alive": hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive()
                     }
                 )
+    
+    def stop_monitoring(self):
+        """Stop system monitoring."""
+        with self._lock:
+            try:
+                # Stop startup monitoring if still running
+                if self._startup_monitor and self._startup_monitor.is_alive():
+                    self._initialization_complete.set()
+                    self._startup_monitor.join(timeout=5)
+                
+                # Stop main monitoring
+                if hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive():
+                    self._monitor_thread.join(timeout=5)
+                
+                # Stop other monitoring systems
+                self.state_tracker.stop_monitoring()
+                self.error_handler.stop_monitoring()
+                
             except Exception as e:
-                self.context.logger.log_error(
-                    error_msg=f"Failed to update system state: {str(e)}",
-                    error_type="state_update_error",
-                    stack_trace=traceback.format_exc()
+                self.error_handler.handle_error(
+                    error_type="monitoring_shutdown",
+                    error_message=f"Failed to stop monitoring: {str(e)}",
+                    error_context={
+                        "startup_monitor_alive": self._startup_monitor and self._startup_monitor.is_alive(),
+                        "monitor_thread_alive": hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive()
+                    }
                 )
-                raise ValueError("Invalid state update") from e
-
-    def start_monitoring(self) -> None:
-        """Start all monitoring systems."""
-        try:
-            # Start traits monitoring
-            self.traits_monitor.start()
-            
-            self.context.logger.record_event(
-                event_type="monitoring_started",
-                message="System monitoring started",
-                level="info"
-            )
-            
-        except Exception as e:
-            self.error_manager.handle_error(
-                error_type="monitoring_start_error",
-                error_message=f"Failed to start monitoring: {str(e)}",
-                error_context={"component": "SOVLSystem"}
-            )
-
-    def stop_monitoring(self) -> None:
-        """Stop all monitoring systems."""
-        try:
-            # Stop traits monitoring
-            self.traits_monitor.stop()
-            
-            self.context.logger.record_event(
-                event_type="monitoring_stopped",
-                message="System monitoring stopped",
-                level="info"
-            )
-            
-        except Exception as e:
-            self.error_manager.handle_error(
-                error_type="monitoring_stop_error",
-                error_message=f"Failed to stop monitoring: {str(e)}",
-                error_context={"component": "SOVLSystem"}
-            )
+    
+    def _monitor_memory(self):
+        """Main memory monitoring loop."""
+        while True:
+            try:
+                self.update_memory_usage()
+                self._cleanup_old_errors()
+                time.sleep(5)  # Check every 5 seconds during normal operation
+            except Exception as e:
+                self.error_handler.handle_error(
+                    error_type="memory_monitoring",
+                    error_message=f"Memory monitoring error: {str(e)}",
+                    error_context={
+                        "monitoring_phase": "main",
+                        "initialization_complete": self._initialization_complete.is_set()
+                    }
+                )
+                time.sleep(10)  # Wait longer on error
 
