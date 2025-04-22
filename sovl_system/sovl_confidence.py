@@ -11,7 +11,16 @@ from sovl_curiosity import CuriosityManager
 from sovl_utils import synchronized, NumericalGuard
 from sovl_config import ConfigManager
 from sovl_temperament import TemperamentSystem
-from sovl_trainer import LifecycleManager
+from sovl_trainer import TrainingCycleManager
+import time
+import threading
+import math
+from torch import nn
+from sovl_error import ErrorHandler
+from sovl_manager import ModelManager
+from sovl_schema import ConfigSchema
+from sovl_experience import MemoriaManager
+from sovl_memory import RAMManager, GPUMemoryManager
 
 # Constants
 DEFAULT_CONFIDENCE = 0.5
@@ -57,7 +66,7 @@ class ConfidenceCalculator:
         config_manager: ConfigManager, 
         logger: Logger, 
         temperament_system: Optional[TemperamentSystem] = None,
-        lifecycle_manager: Optional[LifecycleManager] = None
+        lifecycle_manager: Optional[TrainingCycleManager] = None
     ):
         """Initialize the confidence calculator with configuration and logging.
         
@@ -65,7 +74,7 @@ class ConfidenceCalculator:
             config_manager: ConfigManager instance for configuration handling
             logger: Logger instance for logging
             temperament_system: Optional TemperamentSystem instance for mood-based adjustments
-            lifecycle_manager: Optional LifecycleManager instance for lifecycle-based adjustments
+            lifecycle_manager: Optional TrainingCycleManager instance for lifecycle-based adjustments
             
         Raises:
             ValueError: If config_manager or logger is None

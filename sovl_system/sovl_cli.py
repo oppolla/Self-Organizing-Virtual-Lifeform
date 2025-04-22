@@ -5,6 +5,7 @@ from typing import List, Dict, Tuple, Optional, Callable
 from sovl_main import SOVLSystem
 from sovl_config import ConfigManager
 from sovl_utils import safe_compare
+from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 import readline
 import rlcompleter
 from collections import deque
@@ -79,6 +80,27 @@ class CommandHandler(cmd.Cmd):
         self.current_index = -1
         self.debug_mode = False
         
+        # Initialize monitoring components
+        self.system_monitor = SystemMonitor(
+            config_manager=sovl_system.config_handler,
+            logger=sovl_system.logger,
+            error_manager=sovl_system.error_manager
+        )
+        
+        self.memory_monitor = MemoryMonitor(
+            config_manager=sovl_system.config_handler,
+            logger=sovl_system.logger,
+            ram_manager=sovl_system.ram_manager,
+            gpu_manager=sovl_system.gpu_manager,
+            error_manager=sovl_system.error_manager
+        )
+        
+        self.traits_monitor = TraitsMonitor(
+            config_manager=sovl_system.config_handler,
+            logger=sovl_system.logger,
+            state_tracker=sovl_system.state_tracker
+        )
+
     def preloop(self):
         """Initialize the command handler."""
         print("SOVL Interactive CLI")
@@ -110,12 +132,50 @@ class CommandHandler(cmd.Cmd):
             print("Type 'help [command]' for more information on a specific command.")
             
     def do_status(self, arg):
-        """Show system status."""
-        status = self.sovl_system.get_status()
-        print("\nSystem Status:")
-        print("-------------")
-        for key, value in status.items():
-            print(f"{key}: {value}")
+        """Display system status and metrics."""
+        try:
+            # Get system health status
+            health_status = self.system_monitor.get_system_health()
+            
+            # Get memory metrics
+            memory_metrics = self.memory_monitor.get_memory_metrics()
+            
+            # Get trait metrics
+            trait_metrics = self.traits_monitor.get_trait_metrics()
+            
+            # Display system health
+            print("\n=== System Health ===")
+            print(f"Overall Status: {health_status['status']}")
+            print(f"CPU Usage: {health_status['cpu_usage']:.1f}%")
+            print(f"RAM Usage: {health_status['ram_usage']:.1f}%")
+            if health_status['gpu_available']:
+                print(f"GPU Usage: {health_status['gpu_usage']:.1f}%")
+            
+            # Display memory metrics
+            print("\n=== Memory Metrics ===")
+            print(f"RAM Usage: {memory_metrics['ram_usage']:.1f}%")
+            print(f"RAM Available: {memory_metrics['ram_available']:.1f} GB")
+            if memory_metrics['gpu_available']:
+                print(f"GPU Memory Usage: {memory_metrics['gpu_usage']:.1f}%")
+                print(f"GPU Memory Available: {memory_metrics['gpu_available']:.1f} GB")
+            
+            # Display trait metrics
+            print("\n=== Trait Metrics ===")
+            print(f"Curiosity: {trait_metrics['curiosity']:.2f}")
+            print(f"Confidence: {trait_metrics['confidence']:.2f}")
+            print(f"Stability: {trait_metrics['stability']:.2f}")
+            
+            # Display any active alerts
+            alerts = self.system_monitor.get_active_alerts()
+            if alerts:
+                print("\n=== Active Alerts ===")
+                for alert in alerts:
+                    print(f"- {alert['message']} (Severity: {alert['severity']})")
+            
+        except Exception as e:
+            print(f"Error getting status: {str(e)}")
+            if self.debug_mode:
+                traceback.print_exc()
             
     def do_pause(self, arg):
         """Pause the current operation."""

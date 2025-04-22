@@ -23,7 +23,7 @@ from sovl_error import ErrorManager, ErrorContext
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 
 # Other imports
-from sovl_curiosity import CuriosityEngine
+from sovl_curiosity import CuriosityManager
 from sovl_io import load_training_data, InsufficientDataError
 from sovl_cli import CommandHandler, run_cli
 from sovl_utils import (

@@ -10,6 +10,8 @@ import traceback
 import time
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_main import SOVLSystem, SystemContext
+from sovl_monitor import MemoryMonitor
 
 class SystemInterface(ABC):
     """
@@ -384,7 +386,13 @@ if __name__ == "__main__":
     state_tracker = StateTracker(context)
     error_manager = ErrorManager(context, state_tracker)
     model_loader = ModelLoader(context)
-    memory_monitor = MemoryMonitor(context)
+    memory_monitor = MemoryMonitor(
+        config_manager=config_manager,
+        logger=logger,
+        ram_manager=None,  # Not needed for interface testing
+        gpu_manager=None,  # Not needed for interface testing
+        error_manager=error_manager
+    )
     curiosity_engine = CuriosityEngine(
         config_handler=config_handler,
         model_loader=model_loader,

@@ -10,7 +10,7 @@ from sovl_error import ErrorHandler
 from sovl_state import SOVLState
 from sovl_config import ConfigManager
 from sovl_logger import Logger
-from sovl_trainer import LifecycleManager
+from sovl_trainer import TrainingCycleManager
 from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
 from sovl_manager import ModelManager

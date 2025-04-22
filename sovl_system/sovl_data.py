@@ -14,6 +14,7 @@ from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from threading import Lock
 from dataclasses import dataclass, field
+from sovl_monitor import MemoryMonitor
 
 @dataclass
 class DataStats:
@@ -160,7 +161,13 @@ class FileDataProvider(DataProvider):
         self._initialize_config()
         
         # Initialize memory monitor
-        self.memory_monitor = MemoryMonitor(config_manager, logger)
+        self.memory_monitor = MemoryMonitor(
+            config_manager=self.config_manager,
+            logger=self.logger,
+            ram_manager=None,  # Not needed for data loading
+            gpu_manager=None,  # Not needed for data loading
+            error_manager=self.error_handler
+        )
         
         # Mark as initialized
         self._initialized = True

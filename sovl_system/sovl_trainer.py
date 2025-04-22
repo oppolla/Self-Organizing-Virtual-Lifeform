@@ -681,6 +681,34 @@ class TrainingCycleManager:
         self.ram_manager = RAMManager(config_manager, logger)
         self.gpu_manager = GPUMemoryManager(config_manager, logger)
         
+        # Initialize lifecycle state
+        self._current_stage = "initialization"
+        self._life_curve_weights = {
+            "initialization": 0.5,
+            "exploration": 0.8,
+            "consolidation": 0.9,
+            "maturity": 1.0
+        }
+        
+        # Log initialization
+        self._logger.record_event(
+            event_type="training_cycle_manager_initialized",
+            message="Training cycle manager initialized with lifecycle support",
+            level="info",
+            additional_info={
+                "current_stage": self._current_stage,
+                "life_curve_weights": self._life_curve_weights
+            }
+        )
+        
+    def get_lifecycle_stage(self) -> str:
+        """Get the current lifecycle stage."""
+        return self._current_stage
+        
+    def get_life_curve_weight(self) -> float:
+        """Get the weight based on the current lifecycle stage."""
+        return self._life_curve_weights.get(self._current_stage, 1.0)
+        
     def _prepare_gestation_batch(self, batch_size: int) -> int:
         """Prepare batch size based on memory health."""
         try:

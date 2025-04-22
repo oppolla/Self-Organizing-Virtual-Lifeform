@@ -12,16 +12,18 @@ from sovl_cli import run_cli
 from sovl_logger import LoggingManager
 from sovl_state import SOVLState, StateManager, StateTracker
 from sovl_error import ErrorHandler, ErrorManager
-from sovl_utils import calculate_confidence, detect_repetitions
-from sovl_grafter import PluginManager
+from sovl_utils import  detect_repetitions
 from collections import deque
 from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediator
 import random
-from sovl_main import SOVLSystem, SystemContext, ConfigHandler, ModelLoader, MemoryMonitor
-from sovl_curiosity import CuriosityEngine
+from sovl_main import SOVLSystem, SystemContext
+from sovl_curiosity import CuriosityManager
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger
+from sovl_manager import ModelManager
+from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
+from sovl_trainer import TrainingCycleManager
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
@@ -72,20 +74,65 @@ class SOVLOrchestrator(OrchestratorInterface):
                 device=self.device
             )
             
+            # Initialize model manager early
+            self.model_manager = ModelManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                device=self.device
+            )
+            
+            # Initialize memory managers
+            self.ram_manager = RAMManager(self.config_manager, self.logger)
+            self.gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
+            
+            # Initialize error manager
+            self.error_manager = ErrorManager(self.state_manager, self.logger)
+            
+            # Initialize monitors
+            self.system_monitor = SystemMonitor(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                ram_manager=self.ram_manager,
+                gpu_manager=self.gpu_manager,
+                error_manager=self.error_manager
+            )
+            
+            self.memory_monitor = MemoryMonitor(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                ram_manager=self.ram_manager,
+                gpu_manager=self.gpu_manager,
+                error_manager=self.error_manager
+            )
+            
             # Load state from file if exists, otherwise initialize new state
             self.state = self.state_manager.load_state()
             
             # Initialize system early to ensure state consistency
             self._system: Optional[SystemInterface] = None
             
-            # Initialize error handler with state manager
-            self.error_handler = ErrorManager(self.state_manager, self.logger)
-            
             # Initialize plugin manager
             self.plugin_manager = PluginManager(
                 config_manager=self.config_manager,
                 logger=self.logger,
                 state=self.state
+            )
+            
+            # Initialize training cycle manager with lifecycle support
+            self.training_cycle_manager = TrainingCycleManager(
+                config_manager=self.config_manager,
+                logger=self.logger
+            )
+            
+            # Log initialization
+            self.logger.record_event(
+                event_type="training_cycle_manager_initialized",
+                message="Training cycle manager initialized with lifecycle support",
+                level="info",
+                additional_info={
+                    "current_stage": self.training_cycle_manager.get_lifecycle_stage(),
+                    "life_curve_weight": self.training_cycle_manager.get_life_curve_weight()
+                }
             )
             
             self._lock = Lock()
@@ -392,27 +439,26 @@ class SOVLOrchestrator(OrchestratorInterface):
             self.mediator.register_orchestrator(self)
             
             # Create system components
-            context = SystemContext(self.config_manager.config_path, str(self.device))
-            config_handler = ConfigHandler(self.config_manager.config_path, self.logger, context.event_dispatcher)
+            context = SystemContext(self.config_manager.config_path)
             state_tracker = StateTracker(context)
             error_manager = ErrorManager(context, state_tracker)
-            model_loader = ModelLoader(context)
             memory_monitor = MemoryMonitor(context)
-            curiosity_engine = CuriosityEngine(
-                config_handler=config_handler,
-                model_loader=model_loader,
-                state_tracker=state_tracker,
-                error_manager=error_manager,
+            
+            # Initialize curiosity manager
+            curiosity_manager = CuriosityManager(
+                config_manager=self.config_manager,
                 logger=self.logger,
-                device=str(self.device)
+                error_manager=error_manager,
+                device=self.device,
+                state_manager=state_tracker
             )
             
             # Create and register system
             system = SOVLSystem(
                 context=context,
-                config_handler=config_handler,
-                model_loader=model_loader,
-                curiosity_engine=curiosity_engine,
+                config_handler=self.config_manager,
+                model_manager=self.model_manager,
+                curiosity_manager=curiosity_manager,
                 memory_monitor=memory_monitor,
                 state_tracker=state_tracker,
                 error_manager=error_manager
@@ -445,22 +491,67 @@ class SOVLOrchestrator(OrchestratorInterface):
             raise
 
     def run(self) -> None:
-        """Run the SOVL system in the appropriate mode."""
+        """
+        Run the SOVL system with monitoring and error handling.
+        """
+        self._log_event("orchestrator_run_start", {
+            "conversation_id": self.state.history.conversation_id,
+            "state_hash": self.state.state_hash
+        })
+        
         try:
-            # Validate state consistency before running
-            if not self._system:
-                raise RuntimeError("System not initialized")
+            # Start system monitoring
+            self.system_monitor.start_monitoring()
+            self.memory_monitor.start_monitoring()
             
-            # Run in CLI mode by default
-            run_cli(self.config_manager)
+            # Initialize system if not already initialized
+            if not self._system:
+                self._system = self._initialize_system()
+            
+            # Start the system
+            self._system.start()
+            
+            # Main loop
+            while not self._system.should_stop():
+                try:
+                    # Update system state
+                    self._system.update()
+                    
+                    # Monitor system health
+                    self.system_monitor.check_system_health()
+                    self.memory_monitor.check_memory_health()
+                    
+                    # Handle any pending errors
+                    self.error_manager.handle_pending_errors()
+                    
+                    # Sleep to prevent CPU overuse
+                    time.sleep(0.1)
+                    
+                except Exception as e:
+                    self._log_event("orchestrator_loop_error", {
+                        "error": str(e),
+                        "conversation_id": self.state.history.conversation_id
+                    })
+                    self.error_manager.handle_error(e, "orchestrator_loop")
+            
+            # Stop monitoring
+            self.system_monitor.stop_monitoring()
+            self.memory_monitor.stop_monitoring()
+            
+            # Cleanup
+            self._system.cleanup()
+            
+            self._log_event("orchestrator_run_success", {
+                "conversation_id": self.state.history.conversation_id,
+                "state_hash": self.state.state_hash
+            })
             
         except Exception as e:
-            self._log_error("System execution failed", e)
-            self.error_handler.handle_generic_error(
-                error=e,
-                context="system_execution",
-                fallback_action=lambda: self._handle_execution_failure()
-            )
+            self._log_event("orchestrator_run_error", {
+                "error": str(e),
+                "conversation_id": self.state.history.conversation_id
+            })
+            self.error_manager.handle_error(e, "orchestrator_run")
             raise
 
     def shutdown(self) -> None:
@@ -473,6 +564,15 @@ class SOVLOrchestrator(OrchestratorInterface):
                     message="Starting system shutdown process",
                     level="info"
                 )
+    
+                # Cleanup model manager
+                if hasattr(self, 'model_manager'):
+                    self.model_manager.cleanup()
+                    self.logger.record_event(
+                        event_type="model_manager_cleanup",
+                        message="Model manager cleaned up",
+                        level="info"
+                    )
     
                 # Cleanup event dispatcher
                 self.context.event_dispatcher.cleanup()

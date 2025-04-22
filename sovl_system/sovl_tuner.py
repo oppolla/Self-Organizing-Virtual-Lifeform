@@ -9,7 +9,7 @@ from sovl_utils import NumericalGuard
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import SOVLTrainer
 from sovl_scaffold import CrossAttentionInjector
-from sovl_error import ErrorManager, ConfigurationError, ErrorRecord
+from sovl_error import ErrorManager, ErrorRecord
 
 @dataclass
 class ValidationRange:

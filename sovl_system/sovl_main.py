@@ -34,11 +34,10 @@ from sovl_experience import MemoriaManager
 from sovl_state import StateManager
 
 # AI components
-from sovl_curiosity import CuriosityEngine, CuriosityManager
+from sovl_curiosity import CuriosityManager
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
 from sovl_scaffold import (
     CrossAttentionInjector,
-    ScaffoldManager,
     CrossAttentionLayer,
     ScaffoldTokenMapper
 )
@@ -146,7 +145,13 @@ class SystemContext:
         )
         
         # Initialize AI components
-        self.curiosity_engine = CuriosityEngine()
+        self.curiosity_manager = CuriosityManager(
+            config_manager=self.config_manager,
+            logger=self.logger,
+            error_manager=self.error_handler,
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            state_manager=self.state_manager
+        )
         self.temperament_system = TemperamentSystem()
         self.scaffold_manager = ScaffoldManager()
         
@@ -270,7 +275,7 @@ class SOVLSystem(SystemInterface):
         context: SystemContext,
         config_handler: ConfigHandler,
         model_manager: ModelManager,
-        curiosity_engine: CuriosityEngine,
+        curiosity_manager: CuriosityManager,
         memory_monitor: MemoryMonitor,
         state_tracker: StateTracker,
         error_manager: ErrorManager
@@ -282,7 +287,7 @@ class SOVLSystem(SystemInterface):
             context: System context containing shared resources
             config_handler: Configuration handler component
             model_manager: Model manager component
-            curiosity_engine: Curiosity engine component
+            curiosity_manager: Curiosity manager component
             memory_monitor: Memory monitoring component
             state_tracker: State tracking component
             error_manager: Error management component
@@ -293,7 +298,7 @@ class SOVLSystem(SystemInterface):
                 context=context,
                 config_handler=config_handler,
                 model_manager=model_manager,
-                curiosity_engine=curiosity_engine,
+                curiosity_manager=curiosity_manager,
                 memory_monitor=memory_monitor,
                 state_tracker=state_tracker,
                 error_manager=error_manager
@@ -303,7 +308,7 @@ class SOVLSystem(SystemInterface):
             self.context = context
             self.config_handler = config_handler
             self.model_manager = model_manager
-            self.curiosity_engine = curiosity_engine
+            self.curiosity_manager = curiosity_manager
             self.memory_monitor = memory_monitor
             self.state_tracker = state_tracker
             self.error_manager = error_manager
@@ -324,7 +329,7 @@ class SOVLSystem(SystemInterface):
                 config_manager=context.config_manager,
                 logger=context.logger,
                 state_manager=context.state_manager,
-                curiosity_manager=curiosity_engine.curiosity_manager,
+                curiosity_manager=curiosity_manager.curiosity_manager,
                 training_manager=context.training_cycle_manager,
                 error_manager=error_manager
             )
@@ -368,9 +373,9 @@ class SOVLSystem(SystemInterface):
                     "status": "initialized",
                     "active_model": self.model_manager.active_model_name if self.model_manager else None
                 },
-                "curiosity_engine": {
+                "curiosity_manager": {
                     "status": "initialized",
-                    "question_cache_size": len(self.curiosity_engine.question_cache) if self.curiosity_engine else 0
+                    "question_cache_size": len(self.curiosity_manager.question_cache) if self.curiosity_manager else 0
                 },
                 "memory_monitor": {
                     "status": "initialized",
@@ -448,15 +453,16 @@ class SOVLSystem(SystemInterface):
     def generate_curiosity_question(self) -> Optional[str]:
         """Generate a curiosity-driven question."""
         try:
-            if not hasattr(self.curiosity_engine, 'curiosity_manager'):
+            if not hasattr(self.curiosity_manager, 'generate_question'):
                 self.context.logger.record_event(
                     event_type="curiosity_error",
-                    message="Curiosity manager not initialized",
+                    message="Curiosity manager not properly initialized",
                     level="error"
                 )
                 return None
                 
-            question = self.curiosity_engine.curiosity_manager.generate_question()
+            question = self.curiosity_manager.generate_question()
+            
             self.context.logger.record_event(
                 event_type="curiosity_question_generated",
                 message="Generated curiosity question",
@@ -470,26 +476,26 @@ class SOVLSystem(SystemInterface):
             self.context.logger.log_error(
                 error_msg=f"Failed to generate curiosity question: {str(e)}",
                 error_type="curiosity_question_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"error": str(e)}
+                stack_trace=traceback.format_exc()
             )
             return None
 
     def dream(self) -> bool:
-        """Run a dream cycle to process and consolidate memories."""
+        """Run a dream cycle to explore new ideas."""
         try:
-            if not hasattr(self.curiosity_engine, 'run_dream_cycle'):
+            if not hasattr(self.curiosity_manager, 'queue_exploration'):
                 self.context.logger.record_event(
-                    event_type="dream_error",
-                    message="Dream cycle not supported",
+                    event_type="curiosity_error",
+                    message="Curiosity manager not properly initialized",
                     level="error"
                 )
                 return False
                 
-            self.curiosity_engine.run_dream_cycle()
+            self.curiosity_manager.queue_exploration("dream_cycle")
+            
             self.context.logger.record_event(
-                event_type="dream_cycle_complete",
-                message="Dream cycle completed successfully",
+                event_type="dream_cycle_started",
+                message="Started dream cycle",
                 level="info"
             )
             return True
@@ -497,10 +503,9 @@ class SOVLSystem(SystemInterface):
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0)
             self.context.logger.log_error(
-                error_msg=f"Failed to run dream cycle: {str(e)}",
+                error_msg=f"Failed to start dream cycle: {str(e)}",
                 error_type="dream_cycle_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"error": str(e)}
+                stack_trace=traceback.format_exc()
             )
             return False
 
@@ -539,49 +544,26 @@ class SOVLSystem(SystemInterface):
             return []
 
     def get_component_status(self) -> Dict[str, bool]:
-        """Get status of all system components."""
-        try:
-            return {
-                "model_manager": hasattr(self, "model_manager"),
-                "curiosity_engine": hasattr(self, "curiosity_engine"),
-                "memory_monitor": hasattr(self, "memory_monitor"),
-                "state_tracker": hasattr(self, "state_tracker"),
-                "error_manager": hasattr(self, "error_manager"),
-                "config_handler": hasattr(self, "config_handler")
-            }
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get component status: {str(e)}",
-                error_type="component_status_error",
-                stack_trace=traceback.format_exc()
-            )
-            return {}
+        """Get the status of all components."""
+        return {
+            "config_handler": hasattr(self, "config_handler"),
+            "model_manager": hasattr(self, "model_manager"),
+            "curiosity_manager": hasattr(self, "curiosity_manager"),
+            "memory_monitor": hasattr(self, "memory_monitor"),
+            "state_tracker": hasattr(self, "state_tracker"),
+            "error_manager": hasattr(self, "error_manager")
+        }
 
     def get_system_state(self) -> Dict[str, Any]:
-        """Get current system state."""
-        try:
-            if not hasattr(self.context, 'state_manager'):
-                return {"error": "State manager not initialized"}
-                
-            # Get core state from StateManager
-            state = self.context.state_manager.load_state()
-            
-            # Add additional system information
-            state.update({
-                "debug_mode": self.context.logger.is_debug_enabled(),
-                "last_error": self.error_manager.get_last_error() if hasattr(self, 'error_manager') else None,
-                "components": self.get_component_status(),
-                "memory_stats": self.get_memory_stats()
-            })
-            return state
-            
-        except Exception as e:
-            self.context.logger.log_error(
-                error_msg=f"Failed to get system state: {str(e)}",
-                error_type="state_retrieval_error",
-                stack_trace=traceback.format_exc()
-            )
-            return {"error": str(e)}
+        """Get the current system state."""
+        return {
+            "curiosity_manager": {
+                "is_initialized": hasattr(self, "curiosity_manager"),
+                "exploration_queue_size": len(self.curiosity_manager.exploration_queue) if hasattr(self.curiosity_manager, 'exploration_queue') else 0
+            },
+            "memory_usage": self.memory_monitor.get_memory_metrics() if hasattr(self, "memory_monitor") else {},
+            "error_count": len(self.error_manager.get_recent_errors()) if hasattr(self, "error_manager") else 0
+        }
 
     def set_debug_mode(self, enabled: bool) -> None:
         """Enable or disable debug mode."""
