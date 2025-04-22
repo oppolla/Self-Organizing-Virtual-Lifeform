@@ -734,6 +734,10 @@ class GenerationManager:
         """Clear scaffold-related caches with memory optimization."""
         self.scaffold_provider.clear_scaffold_cache()
 
+    def get_num_scaffolds(self) -> int:
+        """Get the number of available scaffold models."""
+        return len(self.scaffolds)
+
     def _prepare_generation_params(self, max_new_tokens: int, scaffold_weight: Optional[float], **kwargs) -> Dict[str, Any]:
         """Prepare and validate generation parameters."""
         return self.scaffold_provider.prepare_generation_params(max_new_tokens, scaffold_weight, **kwargs)

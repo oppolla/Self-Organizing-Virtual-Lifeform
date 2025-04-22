@@ -25,7 +25,7 @@ COMMAND_CATEGORIES = {
     "Generation": ["generate", "echo", "mimic"],
     "Memory": ["memory", "recall", "forget", "recap"],
     "Interaction": ["muse", "flare", "debate", "spark", "reflect"],
-    "Debug": ["log", "config", "panic", "glitch"],
+    "Debug": ["log", "config", "panic", "glitch", "scaffold"],
     "Advanced": ["tune", "rewind"],
     "History": ["history"],
     "Fun": ["joke"]
@@ -444,6 +444,99 @@ class CommandHandler(cmd.Cmd):
         except Exception as e:
             print(f"Error generating joke: {str(e)}")
             return "I'm not feeling funny right now."
+
+    def do_scaffold(self, arg):
+        """
+        Direct interaction with scaffold models.
+        Usage: scaffold [options] <prompt>
+        Options:
+            -i/--index <n>     : Use specific scaffold model (default: 0)
+            -t/--tokens <n>    : Max new tokens to generate (default: 100)
+            -l/--logits       : Return logits
+            -h/--hidden      : Return hidden states
+            
+        Example: scaffold "What is the meaning of life?"
+        Example: scaffold -i 1 -t 200 "Tell me a story"
+        Example: scaffold -i 2 -l -h "Analyze this text"
+        """
+        try:
+            import shlex
+            import argparse
+            
+            # Parse scaffold command arguments
+            parser = argparse.ArgumentParser(description='Scaffold model interaction')
+            parser.add_argument('-i', '--index', type=int, default=0, help='Scaffold model index')
+            parser.add_argument('-t', '--tokens', type=int, default=100, help='Max new tokens')
+            parser.add_argument('-l', '--logits', action='store_true', help='Return logits')
+            parser.add_argument('-h', '--hidden', action='store_true', help='Return hidden states')
+            parser.add_argument('prompt', nargs='+', help='Prompt for the scaffold model')
+            
+            try:
+                args = parser.parse_args(shlex.split(arg))
+            except SystemExit:
+                return  # Handle --help flag gracefully
+                
+            # Validate scaffold index
+            num_scaffolds = self.sovl_system.generation_manager.get_num_scaffolds()
+            if args.index >= num_scaffolds:
+                print(f"Error: Invalid scaffold index {args.index}. Only {num_scaffolds} scaffold(s) available.")
+                return
+                
+            # Combine prompt parts
+            prompt = ' '.join(args.prompt)
+            
+            # Call the scaffold model
+            result = self.sovl_system.generation_manager.backchannel_scaffold_prompt(
+                prompt=prompt,
+                max_new_tokens=args.tokens,
+                scaffold_index=args.index,
+                return_logits=args.logits,
+                return_hidden_states=args.hidden
+            )
+            
+            # Handle the result
+            if isinstance(result, dict):
+                print("\nScaffold Response:")
+                print("-----------------")
+                print(result['text'])
+                
+                if args.logits or args.hidden:
+                    print("\nMetadata:")
+                    print("---------")
+                    for key, value in result['metadata'].items():
+                        if key != 'generation_params':  # Skip verbose params
+                            print(f"{key}: {value}")
+            else:
+                print("\nScaffold Response:")
+                print("-----------------")
+                print(result)
+                
+        except Exception as e:
+            print(f"Error in scaffold command: {str(e)}")
+            if self.debug_mode:
+                traceback.print_exc()
+
+    def help_scaffold(self):
+        """Detailed help for scaffold command."""
+        print("""
+Scaffold Command - Direct interaction with scaffold models
+-------------------------------------------------------
+Usage: scaffold [options] <prompt>
+
+Options:
+    -i, --index <n>    Use specific scaffold model (default: 0)
+    -t, --tokens <n>   Max new tokens to generate (default: 100)
+    -l, --logits      Return logits information
+    -h, --hidden      Return hidden states
+
+Examples:
+    scaffold "What is the meaning of life?"
+    scaffold -i 1 -t 200 "Tell me a story"
+    scaffold -i 2 -l -h "Analyze this text"
+
+The scaffold command allows direct interaction with any of the available
+scaffold models for debugging and development purposes.
+""")
 
     def default(self, line):
         """Handle unknown commands."""
