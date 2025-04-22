@@ -15,10 +15,16 @@ from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
-from sovl_main import SystemContext, SOVLSystem, StateTracker, ErrorManager, MemoryMonitor
+
+# Core system imports
+from sovl_main import SystemContext, SOVLSystem
+from sovl_state import StateManager, SOVLState, StateTracker
+from sovl_error import ErrorManager, ErrorContext
+from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
+
+# Other imports
 from sovl_curiosity import CuriosityEngine
 from sovl_io import load_training_data, InsufficientDataError
-from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 from sovl_cli import CommandHandler, run_cli
 from sovl_utils import (
     safe_compare, memory_usage, log_memory_usage, dynamic_batch_size,
@@ -31,8 +37,6 @@ from sovl_config import ConfigManager
 from sovl_conductor import SOVLOrchestrator
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_state import StateManager, SOVLState
-from sovl_error import ErrorManager, ErrorContext
 from sovl_manager import ModelManager
 from sovl_scaffold import (
     ScaffoldTokenMapper,

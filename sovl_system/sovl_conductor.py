@@ -10,15 +10,14 @@ from threading import Lock
 from sovl_config import ConfigManager
 from sovl_cli import run_cli
 from sovl_logger import LoggingManager
-from sovl_state import SOVLState
-from sovl_error import ErrorHandler
+from sovl_state import SOVLState, StateManager, StateTracker
+from sovl_error import ErrorHandler, ErrorManager
 from sovl_utils import calculate_confidence, detect_repetitions
 from sovl_grafter import PluginManager
 from collections import deque
-from sovl_state import StateManager
 from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediator
 import random
-from sovl_main import SOVLSystem, SystemContext, ConfigHandler, ModelLoader, MemoryMonitor, StateTracker, ErrorManager
+from sovl_main import SOVLSystem, SystemContext, ConfigHandler, ModelLoader, MemoryMonitor
 from sovl_curiosity import CuriosityEngine
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
@@ -79,8 +78,10 @@ class SOVLOrchestrator(OrchestratorInterface):
             # Initialize system early to ensure state consistency
             self._system: Optional[SystemInterface] = None
             
-            # Initialize error handler and plugin manager
-            self.error_handler = ErrorHandler(self.logger)
+            # Initialize error handler with state manager
+            self.error_handler = ErrorManager(self.state_manager, self.logger)
+            
+            # Initialize plugin manager
             self.plugin_manager = PluginManager(
                 config_manager=self.config_manager,
                 logger=self.logger,
@@ -391,8 +392,6 @@ class SOVLOrchestrator(OrchestratorInterface):
             self.mediator.register_orchestrator(self)
             
             # Create system components
-            from sovl_main import SOVLSystem, SystemContext, ConfigHandler, ModelLoader, CuriosityEngine, MemoryMonitor, StateTracker, ErrorManager
-            
             context = SystemContext(self.config_manager.config_path, str(self.device))
             config_handler = ConfigHandler(self.config_manager.config_path, self.logger, context.event_dispatcher)
             state_tracker = StateTracker(context)
@@ -499,8 +498,8 @@ class SOVLOrchestrator(OrchestratorInterface):
                     level="info"
                 )
     
-                # Clear error history
-                self.error_manager.clear_error_history()
+                # Clear error history using error handler
+                self.error_handler.clear_error_history()
                 self.logger.record_event(
                     event_type="error_history_cleared",
                     message="Error history cleared",
