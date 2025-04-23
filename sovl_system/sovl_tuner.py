@@ -1,7 +1,6 @@
 from typing import Optional, Dict, Any, List, Protocol
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass
 import traceback
 from sovl_config import ConfigManager
 from sovl_logger import Logger
@@ -10,13 +9,6 @@ from sovl_curiosity import CuriosityManager
 from sovl_trainer import SOVLTrainer
 from sovl_scaffold import CrossAttentionInjector
 from sovl_error import ErrorManager, ErrorRecord
-
-@dataclass
-class ValidationRange:
-    """Defines a validation range for a configuration parameter."""
-    min_value: Any
-    max_value: Any
-    description: str = ""
 
 class ICuriosityManager(Protocol):
     """Interface for curiosity management."""
@@ -40,266 +32,6 @@ class ICrossAttentionInjector(Protocol):
 class SOVLTuner:
     """Centralized module for tuning SOVL system parameters dynamically."""
     
-    # Configuration ranges grouped by category
-    CONFIG_RANGES: Dict[str, Dict[str, ValidationRange]] = {
-    "core_config": {
-        "valid_split_ratio": ValidationRange(0.0, 1.0, "Validation split ratio"),
-        "random_seed": ValidationRange(0, 2**32, "Random seed"),
-        "quantization": ValidationRange("fp16", "int8", "Quantization mode"),
-        "hidden_size": ValidationRange(1, None, "Model hidden size"),
-        "num_heads": ValidationRange(1, None, "Number of attention heads"),
-        "initializer_range": ValidationRange(0.0, None, "Initializer range"),
-        "use_dynamic_layers": ValidationRange(True, False, "Dynamic layer usage"),
-        "base_model_name": ValidationRange(None, None, "Base model name"),
-        "base_model_path": ValidationRange(None, None, "Base model path"),
-        "scaffold_model_name": ValidationRange(None, None, "Scaffold model name"),
-        "scaffold_model_path": ValidationRange(None, None, "Scaffold model path"),
-        "cross_attn_layers": ValidationRange([4, 6], None, "Cross attention layers"),
-        "layer_selection_mode": ValidationRange("balanced", ["balanced", "random", "fixed"], "Layer selection mode"),
-        "custom_layers": ValidationRange(None, None, "Custom layers"),
-        "gradient_checkpointing": ValidationRange(True, False, "Gradient checkpointing"),
-        "migration_mode": ValidationRange(True, False, "Migration mode"),
-        "device": ValidationRange("cuda", ["cuda", "cpu"], "Device"),
-    },
-    "model": {
-        "quantization_mode": ValidationRange("fp16", "int8", "Quantization mode"),
-    },
-    "controls_config": {
-        "scaffold_weight_cap": ValidationRange(0.0, 1.0, "Scaffold weight cap"),
-        "scaffold_unk_id": ValidationRange(0, None, "Scaffold unknown ID"),
-        "blend_strength": ValidationRange(0.0, 1.0, "Blend strength"),
-        "attention_weight": ValidationRange(0.0, 1.0, "Attention weight"),
-        "enable_scaffold": ValidationRange(True, False, "Enable scaffold"),
-        "enable_cross_attention": ValidationRange(True, False, "Enable cross attention"),
-        "enable_dynamic_cross_attention": ValidationRange(True, False, "Enable dynamic cross attention"),
-    },
-    "temperament_config": {
-        "mood_influence": ValidationRange(0.0, 1.0, "Mood influence"),
-        "history_maxlen": ValidationRange(1, None, "History max length"),
-        "temp_eager_threshold": ValidationRange(0.0, 1.0, "Eager threshold"),
-        "temp_sluggish_threshold": ValidationRange(0.0, 1.0, "Sluggish threshold"),
-        "temp_mood_influence": ValidationRange(0.0, 1.0, "Temperament mood influence"),
-        "temp_curiosity_boost": ValidationRange(0.0, 1.0, "Curiosity boost"),
-        "temp_restless_drop": ValidationRange(0.0, 1.0, "Restless drop"),
-        "temp_melancholy_noise": ValidationRange(0.0, 0.1, "Melancholy noise"),
-        "conf_feedback_strength": ValidationRange(0.0, 1.0, "Confidence feedback strength"),
-        "temp_smoothing_factor": ValidationRange(0.0, 1.0, "Temperament smoothing factor"),
-        "temperament_decay_rate": ValidationRange(0.0, 1.0, "Temperament decay rate"),
-        "temperament_history_maxlen": ValidationRange(1, None, "Temperament history max length"),
-        "confidence_history_maxlen": ValidationRange(1, None, "Confidence history max length"),
-    },
-    "training_config": {
-        "learning_rate": ValidationRange(0.0, None, "Learning rate"),
-        "train_epochs": ValidationRange(1, None, "Training epochs"),
-        "batch_size": ValidationRange(1, None, "Batch size"),
-        "max_seq_length": ValidationRange(1, None, "Maximum sequence length"),
-        "sigmoid_scale": ValidationRange(0.0, None, "Sigmoid scale"),
-        "sigmoid_shift": ValidationRange(0.0, None, "Sigmoid shift"),
-        "lifecycle_capacity_factor": ValidationRange(0.0, None, "Lifecycle capacity factor"),
-        "lifecycle_curve": ValidationRange("sigmoid_linear", "exponential", "Lifecycle curve type"),
-        "grad_accum_steps": ValidationRange(1, None, "Gradient accumulation steps"),
-        "exposure_gain_eager": ValidationRange(1, None, "Eager exposure gain"),
-        "exposure_gain_default": ValidationRange(1, None, "Default exposure gain"),
-        "max_patience": ValidationRange(0, None, "Maximum patience"),
-        "weight_decay": ValidationRange(0.0, None, "Weight decay"),
-        "max_grad_norm": ValidationRange(0.0, None, "Maximum gradient norm"),
-        "checkpoint_interval": ValidationRange(1, None, "Checkpoint interval"),
-        "cosine_min_lr": ValidationRange(0.0, None, "Cosine minimum learning rate"),
-        "warmup_ratio": ValidationRange(0.0, 1.0, "Warmup ratio"),
-        "warmup_steps": ValidationRange(0, None, "Warmup steps"),
-        "total_steps": ValidationRange(1, None, "Total steps"),
-        "validate_every_n_steps": ValidationRange(1, None, "Validate every n steps"),
-        "dropout_rate": ValidationRange(0.0, 1.0, "Dropout rate"),
-        "max_epochs": ValidationRange(1, None, "Maximum epochs"),
-        "sleep_conf_threshold": ValidationRange(0.0, 1.0, "Sleep confidence threshold"),
-        "sleep_log_min": ValidationRange(1, None, "Minimum sleep log entries"),
-        "dream_memory_weight": ValidationRange(0.0, 1.0, "Dream memory weight"),
-        "dream_noise_scale": ValidationRange(0.0, None, "Dream noise scale"),
-        "dream_prompt_weight": ValidationRange(0.0, 1.0, "Dream prompt weight"),
-        "dream_novelty_boost": ValidationRange(0.0, None, "Dream novelty boost"),
-        "dream_memory_decay": ValidationRange(0.0, 1.0, "Dream memory decay"),
-        "dream_prune_threshold": ValidationRange(0.0, 1.0, "Dream prune threshold"),
-        "dream_swing_var": ValidationRange(0.0, None, "Dream swing variance"),
-        "dream_lifecycle_delta": ValidationRange(0.0, None, "Dream lifecycle delta"),
-        "dream_temperament_on": ValidationRange(True, False, "Dream temperament enabled"),
-        "confidence_history_maxlen": ValidationRange(1, None, "Confidence history max length"),
-        "temperament_history_maxlen": ValidationRange(1, None, "Temperament history max length"),
-        "memory_threshold": ValidationRange(0.0, 1.0, "Memory threshold"),
-        "memory_decay_rate": ValidationRange(0.0, 1.0, "Memory decay rate"),
-        "scaffold_weight": ValidationRange(0.0, None, "Scaffold weight"),
-        "max_dream_memory_mb": ValidationRange(1, None, "Maximum dream memory in MB"),
-        "dream_memory_maxlen": ValidationRange(1, None, "Dream memory max length"),
-        "repetition_n": ValidationRange(2, None, "Repetition count"),
-        "enable_gestation": ValidationRange(True, False, "Enable gestation"),
-        "enable_sleep_training": ValidationRange(True, False, "Enable sleep training"),
-        "enable_lifecycle_weighting": ValidationRange(True, False, "Enable lifecycle weighting"),
-        "enable_dreaming": ValidationRange(True, False, "Enable dreaming"),
-        "enable_prompt_driven_dreams": ValidationRange(True, False, "Enable prompt-driven dreams"),
-        "use_scaffold_memory": ValidationRange(True, False, "Use scaffold memory"),
-        "use_token_map_memory": ValidationRange(True, False, "Use token map memory"),
-        "model_name": ValidationRange(None, None, "Model name"),
-        "dry_run": ValidationRange(True, False, "Dry run"),
-        "dry_run_params": ValidationRange(None, None, "Dry run parameters"),
-        "use_amp": ValidationRange(True, False, "Use AMP"),
-        "scheduler_type": ValidationRange("linear", ["linear", "cosine", "constant"], "Scheduler type"),
-        "checkpoint_path": ValidationRange(None, None, "Checkpoint path"),
-        "metrics_to_track": ValidationRange(None, None, "Metrics to track"),
-    },
-    "scaffold_config": {
-        "quantization_mode": ValidationRange("fp16", "int8", "Quantization mode"),
-    },
-    "dynamic_weighting": {
-        "min_weight": ValidationRange(0.0, None, "Minimum weight"),
-        "max_weight": ValidationRange(0.0, None, "Maximum weight"),
-        "weight_decay": ValidationRange(0.0, None, "Weight decay"),
-        "momentum": ValidationRange(0.0, 1.0, "Momentum"),
-        "history_size": ValidationRange(1, None, "History size"),
-        "enable_dynamic_scaling": ValidationRange(True, False, "Enable dynamic scaling"),
-    },
-    "preprocessing": {
-        "remove_special_chars": ValidationRange(True, False, "Remove special characters"),
-        "lowercase": ValidationRange(True, False, "Convert to lowercase"),
-        "remove_extra_spaces": ValidationRange(True, False, "Remove extra spaces"),
-        "max_length": ValidationRange(1, None, "Maximum length"),
-    },
-    "augmentation": {
-        "synonym_replacement_prob": ValidationRange(0.0, 1.0, "Synonym replacement probability"),
-        "word_dropout_prob": ValidationRange(0.0, 1.0, "Word dropout probability"),
-        "max_augmentations": ValidationRange(1, None, "Maximum augmentations"),
-    },
-    "hardware": {
-        "enable_cuda": ValidationRange(True, False, "Enable CUDA"),
-        "memory_query_interval": ValidationRange(0.0, None, "Memory query interval"),
-        "mock_memory_total_mb": ValidationRange(1.0, None, "Mock memory total in MB"),
-        "max_scaffold_memory_mb": ValidationRange(1, None, "Maximum scaffold memory in MB"),
-    },
-    "lora_config": {
-        "lora_rank": ValidationRange(1, None, "LoRA rank"),
-        "lora_alpha": ValidationRange(1, None, "LoRA alpha"),
-        "lora_dropout": ValidationRange(0.0, 1.0, "LoRA dropout"),
-    },
-    "curiosity_config": {
-        "enable_curiosity": ValidationRange(True, False, "Curiosity enabled"),
-        "attention_weight": ValidationRange(0.0, 1.0, "Attention weight"),
-        "queue_maxlen": ValidationRange(1, None, "Question queue max length"),
-        "novelty_history_maxlen": ValidationRange(1, None, "Novelty history max length"),
-        "decay_rate": ValidationRange(0.0, 1.0, "Decay rate"),
-        "question_timeout": ValidationRange(0.0, None, "Question timeout"),
-        "novelty_threshold_spontaneous": ValidationRange(0.0, 1.0, "Spontaneous novelty threshold"),
-        "novelty_threshold_response": ValidationRange(0.0, 1.0, "Response novelty threshold"),
-        "pressure_threshold": ValidationRange(0.0, 1.0, "Pressure threshold"),
-        "pressure_drop": ValidationRange(0.0, 1.0, "Pressure drop"),
-        "silence_threshold": ValidationRange(0.0, None, "Silence threshold"),
-        "question_cooldown": ValidationRange(0.0, None, "Question cooldown"),
-        "weight_ignorance": ValidationRange(0.0, 1.0, "Ignorance weight"),
-        "weight_novelty": ValidationRange(0.0, 1.0, "Novelty weight"),
-        "max_new_tokens": ValidationRange(1, None, "Maximum new tokens"),
-        "base_temperature": ValidationRange(0.0, None, "Base temperature"),
-        "temperament_influence": ValidationRange(0.0, 1.0, "Temperament influence"),
-        "top_k": ValidationRange(1, None, "Top-k sampling"),
-        "max_memory_mb": ValidationRange(1.0, None, "Maximum memory in MB"),
-        "pressure_change_cooldown": ValidationRange(0.0, None, "Pressure change cooldown"),
-        "min_pressure": ValidationRange(0.0, 1.0, "Minimum pressure"),
-        "max_pressure": ValidationRange(0.0, 1.0, "Maximum pressure"),
-        "pressure_decay_rate": ValidationRange(0.0, 1.0, "Pressure decay rate"),
-        "metrics_maxlen": ValidationRange(1, None, "Metrics max length"),
-    },
-    "cross_attn_config": {
-        "memory_weight": ValidationRange(0.0, 1.0, "Memory weight"),
-    },
-    "logging_config": {
-        "max_log_size_mb": ValidationRange(1, None, "Maximum log size in MB"),
-        "backup_count": ValidationRange(0, None, "Backup count"),
-        "log_dir": ValidationRange(None, None, "Log directory"),
-        "log_file": ValidationRange(None, None, "Log file"),
-        "log_level": ValidationRange("INFO", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], "Log level"),
-    },
-    "error_config": {
-        "error_cooldown": ValidationRange(0.0, None, "Error cooldown"),
-        "warning_threshold": ValidationRange(0.0, None, "Warning threshold"),
-        "error_threshold": ValidationRange(0.0, None, "Error threshold"),
-        "critical_threshold": ValidationRange(0.0, None, "Critical threshold"),
-    },
-    "generation_config": {
-        "temperature": ValidationRange(0.0, None, "Temperature"),
-        "top_p": ValidationRange(0.0, 1.0, "Top-p sampling"),
-    },
-    "data_config": {
-        "batch_size": ValidationRange(1, None, "Batch size"),
-        "max_retries": ValidationRange(0, None, "Maximum retries"),
-    },
-    "memory_config": {
-        "memoria": {
-            "max_memory_mb": ValidationRange(1, None, "Maximum memory in MB"),
-            "garbage_collection_threshold": ValidationRange(0.0, 1.0, "Garbage collection threshold"),
-            "memory_decay_rate": ValidationRange(0.0, 1.0, "Memory decay rate"),
-            "enable_memory_compression": ValidationRange(True, False, "Enable memory compression"),
-            "compression_ratio": ValidationRange(0.0, 1.0, "Compression ratio"),
-            "max_compressed_memory_mb": ValidationRange(1, None, "Maximum compressed memory in MB"),
-        },
-        "ram": {
-            "max_ram_mb": ValidationRange(1, None, "Maximum RAM in MB"),
-            "ram_threshold": ValidationRange(0.0, 1.0, "RAM threshold"),
-            "enable_ram_compression": ValidationRange(True, False, "Enable RAM compression"),
-            "ram_compression_ratio": ValidationRange(0.0, 1.0, "RAM compression ratio"),
-            "max_compressed_ram_mb": ValidationRange(1, None, "Maximum compressed RAM in MB"),
-        },
-        "gpu": {
-            "max_gpu_memory_mb": ValidationRange(1, None, "Maximum GPU memory in MB"),
-            "gpu_memory_threshold": ValidationRange(0.0, 1.0, "GPU memory threshold"),
-            "enable_gpu_memory_compression": ValidationRange(True, False, "Enable GPU memory compression"),
-            "gpu_compression_ratio": ValidationRange(0.0, 1.0, "GPU compression ratio"),
-            "max_compressed_gpu_memory_mb": ValidationRange(1, None, "Maximum compressed GPU memory in MB"),
-        },
-        "manager": {
-            "enable_memoria_manager": ValidationRange(True, False, "Enable memoria manager"),
-            "enable_ram_manager": ValidationRange(True, False, "Enable RAM manager"),
-            "enable_gpu_memory_manager": ValidationRange(True, False, "Enable GPU memory manager"),
-            "memory_sync_interval": ValidationRange(1, None, "Memory sync interval"),
-            "enable_memory_monitoring": ValidationRange(True, False, "Enable memory monitoring"),
-            "memory_monitoring_interval": ValidationRange(1, None, "Memory monitoring interval"),
-        }
-    },
-    "state_config": {
-        "max_history": ValidationRange(1, None, "Maximum history"),
-        "state_file": ValidationRange(None, None, "State file"),
-    },
-    "confidence_config": {
-        "history_maxlen": ValidationRange(1, None, "History max length"),
-        "weight": ValidationRange(0.0, 1.0, "Confidence weight"),
-    },
-    "dream_memory_config": {
-        "max_memories": ValidationRange(1, None, "Maximum memories"),
-        "base_weight": ValidationRange(0.0, 1.0, "Base weight"),
-        "max_weight": ValidationRange(0.0, None, "Maximum weight"),
-    },
-    "lifecycle_config": {
-        "fatigue_factor_cap": ValidationRange(0.0, 0.5, "Fatigue factor cap"),
-        "fatigue_scaling_factor": ValidationRange(1.0, 5.0, "Fatigue scaling factor"),
-    },
-    "data_provider": {
-        "provider_type": ValidationRange(None, None, "Provider type"),
-        "data_path": ValidationRange(None, None, "Data path"),
-    },
-    "gestation_weighting": {
-        "quality_metrics": {
-            "code": ValidationRange(0.1, 3.0, "Code weight"),
-            "url": ValidationRange(0.1, 3.0, "URL weight"),
-            "question": ValidationRange(0.1, 3.0, "Question weight"),
-            "exclamation": ValidationRange(0.1, 3.0, "Exclamation weight"),
-            "emoji": ValidationRange(0.1, 3.0, "Emoji weight"),
-        },
-        "content_weights": {
-            "word_count_ratio_scale": ValidationRange(0.1, 3.0, "Word count ratio scale"),
-            "optimal_word_length_range": {
-                "min": ValidationRange(0, None, "Minimum word length"),
-                "max": ValidationRange(0, None, "Maximum word length"),
-                "weight": ValidationRange(0.1, 3.0, "Word length weight"),
-            }
-        }
-    },
-}
-
     def __init__(
         self,
         config_manager: ConfigManager,
@@ -370,7 +102,7 @@ class SOVLTuner:
         )
 
     def _validate_initial_config(self) -> None:
-        """Validate all configuration sections during initialization."""
+        """Validate required configuration sections exist."""
         try:
             required_sections = [
                 "core_config", "controls_config", "training_config",
@@ -379,67 +111,6 @@ class SOVLTuner:
             for section in required_sections:
                 if not self.config_manager.has_section(section):
                     raise ConfigurationError(f"Missing required configuration section: {section}")
-
-            # Validation rules for each section
-            validation_rules = {
-                "core_config": {
-                    "hidden_size": (lambda x: x > 0, "must be positive"),
-                    "quantization": (lambda x: x in ["fp16", "fp32", "int8"], "must be one of: fp16, fp32, int8"),
-                    "use_dynamic_layers": (lambda x: isinstance(x, bool), "must be boolean"),
-                },
-                "controls_config": {
-                    "temp_eager_threshold": (lambda x: 0.7 <= x <= 0.9, "must be in [0.7, 0.9]"),
-                    "temp_sluggish_threshold": (lambda x: 0.4 <= x <= 0.6, "must be in [0.4, 0.6]"),
-                    "temp_mood_influence": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "temp_curiosity_boost": (lambda x: 0.0 <= x <= 0.5, "must be in [0, 0.5]"),
-                    "temp_restless_drop": (lambda x: 0.0 <= x <= 0.5, "must be in [0, 0.5]"),
-                    "temp_melancholy_noise": (lambda x: 0.0 <= x <= 0.05, "must be in [0, 0.05]"),
-                    "conf_feedback_strength": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "temp_smoothing_factor": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "temperament_decay_rate": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "scaffold_weight_cap": (lambda x: 0.5 <= x <= 1.0, "must be in [0.5, 1.0]"),
-                    "base_temperature": (lambda x: 0.5 <= x <= 1.5, "must be in [0.5, 1.5]"),
-                    "sleep_conf_threshold": (lambda x: 0.5 <= x <= 0.9, "must be in [0.5, 0.9]"),
-                    "sleep_time_factor": (lambda x: 0.5 <= x <= 5.0, "must be in [0.5, 5.0]"),
-                    "sleep_log_min": (lambda x: 5 <= x <= 20, "must be in [5, 20]"),
-                    "dream_swing_var": (lambda x: 0.05 <= x <= 0.2, "must be in [0.05, 0.2]"),
-                    "dream_lifecycle_delta": (lambda x: 0.05 <= x <= 0.2, "must be in [0.05, 0.2]"),
-                    "dream_temperament_on": (lambda x: isinstance(x, bool), "must be boolean"),
-                    "dream_noise_scale": (lambda x: 0.01 <= x <= 0.1, "must be in [0.01, 0.1]"),
-                    "dream_memory_weight": (lambda x: 0.0 <= x <= 0.5, "must be in [0, 0.5]"),
-                    "dream_memory_maxlen": (lambda x: 5 <= x <= 20, "must be in [5, 20]"),
-                    "dream_prompt_weight": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "dream_novelty_boost": (lambda x: 0.0 <= x <= 0.05, "must be in [0, 0.05]"),
-                    "dream_memory_decay": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "dream_prune_threshold": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                },
-                "curiosity_config": {
-                    "enable_curiosity": (lambda x: isinstance(x, bool), "must be boolean"),
-                    "novelty_threshold_spontaneous": (lambda x: 0.5 <= x <= 1.0, "must be in [0.5, 1.0]"),
-                    "novelty_threshold_response": (lambda x: 0.5 <= x <= 1.0, "must be in [0.5, 1.0]"),
-                    "pressure_threshold": (lambda x: 0.5 <= x <= 0.9, "must be in [0.5, 0.9]"),
-                    "pressure_drop": (lambda x: 0.1 <= x <= 0.5, "must be in [0.1, 0.5]"),
-                    "silence_threshold": (lambda x: 5.0 <= x <= 60.0, "must be in [5.0, 60.0]"),
-                    "question_cooldown": (lambda x: 30.0 <= x <= 120.0, "must be in [30.0, 120.0]"),
-                    "queue_maxlen": (lambda x: 1 <= x <= 50, "must be in [1, 50]"),
-                    "weight_ignorance": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "weight_novelty": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "max_new_tokens": (lambda x: 5 <= x <= 12, "must be in [5, 12]"),
-                    "base_temperature": (lambda x: 0.5 <= x <= 1.5, "must be in [0.5, 1.5]"),
-                    "temperament_influence": (lambda x: 0.1 <= x <= 0.6, "must be in [0.1, 0.6]"),
-                    "top_k": (lambda x: 10 <= x <= 50, "must be in [10, 50]"),
-                    "attention_weight": (lambda x: 0.0 <= x <= 1.0, "must be in [0, 1]"),
-                    "question_timeout": (lambda x: 60.0 <= x <= 86400.0, "must be in [60.0, 86400.0]"),
-                },
-                "training_config": {
-                    "lifecycle_capacity_factor": (lambda x: 0.001 <= x <= 0.1, "must be in [0.001, 0.1]"),
-                    "lifecycle_curve": (lambda x: x in ["sigmoid_linear", "exponential"], "must be one of: sigmoid_linear, exponential"),
-                    "lora_capacity": (lambda x: 0 <= x <= 1000, "must be in [0, 1000]"),
-                },
-            }
-
-            for section, rules in validation_rules.items():
-                self.config_manager.validate_section(section, rules)
 
         except Exception as e:
             self.error_manager.handle_error(
@@ -581,35 +252,35 @@ class SOVLTuner:
             raise
 
     def validate_param(self, param_name: str, value: Any) -> bool:
-        """Validate a parameter against its allowed range or type."""
+        """Validate a parameter by delegating to ConfigManager's validation."""
         try:
-            section, key = param_name.split(".", 1)
-            validation_rules = self.config_manager.get_validation_rules(section, key)
-            if not validation_rules:
+            # ConfigManager's validate_value method handles the validation
+            # based on the central schema defined in sovl_schema.py
+            is_valid, corrected_value = self.config_manager.validate_value(param_name, value)
+
+            if not is_valid:
                 self.logger.log_training_event(
-                    event_type="param_validation_warning",
-                    message=f"No validation rules found for {param_name}",
+                    event_type="tuner_param_validation_failed",
+                    message=f"Validation failed for parameter '{param_name}' with value '{value}'. Check ConfigManager logs for details.",
                     level="warning",
                     additional_info={"param_name": param_name, "value": value}
                 )
-                return True
-
-            validator = validation_rules.get("validator")
-            if validator and not validator(value):
-                self.error_manager.handle_error(
-                    error=ConfigurationError(f"Parameter validation failed for {key}"),
-                    error_type="parameter_validation_error",
-                    severity=1,
-                    additional_info={"param_name": param_name, "value": value, "validation_rules": validation_rules}
-                )
                 return False
             return True
+        except KeyError:
+            self.logger.log_training_event(
+                event_type="param_validation_error",
+                message=f"Parameter '{param_name}' not found in ConfigManager schema.",
+                level="error",
+                additional_info={"param_name": param_name, "value": value}
+            )
+            return False
         except Exception as e:
             self.error_manager.handle_error(
                 error=e,
                 error_type="parameter_validation_error",
                 severity=2,
-                additional_info={"param_name": param_name, "value": value}
+                additional_info={"param_name": param_name, "value": value, "context": "Error delegating validation to ConfigManager"}
             )
             return False
 
