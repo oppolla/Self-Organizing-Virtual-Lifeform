@@ -21,6 +21,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_data import DataStats
 import sys
 from collections import Counter
+import numpy as np
 
 class StateError(Exception):
     """Raised for invalid state operations or data."""
@@ -436,7 +437,164 @@ class SOVLState(StateBase):
         self._device = device
         self._initialize_memory_managers()
         self.data_stats = DataStats()
-        
+        self._initialize_state()
+
+    def _initialize_state(self) -> None:
+        """Initialize state components with safe defaults."""
+        try:
+            # Core state components
+            self._confidence_history = ConfidenceHistory(
+                maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 100)
+            )
+            self._training_state = TrainingState()
+            self._conversation_metadata = {}
+            self._cache = {}
+            
+            # Memory and tracking
+            self.seen_prompts = set()
+            self.temperament_score = 0.0
+            self.last_temperament_score = 0.0
+            self.temperament_history = deque(
+                maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5)
+            )
+            
+            # Dream memory management
+            self.dream_memory = deque(
+                maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10)
+            )
+            self.total_dream_memory_mb = 0.0
+            
+            # Conversation tracking
+            self.history = ConversationHistory(
+                maxlen=self.config_manager.get("controls_config.max_messages", 100),
+                conversation_id=str(uuid.uuid4())
+            )
+            
+            self.version = self.STATE_VERSION
+            
+            self.log_event(
+                "state_initialized",
+                "SOVL state components initialized",
+                conversation_id=self.history.conversation_id
+            )
+            
+        except Exception as e:
+            self.log_error(f"Failed to initialize state components: {str(e)}")
+            raise StateError(f"State initialization failed: {str(e)}")
+
+    def _recalculate_dream_memory_mb(self) -> None:
+        """Recalculate total dream memory size in MB."""
+        try:
+            total_bytes = sum(
+                tensor.element_size() * tensor.nelement() 
+                for tensor in self.dream_memory
+            )
+            self.total_dream_memory_mb = total_bytes / (1024 * 1024)
+        except Exception as e:
+            self.log_error(f"Failed to recalculate dream memory size: {str(e)}")
+
+    def add_dream_tensor(self, tensor: torch.Tensor) -> None:
+        """Add a tensor to dream memory with size tracking."""
+        try:
+            if len(self.dream_memory) >= self.dream_memory.maxlen:
+                removed = self.dream_memory.popleft()
+                removed_size = (removed.element_size() * removed.nelement()) / (1024 * 1024)
+                self.total_dream_memory_mb -= removed_size
+            
+            self.dream_memory.append(tensor)
+            added_size = (tensor.element_size() * tensor.nelement()) / (1024 * 1024)
+            self.total_dream_memory_mb += added_size
+            
+            # Check if pruning needed
+            max_memory = self.config_manager.get("memory_config.max_dream_memory_mb", 512.0)
+            if self.total_dream_memory_mb > max_memory:
+                self._prune_dream_memory()
+                
+        except Exception as e:
+            self.log_error(f"Failed to add dream tensor: {str(e)}")
+
+    def _prune_dream_memory(self) -> None:
+        """Prune dream memory if it exceeds memory threshold."""
+        try:
+            max_memory = self.config_manager.get("memory_config.max_dream_memory_mb", 512.0)
+            if self.total_dream_memory_mb <= max_memory:
+                return
+                
+            # Sort by timestamp if available, otherwise by index
+            sorted_memories = sorted(
+                enumerate(self.dream_memory),
+                key=lambda x: getattr(x[1], 'timestamp', x[0])
+            )
+            
+            # Keep only the most recent memories that fit within limit
+            keep_count = 0
+            total_size = 0
+            for _, tensor in sorted_memories:
+                tensor_size = (tensor.element_size() * tensor.nelement()) / (1024 * 1024)
+                if total_size + tensor_size <= max_memory:
+                    total_size += tensor_size
+                    keep_count += 1
+                else:
+                    break
+            
+            # Update dream memory
+            self.dream_memory = deque(
+                (tensor for _, tensor in sorted_memories[-keep_count:]),
+                maxlen=self.dream_memory.maxlen
+            )
+            
+            # Recalculate total size
+            self._recalculate_dream_memory_mb()
+            
+            self.log_event(
+                "dream_memory_pruned",
+                "Dream memory pruned due to size constraints",
+                before_size=self.total_dream_memory_mb,
+                after_size=total_size,
+                kept_memories=keep_count
+            )
+            
+        except Exception as e:
+            self.log_error(f"Failed to prune dream memory: {str(e)}")
+
+    def _validate_state(self) -> None:
+        """Validate state integrity."""
+        try:
+            # Check core components exist and have correct types
+            assert hasattr(self, '_confidence_history') and isinstance(self._confidence_history, ConfidenceHistory), "Invalid _confidence_history"
+            assert hasattr(self, '_training_state') and isinstance(self._training_state, TrainingState), "Invalid _training_state"
+            assert hasattr(self, 'history') and isinstance(self.history, ConversationHistory), "Invalid history"
+            assert hasattr(self, 'seen_prompts') and isinstance(self.seen_prompts, set), "seen_prompts must be a set"
+            assert hasattr(self, 'temperament_score') and isinstance(self.temperament_score, float), "temperament_score must be a float"
+            assert hasattr(self, '_cache') and isinstance(self._cache, dict), "Invalid _cache"
+
+            # Check collections
+            assert isinstance(self.temperament_history, deque), "temperament_history must be a deque"
+            assert isinstance(self.dream_memory, deque), "dream_memory must be a deque"
+            
+            # Check value ranges
+            assert 0 <= self.temperament_score <= 1, f"temperament_score {self.temperament_score} must be in [0, 1]"
+            assert all(0 <= score <= 1 for score in self.temperament_history), "temperament scores must be in [0, 1]"
+            
+            # Validate dream memory
+            calculated_dream_mb = sum(
+                (tensor.element_size() * tensor.nelement()) / (1024 * 1024)
+                for tensor in self.dream_memory
+            )
+            if not np.isclose(self.total_dream_memory_mb, calculated_dream_mb, rtol=1e-5):
+                self.log_event(
+                    "dream_memory_size_mismatch",
+                    f"Tracked {self.total_dream_memory_mb} MB != Calculated {calculated_dream_mb} MB",
+                    level="warning"
+                )
+                self.total_dream_memory_mb = calculated_dream_mb  # Correct the tracked value
+            
+            assert self.total_dream_memory_mb >= 0, "total_dream_memory_mb must be non-negative"
+            
+        except AssertionError as e:
+            self.log_error(f"State validation failed: {str(e)}")
+            raise StateError(f"State validation failed: {str(e)}")
+
     def _initialize_memory_managers(self) -> None:
         """Initialize and validate memory managers."""
         try:
@@ -452,30 +610,6 @@ class SOVLState(StateBase):
         except Exception as e:
             self.log_error(f"Failed to initialize memory managers: {str(e)}")
             raise StateError("Memory manager initialization failed")
-
-    def _initialize_state(self) -> None:
-        """Initialize state components."""
-        try:
-            self.seen_prompts = set()
-            self.temperament_score = 0.0
-            self.last_temperament_score = 0.0
-            self.temperament_history = deque(maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5))
-            self.dream_memory = deque(maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10))
-            self.total_dream_memory_mb = 0.0
-            self.history = ConversationHistory(
-                maxlen=self.config_manager.get("controls_config.max_messages", 100),
-                conversation_id=str(uuid.uuid4())
-            )
-            self.version = self.STATE_VERSION
-            self._memory_threshold = self.config_manager.get("memory_config.memory_threshold", 0.85)
-            self._memory_decay_rate = self.config_manager.get("memory_config.memory_decay_rate", 0.95)
-            self.log_event(
-                "state_initialized", "SOVL state components initialized",
-                conversation_id=self.history.conversation_id, state_hash=self.state_hash()
-            )
-        except Exception as e:
-            self.log_error(f"Failed to initialize state components: {str(e)}", error_type="state_component_initialization_error")
-            raise
 
     def update_data_stats(self, stats: Dict[str, Any]) -> None:
         """Update data statistics."""
@@ -519,51 +653,6 @@ class SOVLState(StateBase):
                 error_type="memory_update_error",
                 stack_trace=traceback.format_exc()
             )
-
-    @synchronized("lock")
-    def _prune_dream_memory(self) -> None:
-        """Prune dream memory if it exceeds memory threshold."""
-        try:
-            max_memory = self.config_manager.get("memory_config.max_dream_memory_mb", 512.0)
-            if self.total_dream_memory_mb <= max_memory:
-                return
-            sorted_memories = sorted(self.dream_memory, key=lambda x: (x["weight"], x["timestamp"]), reverse=True)
-            keep_count = int(len(sorted_memories) * self._memory_decay_rate)
-            self.dream_memory = deque(sorted_memories[:keep_count], maxlen=self.dream_memory.maxlen)
-            self._update_memory_usage()
-            self.log_event(
-                "dream_memory_pruned", "Dream memory pruned due to size constraints",
-                before_size=self.total_dream_memory_mb, after_size=self._calculate_memory_usage(),
-                kept_memories=len(self.dream_memory)
-            )
-        except Exception as e:
-            self.log_error(f"Failed to prune dream memory: {str(e)}", error_type="memory_pruning_error")
-            raise
-
-    def _get_memory_stats(self) -> Dict[str, Any]:
-        """Get current memory statistics."""
-        try:
-            ram_stats = self.ram_manager.check_memory_health()
-            gpu_stats = self.gpu_manager.get_gpu_usage()
-            
-            return {
-                "ram": ram_stats,
-                "gpu": gpu_stats
-            }
-        except Exception as e:
-            self.log_event("memory_stats_failed", f"Failed to get memory stats: {str(e)}", level="warning")
-            return {"ram": {}, "gpu": {}}
-
-    def _calculate_memory_usage(self) -> float:
-        """Calculate current memory usage percentage."""
-        try:
-            stats = self._get_memory_stats()
-            ram_usage = stats["ram"].get("usage_percent", 0.0)
-            gpu_usage = stats["gpu"].get("usage_percent", 0.0)
-            return max(ram_usage, gpu_usage)
-        except Exception as e:
-            self.log_event("memory_calculation_failed", f"Failed to calculate memory usage: {str(e)}", level="warning")
-            return 0.0
 
     def _compress_tensor(self, tensor: torch.Tensor, target_device: Optional[str] = None) -> Dict[str, Any]:
         """Compress tensor for storage.
@@ -622,90 +711,109 @@ class SOVLState(StateBase):
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
-        with self._lock:
+        with self.lock:
             try:
-                # Get base state data
                 state_data = {
                     "version": self.STATE_VERSION,
                     "confidence_history": list(self._confidence_history.get_history()),
-                    "dream_memory": [self._compress_tensor(tensor) for tensor in self._dream_memory],
-                    "temperament_history": list(self._temperament_history),
-                    "seen_prompts": list(self._seen_prompts),
+                    "dream_memory": [self._compress_tensor(tensor) for tensor in self.dream_memory],
+                    "total_dream_memory_mb": self.total_dream_memory_mb,
+                    "temperament_history": list(self.temperament_history),
+                    "temperament_score": self.temperament_score,
+                    "last_temperament_score": self.last_temperament_score,
+                    "seen_prompts": list(self.seen_prompts),
                     "training_state": self._training_state.__dict__,
+                    "conversation_history": self.history.to_dict(),
                     "conversation_metadata": self._conversation_metadata
                 }
-                
-                # Use MemoriaManager to save state
-                self.memoria_manager.save_state("state")
-                
-                # Use storage classes to save their respective data
-                self._dream_storage.load_state([self._compress_tensor(tensor) for tensor in self._dream_memory])
-                self._token_map_storage.load_state(self._token_map)
-                self._state_storage.load_state(state_data)
-                
                 return state_data
             except Exception as e:
-                self.log_error(f"Failed to convert state to dict: {str(e)}", "state_serialization_error")
-                raise
+                self.log_error(f"Failed to convert state to dict: {str(e)}")
+                raise StateError(f"State serialization failed: {str(e)}")
 
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any], config_manager: ConfigManager, logger: Logger, device: torch.device) -> 'SOVLState':
-        """Create SOVLState instance from dictionary."""
+    def _populate_from_dict(self, data: Dict[str, Any]) -> None:
+        """Populate state from dictionary data."""
         try:
-            # Create new state instance
-            state = cls(config_manager, logger, device)
+            # Load confidence history
+            self._confidence_history.clear_history()
+            self._confidence_history.add_many(data.get("confidence_history", []))
             
-            # Use MemoriaManager to load state
-            state.memoria_manager.load_state("state")
+            # Load dream memory
+            self.dream_memory.clear()
+            self.total_dream_memory_mb = 0.0
+            for compressed in data.get("dream_memory", []):
+                tensor = self._decompress_tensor(compressed)
+                self.add_dream_tensor(tensor)
             
-            # Use storage classes to load their respective data
-            dream_memory_data = state._dream_storage.get_state()
-            token_map_data = state._token_map_storage.get_state()
-            state_data = state._state_storage.get_state()
+            # Load temperament data
+            self.temperament_history.clear()
+            self.temperament_history.extend(data.get("temperament_history", []))
+            self.temperament_score = float(data.get("temperament_score", 0.0))
+            self.last_temperament_score = float(data.get("last_temperament_score", 0.0))
             
-            # Update state with loaded data
-            with state._lock:
-                state._confidence_history = ConfidenceHistory(state._config.confidence_history_maxlen)
-                state._confidence_history.add_many(data.get("confidence_history", []))
-                
-                state._dream_memory = deque(maxlen=state._config.dream_memory_maxlen)
-                for compressed in data.get("dream_memory", []):
-                    tensor = state._decompress_tensor(compressed)
-                    state._dream_memory.append(tensor)
-                
-                state._temperament_history = deque(maxlen=state._config.temperament_history_maxlen)
-                state._temperament_history.extend(data.get("temperament_history", []))
-                
-                state._seen_prompts = set(data.get("seen_prompts", []))
-                state._training_state = TrainingState(**data.get("training_state", {}))
-                state._conversation_metadata = data.get("conversation_metadata", {})
+            # Load seen prompts
+            self.seen_prompts = set(data.get("seen_prompts", []))
+            
+            # Load training state
+            training_state_data = data.get("training_state", {})
+            if isinstance(training_state_data, dict):
+                self._training_state = TrainingState(**training_state_data)
+            
+            # Load conversation history
+            history_data = data.get("conversation_history", {})
+            if isinstance(history_data, dict):
+                max_messages = self.config_manager.get("controls_config.max_messages", 100)
+                self.history = ConversationHistory.from_dict(history_data, maxlen=max_messages)
+            
+            # Load conversation metadata
+            self._conversation_metadata = data.get("conversation_metadata", {})
             
             # Validate loaded state
-            state._validate_state()
+            self._validate_state()
             
-            return state
         except Exception as e:
-            logger.log_error(f"Failed to create state from dict: {str(e)}", "state_deserialization_error")
-            raise StateError(f"Failed to create state from dict: {str(e)}")
+            self.log_error(f"Failed to populate state from dict: {str(e)}")
+            raise StateError(f"State population failed: {str(e)}")
 
-    def _validate_state(self) -> None:
-        """Validate state integrity."""
+    def save_state(self, path_prefix: str) -> None:
+        """Save state using memoria manager."""
         try:
-            assert isinstance(self._seen_prompts, set), "seen_prompts must be a set"
-            assert isinstance(self.temperament_score, float), "temperament_score must be a float"
-            assert isinstance(self._confidence_history, deque), "confidence_history must be a deque"
-            assert isinstance(self._temperament_history, deque), "temperament_history must be a deque"
-            assert isinstance(self._dream_memory, deque), "dream_memory must be a deque"
-            assert 0 <= self.temperament_score <= 1, "temperament_score must be in [0, 1]"
-            assert all(0 <= score <= 1 for score in self._confidence_history), "confidence scores must be in [0, 1]"
-            assert all(0 <= score <= 1 for score in self._temperament_history), "temperament scores must be in [0, 1]"
-            for memory in self._dream_memory:
-                assert isinstance(memory, torch.Tensor), "dream memory must be a torch.Tensor"
-                assert 0 <= memory.item() <= 1, "dream memory must be in [0, 1]"
-            assert self.total_dream_memory_mb >= 0, "total_dream_memory_mb must be non-negative"
-        except AssertionError as e:
-            self.log_error(f"State validation failed: {str(e)}", error_type="state_validation_error")
-            raise StateError(f"State validation failed: {str(e)}")
+            state_dict = self.to_dict()
+            self.memoria_manager.save_state(path_prefix, state_dict)
+            self.log_event(
+                "state_saved",
+                f"State saved via MemoriaManager to {path_prefix}",
+                state_size=len(str(state_dict))
+            )
+        except Exception as e:
+            self.log_error(f"Failed to save state: {str(e)}")
+            raise StateError(f"State save failed: {str(e)}")
+
+    def load_state(self, path_prefix: str) -> None:
+        """Load state using memoria manager."""
+        try:
+            state_dict = self.memoria_manager.load_state(path_prefix)
+            
+            if not state_dict:
+                self.log_event(
+                    "state_load_empty",
+                    f"No state data found at {path_prefix}",
+                    level="warning"
+                )
+                return
+                
+            if not isinstance(state_dict, dict):
+                raise StateError(f"Invalid state data type: {type(state_dict)}")
+                
+            self._populate_from_dict(state_dict)
+            self.log_event(
+                "state_loaded",
+                f"State loaded from {path_prefix}",
+                state_size=len(str(state_dict))
+            )
+        except Exception as e:
+            self.log_error(f"Failed to load state: {str(e)}")
+            raise StateError(f"State load failed: {str(e)}")
 
     @synchronized("lock")
     def get_cached(self, key: str, ttl: float = 60.0) -> Any:
@@ -729,13 +837,13 @@ class SOVLState(StateBase):
     def state_hash(self) -> str:
         """Generate a hash of the current state."""
         state_dict = {
-            "seen_prompts": tuple(self._seen_prompts),
+            "seen_prompts": tuple(self.seen_prompts),
             "temperament_score": self.temperament_score,
             "last_temperament_score": self.last_temperament_score,
             "confidence_history": tuple(self._confidence_history),
-            "temperament_history": tuple(self._temperament_history),
+            "temperament_history": tuple(self.temperament_history),
             "dream_memory": tuple(
-                (self._compress_tensor(tensor), tensor.item()) for tensor in self._dream_memory
+                (self._compress_tensor(tensor), tensor.item()) for tensor in self.dream_memory
             ),
             "total_dream_memory_mb": self.total_dream_memory_mb,
             "training_state": self._training_state.__dict__,
@@ -765,14 +873,6 @@ class SOVLState(StateBase):
             "max_messages": self.history.max_messages
         }
 
-    def save_state(self, path_prefix: str) -> None:
-        """Save state using memoria manager."""
-        self.memoria_manager.save_state(path_prefix)
-        
-    def load_state(self, path_prefix: str) -> None:
-        """Load state using memoria manager."""
-        self.memoria_manager.load_state(path_prefix)
-
 class StateManager:
     """Manages system state and memory operations."""
     
@@ -780,83 +880,91 @@ class StateManager:
         self,
         config_manager: ConfigManager,
         logger: Logger,
+        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
+        gpu_manager: GPUMemoryManager,
+        device: torch.device
     ):
-        """
-        Initialize state manager.
-        
-        Args:
-            config_manager: Config manager for fetching configuration values
-            logger: Logger instance for logging events
-            ram_manager: RAMManager instance for RAM memory management
-            gpu_manager: GPUMemoryManager instance for GPU memory management
-        """
+        """Initialize state manager."""
         self._config_manager = config_manager
         self._logger = logger
+        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
+        self._device = device
         
-    def save_state(self, state: Dict[str, Any]) -> None:
-        """Save system state with memory awareness."""
+    def save_state(self, state: SOVLState, path_prefix: str) -> None:
+        """Save system state using the SOVLState instance and MemoriaManager."""
         try:
-            # Check memory health before saving
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
+            state_dict = state.to_dict()
+            self.memoria_manager.save_state(path_prefix, state_dict)
             
-            # Save state using memoria manager
-            self.memoria_manager.save_state("system_state", state)
-            
-            # Log state save with memory health info
             self._logger.record_event(
-                event_type="state_saved",
-                message="System state saved",
+                event_type="state_saved_by_manager",
+                message=f"System state saved via StateManager to {path_prefix}",
                 level="info",
                 additional_info={
-                    "state_size": len(str(state)),
-                    "ram_health": ram_health,
-                    "gpu_health": gpu_health
+                    "state_size": len(str(state_dict)),
+                    "state_hash": state.state_hash()
                 }
             )
             
         except Exception as e:
             self._logger.log_error(
-                error_msg=f"Failed to save state: {str(e)}",
+                error_msg=f"StateManager failed to save state: {str(e)}",
                 error_type="state_save_error",
                 stack_trace=traceback.format_exc()
             )
+            raise StateError(f"StateManager save failed: {str(e)}")
             
-    def load_state(self) -> Dict[str, Any]:
-        """Load system state with memory awareness."""
+    def load_state(self, path_prefix: str) -> SOVLState:
+        """Load system state using MemoriaManager and create an SOVLState instance."""
         try:
-            # Check memory health before loading
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
+            state_dict = self.memoria_manager.load_state(path_prefix)
             
-            # Load state using memoria manager
-            state = self.memoria_manager.load_state("system_state")
+            if not state_dict:
+                self._logger.log_event(
+                    "state_load_empty_by_manager",
+                    f"No state data found by StateManager at {path_prefix}, creating new state.",
+                    level="warning"
+                )
+                return SOVLState(
+                    config_manager=self._config_manager,
+                    logger=self._logger,
+                    device=self._device,
+                    memoria_manager=self.memoria_manager
+                )
+                
+            if not isinstance(state_dict, dict):
+                raise StateError(f"StateManager loaded invalid state data type: {type(state_dict)}")
             
-            # Log state load with memory health info
+            loaded_state = SOVLState.from_dict(
+                data=state_dict,
+                config_manager=self._config_manager,
+                logger=self._logger,
+                device=self._device,
+                memoria_manager=self.memoria_manager
+            )
+            
             self._logger.record_event(
-                event_type="state_loaded",
-                message="System state loaded",
+                event_type="state_loaded_by_manager",
+                message=f"System state loaded via StateManager from {path_prefix}",
                 level="info",
                 additional_info={
-                    "state_size": len(str(state)) if state else 0,
-                    "ram_health": ram_health,
-                    "gpu_health": gpu_health
+                    "state_size": len(str(state_dict)),
+                    "state_hash": loaded_state.state_hash()
                 }
             )
             
-            return state
+            return loaded_state
             
         except Exception as e:
             self._logger.log_error(
-                error_msg=f"Failed to load state: {str(e)}",
+                error_msg=f"StateManager failed to load state: {str(e)}",
                 error_type="state_load_error",
                 stack_trace=traceback.format_exc()
             )
-            return {}
+            raise StateError(f"StateManager load failed: {str(e)}")
 
 class StateTracker(StateBase):
     """Tracks component states and their changes."""
