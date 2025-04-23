@@ -24,7 +24,7 @@ from sovl_interfaces import SystemInterface
 
 # Model and processing
 from sovl_manager import ModelManager
-from sovl_processor import LogitsProcessor, SOVLProcessor
+from sovl_processor import SOVLProcessor
 from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
 
