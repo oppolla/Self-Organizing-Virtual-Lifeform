@@ -20,6 +20,7 @@ from sovl_temperament import TemperamentSystem
 from sovl_experience import MemoriaManager, MetadataProcessor
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
+from torch.utils.data import DataLoader
 
 # File-level: Core training module for SOVL.
 # - Manages loading of training configuration, setting up optimizers and schedulers,
@@ -284,11 +285,15 @@ class TrainingManager:
         self.config = config
         self.model = model
         self.device = device
+        # Ensure model is on the correct device
+        self.model.to(self.device)
         self.optimizer = self._create_optimizer()
         self.scheduler = self._create_scheduler()
-        self.scaler = torch.cuda.amp.GradScaler() if self.config.memory.use_amp else None
+        # Only create scaler if AMP is enabled and CUDA is available
+        self.scaler = torch.cuda.amp.GradScaler() if self.config.memory.use_amp and torch.cuda.is_available() else None
         self.step_count = 0
         self.epoch_count = 0
+        self.optimizer_step_count = 0  # Track actual optimizer steps taken
         self.best_metrics = {}
         self.metrics_history = defaultdict(list)
         
@@ -358,11 +363,23 @@ class TrainingManager:
         # Prepare batch
         batch = self._prepare_batch(batch)
         
+        # Determine if we should use AMP
+        use_amp = self.config.memory.use_amp and self.scaler is not None
+        
         # Forward pass with mixed precision
-        with torch.cuda.amp.autocast(enabled=self.config.memory.use_amp):
-            outputs = self.model(**batch)
-            loss = outputs.loss / self.config.optimizer.grad_accum_steps
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            # Ensure labels are present if needed
+            if "labels" not in batch and "input_ids" in batch:
+                batch["labels"] = batch["input_ids"].clone()
             
+            outputs = self.model(**batch)
+            
+            # Check for loss
+            if not hasattr(outputs, 'loss') or outputs.loss is None:
+                return {"loss": 0.0}  # Return default metrics if no loss
+                
+            loss = outputs.loss / self.config.optimizer.grad_accum_steps
+        
         # Backward pass with gradient scaling
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
@@ -393,11 +410,40 @@ class TrainingManager:
             # Zero gradients
             self.optimizer.zero_grad(set_to_none=True)
             
+            # Increment optimizer step count and set data_exposure
+            self.optimizer_step_count += 1
+            metrics["data_exposure"] = float(self.optimizer_step_count)
+            
         # Update metrics
         metrics["loss"] = loss.item() * self.config.optimizer.grad_accum_steps
-        if hasattr(outputs, "logits"):
-            metrics["accuracy"] = (outputs.logits.argmax(dim=-1) == batch["labels"]).float().mean().item()
-            
+        
+        # Calculate accuracy if possible
+        if hasattr(outputs, "logits") and "labels" in batch:
+            try:
+                logits = outputs.logits.detach()
+                labels = batch["labels"].detach()
+                
+                # Ensure labels are on the same device as logits
+                if labels.device != logits.device:
+                    labels = labels.to(logits.device)
+                    
+                # Handle different tensor dimensions
+                if logits.dim() == 3 and labels.dim() == 2:  # Sequence model
+                    # Ignore padding index (-100)
+                    active_loss = labels.view(-1) != -100
+                    active_logits = logits.view(-1, logits.size(-1))[active_loss]
+                    active_labels = labels.view(-1)[active_loss]
+                    if active_labels.numel() > 0:
+                        metrics["accuracy"] = (active_logits.argmax(dim=-1) == active_labels).float().mean().item()
+                    else:
+                        metrics["accuracy"] = 0.0
+                elif logits.dim() == 2 and labels.dim() == 1:  # Classification
+                    metrics["accuracy"] = (logits.argmax(dim=-1) == labels).float().mean().item()
+                else:
+                    metrics["accuracy"] = 0.0
+            except Exception as e:
+                metrics["accuracy"] = 0.0
+                
         self.step_count += 1
         return metrics
         
@@ -412,23 +458,56 @@ class TrainingManager:
             # Prepare batch
             batch = self._prepare_batch(batch)
             
+            # Determine if we should use AMP
+            use_amp = self.config.memory.use_amp and self.scaler is not None
+            
             # Forward pass with mixed precision
-            with torch.cuda.amp.autocast(enabled=self.config.memory.use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                # Ensure labels are present if needed
+                if "labels" not in batch and "input_ids" in batch:
+                    batch["labels"] = batch["input_ids"].clone()
+                    
                 outputs = self.model(**batch)
                 
-            # Update metrics
-            metrics["loss"] += outputs.loss.item()
-            if hasattr(outputs, "logits"):
-                metrics["accuracy"] += (outputs.logits.argmax(-1) == batch["labels"]).float().mean().item()
+                # Update metrics
+                if hasattr(outputs, 'loss') and outputs.loss is not None:
+                    metrics["loss"] += outputs.loss.item()
+                    
+                if hasattr(outputs, "logits") and "labels" in batch:
+                    try:
+                        logits = outputs.logits.detach()
+                        labels = batch["labels"].detach()
+                        
+                        # Ensure labels are on the same device as logits
+                        if labels.device != logits.device:
+                            labels = labels.to(logits.device)
+                            
+                        # Handle different tensor dimensions
+                        if logits.dim() == 3 and labels.dim() == 2:  # Sequence model
+                            active_loss = labels.view(-1) != -100
+                            active_logits = logits.view(-1, logits.size(-1))[active_loss]
+                            active_labels = labels.view(-1)[active_loss]
+                            if active_labels.numel() > 0:
+                                metrics["accuracy"] += (active_logits.argmax(dim=-1) == active_labels).float().mean().item()
+                        elif logits.dim() == 2 and labels.dim() == 1:  # Classification
+                            metrics["accuracy"] += (logits.argmax(dim=-1) == labels).float().mean().item()
+                    except Exception as e:
+                        pass  # Skip accuracy calculation on error
+                        
             num_batches += 1
             
-        # Average metrics
-        metrics = {k: v / num_batches for k, v in metrics.items()}
-        
-        # Update best metrics
-        for metric_name, value in metrics.items():
-            if metric_name not in self.best_metrics or value < self.best_metrics[metric_name]:
-                self.best_metrics[metric_name] = value
+        # Average metrics only if we have batches
+        if num_batches > 0:
+            metrics = {k: v / num_batches for k, v in metrics.items()}
+        else:
+            metrics = {k: 0.0 for k in metrics.keys()}
+            
+        # Update best metrics based on primary metric (loss)
+        primary_metric = "loss"
+        if primary_metric in metrics:
+            current_best = self.best_metrics.get(primary_metric, float('inf'))
+            if metrics[primary_metric] < current_best:
+                self.best_metrics[primary_metric] = metrics[primary_metric]
                 
         # Update metrics history
         for metric_name, value in metrics.items():
@@ -447,6 +526,7 @@ class TrainingManager:
             "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
             "scaler_state": self.scaler.state_dict() if self.scaler else None,
             "step_count": self.step_count,
+            "optimizer_step_count": self.optimizer_step_count,  # Save optimizer step count
             "epoch_count": self.epoch_count,
             "best_metrics": self.best_metrics,
             "metrics_history": dict(self.metrics_history),
@@ -457,27 +537,53 @@ class TrainingManager:
         
     def load_checkpoint(self, path: str) -> None:
         """Load training checkpoint with validation."""
-        checkpoint = torch.load(path, map_location=self.device)
-        
-        # Load model state
-        self.model.load_state_dict(checkpoint["model_state"])
-        
-        # Load optimizer state
-        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-        
-        # Load scheduler state
-        if self.scheduler and checkpoint["scheduler_state"]:
-            self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+        # Check if checkpoint file exists
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Checkpoint file not found at {path}")
             
-        # Load scaler state
-        if self.scaler and checkpoint["scaler_state"]:
-            self.scaler.load_state_dict(checkpoint["scaler_state"])
+        # Determine map location based on CUDA availability
+        map_location = self.device if torch.cuda.is_available() else torch.device('cpu')
+        
+        try:
+            checkpoint = torch.load(path, map_location=map_location)
             
-        # Load training state
-        self.step_count = checkpoint["step_count"]
-        self.epoch_count = checkpoint["epoch_count"]
-        self.best_metrics = checkpoint["best_metrics"]
-        self.metrics_history = defaultdict(list, checkpoint["metrics_history"])
+            # Validate checkpoint structure
+            required_keys = ["model_state", "optimizer_state", "step_count", "epoch_count"]
+            if not all(key in checkpoint for key in required_keys):
+                raise ValueError(f"Checkpoint file at {path} is missing required keys.")
+                
+            # Load model state
+            self.model.load_state_dict(checkpoint["model_state"], strict=True)
+            
+            # Load optimizer state
+            try:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+            except Exception as e:
+                raise RuntimeError(f"Could not load optimizer state: {e}")
+                
+            # Load scheduler state if available
+            if self.scheduler and checkpoint.get("scheduler_state"):
+                try:
+                    self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+                except Exception as e:
+                    pass  # Continue without scheduler state
+                    
+            # Load scaler state if available
+            if self.scaler and checkpoint.get("scaler_state"):
+                try:
+                    self.scaler.load_state_dict(checkpoint["scaler_state"])
+                except Exception as e:
+                    pass  # Continue without scaler state
+                    
+            # Load training state
+            self.step_count = checkpoint["step_count"]
+            self.optimizer_step_count = checkpoint.get("optimizer_step_count", 0)  # Load optimizer step count
+            self.epoch_count = checkpoint["epoch_count"]
+            self.best_metrics = checkpoint.get("best_metrics", {})
+            self.metrics_history = defaultdict(list, checkpoint.get("metrics_history", {}))
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to load checkpoint from {path}: {e}")
 
 # TrainingEventHandler: processes training lifecycle events for logging and monitoring.
 class TrainingEventHandler:
@@ -540,120 +646,281 @@ class TrainingWorkflowManager:
     def __init__(self, trainer: 'SOVLTrainer', event_handler: TrainingEventHandler):
         self.trainer = trainer
         self.event_handler = event_handler
-        self.logger = trainer.logger
-        self.state = trainer.state
-        self.config = trainer.config
-
+        # Safely get attributes from trainer
+        self.logger = getattr(trainer, '_logger', None)
+        self.state = getattr(trainer, '_training_state', None)
+        self.config = getattr(trainer, 'config', None)
+        
     def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
         """Run a complete training cycle."""
+        # Added: Get device for collation
+        device = getattr(self.trainer, 'device', None)
+        if not device:
+             if self.logger: self.logger.log_error("Device not found on trainer for training cycle.", event_type="training_cycle_device_missing")
+             return 0.0, {"status": "missing_device"}
+             
         try:
-            # Get batch size from memory manager
-            batch_size = self.trainer.memory_manager.get_batch_size()
+            # Added: Manual Collation (assuming batch is List[Dict[str, Tensor]])
+            if not batch:
+                 if self.logger: self.logger.log_warning("Received empty batch for training cycle.", event_type="training_cycle_empty_batch")
+                 return 0.0, {"status": "empty_batch"}
+            try:
+                collated_batch = {
+                    key: torch.stack([item[key] for item in batch])
+                    for key in batch[0].keys() if isinstance(batch[0][key], torch.Tensor)
+                }
+                collated_batch = {k: v.to(device) for k, v in collated_batch.items()}
+            except Exception as e:
+                if self.logger: self.logger.log_error(f"Failed to collate batch for training cycle: {e}", error_type="training_cycle_collation_error")
+                return 0.0, {"status": "collation_error"}
+                
+            # Get training manager
+            training_manager = getattr(self.trainer, 'training_manager', None)
+            if not training_manager or not hasattr(training_manager, 'train_step'):
+                 if self.logger: self.logger.log_error("Training manager or train_step missing for training cycle.", event_type="training_cycle_manager_missing")
+                 return 0.0, {"status": "missing_train_step"}
+                 
+            # Run training step using the manager
+            metrics = training_manager.train_step(batch=collated_batch)
+            loss = metrics.get("loss", 0.0)
             
-            # Run training step
-            loss, metrics = self.trainer.train_step_with_scaffold(
-                batch=batch,
-                scaffold_provider=scaffold_provider,
-                dry_run=False
-            )
-            
-            # Update state and log event
-            self.event_handler.handle_training_complete(
-                epoch=self.state.epoch,
-                avg_loss=loss,
-                data_exposure=metrics.get("data_exposure", 0.0)
-            )
-            
+            # Update state and log event (Ensure state is accessible and has the key)
+            if self.state and "current_epoch" in self.state and hasattr(self.event_handler, 'handle_training_complete'):
+                 self.event_handler.handle_training_complete(
+                     epoch=self.state["current_epoch"],
+                     avg_loss=loss,
+                     data_exposure=metrics.get("data_exposure", 0.0) # Note: train_step doesn't return data_exposure currently
+                 )
+            else:
+                 if self.logger: self.logger.log_warning("Could not log training_complete event due to missing state or handler method.", event_type="training_cycle_event_warning")
+                 
             return loss, metrics
             
         except Exception as e:
-            self.logger.error(f"Error in training cycle: {str(e)}")
-            raise
-
+             if self.logger: self.logger.error(f"Error in training cycle: {str(e)}", stack_trace=traceback.format_exc())
+             # Return default/error status
+             return 0.0, {"status": "error", "error": str(e)}
+             
     def run_sleep_training(self, batch: List[Dict[str, Any]]) -> None:
         """Run sleep training cycle."""
+        # Added: Get device for collation
+        device = getattr(self.trainer, 'device', None)
+        if not device:
+             if self.logger: self.logger.log_error("Device not found on trainer for sleep training.", event_type="sleep_training_device_missing")
+             return
+             
         try:
-            # Get batch size from memory manager
-            batch_size = self.trainer.memory_manager.get_batch_size()
-            
-            # Run sleep training step
-            loss, metrics = self.trainer.train_step_with_scaffold(
-                batch=batch,
-                scaffold_provider=None,
-                dry_run=False
-            )
+             # Added: Manual Collation (assuming batch is List[Dict[str, Tensor]])
+            if not batch:
+                 if self.logger: self.logger.log_warning("Received empty batch for sleep training.", event_type="sleep_training_empty_batch")
+                 return
+            try:
+                collated_batch = {
+                    key: torch.stack([item[key] for item in batch])
+                    for key in batch[0].keys() if isinstance(batch[0][key], torch.Tensor)
+                }
+                collated_batch = {k: v.to(device) for k, v in collated_batch.items()}
+            except Exception as e:
+                if self.logger: self.logger.log_error(f"Failed to collate batch for sleep training: {e}", error_type="sleep_training_collation_error")
+                return
+                
+             # Get training manager
+            training_manager = getattr(self.trainer, 'training_manager', None)
+            if not training_manager or not hasattr(training_manager, 'train_step'):
+                 if self.logger: self.logger.log_error("Training manager or train_step missing for sleep training.", event_type="sleep_training_manager_missing")
+                 return
+                 
+            # Run training step using the manager
+            metrics = training_manager.train_step(batch=collated_batch)
             
             # Update state and log event
-            self.event_handler.handle_sleep_train_complete(
-                batch_size=batch_size,
-                data_exposure=metrics.get("data_exposure", 0.0)
-            )
-            
+            batch_size = len(batch) # Get actual batch size used
+            if hasattr(self.event_handler, 'handle_sleep_train_complete'):
+                 self.event_handler.handle_sleep_train_complete(
+                     batch_size=batch_size,
+                     data_exposure=metrics.get("data_exposure", 0.0) # Note: train_step doesn't return data_exposure
+                 )
+            else:
+                 if self.logger: self.logger.log_warning("Could not log sleep_train_complete event due to missing handler method.", event_type="sleep_training_event_warning")
+                 
         except Exception as e:
-            self.logger.error(f"Error in sleep training: {str(e)}")
-            raise
-
+             if self.logger: self.logger.error(f"Error in sleep training: {str(e)}", stack_trace=traceback.format_exc())
+             # Decide if raising is appropriate
+             
     def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
         """Run gestation cycle with metadata enrichment."""
         try:
             batch = []
             
-            # Process conversation history with metadata if available
-            if hasattr(self.trainer, 'metadata_processor'):
-                # Prepare training pairs with metadata
-                training_pairs = self.trainer.metadata_processor.prepare_training_pairs(conversation_history)
+            # Safely get required components
+            metadata_processor = getattr(self.trainer, 'metadata_processor', None)
+            tokenizer = getattr(self.trainer, 'tokenizer', None)
+            device = getattr(self.trainer, 'device', None)
+            
+            # Check for required components
+            if not metadata_processor:
+                if self.logger:
+                    self.logger.log_warning(
+                        "Metadata processor not found on trainer. Gestation cycle fallback is not implemented.",
+                        event_type="gestation_metadata_missing"
+                    )
+                return
                 
-                # Convert training pairs to batch format
-                for pair in training_pairs:
-                    # Convert to model inputs
+            if not tokenizer:
+                if self.logger:
+                    self.logger.log_warning(
+                        "Tokenizer not found on trainer. Cannot tokenize gestation batch.",
+                        event_type="gestation_tokenizer_missing"
+                    )
+                return
+                
+            if not device:
+                if self.logger:
+                    self.logger.log_warning(
+                        "Device not found on trainer. Cannot process tensors.",
+                        event_type="gestation_device_missing"
+                    )
+                return
+                
+            # Process conversation history with metadata
+            training_pairs = metadata_processor.prepare_training_pairs(conversation_history)
+            
+            # Convert training pairs to batch format
+            for pair in training_pairs:
+                try:
                     input_text = pair["input"]
                     output_text = pair["output"]
                     
-                    # Tokenize inputs/outputs (assuming tokenizer is available)
-                    tokenizer = getattr(self.trainer, 'tokenizer', None)
-                    if tokenizer:
-                        inputs = tokenizer(input_text, return_tensors="pt").to(self.trainer.device)
-                        outputs = tokenizer(output_text, return_tensors="pt").to(self.trainer.device)
+                    # Tokenize with proper settings
+                    inputs = tokenizer(
+                        input_text,
+                        return_tensors="pt",
+                        truncation=True,
+                        padding="max_length",
+                        max_length=self.config.memory.max_seq_length if self.config else 512
+                    ).to(device)
+                    
+                    outputs = tokenizer(
+                        output_text,
+                        return_tensors="pt",
+                        truncation=True,
+                        padding="max_length",
+                        max_length=self.config.memory.max_seq_length if self.config else 512
+                    ).to(device)
+                    
+                    # Create batch item
+                    batch_item = {
+                        "input_ids": inputs.input_ids[0],
+                        "attention_mask": inputs.attention_mask[0],
+                        "labels": outputs.input_ids[0],
+                        "metadata": pair.get("metadata", {})
+                    }
+                    
+                    # Replace padding token ID in labels with -100
+                    if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
+                        batch_item["labels"][batch_item["labels"] == tokenizer.pad_token_id] = -100
                         
-                        # Create batch item
-                        batch_item = {
-                            "input_ids": inputs.input_ids[0],
-                            "attention_mask": inputs.attention_mask[0],
-                            "labels": outputs.input_ids[0],
-                            "content": input_text + "\n" + output_text,  # Include raw content for metadata collection
-                            "metadata": pair["metadata"]  # Include the collected metadata
-                        }
-                        batch.append(batch_item)
-            else:
-                # Fall back to standard processing if metadata processor not available
-                # ... existing conversion from conversation history to batch ...
-                pass
-                
+                    batch.append(batch_item)
+                    
+                except Exception as e:
+                    if self.logger:
+                        self.logger.log_error(
+                            f"Failed to process training pair: {str(e)}",
+                            error_type="gestation_pair_processing_error",
+                            additional_info={"input": input_text[:100], "output": output_text[:100]}
+                        )
+                    continue
+                    
             if not batch:
-                self._logger.log_warning("No training pairs generated for gestation cycle")
+                if self.logger:
+                    self.logger.log_warning(
+                        "No training pairs generated for gestation cycle",
+                        event_type="gestation_empty_batch"
+                    )
                 return
                 
-            # Get batch size from memory manager
-            batch_size = len(batch)
-            if hasattr(self.trainer, 'memory_manager') and hasattr(self.trainer.memory_manager, 'get_batch_size'):
-                batch_size = min(batch_size, self.trainer.memory_manager.get_batch_size())
-            
-            # Run gestation step
-            loss, metrics = self.trainer.train_step_with_scaffold(
-                batch=batch[:batch_size],  # Use only batch_size items
-                scaffold_provider=None,
-                dry_run=False
-            )
-            
-            # Update state and log event
-            self.event_handler.handle_gestation_complete(
-                batch_size=batch_size,
-                avg_loss=loss
-            )
-            
+            # Get effective batch size
+            effective_batch_size = len(batch)
+            if hasattr(self.trainer, '_prepare_gestation_batch'):
+                requested_batch_size = self.config.memory.batch_size if self.config else 2
+                effective_batch_size = min(len(batch), self.trainer._prepare_gestation_batch(requested_batch_size))
+                
+            if effective_batch_size == 0:
+                if self.logger:
+                    self.logger.log_warning(
+                        "Effective batch size is 0 after adjustments, skipping gestation training step.",
+                        event_type="gestation_zero_batch"
+                    )
+                return
+                
+            # Collate batch
+            try:
+                collated_batch = {
+                    key: torch.stack([item[key] for item in batch[:effective_batch_size]])
+                    for key in batch[0].keys() if isinstance(batch[0][key], torch.Tensor)
+                }
+                # Ensure tensors are on the correct device
+                collated_batch = {k: v.to(device) for k, v in collated_batch.items()}
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(
+                        f"Failed to collate gestation batch: {str(e)}",
+                        error_type="gestation_collation_error",
+                        additional_info={"batch_keys": list(batch[0].keys()) if batch else []}
+                    )
+                return
+                
+            # Get training manager
+            training_manager = getattr(self.trainer, 'training_manager', None)
+            if not training_manager:
+                if self.logger:
+                    self.logger.log_error(
+                        "Training manager not found on trainer. Cannot run gestation training step.",
+                        event_type="gestation_manager_missing"
+                    )
+                return
+                
+            # Run training step
+            try:
+                if hasattr(training_manager, 'train_step'):
+                    metrics = training_manager.train_step(batch=collated_batch)
+                    loss = metrics.get("loss", 0.0)
+                else:
+                    if self.logger:
+                        self.logger.log_error(
+                            "train_step method not found on training manager.",
+                            event_type="gestation_train_step_missing"
+                        )
+                    return
+                    
+                # Update state and log event
+                if hasattr(self.event_handler, 'handle_gestation_complete'):
+                    self.event_handler.handle_gestation_complete(
+                        batch_size=effective_batch_size,
+                        avg_loss=loss
+                    )
+                else:
+                    if self.logger:
+                        self.logger.log_warning(
+                            "event_handler missing handle_gestation_complete method.",
+                            event_type="gestation_event_handler_missing"
+                        )
+                        
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(
+                        f"Error during gestation training step: {str(e)}",
+                        error_type="gestation_training_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    
         except Exception as e:
-            self.logger.error(f"Error in gestation cycle: {str(e)}")
-            raise
+            if self.logger:
+                self.logger.log_error(
+                    f"Error in gestation cycle: {str(e)}",
+                    error_type="gestation_cycle_error",
+                    stack_trace=traceback.format_exc()
+                )
 
     def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Run dream cycle."""
@@ -741,7 +1008,10 @@ class SOVLTrainer:
         logger: Logger,
         memoria_manager: MemoriaManager,  # For experiential aspects
         ram_manager: RAMManager,          # For RAM memory management
-        gpu_manager: GPUMemoryManager     # For GPU memory management
+        gpu_manager: GPUMemoryManager,    # For GPU memory management
+        model: torch.nn.Module,           # Added: Model instance
+        device: torch.device,             # Added: Device
+        tokenizer: Optional[Any] = None   # Added: Tokenizer
     ):
         """
         Initialize trainer.
@@ -752,12 +1022,18 @@ class SOVLTrainer:
             memoria_manager: MemoriaManager instance for experiential memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
+            model: The PyTorch model to be trained
+            device: The torch.device to run training on
+            tokenizer: The tokenizer associated with the model
         """
         self._config_manager = config_manager
         self._logger = logger
         self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
+        self.model = model
+        self.device = device
+        self.tokenizer = tokenizer
         
         # Initialize training config with logging settings
         self.config = TrainingConfig(config_manager)
@@ -782,19 +1058,22 @@ class SOVLTrainer:
         # Initialize metadata processor for processing training data
         self.metadata_processor = MetadataProcessor(config_manager, logger)
         
+        # Initialize TrainingManager
+        self.training_manager = TrainingManager(self.config, self.model, self.device)
+        
         # Initialize training state tracking
         self._training_state = {
             "current_epoch": 0,
-            "total_steps": 0,
+            "total_steps": self.training_manager.step_count,
             "last_checkpoint": None,
-            "best_metrics": {},
+            "best_metrics": self.training_manager.best_metrics.copy(),
             "error_history": deque(maxlen=self.config.logging.max_recent_errors)
         }
         
         # Log initialization
         self._logger.log_event(
             event_type="trainer_initialization",
-            message="SOVLTrainer initialized with logging configuration",
+            message="SOVLTrainer initialized with TrainingManager and logging configuration",
             level="info",
             additional_info={
                 "config": {
@@ -803,7 +1082,9 @@ class SOVLTrainer:
                     "memory": self.config.memory.__dict__,
                     "params": self.config.params.__dict__,
                     "logging": self.config.logging.__dict__
-                }
+                },
+                "device": str(self.device),
+                "model_class": self.model.__class__.__name__
             }
         )
 
@@ -863,64 +1144,95 @@ class SOVLTrainer:
                 }
             )
             
-            # Create training manager if needed
-            if not hasattr(self, 'training_manager'):
-                self._logger.log_error(
-                    error_msg="Training manager not initialized",
-                    error_type="training_manager_error",
-                    additional_info={"cycle": training_cycle}
-                )
-                return 0.0, {}
-                
             # Select examples based on current curriculum stage
             selected_examples = self._select_curriculum_examples(training_cycle, all_examples)
             
             # No examples available
             if not selected_examples:
-                self._logger.log_error(
-                    error_msg="No suitable examples found for curriculum training",
-                    error_type="training_data_error",
+                self._logger.log_warning(
+                    "No suitable examples found for curriculum training cycle",
+                    event_type="training_data_warning",
                     additional_info={"cycle": training_cycle}
                 )
-                return 0.0, {}
+                return 0.0, {"status": "no_examples"}
                 
             # Get batch size (respecting memory constraints)
             batch_size = self._prepare_gestation_batch(self.config.memory.batch_size)
             
             # Create batch from selected examples
-            batch = selected_examples[:batch_size]
+            batch_data = selected_examples[:batch_size]
             
+            if not batch_data:
+                self._logger.log_warning(
+                    "Batch data is empty after selection/sizing in curriculum training.",
+                    event_type="curriculum_empty_batch",
+                    additional_info={
+                        "cycle": training_cycle,
+                        "selected_count": len(selected_examples),
+                        "batch_size": batch_size
+                    }
+                )
+                return 0.0, {"status": "empty_batch"}
+                
+            # Collate batch
+            try:
+                collated_batch = {
+                    key: torch.stack([item[key] for item in batch_data])
+                    for key in batch_data[0].keys() if isinstance(batch_data[0][key], torch.Tensor)
+                }
+                # Ensure tensors are on the correct device
+                collated_batch = {k: v.to(self.device) for k, v in collated_batch.items()}
+            except Exception as e:
+                self._logger.log_error(
+                    f"Failed to collate curriculum batch: {str(e)}",
+                    error_type="curriculum_collation_error",
+                    additional_info={
+                        "cycle": training_cycle,
+                        "batch_keys": list(batch_data[0].keys()) if batch_data else []
+                    }
+                )
+                return 0.0, {"status": "collation_error"}
+                
             # Check memory health before training
             ram_health = self.ram_manager.check_memory_health()
             gpu_health = self.gpu_manager.check_memory_health()
             
-            if not ram_health['is_healthy'] or not gpu_health['is_healthy']:
+            if not ram_health.get('is_healthy', True) or not gpu_health.get('is_healthy', True):
                 self._logger.log_event(
                     event_type="memory_warning",
-                    message="Memory health check failed before training",
+                    message="Memory health check indicates potential issues before curriculum training",
                     level="warning",
                     additional_info={
+                        "cycle": training_cycle,
                         "ram_health": ram_health,
                         "gpu_health": gpu_health,
-                        "batch_size": batch_size
+                        "batch_size": len(batch_data)
                     }
                 )
-            
+                
             # Perform training step
             try:
-                # Use contextual batching for more advanced stages
-                if training_cycle > 300 and hasattr(self.training_manager, 'train_with_contextual_batching'):
-                    result = self.training_manager.train_with_contextual_batching(batch)
-                    loss = result.get("loss", 0.0)
-                    metrics = result.get("metrics", {})
-                else:
-                    # Standard training for early stages
-                    loss, metrics = self.training_manager.train_step_with_scaffold(
-                        batch=batch,
-                        scaffold_provider=None,
-                        dry_run=False
+                # Get training manager
+                training_manager = getattr(self, 'training_manager', None)
+                if not training_manager:
+                    self._logger.log_error(
+                        "Training manager not found on trainer.",
+                        event_type="curriculum_manager_missing"
                     )
+                    return 0.0, {"status": "missing_manager"}
                     
+                # Check for train_step method
+                if not hasattr(training_manager, 'train_step'):
+                    self._logger.log_error(
+                        "train_step method not found on training manager.",
+                        event_type="curriculum_train_step_missing"
+                    )
+                    return 0.0, {"status": "missing_train_step"}
+                    
+                # Run training step
+                metrics = training_manager.train_step(batch=collated_batch)
+                loss = metrics.get("loss", 0.0)
+                
                 # Log curriculum stage
                 stage = "beginner" if training_cycle < 100 else "intermediate" if training_cycle < 500 else "advanced"
                 self._logger.log_event(
@@ -930,43 +1242,65 @@ class SOVLTrainer:
                     additional_info={
                         "cycle": training_cycle,
                         "stage": stage,
-                        "examples_count": len(selected_examples),
-                        "batch_size": len(batch),
+                        "examples_selected": len(selected_examples),
+                        "batch_size": len(batch_data),
                         "loss": loss,
                         "metrics": metrics,
                         "ram_health": ram_health,
                         "gpu_health": gpu_health
                     }
                 )
-                    
+                
                 # Update training state
-                self._training_state["total_steps"] += 1
-                self._training_state["best_metrics"].update(metrics)
+                self._training_state["total_steps"] = self.training_manager.step_count
+                self._training_state["best_metrics"] = self.training_manager.best_metrics.copy()
                 
                 return loss, metrics
                 
-            except Exception as e:
+            except torch.cuda.OutOfMemoryError as e:
                 self._logger.log_error(
-                    error_msg=f"Failed to execute curriculum training: {str(e)}",
-                    error_type="curriculum_training_error",
+                    f"Out of memory error during curriculum training: {str(e)}",
+                    error_type="oom_error",
                     stack_trace=traceback.format_exc(),
                     additional_info={
                         "cycle": training_cycle,
-                        "batch_size": batch_size,
+                        "batch_size": len(batch_data),
                         "ram_health": ram_health,
                         "gpu_health": gpu_health
                     }
                 )
-                return 0.0, {}
+                return 0.0, {"status": "oom_error", "error": str(e)}
+                
+            except Exception as e:
+                self._logger.log_error(
+                    f"Failed during curriculum training step execution: {str(e)}",
+                    error_type="curriculum_training_error",
+                    stack_trace=traceback.format_exc(),
+                    additional_info={
+                        "cycle": training_cycle,
+                        "batch_size": len(batch_data),
+                        "ram_health": ram_health,
+                        "gpu_health": gpu_health
+                    }
+                )
+                # Record error in history
+                if isinstance(self._training_state.get("error_history"), deque):
+                    self._training_state["error_history"].append({
+                        "timestamp": time.time(),
+                        "error": str(e),
+                        "type": "curriculum_training_error",
+                        "cycle": training_cycle
+                    })
+                return 0.0, {"status": "training_step_error", "error": str(e)}
                 
         except Exception as e:
             self._logger.log_error(
-                error_msg=f"Unexpected error in curriculum training: {str(e)}",
-                error_type="curriculum_training_error",
+                f"Unexpected error in train_with_curriculum: {str(e)}",
+                error_type="curriculum_unexpected_error",
                 stack_trace=traceback.format_exc(),
                 additional_info={"cycle": training_cycle}
             )
-            return 0.0, {}
+            return 0.0, {"status": "unexpected_error", "error": str(e)}
     
     def _select_curriculum_examples(self, training_cycle: int, all_examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
