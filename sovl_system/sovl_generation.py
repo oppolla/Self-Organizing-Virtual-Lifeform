@@ -1463,7 +1463,7 @@ class GenerationManager:
             self.state.history = temp_history
             return response
         except Exception as e:
-            self._handle_error("handle_empty_prompt", e)
+            self._handle_error("handle_internal_prompt", e)
             return "..."
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
