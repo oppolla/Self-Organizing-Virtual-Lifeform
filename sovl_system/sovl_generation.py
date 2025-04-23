@@ -1055,8 +1055,11 @@ class GenerationManager:
                 max_length=self._get_config_value("controls_config.max_seq_length", 512)
             )
             
-            # Move to device and add generation parameters
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            # Validate device matches base model
+            model_device = next(self.base_model.parameters()).device
+            inputs = {k: v.to(model_device) for k, v in inputs.items()}
+            
+            # Add generation parameters
             inputs['num_return_sequences'] = num_return_sequences
             
             return inputs
@@ -1070,7 +1073,7 @@ class GenerationManager:
         try:
             config = {
                 'max_new_tokens': self._get_config_value("controls_config.max_new_tokens", 100),
-                'do_sample': True,  # Enable sampling by default
+                'do_sample': True,
                 'temperature': self._get_config_value("controls_config.base_temperature", 0.7),
                 'top_k': self._get_config_value("curiosity_config.top_k", 50),
                 'pad_token_id': self.base_tokenizer.pad_token_id,
@@ -1084,6 +1087,13 @@ class GenerationManager:
                     'temperature',
                     self.curiosity_manager.get_pressure() if self.curiosity_manager else None
                 )
+                
+            # Ensure any tensor values are on the correct device
+            model_device = next(self.base_model.parameters()).device
+            config = {
+                k: v.to(model_device) if isinstance(v, torch.Tensor) else v 
+                for k, v in config.items()
+            }
                 
             return config
             
@@ -1146,9 +1156,6 @@ class GenerationManager:
             ValueError: If the input parameters are invalid
         """
         try:
-
-            # TODO: Add multi-scaffold model selection here
-
             # Memory optimization: Check memory health before proceeding
             if not self.check_memory_health():
                 self.memory_manager.manage_memory()
@@ -1161,8 +1168,6 @@ class GenerationManager:
             if not scaffold_model:
                 raise RuntimeError("Scaffold model not properly initialized")
             
-       
-
             # Optimize generation config with smart defaults
             max_length = kwargs.get('max_length', min(512, len(prompt) + max_new_tokens))
             generation_config = {
@@ -1186,8 +1191,9 @@ class GenerationManager:
                 max_length=max_length
             )
             
-            # Move to device efficiently
-            inputs = {k: v.to(self.device, non_blocking=True) for k, v in inputs.items()}
+            # Move to device efficiently with validation
+            model_device = next(scaffold_model.parameters()).device
+            inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
             
             # Generation with memory optimization
             with torch.no_grad(), self.memory_manager.track_memory("scaffold_generation"):
