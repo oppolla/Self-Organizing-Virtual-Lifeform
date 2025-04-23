@@ -468,6 +468,67 @@ class GPUMemoryManager:
                 "gpu_total": 0.0
             }
 
+    def check_memory_health(self) -> Dict[str, float]:
+        """Check GPU memory health and return metrics."""
+        try:
+            gpu_stats = self.get_gpu_usage()
+            
+            gpu_usage = gpu_stats.get("gpu_usage", 0.0)
+            gpu_available = gpu_stats.get("gpu_available", 0.0)
+            gpu_total = gpu_stats.get("gpu_total", float(self.max_gpu_memory))
+            
+            usage_percentage = safe_divide(gpu_usage, gpu_total)
+            health_score = 1.0 - usage_percentage
+            
+            if usage_percentage > self.gpu_threshold:
+                self.error_manager.handle_error(
+                    error=MemoryError("GPU usage exceeds threshold"),
+                    error_type="gpu_threshold_error",
+                    severity=1,
+                    additional_info={
+                        "usage": gpu_usage,
+                        "total": gpu_total,
+                        "threshold": self.gpu_threshold,
+                        "usage_percentage": usage_percentage
+                    }
+                )
+            
+            self._logger.record_event(
+                event_type="gpu_health_check",
+                message="GPU health check completed",
+                level="info",
+                additional_info={
+                    "gpu_usage": gpu_usage,
+                    "gpu_available": gpu_available,
+                    "health_score": health_score,
+                    "usage_percentage": usage_percentage,
+                    "gpu_total": gpu_total
+                }
+            )
+            
+            return {
+                "gpu_usage": gpu_usage,
+                "gpu_available": gpu_available,
+                "health_score": health_score,
+                "usage_percentage": usage_percentage,
+                "gpu_total": gpu_total
+            }
+            
+        except Exception as e:
+            self.error_manager.handle_error(
+                error=e,
+                error_type="gpu_health_error",
+                severity=2,
+                additional_info={"stage": "gpu_health_check"}
+            )
+            return {
+                "gpu_usage": 0.0,
+                "gpu_available": 0.0,
+                "health_score": 0.0,
+                "usage_percentage": 0.0,
+                "gpu_total": 0.0
+            }
+
 class GenerationMemoryManager:
     """Manages memory for text generation tasks in the SOVL system."""
     
@@ -500,22 +561,30 @@ class GenerationMemoryManager:
     def manage_memory(self) -> None:
         """Manage memory usage with adaptive thresholds."""
         try:
-            # Update memory threshold adaptively
             self.memory_threshold = self._calculate_adaptive_threshold()
             
-            # Check memory health with adaptive threshold
             ram_health = self.ram_manager.check_memory_health()
             gpu_health = self.gpu_manager.check_memory_health()
             
             if ram_health["usage_percentage"] > self.memory_threshold:
-                self.ram_manager.recover_memory_threshold(self.memory_threshold)
+                self._logger.record_event(
+                    "ram_threshold_warning",
+                    f"RAM usage {ram_health['usage_percentage']:.2f}% exceeds threshold {self.memory_threshold:.2f}",
+                    level="warning"
+                )
+                gc.collect()
             
             if gpu_health["usage_percentage"] > self.memory_threshold:
-                self.gpu_manager.recover_memory_threshold(self.memory_threshold)
+                self._logger.record_event(
+                    "gpu_threshold_warning",
+                    f"GPU usage {gpu_health['usage_percentage']:.2f}% exceeds threshold {self.memory_threshold:.2f}",
+                    level="warning"
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 self._offload_old_tensors()
             
-            # Log memory health with adaptive threshold
-            self._log_memory_health()
+            self._log_memory_health(ram_health, gpu_health)
             
         except Exception as e:
             self._handle_error("memory_management", e)
@@ -555,20 +624,16 @@ class GenerationMemoryManager:
     def check_memory_health(self) -> bool:
         """Check memory health with adaptive thresholds."""
         try:
-            # Update memory threshold adaptively
             self.memory_threshold = self._calculate_adaptive_threshold()
             
-            # Check both RAM and GPU health
             ram_health = self.ram_manager.check_memory_health()
             gpu_health = self.gpu_manager.check_memory_health()
             
-            # Calculate overall health score
-            ram_score = 1.0 - (ram_health["usage_percentage"] / 100.0)
-            gpu_score = 1.0 - (gpu_health["usage_percentage"] / 100.0)
+            ram_score = 1.0 - ram_health["usage_percentage"]
+            gpu_score = 1.0 - gpu_health["usage_percentage"]
             overall_score = (ram_score + gpu_score) / 2.0
             
-            # Trigger cleanup if health score is below threshold
-            if overall_score < self.memory_threshold:
+            if overall_score < (1.0 - self.memory_threshold):
                 self.manage_memory()
                 return False
                 
@@ -645,26 +710,42 @@ class GenerationMemoryManager:
             self._handle_error("batch_size_optimization", e)
             return current_batch_size
 
-    def _log_memory_health(self) -> None:
+    def _log_memory_health(self, ram_health: Dict = None, gpu_health: Dict = None) -> None:
         """Log detailed memory health status with adaptive thresholds."""
         try:
-            # Get current memory stats
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
+            if ram_health is None:
+                ram_health = self.ram_manager.check_memory_health()
+            if gpu_health is None:
+                gpu_health = self.gpu_manager.check_memory_health()
             
-            # Calculate memory pressure
-            ram_pressure = ram_health["usage_percentage"] / 100.0
-            gpu_pressure = gpu_health["usage_percentage"] / 100.0
+            gb_divisor = 1024**3
+            ram_usage_gb = ram_health["ram_usage"] / gb_divisor
+            ram_total_gb = ram_health["ram_total"] / gb_divisor
+            gpu_usage_gb = gpu_health["gpu_usage"] / gb_divisor
+            gpu_total_gb = gpu_health["gpu_total"] / gb_divisor
             
-            # Log memory health details
-            self._logger.info(
-                f"Memory Health Status:\n"
-                f"  RAM Usage: {ram_health['used']:.2f}GB / {ram_health['total']:.2f}GB "
-                f"({ram_health['usage_percentage']:.1f}%)\n"
-                f"  GPU Usage: {gpu_health['used']:.2f}GB / {gpu_health['total']:.2f}GB "
-                f"({gpu_health['usage_percentage']:.1f}%)\n"
-                f"  Memory Pressure: RAM={ram_pressure:.2f}, GPU={gpu_pressure:.2f}\n"
-                f"  Adaptive Threshold: {self.memory_threshold:.2f}"
+            self._logger.record_event(
+                "memory_health_status",
+                (
+                    f"Memory Health Status:\n"
+                    f"  RAM Usage: {ram_usage_gb:.2f}GB / {ram_total_gb:.2f}GB "
+                    f"({ram_health['usage_percentage']:.1f}%)\n"
+                    f"  GPU Usage: {gpu_usage_gb:.2f}GB / {gpu_total_gb:.2f}GB "
+                    f"({gpu_health['usage_percentage']:.1f}%)\n"
+                    f"  Memory Pressure: RAM={ram_health['usage_percentage']:.2f}, "
+                    f"GPU={gpu_health['usage_percentage']:.2f}\n"
+                    f"  Adaptive Threshold: {self.memory_threshold:.2f}"
+                ),
+                level="info",
+                additional_info={
+                    "ram_usage_gb": ram_usage_gb,
+                    "ram_total_gb": ram_total_gb,
+                    "ram_usage_percentage": ram_health["usage_percentage"],
+                    "gpu_usage_gb": gpu_usage_gb,
+                    "gpu_total_gb": gpu_total_gb,
+                    "gpu_usage_percentage": gpu_health["usage_percentage"],
+                    "adaptive_threshold": self.memory_threshold
+                }
             )
             
         except Exception as e:
