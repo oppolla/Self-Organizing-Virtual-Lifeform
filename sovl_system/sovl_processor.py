@@ -2,17 +2,24 @@ import time
 from collections import deque
 from enum import Enum
 from threading import Lock
-from typing import Union, List, Optional, Dict, Any, Tuple, Set
+from typing import Union, List, Optional, Dict, Any, Tuple, Set, Deque
 import torch
 import traceback
+import re
 from dataclasses import dataclass
-from sovl_utils import NumericalGuard, safe_divide
+from sovl_utils import NumericalGuard, safe_divide, synchronized
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_records import ConfidenceHistory
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, LogitsProcessor
 from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
-from sovl_error import ErrorManager, ErrorRecord
+from sovl_error import ErrorManager, ErrorRecord, ConfigurationError, StateError
+
+# Placeholder for SOVLState until we can properly import it
+try:
+    from sovl_state import SOVLState
+except ImportError:
+    SOVLState = Any  # Fallback type
 
 class LogitsError(Exception):
     """Custom exception for logits processing failures."""
@@ -42,11 +49,15 @@ class ProcessorConfig:
     rep_confidence_penalty: float = 0.3
     enable_rep_detection: bool = True
 
+    def __post_init__(self):
+        """Validate after initialization."""
+        self._validate_config()
+
     @classmethod
     def from_config_manager(cls, config_manager: ConfigManager) -> 'ProcessorConfig':
         """Create a ProcessorConfig instance from ConfigManager."""
         processor_config = config_manager.get_section("processor_config", {})
-        return cls(
+        instance = cls(
             flat_distribution_confidence=processor_config.get("flat_distribution_confidence", 0.2),
             confidence_var_threshold=processor_config.get("confidence_var_threshold", 1e-5),
             confidence_smoothing_factor=processor_config.get("confidence_smoothing_factor", 0.0),
@@ -56,6 +67,7 @@ class ProcessorConfig:
             rep_confidence_penalty=processor_config.get("rep_confidence_penalty", 0.3),
             enable_rep_detection=processor_config.get("enable_rep_detection", True)
         )
+        return instance
 
     def _validate_config(self) -> None:
         """Validate all configuration parameters."""
@@ -85,36 +97,30 @@ class ProcessorConfig:
 
     def update(self, config_manager: ConfigManager, **kwargs) -> None:
         """Update configuration parameters with validation."""
+        validated_args = {}
         try:
-            # Validate new values before updating
+            # Create a temporary copy for validation
+            temp_config = ProcessorConfig(**vars(self))
+            
+            # Apply and validate each change
             for key, value in kwargs.items():
-                if key == "flat_distribution_confidence" and not (0.0 <= value <= 0.5):
-                    raise ValueError(f"flat_distribution_confidence must be in [0.0, 0.5], got {value}")
-                elif key == "confidence_var_threshold" and not (1e-6 <= value <= 1e-4):
-                    raise ValueError(f"confidence_var_threshold must be in [1e-6, 1e-4], got {value}")
-                elif key == "confidence_smoothing_factor" and not (0.0 <= value <= 1.0):
-                    raise ValueError(f"confidence_smoothing_factor must be in [0.0, 1.0], got {value}")
-                elif key == "max_confidence_history" and not (5 <= value <= 20):
-                    raise ValueError(f"max_confidence_history must be in [5, 20], got {value}")
-                elif key == "min_rep_length" and not (2 <= value <= 10):
-                    raise ValueError(f"min_rep_length must be in [2, 10], got {value}")
-                elif key == "max_rep_scan" and not (50 <= value <= 200):
-                    raise ValueError(f"max_rep_scan must be in [50, 200], got {value}")
-                elif key == "rep_confidence_penalty" and not (0.0 <= value <= 1.0):
-                    raise ValueError(f"rep_confidence_penalty must be in [0.0, 1.0], got {value}")
-                elif key == "enable_rep_detection" and not isinstance(value, bool):
-                    raise ValueError(f"enable_rep_detection must be boolean, got {type(value)}")
+                if hasattr(temp_config, key):
+                    setattr(temp_config, key, value)
+                    temp_config._validate_config()  # Validate after each change
+                    validated_args[key] = value
+                else:
+                    raise ValueError(f"Unknown configuration parameter: {key}")
 
-            # Update local config
-            for key, value in kwargs.items():
+            # If all validations passed, update local config
+            for key, value in validated_args.items():
                 setattr(self, key, value)
 
             # Update config in ConfigManager
             processor_config = config_manager.get_section("processor_config", {})
-            processor_config.update(kwargs)
+            processor_config.update(validated_args)
             config_manager.update_section("processor_config", processor_config)
 
-        except ValueError as e:
+        except (ValueError, ConfigurationError) as e:
             raise ConfigurationError(f"Invalid processor configuration update: {str(e)}")
 
 
@@ -258,36 +264,43 @@ class SOVLProcessor:
     MAX_CONFIDENCE: float = 1.0
     MIN_CONFIDENCE: float = 0.0
     PADDING_ID: int = -100
+    DEFAULT_SPECIAL_IDS: Set[int] = {-100, 0, 1, 2, 3}  # Example default special IDs
 
-    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
+    def __init__(self, config_manager: Optional[ConfigManager] = None, logger: Optional[Logger] = None, device: Optional[torch.device] = None):
         """
         Initialize the SOVL processor.
 
         Args:
-            config_manager: Configuration manager instance.
-            logger: Logger for event recording.
-            device: Device for tensor operations.
+            config_manager: Configuration manager instance. If None, will be created.
+            logger: Logger for event recording. If None, will be created.
+            device: Device for tensor operations. If None, will use default device.
         """
-        self.config_manager = config_manager
-        self.logger = logger
-        self.device = device
+        # Initialize fundamental dependencies
+        self.config_manager = config_manager or ConfigManager()
+        self.logger = logger or Logger()
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Initialize confidence calculator and history
-        self.confidence_calculator = ConfidenceCalculator(config_manager, logger)
-        self._confidence_history = ConfidenceHistory(config_manager, logger)
+        # Initialize state attributes
+        self.token_map: Dict[int, int] = {}
+        self.scaffold_unk_id: int = 0
+        self.config: Optional[ProcessorConfig] = None
+        
+        # Initialize components
+        self._lock = Lock()
+        self._validator = TensorValidator(self.device, self.logger)
+        self.confidence_calculator = ConfidenceCalculator(self.config_manager, self.logger)
+        self._confidence_history = ConfidenceHistory(self.config_manager, self.logger)
         
         # Initialize message queue for curiosity parameters
         self._curiosity_queue = deque(maxlen=100)
         self._last_curiosity_update = 0.0
         self._curiosity_update_interval = 1.0  # seconds
         
-        self._lock = Lock()
-        self._validator = TensorValidator(device, logger)
-        
         # Initialize error manager
         self._initialize_error_manager()
         
-        self._log_init()
+        # Set initial state using reset
+        self.reset()
 
     def _initialize_error_manager(self) -> None:
         """Initialize error manager with processor-specific configuration."""
@@ -397,9 +410,17 @@ class SOVLProcessor:
 
     def _log_init(self) -> None:
         """Log initialization event."""
+        if self.config is None:
+            self.logger.log_training_event(
+                event_type="processor_init_warning",
+                message="Processor logging init before full reset completion.",
+                level="warning",
+            )
+            return
+
         self.logger.log_training_event(
             event_type="processor_initialized",
-            message="Processor initialized successfully",
+            message="Processor initialized/reset successfully",
             level="info",
             additional_info={
                 "config": vars(self.config),
@@ -450,19 +471,22 @@ class SOVLProcessor:
             bool: True if validation passes, False otherwise.
         """
         try:
-            if not self._validator.validate_tensor(logits):
-                self.error_manager.record_error(
-                    "tensor_validation_error",
-                    "Logits tensor validation failed",
-                    severity=2,
-                    context={"tensor_shape": logits.shape}
-                )
-                return False
+            # Use the validator to validate logits
+            validated_logits = self._validator.validate_logits(logits)
+            # If no exception was raised, validation passed
             return True
+        except LogitsError as e:
+            self.error_manager.record_error(
+                "tensor_validation_error",
+                f"Logits tensor validation failed: {str(e)}",
+                severity=2,
+                context={"tensor_shape": getattr(logits, 'shape', 'N/A'), "error": str(e)}
+            )
+            return False
         except Exception as e:
             self.error_manager.record_error(
                 "tensor_validation_error",
-                f"Error during logits validation: {str(e)}",
+                f"Unexpected error during logits validation: {str(e)}",
                 severity=3,
                 context={"error": str(e)}
             )
@@ -535,43 +559,78 @@ class SOVLProcessor:
         """
         try:
             with self._lock:
+                # Basic type checking for loaded state
                 if "config" in state:
+                    if not isinstance(state["config"], dict):
+                        raise TypeError("Expected 'config' to be a dict in loaded state")
                     self.config.update(self.config_manager, **state["config"])
+                
                 if "token_mapping" in state:
+                    if not isinstance(state["token_mapping"], dict):
+                        raise TypeError("Expected 'token_mapping' to be a dict in loaded state")
                     self.scaffold_unk_id = state["token_mapping"].get("scaffold_unk_id", 0)
                     self.token_map = state["token_mapping"].get("token_map", {})
+                    if not isinstance(self.token_map, dict):
+                        raise TypeError("Expected 'token_map' within 'token_mapping' to be a dict")
+
                 if "confidence_history" in state:
+                    if not isinstance(state["confidence_history"], dict):
+                        raise TypeError("Expected 'confidence_history' to be a dict in loaded state")
+                    # Assuming ConfidenceHistory handles its own loading validation
                     self._confidence_history.from_dict(state["confidence_history"])
                 
                 self.logger.log_training_event(
                     event_type="state_loaded",
                     message="Processor state loaded",
                     level="info",
-                    additional_info={"state": state}
+                    additional_info={"loaded_keys": list(state.keys())} # Avoid logging potentially large state
                 )
         except Exception as e:
             self.logger.log_error(
                 error_type="state_error",
-                message="Failed to load processor state",
+                message=f"Failed to load processor state: {str(e)}",
                 error=str(e),
                 stack_trace=traceback.format_exc()
             )
-            raise
+            # Reset to a known good state on load failure
+            self.reset()
+            self.logger.log_training_event(
+                event_type="state_load_failed_reset",
+                message="Processor reset due to state load failure.",
+                level="warning"
+            )
 
     def reset(self) -> None:
-        """Reset processor state."""
+        """Reset processor state to defaults."""
         with self._lock:
-            # Reset to default configuration
+            # Reset configuration
             self.config = ProcessorConfig.from_config_manager(self.config_manager)
+
+            # Reset token mapping
             self.scaffold_unk_id = 0
             self.token_map = {}
+
+            # Reset confidence history
             self._confidence_history.clear_history()
-            
+
+            # Reset validator and confidence calculator
+            self._validator = TensorValidator(self.device, self.logger)
+            self.confidence_calculator = ConfidenceCalculator(self.config_manager, self.logger)
+
+            # Reset curiosity queue
+            self._curiosity_queue.clear()
+            self._last_curiosity_update = 0.0
+
+            # Re-initialize error manager
+            self._initialize_error_manager()
+
             self.logger.log_training_event(
                 event_type="processor_reset",
                 message="Processor state reset",
                 level="info"
             )
+            # Log init state after reset is complete
+            self._log_init()
 
     def detect_repetitions(
         self,
@@ -586,7 +645,7 @@ class SOVLProcessor:
         
         Args:
             token_ids: List of token IDs or tensor of shape (batch_size, seq_len)
-            special_ids: Set of special token IDs to ignore
+            special_ids: Set of special token IDs to ignore. If None, uses defaults.
             min_rep_length: Minimum sequence length to check
             max_scan: Maximum number of tokens to scan
             batch_size: Optional batch size for processing
@@ -594,36 +653,41 @@ class SOVLProcessor:
         Returns:
             (start_idx, end_idx) of first repetition found or None
         """
+        if not self.config.enable_rep_detection:
+            return None
+
         try:
             with self._lock:
                 # Use config values if not specified
-                if min_rep_length is None:
-                    min_rep_length = self.config.min_rep_length
-                if max_scan is None:
-                    max_scan = self.config.max_rep_scan
-                if special_ids is None:
-                    special_ids = {
-                        self.base_tokenizer.pad_token_id,
-                        self.base_tokenizer.eos_token_id,
-                        self.base_tokenizer.bos_token_id,
-                        self.base_tokenizer.unk_token_id
-                    }
-                
+                min_rep_length = min_rep_length if min_rep_length is not None else self.config.min_rep_length
+                max_scan = max_scan if max_scan is not None else self.config.max_rep_scan
+                special_ids = special_ids if special_ids is not None else self.DEFAULT_SPECIAL_IDS
+
                 # Handle empty input
-                if not token_ids:
+                if isinstance(token_ids, list) and not token_ids:
                     return None
-                
+                if isinstance(token_ids, torch.Tensor) and token_ids.numel() == 0:
+                    return None
+
                 # Convert to tensor if needed
+                input_tensor: torch.Tensor
                 if isinstance(token_ids, list):
-                    token_ids = torch.tensor(token_ids, device=self.device)
+                    input_tensor = torch.tensor(token_ids, device=self.device, dtype=torch.long)
+                elif isinstance(token_ids, torch.Tensor):
+                    input_tensor = token_ids.to(self.device)
+                else:
+                    raise TypeError(f"Unsupported type for token_ids: {type(token_ids)}")
+
+                # Ensure tensor is at least 1D
+                if input_tensor.dim() == 0:
+                    input_tensor = input_tensor.unsqueeze(0)
                 
-                # Handle batch processing
-                if token_ids.dim() == 2:
-                    if batch_size is None:
-                        batch_size = token_ids.size(0)
+                # Handle batch processing if input is 2D
+                if input_tensor.dim() == 2:
+                    effective_batch_size = batch_size if batch_size is not None else input_tensor.size(0)
                     
-                    for i in range(0, token_ids.size(0), batch_size):
-                        batch = token_ids[i:i + batch_size]
+                    for i in range(0, input_tensor.size(0), effective_batch_size):
+                        batch = input_tensor[i:i + effective_batch_size]
                         result = self._detect_repetitions_batch(
                             batch, special_ids, min_rep_length, max_scan
                         )
@@ -632,21 +696,16 @@ class SOVLProcessor:
                     return None
                 
                 # Single sequence processing
-                # Filter out special tokens and check if any non-special tokens remain
-                filtered = [i for i in token_ids.tolist() if i not in special_ids]
-                if not filtered or len(filtered) < 2 * min_rep_length:
-                    return None
-                
                 return self._detect_repetitions_single(
-                    token_ids, special_ids, min_rep_length, max_scan
+                    input_tensor, special_ids, min_rep_length, max_scan
                 )
                 
         except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Repetition detection failed: {str(e)}",
-                error_type="repetition_detection_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
+            self.error_manager.record_error(
+                "repetition_detection_error",
+                f"Repetition detection failed: {str(e)}",
+                severity=2,
+                context={
                     "token_ids_shape": str(getattr(token_ids, 'shape', 'N/A')),
                     "min_rep_length": min_rep_length,
                     "max_scan": max_scan
@@ -656,101 +715,103 @@ class SOVLProcessor:
 
     def _detect_repetitions_batch(
         self,
-        token_ids: torch.Tensor,
+        token_ids_batch: torch.Tensor,  # Should be 2D (batch, seq_len)
         special_ids: Set[int],
         min_rep_length: int,
         max_scan: int
     ) -> Optional[Tuple[int, int]]:
         """Detect repetitions in a batch of sequences."""
-        # Create mask for special tokens
-        special_mask = torch.zeros_like(token_ids, dtype=torch.bool)
-        for sid in special_ids:
-            special_mask |= (token_ids == sid)
-        
-        # Filter out special tokens
-        filtered = token_ids[~special_mask]
-        
-        # Process each sequence in the batch
-        for i in range(filtered.size(0)):
+        for i in range(token_ids_batch.size(0)):
+            sequence_tensor = token_ids_batch[i]
             result = self._detect_repetitions_single(
-                filtered[i], special_ids, min_rep_length, max_scan
+                sequence_tensor, special_ids, min_rep_length, max_scan
             )
             if result is not None:
                 return result
-        
         return None
 
     def _detect_repetitions_single(
         self,
-        token_ids: torch.Tensor,
+        token_ids: torch.Tensor,  # Should be 1D
         special_ids: Set[int],
         min_rep_length: int,
         max_scan: int
     ) -> Optional[Tuple[int, int]]:
         """Detect repetitions in a single sequence."""
-        # Convert to list for processing
-        ids = token_ids.tolist()
-        filtered = [i for i in ids if i not in special_ids]
-        scan_range = min(len(filtered), max_scan)
+        if token_ids.numel() < 2 * min_rep_length:
+            return None
+
+        # Convert to list for processing, filtering special IDs
+        ids_list = token_ids.tolist()
+        filtered_ids = [i for i in ids_list if i not in special_ids]
         
-        # Use sliding window with early stopping
-        for i in range(scan_range - 2 * min_rep_length + 1):
-            window = filtered[i:i + min_rep_length]
-            next_window = filtered[i + min_rep_length:i + 2 * min_rep_length]
-            
-            if window == next_window:
+        if len(filtered_ids) < 2 * min_rep_length:
+            return None
+
+        scan_len = min(len(filtered_ids), max_scan)
+        
+        # Check for repetitions using a sliding window approach
+        for i in range(scan_len - min_rep_length):
+            # Check if the sequence starting at i repeats immediately after
+            idx_end_first = i + min_rep_length
+            idx_end_second = idx_end_first + min_rep_length
+
+            # Ensure we don't go out of bounds
+            if idx_end_second > len(filtered_ids):
+                break
+
+            seq1 = filtered_ids[i:idx_end_first]
+            seq2 = filtered_ids[idx_end_first:idx_end_second]
+
+            if seq1 == seq2:
+                # Repetition detected
                 self.logger.record({
                     "event": EventType.WARNING.value,
-                    "message": "Repetition detected",
-                    "start_idx": i,
-                    "end_idx": i + min_rep_length,
+                    "message": "Repetition detected (based on filtered tokens)",
+                    "filtered_start_idx": i,
+                    "filtered_end_idx": idx_end_first,
                     "length": min_rep_length,
                     "timestamp": time.time()
                 })
-                return (i, i + min_rep_length)
+                return (i, idx_end_first)
         
         return None
-    
-    def _log_confidence(
-        self,
-        conf: float,
-        logits: torch.Tensor,
-        temperament: Optional[float],
-        curiosity: Optional[float]
-    ) -> None:
-        """Log confidence calculation event."""
-        self.logger.record_event(
-            event_type="confidence_calculated",
-            message="Confidence calculation completed",
-            level="info",
-            additional_info={
-                "confidence": conf,
-                "logits_shape": logits.shape,
-                "temperament_influence": temperament,
-                "curiosity_pressure": curiosity
-            }
-        )
 
-    def _log_confidence_error(
-        self,
-        error: Exception,
-        logits: Union[torch.Tensor, List[torch.Tensor]],
-        generated_ids: Optional[torch.Tensor],
-        temperament: Optional[float],
-        curiosity: Optional[float]
-    ) -> None:
-        """Log confidence calculation errors."""
-        self.logger.log_error(
-            error_msg="Confidence calculation failed",
-            error_type="confidence_error",
-            stack_trace=traceback.format_exc(),
-            additional_info={
-                "logits_shape": str(getattr(logits, 'shape', 'N/A')),
-                "generated_ids_shape": str(getattr(generated_ids, 'shape', 'N/A')),
-                "temperament_influence": temperament,
-                "curiosity_pressure": curiosity
-            }
-        )
+    def detect_repetition_in_sequence(self, token_ids: Union[List[int], torch.Tensor]) -> bool:
+        """
+        Check if a sequence contains any repetitions.
+        This is a convenience method that uses detect_repetitions.
+
+        Args:
+            token_ids: List of token IDs or tensor to check for repetitions.
+
+        Returns:
+            bool: True if repetition is detected, False otherwise.
+        """
+        if not self.config.enable_rep_detection:
+            return False
+
+        try:
+            repetition_found = self.detect_repetitions(token_ids=token_ids)
+            
+            if repetition_found is not None:
+                self.logger.record_event(
+                    "repetition_detected",
+                    "Repetition detected in sequence",
+                    level="warning",
+                    additional_info={"detected_indices": repetition_found}
+                )
+            
+            return repetition_found is not None
+
+        except Exception as e:
+            self.error_manager.record_error(
+                "repetition_detection_error",
+                f"Error detecting repetition in sequence: {str(e)}",
+                severity=3,
+                context={"error": str(e)}
+            )
+            return False
 
     def vibe_sculpt(self, logits: torch.Tensor, state: SOVLState) -> torch.Tensor:
         """
