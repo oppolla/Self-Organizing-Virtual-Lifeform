@@ -774,22 +774,16 @@ class CrossAttentionInjector:
     """Injector for adding cross-attention layers to a transformer model."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger):
-        """
-        Initialize the CrossAttentionInjector with configuration manager and logger.
-        
-        Args:
-            config_manager: Configuration manager instance
-            logger: Logger instance for structured logging
-        """
         self._config_manager = config_manager
         self._logger = logger
         self._lock = Lock()
         self._scaffold_proj: Optional[nn.Module] = None
         self._scaffold_unk_id = config_manager.get("controls_config.scaffold_unk_id", 0)
         self._error_handler = ErrorHandler(config_manager, logger)
+        self._target_layer_names: List[str] = []  # Store names of layers being injected
         
         self._validate_config()
-        
+
     def _validate_config(self) -> None:
         """Validate cross-attention configuration."""
         try:
@@ -850,15 +844,24 @@ class CrossAttentionInjector:
         """Inject cross-attention into the model."""
         try:
             with self._lock:
+                # Get both layers and their names
+                layers, layer_names = self.find_model_layers(base_model)
                 layer_indices = self.get_cross_attention_layers(base_model, layers_to_inject)
-                original_state = {name: param.clone() for name, param in base_model.named_parameters()}
+                
+                # Store the names of layers we're injecting into
+                self._target_layer_names = [layer_names[i] for i in layer_indices]
                 
                 self._logger.record_event(
                     event_type="cross_attention_injection_start",
                     message="Cross-attention injection started",
                     level="info",
-                    additional_info={"layers": layer_indices, "timestamp": time.time()}
+                    additional_info={
+                        "layer_names": self._target_layer_names,
+                        "timestamp": time.time()
+                    }
                 )
+                
+                original_state = {name: param.clone() for name, param in base_model.named_parameters()}
                 
                 for layer_idx in layer_indices:
                     self._inject_single_layer(
@@ -869,7 +872,7 @@ class CrossAttentionInjector:
                         token_map=token_map
                     )
                 
-                if not self.verify_injection(base_model, layer_indices, base_model.config):
+                if not self.verify_injection(base_model, base_model.config):
                     for name, param in base_model.named_parameters():
                         if name in original_state:
                             param.data.copy_(original_state[name])
@@ -883,6 +886,7 @@ class CrossAttentionInjector:
                 )
                 
                 return base_model
+                
         except Exception as e:
             self._logger.record_event(
                 event_type="cross_attention_injection_failed",
@@ -891,6 +895,95 @@ class CrossAttentionInjector:
                 additional_info={"timestamp": time.time(), "stack_trace": traceback.format_exc()}
             )
             raise
+
+    def _get_module_by_name(self, model: nn.Module, name: str) -> Optional[nn.Module]:
+        """Safely retrieve a module by its dotted name."""
+        try:
+            return functools.reduce(getattr, name.split('.'), model)
+        except AttributeError:
+            self._logger.record_event(
+                event_type="module_retrieval_failed",
+                message=f"Could not retrieve module with name: {name}",
+                level="warning",
+                additional_info={"module_name": name, "timestamp": time.time()}
+            )
+            return None
+
+    def verify_injection(self, model: nn.Module, base_config: Any) -> bool:
+        """Verify cross-attention layers were properly injected using exact layer names."""
+        try:
+            if not self._target_layer_names:
+                self._logger.record_event(
+                    event_type="verification_failed",
+                    message="No target layers specified for verification",
+                    level="error"
+                )
+                return False
+
+            verified_layers = set()
+            
+            for layer_name in self._target_layer_names:
+                layer = self._get_module_by_name(model, layer_name)
+                
+                if layer is None:
+                    self._logger.record_event(
+                        event_type="layer_verification_failed",
+                        message=f"Could not find layer: {layer_name}",
+                        level="warning",
+                        additional_info={"layer_name": layer_name}
+                    )
+                    return False
+                    
+                if not hasattr(layer, '_cross_attn'):
+                    self._logger.record_event(
+                        event_type="missing_cross_attention",
+                        message=f"Layer missing cross-attention: {layer_name}",
+                        level="warning",
+                        additional_info={"layer_name": layer_name}
+                    )
+                    return False
+                    
+                cross_attn = layer._cross_attn
+                
+                if (cross_attn._hidden_size != base_config.hidden_size or 
+                    cross_attn._num_heads != base_config.num_attention_heads):
+                    self._logger.record_event(
+                        event_type="dimension_mismatch",
+                        message=f"Dimension mismatch in layer: {layer_name}",
+                        level="warning",
+                        additional_info={
+                            "layer_name": layer_name,
+                            "expected_hidden_size": base_config.hidden_size,
+                            "actual_hidden_size": cross_attn._hidden_size,
+                            "expected_heads": base_config.num_attention_heads,
+                            "actual_heads": cross_attn._num_heads
+                        }
+                    )
+                    return False
+                    
+                verified_layers.add(layer_name)
+            
+            if verified_layers != set(self._target_layer_names):
+                missing = set(self._target_layer_names) - verified_layers
+                self._logger.record_event(
+                    event_type="incomplete_verification",
+                    message="Not all layers were verified",
+                    level="warning",
+                    additional_info={"missing_layers": list(missing)}
+                )
+                return False
+            
+            self._logger.record_event(
+                event_type="verification_success",
+                message="All layers verified successfully",
+                level="info",
+                additional_info={"verified_layers": list(verified_layers)}
+            )
+            return True
+            
+        except Exception as e:
+            self._error_handler.handle_cross_attention_error(e)
+            return False
 
     def _inject_single_layer(
         self,
@@ -1078,84 +1171,6 @@ class CrossAttentionInjector:
         except Exception:
             return False
 
-    def verify_injection(self, model: nn.Module, expected_layers: List[int], base_config: Any) -> bool:
-        """Verify that cross-attention layers were properly injected."""
-        try:
-            expected_layers = set(expected_layers)
-            found_layers = set()
-
-            for name, module in model.named_modules():
-                if "cross_attn" in name.lower():
-                    try:
-                        parts = name.split('.')
-                        if len(parts) >= 3 and parts[0] == 'transformer' and parts[1] == 'h':
-                            layer_idx = int(parts[2])
-                            found_layers.add(layer_idx)
-                    except (ValueError, IndexError):
-                        continue
-                    
-            self._logger.record_event(
-                event_type="cross_attention_verification",
-                message="Cross-attention verification completed",
-                level="info",
-                additional_info={
-                    "expected_layers": list(expected_layers),
-                    "found_layers": list(found_layers),
-                    "timestamp": time.time()
-                }
-            )
-
-            if not expected_layers.issubset(found_layers):
-                missing_layers = expected_layers - found_layers
-                self._logger.record_event(
-                    event_type="missing_cross_attention_layers",
-                    message=f"Missing cross-attention layers: {missing_layers}",
-                    level="warning",
-                    additional_info={
-                        "missing_layers": list(missing_layers),
-                        "timestamp": time.time()
-                    }
-                )
-                return False
-
-            for layer_idx in expected_layers:
-                try:
-                    layer = model.transformer.h[layer_idx]
-                    if not hasattr(layer, '_cross_attn'):
-                        self._logger.record_event(
-                            event_type="layer_missing_cross_attention_attribute",
-                            message=f"Layer {layer_idx} missing cross_attention attribute",
-                            level="warning",
-                            additional_info={"layer_idx": layer_idx, "timestamp": time.time()}
-                        )
-                        return False
-
-                    if layer._cross_attn._hidden_size != base_config.hidden_size:
-                        self._logger.record_event(
-                            event_type="layer_dimension_mismatch",
-                            message=f"Layer {layer_idx} dimension mismatch",
-                            level="warning",
-                            additional_info={"layer_idx": layer_idx, "timestamp": time.time()}
-                        )
-                        return False
-
-                    if layer._cross_attn._num_heads != base_config.num_attention_heads:
-                        self._logger.record_event(
-                            event_type="layer_attention_heads_mismatch",
-                            message=f"Layer {layer_idx} attention heads mismatch",
-                            level="warning",
-                            additional_info={"layer_idx": layer_idx, "timestamp": time.time()}
-                        )
-                        return False
-                except Exception as e:
-                    self._error_handler.handle_cross_attention_error(e, layer_idx)
-                    return False
-
-            return True
-        except Exception as e:
-            self._error_handler.handle_cross_attention_error(e)
-            return False
-
     def save_state(self, path: str, state_dict: dict) -> None:
         """Save cross-attention parameters."""
         try:
@@ -1244,7 +1259,7 @@ class CrossAttentionInjector:
                 token_map=token_map
             )
             
-            if not self.verify_injection(model, layers_to_inject, model.config):
+            if not self.verify_injection(model, model.config):
                 raise ValueError("Cross-attention layer verification failed")
                 
             self._logger.record_event(
