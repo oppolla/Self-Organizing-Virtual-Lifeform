@@ -168,20 +168,31 @@ class ValidationSchema:
                 "weight_ignorance": ConfigSchema(field="curiosity_config.weight_ignorance", type=float, default=0.7, range=(0.0, 1.0)),
                 "weight_novelty": ConfigSchema(field="curiosity_config.weight_novelty", type=float, default=0.3, range=(0.0, 1.0)),
                 "max_new_tokens": ConfigSchema(field="curiosity_config.max_new_tokens", type=int, default=8, range=(1, None)),
-                "base_temperature": ConfigSchema(field="curiosity_config.base_temperature", type=float, default=0.9, range=(0.0, None)),
-                "temperament_influence": ConfigSchema(field="curiosity_config.temperament_influence", type=float, default=0.3, range=(0.0, 1.0)),
+                "base_temperature": ConfigSchema(field="curiosity_config.base_temperature", type=float, default=1.1, range=(0.0, None)),
+                "temperament_influence": ConfigSchema(field="curiosity_config.temperament_influence", type=float, default=0.4, range=(0.0, 1.0)),
                 "top_k": ConfigSchema(field="curiosity_config.top_k", type=int, default=30, range=(1, None)),
-                "max_memory_mb": ConfigSchema(field="curiosity_config.max_memory_mb", type=float, default=512.0, range=(1.0, None)),
-                "pressure_change_cooldown": ConfigSchema(field="curiosity_config.pressure_change_cooldown", type=float, default=1.0, range=(0.0, None)),
+                "max_memory_mb": ConfigSchema(field="curiosity_config.max_memory_mb", type=int, default=128, range=(1, None)),
+                "pressure_change_cooldown": ConfigSchema(field="curiosity_config.pressure_change_cooldown", type=float, default=60.0, range=(0.0, None)),
                 "min_pressure": ConfigSchema(field="curiosity_config.min_pressure", type=float, default=0.1, range=(0.0, 1.0)),
                 "max_pressure": ConfigSchema(field="curiosity_config.max_pressure", type=float, default=0.9, range=(0.0, 1.0)),
                 "pressure_decay_rate": ConfigSchema(field="curiosity_config.pressure_decay_rate", type=float, default=0.95, range=(0.0, 1.0)),
-                "metrics_maxlen": ConfigSchema(field="curiosity_config.metrics_maxlen", type=int, default=1000, range=(1, None)),
+                "metrics_maxlen": ConfigSchema(field="curiosity_config.metrics_maxlen", type=int, default=20, range=(1, None)),
+                "min_temperature": ConfigSchema(field="curiosity_config.min_temperature", type=float, default=0.7, range=(0.0, None)),
+                "max_temperature": ConfigSchema(field="curiosity_config.max_temperature", type=float, default=1.7, range=(0.0, None)),
                 "lifecycle_params": ConfigSchema(field="curiosity_config.lifecycle_params", type=dict, default={
-                    "gestation": {"pressure_reduction": 0.5, "novelty_boost": 0.1},
-                    "active": {"pressure_reduction": 0.3, "novelty_boost": 0.35},
-                    "sleep": {"pressure_reduction": 0.1, "novelty_boost": 0.2}
-                }),
+                    "gestation": {
+                        "pressure_reduction": 0.3,
+                        "novelty_boost": 0.2
+                    },
+                    "active": {
+                        "pressure_reduction": 0.1,
+                        "novelty_boost": 0.1
+                    },
+                    "sleep": {
+                        "pressure_reduction": 0.5,
+                        "novelty_boost": 0.3
+                    }
+                })
             },
             "cross_attn_config": {
                 "memory_weight": ConfigSchema(field="cross_attn_config.memory_weight", type=float, default=0.2, range=(0.0, 1.0)),
