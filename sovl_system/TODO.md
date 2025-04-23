@@ -2,9 +2,8 @@
 
 ## General Taks:
 
-1. multi scaffold support improvements, multi scaffold name system: scaffold0 scaffold1. name selextor system? death of scaffold?
+1. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 3. integrate sovl_bonder
-5. add temperament_pressure. Use empty prompt, (or maybe refined one?)
 6. further develop initialization and startup feel
 
 

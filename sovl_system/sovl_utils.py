@@ -1,6 +1,4 @@
 import torch
-import math
-import time
 from typing import Union, Tuple, Optional, List, Dict, Deque, Set, Callable, Any
 from collections import deque
 import numpy as np
@@ -10,6 +8,8 @@ import traceback
 from functools import wraps
 from sovl_logger import Logger
 from sovl_config import ConfigManager
+from sovl_memory import GPUMemoryManager, RAMManager
+from sovl_state import StateTracker
 
 class NumericalGuard:
     """Context manager for numerical stability."""
@@ -26,13 +26,6 @@ def safe_divide(numerator: float, denominator: float, default: float = 0.0) -> f
 
 def safe_compare(a: float, b: float, tolerance: float = 1e-6) -> bool:
     """Safely compare two floating point numbers."""
-    try:
-        return abs(a - b) < tolerance
-    except Exception:
-        return False
-
-def float_compare(a: float, b: float, tolerance: float = 1e-6) -> bool:
-    """Compare two floating point numbers with tolerance."""
     try:
         return abs(a - b) < tolerance
     except Exception:
@@ -336,63 +329,85 @@ def validate_components(**components) -> None:
 
 def sync_component_states(state_tracker: Any, components: List[Any]) -> None:
     """
-    Synchronize state between components.
-    
+    Synchronize state tracker reference across components.
+
     Args:
         state_tracker: The main state tracker instance
         components: List of components to sync state with
-        
+
     Raises:
         ValueError: If state synchronization fails
     """
     try:
+        # Ensure state_tracker is not None before proceeding
+        if state_tracker is None:
+            raise ValueError("Provided state_tracker is None")
+            
         for component in components:
-            if hasattr(component, 'state_tracker'):
+            # Check if component is not None and has the attribute
+            if component is not None and hasattr(component, 'state_tracker'):
                 component.state_tracker = state_tracker
+            # Optional: Log or raise if a component doesn't have the attribute?
+            # else:
+            #     # Handle components without state_tracker attribute if necessary
+            #     pass 
+                
     except Exception as e:
+        # Consider logging the error here using component's logger if available
+        # Or re-raise a more specific error
         raise ValueError(f"Failed to sync component states: {str(e)}")
 
 def validate_component_states(state_tracker: Any, components: List[Any]) -> None:
     """
-    Validate that all components have consistent state.
-    
+    Validate that all relevant components reference the same state tracker instance.
+
     Args:
         state_tracker: The main state tracker instance
         components: List of components to validate
-        
+
     Raises:
-        ValueError: If state validation fails
+        ValueError: If state validation fails (components reference different trackers or None)
     """
     try:
-        if not state_tracker.state:
-            raise ValueError("State tracker state not initialized")
-        
-        state_hash = state_tracker.state.state_hash
+        if state_tracker is None:
+            raise ValueError("Cannot validate against a None state_tracker")
+            
+        mismatched_components = []
         for component in components:
-            if hasattr(component, 'state_tracker') and component.state_tracker.state.state_hash != state_hash:
-                raise ValueError(f"State hash mismatch in {component.__class__.__name__}")
+            # Check components that are expected to have a state_tracker
+            if component is not None and hasattr(component, 'state_tracker'):
+                if getattr(component, 'state_tracker') is not state_tracker:
+                    mismatched_components.append(component.__class__.__name__)
+
+        if mismatched_components:
+            raise ValueError(f"State tracker mismatch detected in components: {', '.join(mismatched_components)}")
+
     except Exception as e:
+        # Log error if needed
         raise ValueError(f"Failed to validate component states: {str(e)}")
 
 def initialize_component_state(state_tracker: Any, components: List[Any]) -> None:
     """
-    Initialize state for all components.
-    
+    Syncs the state tracker reference across components and validates the sync.
+    Note: Assumes the core state object (e.g., SOVLState) is initialized elsewhere.
+
     Args:
         state_tracker: The main state tracker instance
-        components: List of components to initialize
-        
+        components: List of components to initialize and validate
+
     Raises:
-        ValueError: If state initialization fails
+        ValueError: If state synchronization or validation fails
     """
     try:
-        if not state_tracker.state:
-            state_tracker.initialize_state()
-        
+        # Sync the state_tracker reference to all components first
         sync_component_states(state_tracker, components)
+        
+        # Then validate that the sync was successful
         validate_component_states(state_tracker, components)
+        
     except Exception as e:
-        raise ValueError(f"Failed to initialize component state: {str(e)}")
+        # Log error if needed, maybe include component names
+        raise ValueError(f"Failed to initialize component state references: {str(e)}")
 
 def validate_layer_indices(
     layers: Union[List[int], int],
