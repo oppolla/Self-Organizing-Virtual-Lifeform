@@ -69,6 +69,11 @@ class ValidationSchema:
                 "temperament_decay_rate": ConfigSchema(field="temperament_config.temperament_decay_rate", type=float, default=0.9, range=(0.0, 1.0)),
                 "temperament_history_maxlen": ConfigSchema(field="temperament_config.temperament_history_maxlen", type=int, default=5, range=(1, None)),
                 "confidence_history_maxlen": ConfigSchema(field="temperament_config.confidence_history_maxlen", type=int, default=5, range=(1, None)),
+                "temperament_pressure_threshold": ConfigSchema(field="temperament_config.temperament_pressure_threshold", type=float, default=0.5, range=(0.0, 1.0)),
+                "temperament_max_pressure": ConfigSchema(field="temperament_config.temperament_max_pressure", type=float, default=1.0, range=(0.0, 1.0)),
+                "temperament_min_pressure": ConfigSchema(field="temperament_config.temperament_min_pressure", type=float, default=0.0, range=(0.0, 1.0)),
+                "temperament_confidence_adjustment": ConfigSchema(field="temperament_config.temperament_confidence_adjustment", type=float, default=0.5, range=(0.0, 1.0)),
+                "temperament_pressure_drop": ConfigSchema(field="temperament_config.temperament_pressure_drop", type=float, default=0.2, range=(0.0, 1.0)),
                 "lifecycle_params": ConfigSchema(field="temperament_config.lifecycle_params", type=dict, default={
                     "gestation": {"bias": 0.1, "decay": 1.0},
                     "active": {"bias": 0.0, "decay": 0.9},

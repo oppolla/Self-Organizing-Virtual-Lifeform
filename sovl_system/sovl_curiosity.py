@@ -246,36 +246,94 @@ class Curiosity:
 class CuriosityPressure:
     """Manages curiosity pressure accumulation and eruption."""
     
-    def __init__(self, base_pressure: float, max_pressure: float, min_pressure: float, decay_rate: float, confidence_adjustment: float):
-        # Validate input parameters
-        if not all(isinstance(x, (int, float)) for x in [base_pressure, max_pressure, min_pressure, decay_rate, confidence_adjustment]):
-            raise ValueError("All pressure parameters must be numeric")
-        if not (0 <= min_pressure <= base_pressure <= max_pressure <= 1.0):
-            raise ValueError("Invalid pressure range")
-        if not (0 <= decay_rate <= 1.0) or not (0 <= confidence_adjustment <= 1.0):
-            raise ValueError("Decay rate and confidence adjustment must be between 0 and 1")
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger
+    ):
+        """
+        Initialize curiosity pressure system with configuration-driven parameters.
+        
+        Args:
+            config_manager: Configuration manager instance
+            logger: Logger instance for event tracking
+        """
+        self.config_manager = config_manager
+        self.logger = logger
+        
+        # Fetch and validate configuration parameters
+        try:
+            config = config_manager.get_section("curiosity_config", {})
+            self.base_pressure = self._validate_config_value(
+                "base_pressure", config.get("base_pressure", 0.5), (0.0, 1.0)
+            )
+            self.max_pressure = self._validate_config_value(
+                "max_pressure", config.get("max_pressure", 1.0), (0.0, 1.0)
+            )
+            self.min_pressure = self._validate_config_value(
+                "min_pressure", config.get("min_pressure", 0.0), (0.0, 1.0)
+            )
+            self.decay_rate = self._validate_config_value(
+                "decay_rate", config.get("decay_rate", 0.1), (0.0, 1.0)
+            )
+            self.confidence_adjustment = self._validate_config_value(
+                "confidence_adjustment", config.get("confidence_adjustment", 0.5), (0.0, 1.0)
+            )
             
-        self.base_pressure = base_pressure
-        self.max_pressure = max_pressure
-        self.min_pressure = min_pressure
-        self.decay_rate = decay_rate
-        self.confidence_adjustment = confidence_adjustment
-        self.current_pressure = base_pressure
+            if not (self.min_pressure <= self.base_pressure <= self.max_pressure):
+                raise ValueError("Invalid pressure range: min <= base <= max required")
+                
+        except Exception as e:
+            self._log_error(
+                f"Failed to initialize curiosity pressure config: {str(e)}",
+                error_type="curiosity_pressure_config_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+            
+        self.current_pressure = self.base_pressure
         self.last_update = time.time()
         
         # Log initialization
         self._log_event(
-            "pressure_system_initialized",
+            "curiosity_pressure_initialized",
             "Curiosity pressure system initialized",
             level="info",
             additional_info={
-                "base_pressure": base_pressure,
-                "max_pressure": max_pressure,
-                "min_pressure": min_pressure,
-                "decay_rate": decay_rate,
-                "confidence_adjustment": confidence_adjustment
+                "base_pressure": self.base_pressure,
+                "max_pressure": self.max_pressure,
+                "min_pressure": self.min_pressure,
+                "decay_rate": self.decay_rate,
+                "confidence_adjustment": self.confidence_adjustment
             }
         )
+
+    def _validate_config_value(self, key: str, value: Any, valid_range: tuple) -> float:
+        """
+        Validate a configuration value against a range.
+        
+        Args:
+            key: Configuration key
+            value: Value to validate
+            valid_range: Tuple of (min, max) allowed values
+            
+        Returns:
+            Validated float value
+        """
+        try:
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"Config {key} must be a number")
+            min_val, max_val = valid_range
+            if not (min_val <= value <= max_val):
+                raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
+            return float(value)
+        except Exception as e:
+            self._log_error(
+                f"Config validation failed for {key}: {str(e)}",
+                error_type="curiosity_config_validation_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
 
     def update(self, confidence: float) -> float:
         """Update pressure based on confidence with time-based decay."""
@@ -301,7 +359,7 @@ class CuriosityPressure:
             
             # Log pressure update
             self._log_event(
-                "pressure_updated",
+                "curiosity_pressure_updated",
                 "Curiosity pressure updated",
                 level="debug",
                 additional_info={
@@ -318,7 +376,7 @@ class CuriosityPressure:
         except Exception as e:
             self._log_error(
                 f"Failed to update pressure: {str(e)}",
-                error_type="pressure_update_error",
+                error_type="curiosity_pressure_update_error",
                 stack_trace=traceback.format_exc()
             )
             return self.current_pressure
@@ -326,9 +384,12 @@ class CuriosityPressure:
     def should_erupt(self, threshold: float) -> bool:
         """Check if pressure exceeds threshold."""
         try:
+            if not isinstance(threshold, (int, float)) or not (0 <= threshold <= 1.0):
+                raise ValueError("Threshold must be a number between 0 and 1")
+                
             result = self.current_pressure >= threshold
             self._log_event(
-                "pressure_threshold_check",
+                "curiosity_pressure_threshold_check",
                 "Checked if pressure exceeds threshold",
                 level="debug",
                 additional_info={
@@ -341,7 +402,7 @@ class CuriosityPressure:
         except Exception as e:
             self._log_error(
                 f"Failed to check pressure threshold: {str(e)}",
-                error_type="pressure_check_error",
+                error_type="curiosity_pressure_check_error",
                 stack_trace=traceback.format_exc()
             )
             return False
@@ -357,7 +418,7 @@ class CuriosityPressure:
             self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
             
             self._log_event(
-                "pressure_dropped",
+                "curiosity_pressure_dropped",
                 "Reduced curiosity pressure",
                 level="debug",
                 additional_info={
@@ -369,29 +430,27 @@ class CuriosityPressure:
         except Exception as e:
             self._log_error(
                 f"Failed to drop pressure: {str(e)}",
-                error_type="pressure_drop_error",
+                error_type="curiosity_pressure_drop_error",
                 stack_trace=traceback.format_exc()
             )
 
     def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log event with standardized format."""
-        if hasattr(self, 'logger') and self.logger:
-            self.logger.record_event(
-                event_type=event_type,
-                message=message,
-                level=level,
-                additional_info=kwargs
-            )
+        self.logger.record_event(
+            event_type=event_type,
+            message=message,
+            level=level,
+            additional_info=kwargs
+        )
 
-    def _log_error(self, message: str, error_type: str = "pressure_error", **kwargs) -> None:
+    def _log_error(self, message: str, error_type: str = "curiosity_pressure_error", **kwargs) -> None:
         """Log error with standardized format."""
-        if hasattr(self, 'logger') and self.logger:
-            self.logger.log_error(
-                error_msg=message,
-                error_type=error_type,
-                stack_trace=traceback.format_exc(),
-                **kwargs
-            )
+        self.logger.log_error(
+            error_msg=message,
+            error_type=error_type,
+            stack_trace=kwargs.get("stack_trace", traceback.format_exc()),
+            additional_info=kwargs.get("additional_info", {})
+        )
 
 class CuriosityCallbacks:
     """Handles curiosity-related callbacks."""
@@ -590,11 +649,8 @@ class CuriosityManager:
             
             # Initialize pressure system with validated values
             self.pressure = CuriosityPressure(
-                base_pressure=self.pressure_threshold,
-                max_pressure=self.max_pressure,
-                min_pressure=self.min_pressure,
-                decay_rate=self.decay_rate,
-                confidence_adjustment=self.confidence_adjustment
+                config_manager=self.config_manager,
+                logger=self.logger
             )
             
             # Log successful initialization

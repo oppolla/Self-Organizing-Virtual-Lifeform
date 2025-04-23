@@ -1032,16 +1032,20 @@ class GenerationManager:
         return decorator
 
     @state_managed_operation("generate_text")
-    def generate_text(self, prompt: str, num_return_sequences: int = 1) -> List[str]:
+    def generate_text(self, prompt: str, num_return_sequences: int = 1, **kwargs) -> List[str]:
         """Generate text with state-driven error handling and recovery."""
-        # Validate input parameters
-        self._validate_generation_params(prompt, num_return_sequences=num_return_sequences)
-        
-        if not prompt or not isinstance(prompt, str):
-            raise ValueError("Invalid prompt provided")
-        
-        batch = self._prepare_generation_batch(prompt, num_return_sequences)
-        return self._generate_with_state_context(batch)
+        try:
+            # Original generation logic (without temperament check)
+            self._validate_generation_params(prompt, num_return_sequences=num_return_sequences)
+            
+            if not prompt or not isinstance(prompt, str):
+                raise ValueError("Invalid prompt provided")
+            
+            batch = self._prepare_generation_batch(prompt, num_return_sequences)
+            return self._generate_with_state_context(batch)
+        except Exception as e:
+            self._handle_error("generate_text", e)
+            return ["An error occurred during text generation"]
 
     def _prepare_generation_batch(self, prompt: str, num_return_sequences: int = 1) -> Dict[str, Any]:
         """Prepare input batch for text generation."""
@@ -1432,6 +1436,35 @@ class GenerationManager:
             # Set safe defaults if error occurs
             self.state.temperament_score = 0.5
             self.state.confidence = 0.5
+
+    def _handle_internal_prompt(self, prompt: str = " ") -> str:
+        """Generate a response based on a minimal or provided prompt.
+        
+        Defaults to a minimal prompt (" ") when triggered by temperament, 
+        but can accept a specific prompt for other use cases.
+        """
+        try:
+            # Save current history temporarily
+            temp_history = self.state.history
+            self.state.history = ConversationHistory(
+                maxlen=self.controls_config.get("conversation_history_maxlen", 10)
+            )
+            
+            # Generate with higher temperature for more creative/expressive output
+            response = self.generate_text(
+                prompt,  # Use the passed or default prompt
+                num_return_sequences=1,
+                temperature=self.controls_config.get("base_temperature", 0.7) + 0.3,
+                top_k=self.controls_config.get("top_k", 50),
+                do_sample=True
+            )[0]
+            
+            # Restore history
+            self.state.history = temp_history
+            return response
+        except Exception as e:
+            self._handle_error("handle_empty_prompt", e)
+            return "..."
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for generated tokens."""
