@@ -246,31 +246,152 @@ class Curiosity:
 class CuriosityPressure:
     """Manages curiosity pressure accumulation and eruption."""
     
-    def __init__(self, base_pressure: float, max_pressure: float, min_pressure: float, decay_rate: float):
+    def __init__(self, base_pressure: float, max_pressure: float, min_pressure: float, decay_rate: float, confidence_adjustment: float):
+        # Validate input parameters
+        if not all(isinstance(x, (int, float)) for x in [base_pressure, max_pressure, min_pressure, decay_rate, confidence_adjustment]):
+            raise ValueError("All pressure parameters must be numeric")
+        if not (0 <= min_pressure <= base_pressure <= max_pressure <= 1.0):
+            raise ValueError("Invalid pressure range")
+        if not (0 <= decay_rate <= 1.0) or not (0 <= confidence_adjustment <= 1.0):
+            raise ValueError("Decay rate and confidence adjustment must be between 0 and 1")
+            
         self.base_pressure = base_pressure
         self.max_pressure = max_pressure
         self.min_pressure = min_pressure
         self.decay_rate = decay_rate
+        self.confidence_adjustment = confidence_adjustment
         self.current_pressure = base_pressure
         self.last_update = time.time()
+        
+        # Log initialization
+        self._log_event(
+            "pressure_system_initialized",
+            "Curiosity pressure system initialized",
+            level="info",
+            additional_info={
+                "base_pressure": base_pressure,
+                "max_pressure": max_pressure,
+                "min_pressure": min_pressure,
+                "decay_rate": decay_rate,
+                "confidence_adjustment": confidence_adjustment
+            }
+        )
 
     def update(self, confidence: float) -> float:
-        """Update pressure based on confidence."""
-        time_delta = time.time() - self.last_update
-        self.last_update = time.time()
-
-        self.current_pressure = self.base_pressure + (confidence - self.base_pressure) * 0.1
-        self.current_pressure = max(self.min_pressure, min(self.max_pressure, self.current_pressure))
-
-        return self.current_pressure
+        """Update pressure based on confidence with time-based decay."""
+        try:
+            # Validate confidence input
+            if not isinstance(confidence, (int, float)) or not (0 <= confidence <= 1.0):
+                raise ValueError("Confidence must be a number between 0 and 1")
+                
+            time_delta = time.time() - self.last_update
+            if time_delta < 0:
+                raise ValueError("Invalid time delta detected")
+                
+            self.last_update = time.time()
+            
+            # Apply time-based decay
+            old_pressure = self.current_pressure
+            decay = math.exp(-self.decay_rate * time_delta)
+            self.current_pressure = (self.current_pressure * decay +
+                                   (1 - decay) * (self.base_pressure + (confidence - self.base_pressure) * self.confidence_adjustment))
+            
+            # Ensure pressure stays within bounds
+            self.current_pressure = max(self.min_pressure, min(self.max_pressure, self.current_pressure))
+            
+            # Log pressure update
+            self._log_event(
+                "pressure_updated",
+                "Curiosity pressure updated",
+                level="debug",
+                additional_info={
+                    "old_pressure": old_pressure,
+                    "new_pressure": self.current_pressure,
+                    "confidence": confidence,
+                    "time_delta": time_delta,
+                    "decay": decay
+                }
+            )
+            
+            return self.current_pressure
+            
+        except Exception as e:
+            self._log_error(
+                f"Failed to update pressure: {str(e)}",
+                error_type="pressure_update_error",
+                stack_trace=traceback.format_exc()
+            )
+            return self.current_pressure
 
     def should_erupt(self, threshold: float) -> bool:
         """Check if pressure exceeds threshold."""
-        return self.current_pressure >= threshold
+        try:
+            result = self.current_pressure >= threshold
+            self._log_event(
+                "pressure_threshold_check",
+                "Checked if pressure exceeds threshold",
+                level="debug",
+                additional_info={
+                    "current_pressure": self.current_pressure,
+                    "threshold": threshold,
+                    "result": result
+                }
+            )
+            return result
+        except Exception as e:
+            self._log_error(
+                f"Failed to check pressure threshold: {str(e)}",
+                error_type="pressure_check_error",
+                stack_trace=traceback.format_exc()
+            )
+            return False
 
     def drop_pressure(self, amount: float) -> None:
         """Reduce pressure by a specified amount."""
-        self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
+        try:
+            # Validate amount
+            if not isinstance(amount, (int, float)) or amount < 0:
+                raise ValueError("Amount must be a non-negative number")
+                
+            old_pressure = self.current_pressure
+            self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
+            
+            self._log_event(
+                "pressure_dropped",
+                "Reduced curiosity pressure",
+                level="debug",
+                additional_info={
+                    "old_pressure": old_pressure,
+                    "new_pressure": self.current_pressure,
+                    "amount": amount
+                }
+            )
+        except Exception as e:
+            self._log_error(
+                f"Failed to drop pressure: {str(e)}",
+                error_type="pressure_drop_error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Log event with standardized format."""
+        if hasattr(self, 'logger') and self.logger:
+            self.logger.record_event(
+                event_type=event_type,
+                message=message,
+                level=level,
+                additional_info=kwargs
+            )
+
+    def _log_error(self, message: str, error_type: str = "pressure_error", **kwargs) -> None:
+        """Log error with standardized format."""
+        if hasattr(self, 'logger') and self.logger:
+            self.logger.log_error(
+                error_msg=message,
+                error_type=error_type,
+                stack_trace=traceback.format_exc(),
+                **kwargs
+            )
 
 class CuriosityCallbacks:
     """Handles curiosity-related callbacks."""
@@ -379,15 +500,9 @@ class CuriosityManager:
         
         # Initialize components
         self.curiosity = Curiosity(config_manager, logger)
-        self.pressure = CuriosityPressure(
-            base_pressure=0.5,
-            max_pressure=1.0,
-            min_pressure=0.0,
-            decay_rate=0.95
-        )
         self.callbacks = CuriosityCallbacks(logger)
         
-        # Initialize configuration
+        # Initialize configuration first
         self._initialize_config()
         
         # Initialize state
@@ -408,32 +523,105 @@ class CuriosityManager:
             # Get curiosity config section
             curiosity_config = self.config_manager.get_section("curiosity_config", {})
             
+            # Initialize enabled state from config
+            self.enabled = curiosity_config.get("enable_curiosity", True)
+            
             # Validate and set config values
             self.weight_ignorance = self._validate_config_value(
                 "weight_ignorance",
-                curiosity_config.get("weight_ignorance", 0.7),
+                curiosity_config.get("weight_ignorance"),
                 (0.0, 1.0)
             )
             
             self.weight_novelty = self._validate_config_value(
                 "weight_novelty",
-                curiosity_config.get("weight_novelty", 0.3),
+                curiosity_config.get("weight_novelty"),
                 (0.0, 1.0)
             )
             
-            # Update config with validated values
-            curiosity_config.update({
-                "weight_ignorance": self.weight_ignorance,
-                "weight_novelty": self.weight_novelty
-            })
+            # Get generation parameters from config
+            self.base_temperature = curiosity_config.get("base_temperature")
+            self.temperament_influence = curiosity_config.get("temperament_influence")
+            self.max_new_tokens = curiosity_config.get("max_new_tokens")
+            self.top_k = curiosity_config.get("top_k")
+            self.novelty_threshold_response = curiosity_config.get("novelty_threshold_response")
+            self.novelty_threshold_spontaneous = curiosity_config.get("novelty_threshold_spontaneous")
             
-            self.config_manager.update_section("curiosity_config", curiosity_config)
+            # Get temperature bounds
+            self.min_temperature = curiosity_config.get("min_temperature", 0.7)
+            self.max_temperature = curiosity_config.get("max_temperature", 1.7)
+            
+            # Add pressure system validation
+            self.pressure_threshold = self._validate_config_value(
+                "pressure_threshold",
+                curiosity_config.get("pressure_threshold"),
+                (0.0, 1.0)
+            )
+            
+            self.pressure_drop = self._validate_config_value(
+                "pressure_drop",
+                curiosity_config.get("pressure_drop"),
+                (0.0, 1.0)
+            )
+            
+            self.max_pressure = self._validate_config_value(
+                "max_pressure",
+                curiosity_config.get("max_pressure"),
+                (0.0, 1.0)
+            )
+            
+            self.min_pressure = self._validate_config_value(
+                "min_pressure",
+                curiosity_config.get("min_pressure"),
+                (0.0, 1.0)
+            )
+            
+            self.decay_rate = self._validate_config_value(
+                "decay_rate",
+                curiosity_config.get("decay_rate"),
+                (0.0, 1.0)
+            )
+            
+            self.confidence_adjustment = self._validate_config_value(
+                "confidence_adjustment",
+                curiosity_config.get("confidence_adjustment", 0.1),
+                (0.0, 1.0)
+            )
+            
+            # Initialize pressure system with validated values
+            self.pressure = CuriosityPressure(
+                base_pressure=self.pressure_threshold,
+                max_pressure=self.max_pressure,
+                min_pressure=self.min_pressure,
+                decay_rate=self.decay_rate,
+                confidence_adjustment=self.confidence_adjustment
+            )
             
             # Log successful initialization
             self._log_event(
                 "curiosity_config_initialized",
                 "Curiosity configuration initialized successfully",
-                level="info"
+                level="info",
+                additional_info={
+                    "enabled": self.enabled,
+                    "weight_ignorance": self.weight_ignorance,
+                    "weight_novelty": self.weight_novelty,
+                    "base_temperature": self.base_temperature,
+                    "temperament_influence": self.temperament_influence,
+                    "max_new_tokens": self.max_new_tokens,
+                    "top_k": self.top_k,
+                    "novelty_threshold_response": self.novelty_threshold_response,
+                    "novelty_threshold_spontaneous": self.novelty_threshold_spontaneous,
+                    "pressure_config": {
+                        "base": self.pressure.base_pressure,
+                        "max": self.pressure.max_pressure,
+                        "min": self.pressure.min_pressure,
+                        "decay_rate": self.pressure.decay_rate,
+                        "threshold": self.pressure_threshold,
+                        "drop": self.pressure_drop,
+                        "confidence_adjustment": self.confidence_adjustment
+                    }
+                }
             )
             
         except Exception as e:
@@ -669,79 +857,163 @@ class CuriosityManager:
             })
             return 0.0
 
-    def generate_question(
+    def generate_curiosity_question(
         self,
-        state: Any,
-        tokenizer: Any,
-        model: Any,
-        max_length: int = 512
+        context: str = None,
+        spontaneous: bool = False,
+        tokenizer: Any = None,
+        model: Any = None
     ) -> Optional[str]:
-        """Generate a curiosity-driven question."""
+        """Generate a curiosity-driven question.
+        
+        Args:
+            context: Optional context to base the question on
+            spontaneous: Whether this is a spontaneous question
+            tokenizer: Tokenizer to use for generation
+            model: Model to use for generation
+            
+        Returns:
+            Optional[str]: Generated question or None if generation fails/disabled
+        """
         try:
-            if not self.state_manager:
+            if not self.enabled:
                 return None
-                
-            # Get next exploration item
-            item = self.get_next_exploration()
-            if not item:
+            
+            # Check pressure threshold
+            if not self.pressure.should_erupt(self.pressure_threshold):
                 return None
-                
-            # Process the prompt through the model
-            inputs = tokenizer(
-                item["prompt"],
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=max_length
+            
+            if not context and self.state_manager and self.state_manager.dream_memory:
+                dream_embs, _ = zip(*self.state_manager.dream_memory)
+                seed = self._generate_seed(model, tokenizer)
+                context = " ".join(seed.split()[:3])
+            elif not context:
+                context = ""
+
+            # Use configured temperature bounds with temperament system
+            temp = self.base_temperature
+            if self.temperament_system:
+                temp += (self.temperament_system.get_temperament_score() * self.temperament_influence)
+            temp = max(self.min_temperature, min(self.max_temperature, temp))
+
+            output = self._generate_with_params(
+                context,
+                model,
+                tokenizer,
+                max_new_tokens=self.max_new_tokens,
+                temperature=temp,
+                top_k=self.top_k,
+                do_sample=True
+            )
+
+            if not output.endswith("?"):
+                output += "?"
+
+            score = self.calculate_curiosity_score(output)
+            threshold = (
+                self.novelty_threshold_spontaneous if spontaneous 
+                else self.novelty_threshold_response
             )
             
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_length=max_length,
-                    num_return_sequences=1,
-                    temperature=0.7,
-                    do_sample=True
-                )
+            if score > threshold:
+                # Drop pressure when question is generated
+                self.pressure.drop_pressure(self.pressure_drop)
                 
-            question = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            return question
-            
+                self.logger.record_event(
+                    event_type="curiosity_question_generated",
+                    message="Generated curiosity question",
+                    level="info",
+                    additional_info={
+                        "question": output,
+                        "score": score,
+                        "spontaneous": spontaneous,
+                        "threshold": threshold,
+                        "pressure": self.pressure.current_pressure
+                    }
+                )
+                return output
+            return None
+                
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, {
-                "operation": "question_generation",
-                "max_length": max_length
+                "operation": "generate_curiosity_question",
+                "context": context,
+                "spontaneous": spontaneous
             })
             return None
-            
+
     def set_state(self, state: Any) -> bool:
         """Set the state for the CuriosityManager."""
         try:
+            # Validate state
             if not state:
-                raise ValueError("State cannot be None")
+                self._log_error(
+                    "Cannot set null state",
+                    error_type="state_error",
+                    context={"current_state": self.state}
+                )
+                return False
                 
+            # Check for required state attributes
+            required_attrs = ['dream_memory', 'get_confidence', 'get_seen_prompts', 'get_prompt_embedding']
+            missing_attrs = [attr for attr in required_attrs if not hasattr(state, attr)]
+            if missing_attrs:
+                self._log_error(
+                    f"State missing required attributes: {missing_attrs}",
+                    error_type="state_error",
+                    context={"current_state": self.state}
+                )
+                return False
+                
+            old_state = self.state
             self.state = state
+            
+            self._log_event(
+                "state_updated",
+                "Curiosity manager state updated",
+                level="info",
+                additional_info={
+                    "old_state_hash": hash(old_state) if old_state else None,
+                    "new_state_hash": hash(state),
+                    "state_type": type(state).__name__
+                }
+            )
             return True
             
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "state_set",
-                "state_hash": getattr(state, "state_hash", None)
-            })
+            self._log_error(
+                f"Failed to set state: {str(e)}",
+                error_type="state_error",
+                stack_trace=traceback.format_exc()
+            )
             return False
-            
+
     def reset(self) -> bool:
         """Reset the CuriosityManager state."""
         try:
+            old_state = self.state
             self.metrics.clear()
             self.exploration_queue.clear()
             self.state = None
+            
+            self._log_event(
+                "manager_reset",
+                "Curiosity manager reset",
+                level="info",
+                additional_info={
+                    "old_state_hash": hash(old_state) if old_state else None,
+                    "metrics_cleared": True,
+                    "queue_cleared": True
+                }
+            )
             return True
             
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "manager_reset"
-            })
+            self._log_error(
+                f"Failed to reset manager: {str(e)}",
+                error_type="reset_error",
+                stack_trace=traceback.format_exc()
+            )
             return False
 
     def tune(self, **params) -> None:
@@ -847,3 +1119,98 @@ class CuriosityManager:
                 "operation": "queue_stats"
             })
             return {}
+
+    def _generate_seed(self, model: Any, tokenizer: Any) -> str:
+        """Generate a seed for question generation.
+        
+        Args:
+            model: Model to use for generation
+            tokenizer: Tokenizer to use for generation
+            
+        Returns:
+            str: Generated seed text
+        """
+        try:
+            # Use a simple prompt to generate a seed
+            prompt = "Generate a thought-provoking question about: "
+            
+            # Generate with conservative parameters
+            output = self._generate_with_params(
+                prompt,
+                model,
+                tokenizer,
+                max_new_tokens=10,  # Keep it short for a seed
+                temperature=0.7,    # Lower temperature for more focused output
+                top_k=20,          # Narrower sampling
+                do_sample=True
+            )
+            
+            # Clean up the output
+            seed = output.strip()
+            if seed.endswith("?"):
+                seed = seed[:-1].strip()
+            
+            return seed
+            
+        except Exception as e:
+            self._log_error(
+                f"Failed to generate seed: {str(e)}",
+                error_type="seed_generation_error",
+                stack_trace=traceback.format_exc()
+            )
+            return "curiosity exploration"  # Fallback seed
+
+    def _generate_with_params(self, context: str, model: Any, tokenizer: Any, **params) -> str:
+        """Generate text with given parameters.
+        
+        Args:
+            context: Input context for generation
+            model: Model to use for generation
+            tokenizer: Tokenizer to use for generation
+            **params: Generation parameters
+            
+        Returns:
+            str: Generated text
+        """
+        try:
+            self._log_event(
+                "generation_started",
+                "Starting text generation",
+                level="debug",
+                additional_info={
+                    "context_length": len(context),
+                    "parameters": params
+                }
+            )
+            
+            # Generate text
+            output = model.generate(
+                tokenizer.encode(context, return_tensors="pt"),
+                **params
+            )
+            
+            generated_text = tokenizer.decode(output[0])
+            
+            self._log_event(
+                "generation_completed",
+                "Text generation completed",
+                level="debug",
+                additional_info={
+                    "output_length": len(generated_text),
+                    "parameters": params
+                }
+            )
+            
+            return generated_text
+            
+        except Exception as e:
+            self._log_error(
+                f"Text generation failed: {str(e)}",
+                error_type="generation_error",
+                stack_trace=traceback.format_exc(),
+                context={
+                    "input_context": context,
+                    "parameters": params
+                }
+            )
+            return ""

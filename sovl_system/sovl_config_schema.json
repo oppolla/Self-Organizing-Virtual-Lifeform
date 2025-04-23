@@ -1,532 +1,503 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Controls Configuration Schema",
-  "description": "Schema for the controls configuration of the SOVLSystem",
+  "title": "SOVL System Configuration Schema",
+  "description": "Schema for the complete SOVLSystem configuration",
   "type": "object",
   "properties": {
-    "sleep_conf_threshold": {
-      "type": "number",
-      "description": "Confidence threshold for entering sleep state",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.7
-    },
-    "sleep_time_factor": {
-      "type": "number",
-      "description": "Factor to scale sleep duration",
-      "minimum": 0.1,
-      "maximum": 10.0,
-      "default": 1.0
-    },
-    "sleep_log_min": {
-      "type": "integer",
-      "description": "Minimum log size for sleep consideration",
-      "minimum": 1,
-      "maximum": 100,
-      "default": 10
-    },
-    "dream_swing_var": {
-      "type": "number",
-      "description": "Variance for dream swing adjustments",
-      "minimum": 0.0,
-      "maximum": 0.5,
-      "default": 0.1
-    },
-    "dream_lifecycle_delta": {
-      "type": "number",
-      "description": "Delta for dream lifecycle updates",
-      "minimum": 0.0,
-      "maximum": 0.5,
-      "default": 0.1
-    },
-    "dream_temperament_on": {
-      "type": "boolean",
-      "description": "Enable temperament influence on dreaming",
-      "default": true
-    },
-    "dream_noise_scale": {
-      "type": "number",
-      "description": "Scale of noise in dream generation",
-      "minimum": 0.0,
-      "maximum": 0.1,
-      "default": 0.05
-    },
-    "temp_eager_threshold": {
-      "type": "number",
-      "description": "Threshold for eager temperament",
-      "minimum": 0.7,
-      "maximum": 0.9,
-      "default": 0.8
-    },
-    "temp_sluggish_threshold": {
-      "type": "number",
-      "description": "Threshold for sluggish temperament",
-      "minimum": 0.4,
-      "maximum": 0.6,
-      "default": 0.6
-    },
-    "temp_mood_influence": {
-      "type": "number",
-      "description": "Influence of mood on temperature",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.0
-    },
-    "scaffold_weight_cap": {
-      "type": "number",
-      "description": "Maximum weight for scaffold influence",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.9
-    },
-    "base_temperature": {
-      "type": "number",
-      "description": "Base temperature for generation",
-      "minimum": 0.1,
-      "maximum": 2.0,
-      "default": 0.7
-    },
-    "save_path_prefix": {
-      "type": "string",
-      "description": "Prefix for saving state files",
-      "pattern": "^[a-zA-Z0-9_/.-]+$",
-      "default": "state"
-    },
-    "dream_memory_weight": {
-      "type": "number",
-      "description": "Weight of memory in dream generation",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.1
-    },
-    "dream_memory_maxlen": {
-      "type": "integer",
-      "description": "Maximum length of dream memory",
-      "minimum": 1,
-      "maximum": 50,
-      "default": 10
-    },
-    "dream_prompt_weight": {
-      "type": "number",
-      "description": "Weight of prompt in dream generation",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.5
-    },
-    "dream_novelty_boost": {
-      "type": "number",
-      "description": "Boost factor for dream novelty",
-      "minimum": 0.0,
-      "maximum": 0.1,
-      "default": 0.03
-    },
-    "temp_curiosity_boost": {
-      "type": "number",
-      "description": "Curiosity boost for temperature",
-      "minimum": 0.0,
-      "maximum": 0.5,
-      "default": 0.5
-    },
-    "temp_restless_drop": {
-      "type": "number",
-      "description": "Restless drop for temperature",
-      "minimum": 0.0,
-      "maximum": 0.5,
-      "default": 0.1
-    },
-    "temp_melancholy_noise": {
-      "type": "number",
-      "description": "Noise factor for melancholy temperament",
-      "minimum": 0.0,
-      "maximum": 0.05,
-      "default": 0.02
-    },
-    "conf_feedback_strength": {
-      "type": "number",
-      "description": "Strength of confidence feedback",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.5
-    },
-    "temp_smoothing_factor": {
-      "type": "number",
-      "description": "Smoothing factor for temperature",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.0
-    },
-    "dream_memory_decay": {
-      "type": "number",
-      "description": "Decay rate for dream memory",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.95
-    },
-    "dream_prune_threshold": {
-      "type": "number",
-      "description": "Threshold for pruning dream memory",
-      "minimum": 0.0,
-      "maximum": 0.5,
-      "default": 0.1
-    },
-    "use_scaffold_memory": {
-      "type": "boolean",
-      "description": "Enable scaffold memory usage",
-      "default": true
-    },
-    "use_token_map_memory": {
-      "type": "boolean",
-      "description": "Enable token map memory usage",
-      "default": true
-    },
-    "memory_decay_rate": {
-      "type": "number",
-      "description": "General memory decay rate",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.95
-    },
-    "dynamic_cross_attn_mode": {
-      "type": ["string", "null"],
-      "description": "Mode for dynamic cross attention",
-      "enum": ["adaptive", "fixed", null],
-      "default": null
-    },
-    "has_woken": {
-      "type": "boolean",
-      "description": "Indicates if system has woken",
-      "default": false
-    },
-    "is_sleeping": {
-      "type": "boolean",
-      "description": "Indicates if system is sleeping",
-      "default": false
-    },
-    "confidence_history_maxlen": {
-      "type": "integer",
-      "description": "Maximum length of confidence history",
-      "minimum": 3,
-      "maximum": 10,
-      "default": 5
-    },
-    "temperament_history_maxlen": {
-      "type": "integer",
-      "description": "Maximum length of temperament history",
-      "minimum": 3,
-      "maximum": 10,
-      "default": 5
-    },
-    "conversation_history_maxlen": {
-      "type": "integer",
-      "description": "Maximum length of conversation history",
-      "minimum": 5,
-      "maximum": 50,
-      "default": 10
-    },
-    "max_seen_prompts": {
-      "type": "integer",
-      "description": "Maximum number of seen prompts",
-      "minimum": 100,
-      "maximum": 10000,
-      "default": 1000
-    },
-    "prompt_timeout": {
-      "type": "number",
-      "description": "Timeout for prompts in seconds",
-      "minimum": 3600.0,
-      "maximum": 604800.0,
-      "default": 86400.0
-    },
-    "temperament_decay_rate": {
-      "type": "number",
-      "description": "Decay rate for temperament",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.95
-    },
-    "scaffold_unk_id": {
-      "type": "integer",
-      "description": "Unknown ID for scaffold",
-      "minimum": 0,
-      "maximum": 100000,
-      "default": 0
-    },
-    "enable_dreaming": {
-      "type": "boolean",
-      "description": "Enable dreaming functionality",
-      "default": true
-    },
-    "enable_temperament": {
-      "type": "boolean",
-      "description": "Enable temperament adjustments",
-      "default": true
-    },
-    "enable_confidence_tracking": {
-      "type": "boolean",
-      "description": "Enable confidence tracking",
-      "default": true
-    },
-    "enable_gestation.ConcurrentModificationException": {
-      "type": "boolean",
-      "description": "Enable gestation process",
-      "default": true
-    },
-    "enable_sleep_training": {
-      "type": "boolean",
-      "description": "Enable sleep training",
-      "default": true
-    },
-    "enable_cross_attention": {
-      "type": "boolean",
-      "description": "Enable cross attention mechanism",
-      "default": true
-    },
-    "enable_dynamic_cross_attention": {
-      "type": "boolean",
-      "description": "Enable dynamic cross attention",
-      "default": true
-    },
-    "enable_lora_adapters": {
-      "type": "boolean",
-      "description": "Enable LoRA adapters",
-      "default": true
-    },
-    "enable_repetition_check": {
-      "type": "boolean",
-      "description": "Enable repetition checking",
-      "default": true
-    },
-    "enable_prompt_driven_dreams": {
-      "type": "boolean",
-      "description": "Enable prompt-driven dreams",
-      "default": true
-    },
-    "enable_lifecycle_weighting": {
-      "type": "boolean",
-      "description": "Enable lifecycle weighting",
-      "default": true
-    },
-    "memory_threshold": {
-      "type": "number",
-      "description": "Threshold for memory retention",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.85
-    },
-    "enable_error_listening": {
-      "type": "boolean",
-      "description": "Enable error listening",
-      "default": true
-    },
-    "enable_curiosity": {
-      "type": "boolean",
-      "description": "Enable curiosity-driven behavior",
-      "default": true
-    },
-    "curiosity_novelty_threshold_spontaneous": {
-      "type": "number",
-      "description": "Novelty threshold for spontaneous curiosity",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.9
-    },
-    "curiosity_novelty_threshold_response": {
-      "type": "number",
-      "description": "Novelty threshold for response-driven curiosity",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.8
-    },
-    "curiosity_pressure_threshold": {
-      "type": "number",
-      "description": "Pressure threshold for curiosity",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.7
-    },
-    "curiosity_pressure_drop": {
-      "type": "number",
-      "description": "Pressure drop for curiosity",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.3
-    },
-    "curiosity_silence_threshold": {
-      "type": "number",
-      "description": "Silence threshold for curiosity in seconds",
-      "minimum": 0.0,
-      "maximum": 3600.0,
-      "default": 20.0
-    },
-    "curiosity_question_cooldown": {
-      "type": "number",
-      "description": "Cooldown for curiosity questions in seconds",
-      "minimum": 0.0,
-      "maximum": 3600.0,
-      "default": 60.0
-    },
-    "curiosity_queue_maxlen": {
-      "type": "integer",
-      "description": "Maximum length of curiosity queue",
-      "minimum": 1,
-      "maximum": 50,
-      "default": 10
-    },
-    "curiosity_weight_ignorance": {
-      "type": "number",
-      "description": "Weight of ignorance in curiosity",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.7
-    },
-    "curiosity_weight_novelty": {
-      "type": "number",
-      "description": "Weight of novelty in curiosity",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.3
-    },
-    "curiosity_max_new_tokens": {
-      "type": "integer",
-      "description": "Maximum new tokens for curiosity",
-      "minimum": 1,
-      "maximum": 100,
-      "default": 8
-    },
-    "curiosity_base_temperature": {
-      "type": "number",
-      "description": "Base temperature for curiosity",
-      "minimum": 0.1,
-      "maximum": 2.0,
-      "default": 1.1
-    },
-    "curiosity_temperament_influence": {
-      "type": "number",
-      "description": "Temperament influence on curiosity",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.4
-    },
-    "curiosity_top_k": {
-      "type": "integer",
-      "description": "Top-k sampling for curiosity",
-      "minimum": 1,
-      "maximum": 100,
-      "default": 30
-    },
-    "dropout_rate": {
-      "type": "number",
-      "description": "Dropout rate for controls",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.1
-    },
-    "use_gating": {
-      "type": "boolean",
-      "description": "Enable gating mechanism",
-      "default": true
-    },
-    "scale_attention": {
-      "type": "boolean",
-      "description": "Enable attention scaling",
-      "default": true
-    },
-    "use_residual": {
-      "type": "boolean",
-      "description": "Enable residual connections",
-      "default": true
-    },
-    "use_pooling": {
-      "type": "boolean",
-      "description": "Enable pooling mechanism",
-      "default": false
-    },
-    "use_sparse_attention": {
-      "type": "boolean",
-      "description": "Enable sparse attention",
-      "default": false
-    },
-    "sparse_pattern": {
-      "type": "string",
-      "description": "Pattern for sparse attention",
-      "enum": ["window"],
-      "default": "window"
-    },
-    "sparse_window_size": {
-      "type": "integer",
-      "description": "Window size for sparse attention",
-      "minimum": 1,
-      "maximum": 2048,
-      "default": 128
-    },
-    "injection_strategy": {
-      "type": "string",
-      "description": "Strategy for token injection",
-      "enum": ["sequential"],
-      "default": "sequential"
-    },
-    "token_map": {
-      "type": ["object", "null"],
-      "description": "Token mapping configuration",
-      "default": null
-    },
-    "max_tokens_per_mapping": {
-      "type": "integer",
-      "description": "Maximum scaffold tokens per base token",
-      "minimum": 1,
-      "maximum": 5,
-      "default": 3
-    },
-    "mapping_similarity_threshold": {
-      "type": "number",
-      "description": "Similarity threshold for alternative mappings",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.7
-    },
-    "allow_bidirectional_mapping": {
-      "type": "boolean",
-      "description": "Enable bidirectional token mapping",
-      "default": false
-    },
-    "fallback_strategy": {
-      "type": "string",
-      "description": "Strategy for handling failed mappings",
-      "enum": ["split", "merge", "nearest", "unk"],
-      "default": "split"
-    },
-    "normalization_level": {
-      "type": "string",
-      "description": "Token normalization aggressiveness",
-      "enum": ["none", "basic", "aggressive"],
-      "default": "basic"
-    },
-    "min_semantic_similarity": {
-      "type": "number",
-      "description": "Minimum semantic similarity threshold",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.5
-    },
-    "max_meaning_drift": {
-      "type": "number",
-      "description": "Maximum allowed semantic drift",
-      "minimum": 0.0,
-      "maximum": 1.0,
-      "default": 0.3
-    },
-    "enable_periodic_validation": {
-      "type": "boolean",
-      "description": "Enable periodic mapping validation",
-      "default": true
-    },
-    "conflict_resolution_strategy": {
-      "type": "string",
-      "description": "Strategy for resolving mapping conflicts",
-      "enum": ["keep_first", "keep_last", "keep_highest_conf", "merge"],
-      "default": "keep_highest_conf"
+    "core_config": {
+      "type": "object",
+      "properties": {
+        "base_model_name": {"type": "string"},
+        "base_model_path": {"type": ["string", "null"]},
+        "scaffold_model_name": {"type": "string"},
+        "scaffold_model_path": {"type": ["string", "null"]},
+        "cross_attn_layers": {
+          "type": "array",
+          "items": {"type": "integer"}
+        },
+        "use_dynamic_layers": {"type": "boolean"},
+        "layer_selection_mode": {"type": "string"},
+        "custom_layers": {"type": ["array", "null"]},
+        "valid_split_ratio": {"type": "number"},
+        "random_seed": {"type": "integer"},
+        "quantization": {"type": "string"},
+        "hidden_size": {"type": "integer"},
+        "num_heads": {"type": "integer"},
+        "gradient_checkpointing": {"type": "boolean"},
+        "initializer_range": {"type": "number"},
+        "migration_mode": {"type": "boolean"},
+        "device": {"type": "string"}
+      },
+      "required": ["base_model_name", "scaffold_model_name", "cross_attn_layers", "use_dynamic_layers", "layer_selection_mode", "valid_split_ratio", "random_seed", "quantization", "hidden_size", "num_heads", "gradient_checkpointing", "initializer_range", "migration_mode", "device"]
+    },
+    "controls_config": {
+      "type": "object",
+      "properties": {
+        "enable_scaffold": {"type": "boolean"},
+        "scaffold_weight_cap": {"type": "number"},
+        "scaffold_unk_id": {"type": "integer"},
+        "enable_cross_attention": {"type": "boolean"},
+        "enable_dynamic_cross_attention": {"type": "boolean"},
+        "injection_strategy": {"type": "string"},
+        "blend_strength": {"type": "number"},
+        "attention_weight": {"type": "number"},
+        "max_tokens_per_mapping": {"type": "integer"},
+        "mapping_similarity_threshold": {"type": "number"},
+        "allow_bidirectional_mapping": {"type": "boolean"},
+        "fallback_strategy": {"type": "string"},
+        "normalization_level": {"type": "string"},
+        "min_semantic_similarity": {"type": "number"},
+        "max_meaning_drift": {"type": "number"},
+        "enable_periodic_validation": {"type": "boolean"},
+        "conflict_resolution_strategy": {"type": "string"}
+      },
+      "required": ["enable_scaffold", "scaffold_weight_cap", "scaffold_unk_id", "enable_cross_attention", "enable_dynamic_cross_attention", "injection_strategy", "blend_strength", "attention_weight", "max_tokens_per_mapping", "mapping_similarity_threshold", "allow_bidirectional_mapping", "fallback_strategy", "normalization_level", "min_semantic_similarity", "max_meaning_drift", "enable_periodic_validation", "conflict_resolution_strategy"]
+    },
+    "temperament_config": {
+      "type": "object",
+      "properties": {
+        "mood_influence": {"type": "number"},
+        "history_maxlen": {"type": "integer"},
+        "temp_eager_threshold": {"type": "number"},
+        "temp_sluggish_threshold": {"type": "number"},
+        "temp_mood_influence": {"type": "number"},
+        "temp_curiosity_boost": {"type": "number"},
+        "temp_restless_drop": {"type": "number"},
+        "temp_melancholy_noise": {"type": "number"},
+        "conf_feedback_strength": {"type": "number"},
+        "temp_smoothing_factor": {"type": "number"},
+        "temperament_decay_rate": {"type": "number"},
+        "temperament_history_maxlen": {"type": "integer"},
+        "confidence_history_maxlen": {"type": "integer"},
+        "lifecycle_params": {
+          "type": "object",
+          "properties": {
+            "gestation": {
+              "type": "object",
+              "properties": {
+                "bias": {"type": "number"},
+                "decay": {"type": "number"}
+              }
+            },
+            "active": {
+              "type": "object",
+              "properties": {
+                "bias": {"type": "number"},
+                "decay": {"type": "number"}
+              }
+            },
+            "sleep": {
+              "type": "object",
+              "properties": {
+                "bias": {"type": "number"},
+                "decay": {"type": "number"}
+              }
+            }
+          }
+        }
+      },
+      "required": ["mood_influence", "history_maxlen", "temp_eager_threshold", "temp_sluggish_threshold", "temp_mood_influence", "temp_curiosity_boost", "temp_restless_drop", "temp_melancholy_noise", "conf_feedback_strength", "temp_smoothing_factor", "temperament_decay_rate", "temperament_history_maxlen", "confidence_history_maxlen", "lifecycle_params"]
+    },
+    "curiosity_config": {
+      "type": "object",
+      "properties": {
+        "enable_curiosity": {"type": "boolean"},
+        "attention_weight": {"type": "number"},
+        "queue_maxlen": {"type": "integer"},
+        "novelty_history_maxlen": {"type": "integer"},
+        "decay_rate": {"type": "number"},
+        "question_timeout": {"type": "number"},
+        "novelty_threshold_spontaneous": {"type": "number"},
+        "novelty_threshold_response": {"type": "number"},
+        "pressure_threshold": {"type": "number"},
+        "pressure_drop": {"type": "number"},
+        "silence_threshold": {"type": "number"},
+        "question_cooldown": {"type": "number"},
+        "weight_ignorance": {"type": "number"},
+        "weight_novelty": {"type": "number"},
+        "max_new_tokens": {"type": "integer"},
+        "base_temperature": {"type": "number"},
+        "temperament_influence": {"type": "number"},
+        "top_k": {"type": "integer"},
+        "max_memory_mb": {"type": "number"},
+        "pressure_change_cooldown": {"type": "number"},
+        "min_pressure": {"type": "number"},
+        "max_pressure": {"type": "number"},
+        "pressure_decay_rate": {"type": "number"},
+        "metrics_maxlen": {"type": "integer"},
+        "min_temperature": {"type": "number"},
+        "max_temperature": {"type": "number"},
+        "lifecycle_params": {
+          "type": "object",
+          "properties": {
+            "gestation": {
+              "type": "object",
+              "properties": {
+                "pressure_reduction": {"type": "number"},
+                "novelty_boost": {"type": "number"}
+              }
+            },
+            "active": {
+              "type": "object",
+              "properties": {
+                "pressure_reduction": {"type": "number"},
+                "novelty_boost": {"type": "number"}
+              }
+            },
+            "sleep": {
+              "type": "object",
+              "properties": {
+                "pressure_reduction": {"type": "number"},
+                "novelty_boost": {"type": "number"}
+              }
+            }
+          }
+        }
+      },
+      "required": ["enable_curiosity", "attention_weight", "queue_maxlen", "novelty_history_maxlen", "decay_rate", "question_timeout", "novelty_threshold_spontaneous", "novelty_threshold_response", "pressure_threshold", "pressure_drop", "silence_threshold", "question_cooldown", "weight_ignorance", "weight_novelty", "max_new_tokens", "base_temperature", "temperament_influence", "top_k", "max_memory_mb", "pressure_change_cooldown", "min_pressure", "max_pressure", "pressure_decay_rate", "metrics_maxlen", "min_temperature", "max_temperature", "lifecycle_params"]
+    },
+    "memory_config": {
+      "type": "object",
+      "properties": {
+        "memoria": {
+          "type": "object",
+          "properties": {
+            "storage_path": {"type": "string"},
+            "max_storage_mb": {"type": "number"},
+            "state_save_interval": {"type": "number"},
+            "compression_enabled": {"type": "boolean"},
+            "encryption_enabled": {"type": "boolean"}
+          }
+        },
+        "ram": {
+          "type": "object",
+          "properties": {
+            "max_memory_mb": {"type": "number"},
+            "memory_threshold": {"type": "number"},
+            "memory_decay_rate": {"type": "number"},
+            "dream_memory_maxlen": {"type": "integer"},
+            "conversation_history_maxlen": {"type": "integer"}
+          }
+        },
+        "gpu": {
+          "type": "object",
+          "properties": {
+            "max_memory_mb": {"type": "number"},
+            "memory_threshold": {"type": "number"},
+            "check_interval": {"type": "integer"},
+            "batch_size_adjustment": {"type": "number"},
+            "clear_cache_threshold": {"type": "number"}
+          }
+        }
+      },
+      "required": ["memoria", "ram", "gpu"]
+    },
+    "training_config": {
+      "type": "object",
+      "properties": {
+        "model_name": {"type": "string"},
+        "learning_rate": {"type": "number"},
+        "train_epochs": {"type": "integer"},
+        "batch_size": {"type": "integer"},
+        "max_seq_length": {"type": "integer"},
+        "sigmoid_scale": {"type": "number"},
+        "sigmoid_shift": {"type": "number"},
+        "lifecycle_capacity_factor": {"type": "number"},
+        "lifecycle_curve": {"type": "string"},
+        "grad_accum_steps": {"type": "integer"},
+        "exposure_gain_eager": {"type": "number"},
+        "exposure_gain_default": {"type": "number"},
+        "max_patience": {"type": "integer"},
+        "dry_run": {"type": "boolean"},
+        "dry_run_params": {
+          "type": "object",
+          "properties": {
+            "max_samples": {"type": "integer"},
+            "max_length": {"type": "integer"},
+            "validate_architecture": {"type": "boolean"},
+            "skip_training": {"type": "boolean"}
+          }
+        },
+        "weight_decay": {"type": "number"},
+        "max_grad_norm": {"type": "number"},
+        "use_amp": {"type": "boolean"},
+        "checkpoint_interval": {"type": "integer"},
+        "scheduler_type": {"type": "string"},
+        "cosine_min_lr": {"type": "number"},
+        "warmup_ratio": {"type": "number"},
+        "warmup_steps": {"type": "integer"},
+        "total_steps": {"type": "integer"},
+        "validate_every_n_steps": {"type": "integer"},
+        "checkpoint_path": {"type": "string"},
+        "dropout_rate": {"type": "number"},
+        "max_epochs": {"type": "integer"},
+        "metrics_to_track": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "enable_gestation": {"type": "boolean"},
+        "enable_sleep_training": {"type": "boolean"},
+        "enable_lifecycle_weighting": {"type": "boolean"},
+        "sleep_conf_threshold": {"type": "number"},
+        "sleep_log_min": {"type": "integer"},
+        "fatigue_factor_cap": {"type": "number"},
+        "fatigue_scaling_factor": {"type": "number"},
+        "dream_memory_weight": {"type": "number"},
+        "enable_dreaming": {"type": "boolean"},
+        "repetition_n": {"type": "integer"},
+        "dream_noise_scale": {"type": "number"},
+        "dream_prompt_weight": {"type": "number"},
+        "dream_novelty_boost": {"type": "number"},
+        "dream_memory_decay": {"type": "number"},
+        "dream_prune_threshold": {"type": "number"},
+        "enable_prompt_driven_dreams": {"type": "boolean"},
+        "dream_swing_var": {"type": "number"},
+        "dream_lifecycle_delta": {"type": "number"},
+        "dream_temperament_on": {"type": "boolean"},
+        "memory_threshold": {"type": "number"},
+        "memory_decay_rate": {"type": "number"},
+        "use_scaffold_memory": {"type": "boolean"},
+        "use_token_map_memory": {"type": "boolean"},
+        "scaffold_weight": {"type": "number"},
+        "max_dream_memory_mb": {"type": "number"},
+        "dream_memory_maxlen": {"type": "integer"}
+      },
+      "required": ["model_name", "learning_rate", "train_epochs", "batch_size", "max_seq_length", "sigmoid_scale", "sigmoid_shift", "lifecycle_capacity_factor", "lifecycle_curve", "grad_accum_steps", "exposure_gain_eager", "exposure_gain_default", "max_patience", "dry_run", "dry_run_params", "weight_decay", "max_grad_norm", "use_amp", "checkpoint_interval", "scheduler_type", "cosine_min_lr", "warmup_ratio", "warmup_steps", "total_steps", "validate_every_n_steps", "checkpoint_path", "dropout_rate", "max_epochs", "metrics_to_track", "enable_gestation", "enable_sleep_training", "enable_lifecycle_weighting", "sleep_conf_threshold", "sleep_log_min", "fatigue_factor_cap", "fatigue_scaling_factor", "dream_memory_weight", "enable_dreaming", "repetition_n", "dream_noise_scale", "dream_prompt_weight", "dream_novelty_boost", "dream_memory_decay", "dream_prune_threshold", "enable_prompt_driven_dreams", "dream_swing_var", "dream_lifecycle_delta", "dream_temperament_on", "memory_threshold", "memory_decay_rate", "use_scaffold_memory", "use_token_map_memory", "scaffold_weight", "max_dream_memory_mb", "dream_memory_maxlen"]
+    },
+    "logging_config": {
+      "type": "object",
+      "properties": {
+        "log_dir": {"type": "string"},
+        "log_file": {"type": "string"},
+        "log_level": {"type": "string"},
+        "max_log_size_mb": {"type": "number"},
+        "backup_count": {"type": "integer"}
+      },
+      "required": ["log_dir", "log_file", "log_level", "max_log_size_mb", "backup_count"]
+    },
+    "error_config": {
+      "type": "object",
+      "properties": {
+        "error_cooldown": {"type": "number"},
+        "warning_threshold": {"type": "number"},
+        "error_threshold": {"type": "number"},
+        "critical_threshold": {"type": "number"}
+      },
+      "required": ["error_cooldown", "warning_threshold", "error_threshold", "critical_threshold"]
+    },
+    "generation_config": {
+      "type": "object",
+      "properties": {
+        "temperature": {"type": "number"},
+        "top_p": {"type": "number"}
+      },
+      "required": ["temperature", "top_p"]
+    },
+    "data_config": {
+      "type": "object",
+      "properties": {
+        "batch_size": {"type": "integer"},
+        "max_retries": {"type": "integer"}
+      },
+      "required": ["batch_size", "max_retries"]
+    },
+    "data_provider": {
+      "type": "object",
+      "properties": {
+        "provider_type": {"type": "string"},
+        "data_path": {"type": "string"}
+      },
+      "required": ["provider_type", "data_path"]
+    },
+    "state_config": {
+      "type": "object",
+      "properties": {
+        "max_history": {"type": "integer"},
+        "state_file": {"type": "string"}
+      },
+      "required": ["max_history", "state_file"]
+    },
+    "confidence_config": {
+      "type": "object",
+      "properties": {
+        "history_maxlen": {"type": "integer"},
+        "weight": {"type": "number"}
+      },
+      "required": ["history_maxlen", "weight"]
+    },
+    "dream_memory_config": {
+      "type": "object",
+      "properties": {
+        "max_memories": {"type": "integer"},
+        "base_weight": {"type": "number"},
+        "max_weight": {"type": "number"}
+      },
+      "required": ["max_memories", "base_weight", "max_weight"]
+    },
+    "gestation_weighting": {
+      "type": "object",
+      "properties": {
+        "metadata_fields": {
+          "type": "object",
+          "properties": {
+            "quality_metrics": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {"type": "boolean"},
+                    "weight": {"type": "number"}
+                  }
+                },
+                "url": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {"type": "boolean"},
+                    "weight": {"type": "number"}
+                  }
+                },
+                "question": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {"type": "boolean"},
+                    "weight": {"type": "number"}
+                  }
+                },
+                "exclamation": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {"type": "boolean"},
+                    "weight": {"type": "number"}
+                  }
+                },
+                "emoji": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {"type": "boolean"},
+                    "weight": {"type": "number"}
+                  }
+                }
+              }
+            },
+            "content_metrics": {
+              "type": "object",
+              "properties": {
+                "word_count": {"type": "integer"},
+                "context_word_count": {"type": "integer"},
+                "avg_word_length": {"type": "number"},
+                "sentence_count": {"type": "integer"},
+                "avg_sentence_length": {"type": "number"}
+              }
+            },
+            "confidence_metrics": {
+              "type": "object",
+              "properties": {
+                "confidence": {"type": "number"},
+                "temperament": {"type": "number"}
+              }
+            },
+            "context_metrics": {
+              "type": "object",
+              "properties": {
+                "is_first_message": {"type": "boolean"},
+                "is_last_message": {"type": "boolean"},
+                "context_window_size": {"type": "integer"},
+                "response_time": {"type": "number"}
+              }
+            }
+          }
+        },
+        "content_weights": {
+          "type": "object",
+          "properties": {
+            "word_count_ratio_scale": {"type": "number"},
+            "optimal_word_length_range": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "integer"},
+                "max": {"type": "integer"},
+                "weight": {"type": "number"}
+              }
+            },
+            "suboptimal_word_length_weight": {"type": "number"},
+            "optimal_sentence_count_range": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "integer"},
+                "max": {"type": "integer"},
+                "weight": {"type": "number"}
+              }
+            },
+            "excessive_sentence_weight": {"type": "number"},
+            "optimal_sentence_length_range": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "integer"},
+                "max": {"type": "integer"},
+                "weight": {"type": "number"}
+              }
+            },
+            "excessive_sentence_length_weight": {"type": "number"}
+          }
+        },
+        "confidence_weights": {
+          "type": "object",
+          "properties": {
+            "high_confidence_threshold": {"type": "number"},
+            "high_confidence_weight": {"type": "number"},
+            "moderate_confidence_threshold": {"type": "number"},
+            "moderate_confidence_weight": {"type": "number"},
+            "low_confidence_threshold": {"type": "number"},
+            "low_confidence_weight": {"type": "number"}
+          }
+        },
+        "temperament_weights": {
+          "type": "object",
+          "properties": {
+            "balanced_range": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "number"},
+                "max": {"type": "number"},
+                "weight": {"type": "number"}
+              }
+            },
+            "extreme_temperament_weight": {"type": "number"}
+          }
+        },
+        "context_weights": {
+          "type": "object",
+          "properties": {
+            "first_last_message_weight": {"type": "number"},
+            "optimal_context_range": {
+              "type": "object",
+              "properties": {
+                "min": {"type": "integer"},
+                "max": {"type": "integer"},
+                "weight": {"type": "number"}
+              }
+            },
+            "excessive_context_weight": {"type": "number"}
+          }
+        },
+        "timing_weights": {
+          "type": "object",
+          "properties": {
+            "max_response_time": {"type": "number"},
+            "optimal_timing_weight": {"type": "number"}
+          }
+        },
+        "weight_bounds": {
+          "type": "object",
+          "properties": {
+            "min": {"type": "number"},
+            "max": {"type": "number"}
+          }
+        }
+      },
+      "required": ["metadata_fields", "content_weights", "confidence_weights", "temperament_weights", "context_weights", "timing_weights", "weight_bounds"]
     }
   },
-  "required": [],
-  "additionalProperties": false
+  "required": ["core_config", "controls_config", "temperament_config", "curiosity_config", "memory_config", "training_config", "logging_config", "error_config", "generation_config", "data_config", "data_provider", "state_config", "confidence_config", "dream_memory_config", "gestation_weighting"]
 }

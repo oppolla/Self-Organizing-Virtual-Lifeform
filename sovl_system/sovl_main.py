@@ -565,7 +565,12 @@ class SOVLSystem(SystemInterface):
                 if not self.curiosity_manager:
                     raise ValueError("Curiosity manager not initialized")
                     
-                question = self.curiosity_manager.generate_question()
+                question = self.curiosity_manager.generate_curiosity_question(
+                    context=None,
+                    spontaneous=True,
+                    tokenizer=self.model_manager.tokenizer if self.model_manager else None,
+                    model=self.model_manager.model if self.model_manager else None
+                )
                 if question:
                     self.context.logger.record_event(
                         event_type="curiosity_question_generated",
