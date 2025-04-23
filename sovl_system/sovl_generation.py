@@ -517,31 +517,61 @@ class GenerationManager:
             raise
 
     def _validate_config_values(self) -> None:
-        """Validate specific configuration values."""
+        """Validate configuration values."""
         try:
-            # Memory threshold validation
+            # Memory thresholds
             memory_threshold = self._get_config_value("controls_config.memory_threshold", 0.85)
             if not 0.0 <= memory_threshold <= 1.0:
                 raise ValueError(f"Invalid memory_threshold: {memory_threshold}")
-
-            # Generation retries validation
+                
+            # Generation parameters
             max_retries = self._get_config_value("controls_config.max_generation_retries", 3)
             if not isinstance(max_retries, int) or max_retries < 1:
                 raise ValueError(f"Invalid max_generation_retries: {max_retries}")
-
-            # Temperature validation
+                
             base_temperature = self._get_config_value("controls_config.base_temperature", 0.7)
             if not 0.0 <= base_temperature <= 2.0:
                 raise ValueError(f"Invalid base_temperature: {base_temperature}")
-
+                
             # Top-k validation
             top_k = self._get_config_value("curiosity_config.top_k", 30)
             if not isinstance(top_k, int) or top_k < 1:
                 raise ValueError(f"Invalid top_k: {top_k}")
-
+                
+            # Validate other critical parameters
+            self._validate_memory_config()
+            self._validate_scaffold_config()
+            self._validate_generation_config()
+            
         except Exception as e:
             self._handle_error("config_validation", e)
             raise
+
+    def _validate_memory_config(self) -> None:
+        """Validate memory-related configuration."""
+        batch_size = self._get_config_value("controls_config.base_batch_size", 1)
+        if not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError(f"Invalid base_batch_size: {batch_size}")
+            
+        max_cache_size = self._get_config_value("controls_config.max_cache_size", 1000)
+        if not isinstance(max_cache_size, int) or max_cache_size < 1:
+            raise ValueError(f"Invalid max_cache_size: {max_cache_size}")
+
+    def _validate_scaffold_config(self) -> None:
+        """Validate scaffold-related configuration."""
+        if not isinstance(self.scaffolds, list) or not self.scaffolds:
+            raise ValueError("No scaffold models available")
+            
+        if not isinstance(self.scaffold_tokenizer, AutoTokenizer):
+            raise ValueError("Invalid scaffold tokenizer")
+
+    def _validate_generation_config(self) -> None:
+        """Validate generation-related configuration."""
+        if not isinstance(self.base_model, AutoModelForCausalLM):
+            raise ValueError("Invalid base model")
+            
+        if not isinstance(self.base_tokenizer, AutoTokenizer):
+            raise ValueError("Invalid base tokenizer")
 
     def _get_config_value(self, key: str, default: Any) -> Any:
         """Get a configuration value with validation."""
@@ -961,15 +991,43 @@ class GenerationManager:
     @state_managed_operation("generate_text")
     def generate_text(self, prompt: str, num_return_sequences: int = 1) -> List[str]:
         """Generate text with state-driven error handling and recovery."""
+        # Validate input parameters
+        self._validate_generation_params(prompt, num_return_sequences=num_return_sequences)
+        
         if not prompt or not isinstance(prompt, str):
             raise ValueError("Invalid prompt provided")
         
         batch = self._prepare_generation_batch(prompt, num_return_sequences)
         return self._generate_with_state_context(batch)
 
+    def _prepare_generation_batch(self, prompt: str, num_return_sequences: int = 1) -> Dict[str, Any]:
+        """Prepare input batch for text generation."""
+        try:
+            # Tokenize input
+            inputs = self.base_tokenizer(
+                prompt,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=self._get_config_value("controls_config.max_seq_length", 512)
+            )
+            
+            # Move to device and add generation parameters
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            inputs['num_return_sequences'] = num_return_sequences
+            
+            return inputs
+            
+        except Exception as e:
+            self._handle_error("prepare_generation_batch", e)
+            raise ValueError(f"Failed to prepare generation batch: {str(e)}")
+
     @state_managed_operation("generate_with_state_context")
     def _generate_with_state_context(self, batch: Dict[str, Any]) -> List[str]:
         """Generate text with state context and error handling."""
+        # Validate state consistency before generation
+        self._validate_state_consistency()
+        
         generation_config = self._get_generation_config()
         outputs = self.base_model.generate(**batch, **generation_config)
         generated_texts = self.base_tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -1229,6 +1287,45 @@ class GenerationManager:
         except Exception as e:
             self._handle_error("batch_size_optimization", e)
             return current_batch_size
+
+    def _validate_generation_params(self, prompt: str, max_new_tokens: int = 100, **kwargs) -> None:
+        """Validate generation parameters."""
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("Prompt must be a non-empty string")
+            
+        if not isinstance(max_new_tokens, int) or max_new_tokens <= 0:
+            raise ValueError(f"max_new_tokens must be a positive integer, got {max_new_tokens}")
+            
+        # Validate temperature if provided
+        if "temperature" in kwargs:
+            temp = kwargs["temperature"]
+            if not isinstance(temp, (int, float)) or temp <= 0:
+                raise ValueError(f"temperature must be a positive number, got {temp}")
+                
+        # Validate other common parameters
+        if "top_k" in kwargs:
+            top_k = kwargs["top_k"]
+            if not isinstance(top_k, int) or top_k <= 0:
+                raise ValueError(f"top_k must be a positive integer, got {top_k}")
+                
+        if "top_p" in kwargs:
+            top_p = kwargs["top_p"]
+            if not isinstance(top_p, (int, float)) or not 0 < top_p <= 1:
+                raise ValueError(f"top_p must be between 0 and 1, got {top_p}")
+
+    def _validate_state_consistency(self) -> None:
+        """Validate state consistency after updates."""
+        if not hasattr(self.state, 'temperament_score'):
+            raise ValueError("State missing temperament_score")
+            
+        if not 0 <= self.state.temperament_score <= 1:
+            raise ValueError(f"Invalid temperament_score: {self.state.temperament_score}")
+            
+        if not hasattr(self.state, 'confidence'):
+            raise ValueError("State missing confidence")
+            
+        if not 0 <= self.state.confidence <= 1:
+            raise ValueError(f"Invalid confidence: {self.state.confidence}")
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for generated tokens."""
