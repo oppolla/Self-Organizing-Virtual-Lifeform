@@ -56,6 +56,11 @@
     "temperament_decay_rate": 0.9,
     "temperament_history_maxlen": 5,
     "confidence_history_maxlen": 5,
+    "temperament_pressure_threshold": 0.5,
+    "temperament_max_pressure": 1.0,
+    "temperament_min_pressure": 0.0,
+    "temperament_confidence_adjustment": 0.5,
+    "temperament_pressure_drop": 0.2,
     "lifecycle_params": {
       "gestation": {
         "bias": 0.1,
@@ -131,7 +136,9 @@
     "use_token_map_memory": true,
     "scaffold_weight": 0.3,
     "max_dream_memory_mb": 128,
-    "dream_memory_maxlen": 3
+    "dream_memory_maxlen": 3,
+    "confidence_history_maxlen": 5,
+    "temperament_history_maxlen": 5
   },
   "scaffold_config": {
     "model_path": "/path/to/SmolLM2-135M/model",
