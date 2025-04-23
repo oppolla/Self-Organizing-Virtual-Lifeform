@@ -193,17 +193,12 @@ class TemperamentSystem:
                 return
                 
             # Get configuration values
-            smoothing_factor = self.temperament_config.get("temperament_config.temp_smoothing_factor")
-            feedback_strength = self.temperament_config.get("temperament_config.conf_feedback_strength")
             eager_threshold = self.temperament_config.get("temperament_config.temp_eager_threshold", 0.7)
             pressure_drop = self.temperament_config.get("temperament_config.temperament_pressure_drop", 0.2)
             
             # Get lifecycle stage from manager if not provided
             if lifecycle_stage is None and self.lifecycle_manager:
                 lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage()
-            
-            # Update pressure
-            current_pressure = self.pressure.update(confidence, lifecycle_stage)
             
             # Apply lifecycle-based adjustments to score
             lifecycle_params = self.temperament_config.get("temperament_config.lifecycle_params", {})
@@ -236,46 +231,50 @@ class TemperamentSystem:
             else:
                 adjusted_score = new_score
             
-            # Check if temperament should adjust based on pressure
-            if self.pressure.should_adjust(eager_threshold):
-                # Update state with adjusted score
-                self.state.update_temperament(adjusted_score)
+            # Always update the state with the adjusted score
+            previous_score = self.state.current_temperament
+            self.state.update_temperament(adjusted_score)
+            
+            # Check if pressure threshold was met before potential drop
+            pressure_threshold_met = self.pressure.should_adjust(eager_threshold)
+            
+            if pressure_threshold_met:
+                # If threshold was met, drop pressure and log
                 self.pressure.drop_pressure(pressure_drop)
-                
                 self.logger.record_event(
-                    event_type="temperament_adjusted",
-                    message="Temperament adjusted due to pressure threshold",
+                    event_type="temperament_pressure_threshold_met",
+                    message="Temperament pressure met threshold, pressure dropped",
                     level="info",
                     additional_info={
-                        "new_score": adjusted_score,
+                        "adjusted_score": adjusted_score,
                         "confidence": confidence,
-                        "current_pressure": current_pressure,
+                        "pressure_before_drop": self.pressure.current_pressure,
                         "eager_threshold": eager_threshold,
-                        "pressure_drop": pressure_drop,
+                        "pressure_drop_amount": pressure_drop,
+                        "new_pressure": self.pressure.current_pressure,
                         "lifecycle_stage": lifecycle_stage
                     }
                 )
             
-            # Update lifecycle state
+            # Update lifecycle state tracking
             self._lifecycle_stage = lifecycle_stage
             self._last_lifecycle_update = time.time()
             
-            # Log the update with enhanced lifecycle context
+            # Log the final update details
             self.logger.record_event(
-                event_type="temperament_updated",
-                message="Temperament system updated",
+                event_type="temperament_state_updated",
+                message="Temperament state updated",
                 level="info",
                 additional_info={
-                    "new_score": adjusted_score,
+                    "previous_score": previous_score,
+                    "new_score": self.state.current_temperament,
+                    "input_score": new_score,
                     "confidence": confidence,
-                    "current_pressure": current_pressure,
+                    "current_pressure": self.pressure.current_pressure,
                     "lifecycle_stage": lifecycle_stage,
-                    "current_score": self.state.current_temperament,
                     "conversation_id": self.state.conversation_id,
                     "state_hash": self.state.state_hash,
-                    "smoothing_factor": smoothing_factor,
-                    "feedback_strength": feedback_strength,
-                    "time_since_last_update": time.time() - self._last_lifecycle_update,
+                    "time_since_last_lifecycle_update": time.time() - self._last_lifecycle_update,
                     "lifecycle_params": lifecycle_params.get(lifecycle_stage, {})
                 }
             )
@@ -388,8 +387,32 @@ class TemperamentSystem:
                 return adjusted_value
                 
             else:
-                raise ValueError(f"Unsupported parameter type: {parameter_type}")
+                # Use NotImplementedError for unsupported types
+                raise NotImplementedError(f"Parameter adjustment not implemented for type: {parameter_type}")
             
+        except ValueError as ve: # Catch specific validation errors first
+            self.logger.log_error(
+                error_msg=f"Invalid input for parameter adjustment: {str(ve)}",
+                error_type="parameter_validation_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "parameter_type": parameter_type,
+                    "base_value": base_value,
+                    "curiosity_pressure": curiosity_pressure
+                }
+            )
+            return base_value # Return base value on validation error
+        except NotImplementedError as nie: # Catch specific implementation errors
+             self.logger.log_error(
+                error_msg=str(nie),
+                error_type="parameter_adjustment_unsupported",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "parameter_type": parameter_type,
+                    "base_value": base_value
+                }
+            )
+             return base_value # Return base value if type not supported
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"Failed to adjust parameter: {str(e)}",
@@ -401,7 +424,7 @@ class TemperamentSystem:
                     "curiosity_pressure": curiosity_pressure
                 }
             )
-            return base_value  # Return base value on error
+            return base_value  # Return base value on general error
 
 class TemperamentAdjuster:
     """Manages temperament adjustments and state updates."""
@@ -434,16 +457,22 @@ class TemperamentAdjuster:
     def _on_config_change(self) -> None:
         """Handle configuration changes."""
         try:
-            current_params = self._get_validated_parameters()
-            current_hash = self._compute_parameter_hash(current_params)
+            # Check if relevant parameters have actually changed
+            new_params = self._get_validated_parameters()
+            new_hash = self._compute_parameter_hash(new_params)
             
-            if current_hash != self._last_parameter_hash:
+            if new_hash != self._last_parameter_hash:
                 self.logger.record_event(
                     event_type="temperament_parameters_changed",
-                    message="Temperament parameters changed, reinitializing system",
+                    message="Temperament control parameters changed, reinitializing system",
                     level="info",
-                    additional_info=current_params
+                    additional_info={
+                        "previous_hash": self._last_parameter_hash,
+                        "new_hash": new_hash,
+                        "new_params": new_params
+                    }
                 )
+                # Reinitialize the system which will update _last_parameter_hash
                 self._initialize_temperament_system()
                 
         except Exception as e:
@@ -454,30 +483,51 @@ class TemperamentAdjuster:
             )
             
     def _on_state_update(self, state: SOVLState) -> None:
-        """Handle state updates."""
+        """Handle state updates by synchronizing with the TemperamentSystem."""
         try:
-            # Validate state consistency
-            if not self._validate_state_consistency(state):
-                # Reset history if inconsistent
+            if not self.temperament_system:
+                 self.logger.log_error(
+                    error_msg="Temperament system not initialized, cannot process state update.",
+                    error_type="temperament_state_error"
+                 )
+                 return
+
+            # Get the latest score from the core temperament system
+            new_temperament_score = self.temperament_system.current_score
+
+            # --- Validate State Consistency ---
+            # Check consistency *before* updating the state object
+            is_consistent = self._validate_state_consistency(state, new_temperament_score)
+            
+            if not is_consistent:
+                # Handle inconsistency - e.g., reset history
                 state.temperament_history.clear()
                 self.logger.record_event(
                     event_type="temperament_history_reset",
-                    message="Temperament history reset due to inconsistency",
-                    level="info",
+                    message="Temperament history reset due to inconsistency detected before state update",
+                    level="warning",
                     additional_info={
                         "conversation_id": state.conversation_id,
-                        "state_hash": state.state_hash
+                        "state_hash": state.state_hash,
+                        "score_before_reset": new_temperament_score,
+                        "last_history_score": state.temperament_history[-1] if state.temperament_history else None
                     }
                 )
+
+            # --- Update State ---
+            # Now, update the state object with the score from the temperament system
+            state.temperament_score = new_temperament_score
             
-            # Update state with current temperament
-            state.temperament_score = self.temperament_system.current_score
+            # Append the new score to the history (handle max length if needed)
+            history_maxlen = self.config_handler.config_manager.get("temperament_config.temperament_history_maxlen", 5)
             state.temperament_history.append(state.temperament_score)
-            
-            # Update state hash
+            if len(state.temperament_history) > history_maxlen:
+                 state.temperament_history.pop(0) # Remove oldest entry
+
+            # Update internal state hash tracker
             self._last_state_hash = self._compute_state_hash(state)
             
-            # Notify other components
+            # Notify other components that the temperament aspect of the state has been updated
             self.event_dispatcher.notify("temperament_updated", state)
             
         except Exception as e:
@@ -485,60 +535,80 @@ class TemperamentAdjuster:
                 error_msg=f"Failed to synchronize state: {str(e)}",
                 error_type="temperament_state_error",
                 stack_trace=traceback.format_exc(),
-                conversation_id=state.conversation_id,
-                state_hash=state.state_hash
+                additional_info={
+                    "conversation_id": getattr(state, 'conversation_id', 'N/A'),
+                    "state_hash": getattr(state, 'state_hash', 'N/A')
+                }
             )
-            raise
             
-    def _validate_state_consistency(self, state: SOVLState) -> bool:
-        """Validate consistency between current state and temperament history."""
+    def _validate_state_consistency(self, state: SOVLState, new_score: float) -> bool:
+        """
+        Validate consistency between the potential new score and the existing history.
+        Checks for large jumps and parameter changes.
+        
+        Args:
+            state: The current SOVLState object (before update).
+            new_score: The new temperament score calculated by TemperamentSystem.
+
+        Returns:
+            bool: True if consistent, False otherwise.
+        """
         try:
+            # If history is empty, it's consistent by default
             if not state.temperament_history:
                 return True
                 
-            # Check for significant deviation between current score and history
-            if abs(state.temperament_history[-1] - state.temperament_score) > 0.5:
+            # Check for significant deviation between the *new* score and the *last recorded* score
+            last_recorded_score = state.temperament_history[-1]
+            # Define a threshold for inconsistency (e.g., from config or hardcoded)
+            inconsistency_threshold = 0.5 # Example threshold
+            
+            if abs(new_score - last_recorded_score) > inconsistency_threshold:
                 self.logger.record_event(
-                    event_type="temperament_inconsistency",
-                    message="Temperament history inconsistent with current score",
+                    event_type="temperament_inconsistency_detected",
+                    message="Potential temperament inconsistency: large jump detected",
                     level="warning",
                     additional_info={
-                        "current_score": state.temperament_score,
-                        "last_history_score": state.temperament_history[-1],
+                        "new_score": new_score,
+                        "last_recorded_score": last_recorded_score,
+                        "threshold": inconsistency_threshold,
                         "history_length": len(state.temperament_history),
                         "conversation_id": state.conversation_id,
                         "state_hash": state.state_hash
                     }
                 )
-                return False
+                return False # Inconsistent jump
                 
-            # Check for parameter changes that might invalidate history
-            current_hash = self._compute_parameter_hash(self._get_validated_parameters())
-            if current_hash != self._last_parameter_hash:
+            # Check if parameters have changed since the last state update was recorded
+            current_param_hash = self._compute_parameter_hash(self._get_validated_parameters())
+            if current_param_hash != self._last_parameter_hash:
                 self.logger.record_event(
-                    event_type="temperament_history_invalidated",
-                    message="Temperament parameters changed, history may be invalid",
+                    event_type="temperament_history_params_mismatch",
+                    message="Temperament parameters changed since last history update, potential inconsistency",
                     level="warning",
                     additional_info={
-                        "parameter_hash": current_hash,
-                        "last_parameter_hash": self._last_parameter_hash,
+                        "current_parameter_hash": current_param_hash,
+                        "recorded_parameter_hash": self._last_parameter_hash,
                         "conversation_id": state.conversation_id,
                         "state_hash": state.state_hash
                     }
                 )
-                return False
+                return False # Parameters changed, consider history invalid
                 
+            # If checks pass, state is consistent
             return True
             
         except Exception as e:
             self.logger.log_error(
-                error_msg=f"Failed to validate state consistency: {str(e)}",
+                error_msg=f"Failed during state consistency validation: {str(e)}",
                 error_type="temperament_validation_error",
                 stack_trace=traceback.format_exc(),
-                conversation_id=state.conversation_id,
-                state_hash=state.state_hash
+                additional_info={
+                     "conversation_id": getattr(state, 'conversation_id', 'N/A'),
+                     "state_hash": getattr(state, 'state_hash', 'N/A')
+                }
             )
-            return False
+            return False # Assume inconsistent on error
             
     def _compute_state_hash(self, state: SOVLState) -> str:
         """Compute a hash of the current state."""
@@ -579,10 +649,13 @@ class TemperamentAdjuster:
             raise
             
     def _get_validated_parameters(self) -> Dict[str, Any]:
-        """Get and validate temperament parameters."""
+        """
+        Get and validate temperament parameters specifically used for control adjustments.
+        Note: Reads from 'controls_config', distinct from 'temperament_config' used elsewhere.
+        """
         config = self.config_handler.config_manager
         
-        # Define safe parameter ranges
+        # Define safe parameter ranges relevant to TemperamentAdjuster's scope
         safe_ranges = {
             "temp_smoothing_factor": (0.1, 1.0),
             "temp_eager_threshold": (0.5, 0.9),
@@ -595,31 +668,41 @@ class TemperamentAdjuster:
             "temperament_decay_rate": (0.1, 0.9)
         }
         
-        # Get and validate parameters
+        # Get and validate parameters from 'controls_config' section
         params = {}
         for key, (min_val, max_val) in safe_ranges.items():
-            value = config.get(f"controls_config.{key}", (min_val + max_val) / 2)
-            if not (min_val <= value <= max_val):
-                self.logger.record_event(
-                    event_type="temperament_parameter_warning",
-                    message=f"Parameter {key} out of safe range, clamping to bounds",
+            # Construct the full key path expected by config_manager
+            config_key = f"controls_config.{key}"
+            # Provide a default value (e.g., midpoint) if key is missing
+            default_value = (min_val + max_val) / 2.0 
+            value = config.get(config_key, default_value)
+            
+            # Validate type and range
+            if not isinstance(value, (int, float)):
+                 self.logger.record_event(
+                    event_type="temperament_parameter_type_warning",
+                    message=f"Parameter {config_key} has incorrect type ({type(value)}), using default.",
                     level="warning",
-                    additional_info={
-                        "parameter": key,
-                        "value": value,
-                        "min": min_val,
-                        "max": max_val
-                    }
+                    additional_info={"parameter": config_key, "value": value, "default": default_value}
+                 )
+                 value = default_value
+            elif not (min_val <= value <= max_val):
+                self.logger.record_event(
+                    event_type="temperament_parameter_range_warning",
+                    message=f"Parameter {config_key} out of safe range [{min_val}, {max_val}], clamping.",
+                    level="warning",
+                    additional_info={"parameter": config_key, "value": value, "min": min_val, "max": max_val}
                 )
-                value = max(min_val, min(value, max_val))
-            params[key] = value
+                value = max(min_val, min(value, max_val)) # Clamp the value
+            
+            params[key] = value # Store the validated/clamped value using the short key name
             
         return params
         
     def _compute_parameter_hash(self, params: Dict[str, Any]) -> str:
         """Compute a hash of the current parameters."""
         return str(sorted(params.items()))
-    
+
 class TemperamentPressure:
     """Monitors temperament score and triggers empty prompts when thresholds are met."""
     
@@ -628,7 +711,7 @@ class TemperamentPressure:
         config_manager: ConfigManager
     ):
         """
-        Initialize temperament pressure monitoring.
+        Initialize temperament pressure monitoring, validating config values.
         
         Args:
             config_manager: Configuration manager instance
@@ -636,33 +719,80 @@ class TemperamentPressure:
         self.config_manager = config_manager
         self.logger = config_manager.logger
         
-        # Get configuration values with defaults
-        config = config_manager.get_section("temperament_config", {})
-        self.empty_prompt_threshold = config.get("temperament_empty_prompt_threshold", 0.7)
-        self.cooldown_period = config.get("temperament_cooldown_period", 300)  # 5 minutes default
-        self.min_pressure = config.get("temperament_min_pressure", 0.0)
-        self.max_pressure = config.get("temperament_max_pressure", 1.0)
+        # Get configuration values with defaults and validation
+        config_section = "temperament_config"
         
+        self.empty_prompt_threshold = self._get_validated_float(
+            config_section, "temperament_empty_prompt_threshold", 0.7, 0.0, 1.0
+        )
+        self.cooldown_period = self._get_validated_float(
+            config_section, "temperament_cooldown_period", 300, 0.0, float('inf')
+        )
+        self.min_pressure = self._get_validated_float(
+            config_section, "temperament_min_pressure", 0.0, 0.0, 1.0
+        )
+        self.max_pressure = self._get_validated_float(
+            config_section, "temperament_max_pressure", 1.0, 0.0, 1.0
+        )
+
+        # Validate min_pressure <= max_pressure
+        if self.min_pressure > self.max_pressure:
+             self._log_error(
+                 f"Configuration error: min_pressure ({self.min_pressure}) cannot be greater than max_pressure ({self.max_pressure}). Using defaults.",
+                 error_type="temperament_config_error"
+             )
+             self.min_pressure = 0.0
+             self.max_pressure = 1.0
+
         # Initialize state
         self.current_pressure = self.min_pressure
         self.last_trigger_time = 0
         
-        # Log initialization
+        # Log initialization with validated values
         self._log_event(
             "temperament_pressure_initialized",
-            "Temperament pressure monitoring initialized",
+            "Temperament pressure monitoring initialized with validated config",
             level="info",
             additional_info={
                 "empty_prompt_threshold": self.empty_prompt_threshold,
                 "cooldown_period": self.cooldown_period,
                 "min_pressure": self.min_pressure,
-                "max_pressure": self.max_pressure
+                "max_pressure": self.max_pressure,
+                "initial_pressure": self.current_pressure
             }
         )
+
+    def _get_validated_float(self, section: str, key: str, default: float, min_val: float, max_val: float) -> float:
+        """Helper to get and validate a float config value."""
+        full_key = f"{section}.{key}"
+        value = self.config_manager.get(full_key, default)
+        
+        if not isinstance(value, (int, float)):
+            self._log_event(
+                "temperament_pressure_config_warning",
+                f"Config value {full_key} is not numeric ({type(value)}), using default {default}",
+                level="warning",
+                additional_info={"key": full_key, "value": value}
+            )
+            return default
+            
+        value = float(value) # Ensure it's float
+        
+        if not (min_val <= value <= max_val):
+             self._log_event(
+                "temperament_pressure_config_warning",
+                f"Config value {full_key} ({value}) out of range [{min_val}, {max_val}], clamping",
+                level="warning",
+                additional_info={"key": full_key, "value": value}
+             )
+             value = max(min_val, min(value, max_val))
+             
+        return value
 
     def should_trigger_empty_prompt(self, temperament_score: float) -> bool:
         """
         Check if an empty prompt should be triggered based on temperament score.
+        Updates internal pressure based on the provided score.
         
         Args:
             temperament_score: Current temperament score from TemperamentSystem
@@ -673,11 +803,11 @@ class TemperamentPressure:
         try:
             current_time = time.time()
             
-            # Check cooldown period
+            # Check cooldown period first
             if current_time - self.last_trigger_time < self.cooldown_period:
-                return False
+                return False # Still in cooldown
             
-            # Update internal pressure based on temperament score
+            # Update internal pressure based on the current temperament score
             self.current_pressure = max(self.min_pressure, 
                                      min(self.max_pressure, temperament_score))
             
@@ -688,13 +818,13 @@ class TemperamentPressure:
                 self.last_trigger_time = current_time
                 self._log_event(
                     "temperament_empty_prompt_triggered",
-                    "Empty prompt triggered due to high temperament",
+                    "Empty prompt triggered due to high temperament pressure",
                     level="info",
                     additional_info={
                         "temperament_score": temperament_score,
                         "current_pressure": self.current_pressure,
                         "threshold": self.empty_prompt_threshold,
-                        "time_since_last": current_time - self.last_trigger_time
+                        "time_since_last_trigger": current_time - self.last_trigger_time
                     }
                 )
             
@@ -707,6 +837,19 @@ class TemperamentPressure:
                 stack_trace=traceback.format_exc()
             )
             return False
+
+    def should_adjust(self, threshold: float) -> bool:
+        """
+        Checks if the current pressure meets a generic adjustment threshold.
+        Used by TemperamentSystem to decide if pressure-related actions should occur.
+        
+        Args:
+            threshold: The threshold to check against.
+
+        Returns:
+            bool: True if current_pressure >= threshold.
+        """
+        return self.current_pressure >= threshold
 
     def drop_pressure(self, amount: float) -> None:
         """
