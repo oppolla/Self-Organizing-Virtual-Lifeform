@@ -8,11 +8,57 @@ import traceback
 import os
 from threading import Lock
 import time
+from functools import wraps  # Import wraps
 from sovl_utils import validate_quantization_mode
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ErrorRecord
-from sovl_state import StateTracker
+from sovl_state import StateTracker, StateManager
+
+# Decorator function (defined outside the class for clarity)
+def _prevent_immediate_retry(recovery_func):
+    @wraps(recovery_func)
+    def wrapper(self, record: ErrorRecord, *args, **kwargs):
+        strategy_name = recovery_func.__name__
+        # Ensure record has a unique hash or id. Using hash here.
+        if not hasattr(record, 'hash'):
+             # Fallback or raise error if hash is missing
+             # For now, log and potentially skip check
+             self._log_error("Missing hash in ErrorRecord for retry prevention", "decorator_error")
+             # Call original function without retry check if hash is missing
+             return recovery_func(self, record, *args, **kwargs)
+
+        recovery_key = (record.hash, strategy_name)
+
+        # Skip if this exact recovery just failed
+        if self._last_failed_recovery_key == recovery_key:
+            self._log_event(
+                f"{strategy_name}_skipped",
+                f"Skipping immediate retry of failed {strategy_name} recovery",
+                level="warning",
+                additional_info={"error_hash": record.hash}
+            )
+            return # Skip the recovery attempt
+
+        try:
+            # Call the original recovery function
+            result = recovery_func(self, record, *args, **kwargs)
+            # Reset the flag on successful completion of the recovery attempt
+            self._last_failed_recovery_key = None
+            return result
+        except Exception as e:
+            # Mark this recovery attempt as failed
+            self._last_failed_recovery_key = recovery_key
+            # Log the failure during the recovery attempt
+            self._log_error(
+                f"Exception during recovery attempt in {strategy_name}: {str(e)}",
+                error_type="recovery_attempt_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error_hash": record.hash}
+            )
+            # Re-raise the exception so the main error handling flow continues
+            raise e
+    return wrapper
 
 class ModelManager:
     """
@@ -32,6 +78,7 @@ class ModelManager:
         self._logger = logger
         self._device = device
         self._memory_lock = Lock()
+        self._last_failed_recovery_key = None  # Track last failed recovery attempt
 
         # Initialize error manager
         self._initialize_error_manager()
@@ -78,6 +125,7 @@ class ModelManager:
             "tokenizer_error": self._recover_tokenizer
         })
 
+    @_prevent_immediate_retry
     def _recover_model_loading(self, record: ErrorRecord) -> None:
         """Recovery strategy for model loading errors."""
         try:
@@ -102,12 +150,9 @@ class ModelManager:
                 }
             )
         except Exception as e:
-            self._log_error(
-                f"Failed to recover from model loading error: {str(e)}",
-                error_type="recovery_error",
-                stack_trace=traceback.format_exc()
-            )
+            raise
 
+    @_prevent_immediate_retry
     def _recover_memory_allocation(self, record: ErrorRecord) -> None:
         """Recovery strategy for memory allocation errors."""
         try:
@@ -129,12 +174,9 @@ class ModelManager:
                 additional_info={"new_quantization": self.quantization_mode}
             )
         except Exception as e:
-            self._log_error(
-                f"Failed to recover from memory allocation: {str(e)}",
-                error_type="recovery_error",
-                stack_trace=traceback.format_exc()
-            )
+            raise
 
+    @_prevent_immediate_retry
     def _recover_quantization(self, record: ErrorRecord) -> None:
         """Recovery strategy for quantization errors."""
         try:
@@ -154,12 +196,9 @@ class ModelManager:
                 additional_info={"new_quantization": self.quantization_mode}
             )
         except Exception as e:
-            self._log_error(
-                f"Failed to recover from quantization error: {str(e)}",
-                error_type="recovery_error",
-                stack_trace=traceback.format_exc()
-            )
+            raise
 
+    @_prevent_immediate_retry
     def _recover_tokenizer(self, record: ErrorRecord) -> None:
         """Recovery strategy for tokenizer errors."""
         try:
@@ -176,11 +215,7 @@ class ModelManager:
                 level="info"
             )
         except Exception as e:
-            self._log_error(
-                f"Failed to recover from tokenizer error: {str(e)}",
-                error_type="recovery_error",
-                stack_trace=traceback.format_exc()
-            )
+            raise
 
     def load_models(self):
         """Load base and scaffold models along with their tokenizers."""
