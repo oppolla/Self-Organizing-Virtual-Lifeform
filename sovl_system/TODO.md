@@ -3,11 +3,10 @@
 ## General Taks:
 
 1. multi scaffold support improvements, multi scaffold name system: scaffold0 scaffold1. name selextor system? death of scaffold?
-3.  integrate sovl_bonder
-4.  look into migrating dream and curiosity question out of sovl main
+3. integrate sovl_bonder
 5. add temperament_pressure. Use empty prompt, (or maybe refined one?)
 6. further develop initialization and startup feel
-7. Tweak wake up prompt like the joke prompt for a greeting.
+
 
 
 
