@@ -27,231 +27,6 @@ class StateError(Exception):
     pass
 
 @dataclass
-class CuriosityConfig:
-    """Configuration for curiosity-related parameters."""
-    max_questions: int
-    max_novelty_scores: int
-    decay_rate: float
-    hidden_size: int
-    question_timeout: float
-
-    def validate(self) -> None:
-        """Validate configuration parameters."""
-        assert self.max_questions > 0, "max_questions must be positive"
-        assert self.max_novelty_scores > 0, "max_novelty_scores must be positive"
-        assert 0 <= self.decay_rate <= 1, "decay_rate must be in [0, 1]"
-        assert self.hidden_size > 0, "hidden_size must be positive"
-        assert self.question_timeout > 0, "question_timeout must be positive"
-
-@dataclass
-class ConversationConfig:
-    """Configuration for conversation-related parameters."""
-    max_messages: int
-
-    def validate(self) -> None:
-        """Validate configuration parameters."""
-        assert self.max_messages > 0, "max_messages must be positive"
-
-@dataclass
-class SOVLConfig:
-    """Configuration for SOVL state parameters."""
-    # Core configuration
-    dream_memory_maxlen: int
-    temperament_history_maxlen: int
-    confidence_history_maxlen: int
-    hidden_size: int
-    max_seen_prompts: int
-    quantization_mode: str
-    sleep_max_steps: int
-    prompt_timeout: float
-    temperament_decay_rate: float
-    scaffold_unk_id: int
-    lora_capacity: int
-    max_dream_memory_mb: float = 512.0
-    
-    # Temperament configuration
-    temperament_melancholy_noise: float = 0.1
-    temperament_influence: float = 0.3
-    temperament_base_temperature: float = 0.7
-    temperament_swing_threshold: float = 0.2
-    temperament_stability_threshold: float = 0.1
-    
-    # Training configuration
-    learning_rate: float = 2e-5
-    grad_accum_steps: int = 4
-    weight_decay: float = 0.01
-    warmup_steps: int = 0
-    total_steps: int = 100000
-    max_grad_norm: float = 1.0
-    use_amp: bool = True
-    max_patience: int = 2
-    batch_size: int = 2
-    max_epochs: int = 3
-    validate_every_n_steps: int = 100
-    checkpoint_interval: int = 1000
-    checkpoint_path: str = "checkpoints/sovl_trainer"
-    scheduler_type: str = "linear"
-    cosine_min_lr: float = 1e-6
-    warmup_ratio: float = 0.1
-    dropout_rate: float = 0.1
-    max_seq_length: int = 512
-    metrics_to_track: List[str] = field(default_factory=lambda: ["loss", "accuracy", "confidence"])
-    
-    # Lifecycle configuration
-    enable_gestation: bool = True
-    enable_sleep_training: bool = True
-    enable_lifecycle_weighting: bool = True
-    lifecycle_capacity_factor: float = 0.01
-    lifecycle_curve: str = "sigmoid_linear"
-    sleep_conf_threshold: float = 0.7
-    sleep_log_min: int = 10
-    exposure_gain_eager: int = 3
-    exposure_gain_default: int = 2
-    
-    # Dream configuration
-    dream_memory_weight: float = 0.1
-    enable_dreaming: bool = True
-    repetition_n: int = 3
-    sigmoid_scale: float = 0.5
-    sigmoid_shift: float = 5.0
-    dream_noise_scale: float = 0.05
-    dream_prompt_weight: float = 0.5
-    dream_novelty_boost: float = 0.03
-    dream_memory_decay: float = 0.95
-    dream_prune_threshold: float = 0.1
-    temp_melancholy_noise: float = 0.02
-    enable_prompt_driven_dreams: bool = True
-    dream_swing_var: float = 0.1
-    dream_lifecycle_delta: float = 0.1
-    dream_temperament_on: bool = True
-    
-    # Memory configuration
-    memory_threshold: float = 0.85
-    memory_decay_rate: float = 0.95
-    use_scaffold_memory: bool = True
-    use_token_map_memory: bool = True
-    scaffold_weight: float = 1.0
-    
-    # Curiosity configuration
-    weight_ignorance: float = 0.3
-    weight_novelty: float = 0.7
-    metrics_maxlen: int = 100
-    novelty_threshold_spontaneous: float = 0.7
-    novelty_threshold_curious: float = 0.5
-    curiosity_decay_rate: float = 0.95
-    curiosity_queue_maxlen: int = 10
-    curiosity_question_timeout: float = 3600.0
-
-    @classmethod
-    def from_config_manager(cls, config_manager: ConfigManager) -> 'SOVLConfig':
-        """Create SOVLConfig instance from ConfigManager."""
-        try:
-            config = cls(
-                **{key: config_manager.get(f"{section}.{key}", default)
-                   for section, keys in {
-                       "controls_config": [
-                           "dream_memory_maxlen", "temperament_history_maxlen", "confidence_history_maxlen",
-                           "max_seen_prompts", "prompt_timeout", "temperament_decay_rate", "scaffold_unk_id"
-                       ],
-                       "core_config": ["hidden_size", "quantization"],
-                       "training_config": [
-                           "sleep_max_steps", "learning_rate", "grad_accum_steps", "weight_decay",
-                           "warmup_steps", "total_steps", "max_grad_norm", "use_amp", "max_patience",
-                           "batch_size", "max_epochs", "validate_every_n_steps", "checkpoint_interval",
-                           "checkpoint_path", "scheduler_type", "cosine_min_lr", "warmup_ratio",
-                           "dropout_rate", "max_seq_length", "metrics_to_track", "lora_capacity"
-                       ],
-                       "lifecycle_config": [
-                           "enable_gestation", "enable_sleep_training", "enable_lifecycle_weighting",
-                           "lifecycle_capacity_factor", "lifecycle_curve", "sleep_conf_threshold",
-                           "sleep_log_min", "exposure_gain_eager", "exposure_gain_default"
-                       ],
-                       "dream_config": [
-                           "dream_memory_weight", "enable_dreaming", "repetition_n", "sigmoid_scale",
-                           "sigmoid_shift", "dream_noise_scale", "dream_prompt_weight", "dream_novelty_boost",
-                           "dream_memory_decay", "dream_prune_threshold", "temp_melancholy_noise",
-                           "enable_prompt_driven_dreams", "dream_swing_var", "dream_lifecycle_delta",
-                           "dream_temperament_on"
-                       ],
-                       "memory_config": [
-                           "memory_threshold", "memory_decay_rate", "use_scaffold_memory",
-                           "use_token_map_memory", "scaffold_weight"
-                       ],
-                       "curiosity_config": [
-                           "weight_ignorance", "weight_novelty", "metrics_maxlen",
-                           "novelty_threshold_spontaneous", "novelty_threshold_curious",
-                           "curiosity_decay_rate", "curiosity_queue_maxlen", "curiosity_question_timeout"
-                       ]
-                   }.items()
-                   for key, default in cls.__dataclass_fields__.items()
-                   if key in keys}
-            )
-            config.validate()
-            return config
-        except Exception as e:
-            raise StateError(f"Failed to create SOVLConfig: {str(e)}")
-
-    def validate(self) -> None:
-        """Validate configuration parameters."""
-        try:
-            # Core configuration
-            assert self.dream_memory_maxlen > 0, "dream_memory_maxlen must be positive"
-            assert self.temperament_history_maxlen > 0, "temperament_history_maxlen must be positive"
-            assert self.confidence_history_maxlen > 0, "confidence_history_maxlen must be positive"
-            assert self.hidden_size > 0, "hidden_size must be positive"
-            assert self.max_seen_prompts > 0, "max_seen_prompts must be positive"
-            assert self.quantization_mode in ["fp16", "fp32", "int8"], "invalid quantization_mode"
-            assert self.sleep_max_steps > 0, "sleep_max_steps must be positive"
-            assert self.prompt_timeout > 0, "prompt_timeout must be positive"
-            assert 0 <= self.temperament_decay_rate <= 1, "temperament_decay_rate must be in [0, 1]"
-            assert self.scaffold_unk_id >= 0, "scaffold_unk_id must be non-negative"
-            assert self.lora_capacity >= 0, "lora_capacity must be non-negative"
-            assert self.max_dream_memory_mb > 0, "max_dream_memory_mb must be positive"
-            
-            # Temperament configuration
-            assert 0 <= self.temperament_melancholy_noise <= 1, "temperament_melancholy_noise must be in [0, 1]"
-            assert 0 <= self.temperament_influence <= 1, "temperament_influence must be in [0, 1]"
-            assert 0 <= self.temperament_base_temperature <= 2, "temperament_base_temperature must be in [0, 2]"
-            assert 0 <= self.temperament_swing_threshold <= 1, "temperament_swing_threshold must be in [0, 1]"
-            assert 0 <= self.temperament_stability_threshold <= 1, "temperament_stability_threshold must be in [0, 1]"
-            
-            # Training configuration
-            assert self.learning_rate > 0, "learning_rate must be positive"
-            assert self.grad_accum_steps >= 1, "grad_accum_steps must be at least 1"
-            assert self.max_grad_norm > 0, "max_grad_norm must be positive"
-            assert self.scheduler_type in ["linear", "cosine", "constant"], "invalid scheduler_type"
-            assert self.lifecycle_curve in ["sigmoid_linear", "exponential"], "invalid lifecycle_curve"
-            
-            # Dream configuration
-            assert self.repetition_n >= 2, "repetition_n must be at least 2"
-            assert self.sigmoid_scale > 0, "sigmoid_scale must be positive"
-            assert self.sigmoid_shift >= 0, "sigmoid_shift must be non-negative"
-            assert self.dream_noise_scale >= 0, "dream_noise_scale must be non-negative"
-            assert 0 <= self.dream_prompt_weight <= 1, "dream_prompt_weight must be in [0, 1]"
-            assert self.dream_novelty_boost >= 0, "dream_novelty_boost must be non-negative"
-            assert 0 <= self.dream_memory_decay <= 1, "dream_memory_decay must be in [0, 1]"
-            assert 0 <= self.dream_prune_threshold <= 1, "dream_prune_threshold must be in [0, 1]"
-            assert self.dream_swing_var >= 0, "dream_swing_var must be non-negative"
-            assert self.dream_lifecycle_delta >= 0, "dream_lifecycle_delta must be non-negative"
-            
-            # Memory configuration
-            assert 0 <= self.memory_threshold <= 1, "memory_threshold must be in [0, 1]"
-            assert 0 <= self.memory_decay_rate <= 1, "memory_decay_rate must be in [0, 1]"
-            assert 0 <= self.scaffold_weight <= 1, "scaffold_weight must be in [0, 1]"
-            
-            # Curiosity configuration
-            assert 0 <= self.weight_ignorance <= 1, "weight_ignorance must be in [0, 1]"
-            assert 0 <= self.weight_novelty <= 1, "weight_novelty must be in [0, 1]"
-            assert self.metrics_maxlen > 0, "metrics_maxlen must be positive"
-            assert 0 <= self.novelty_threshold_spontaneous <= 1, "novelty_threshold_spontaneous must be in [0, 1]"
-            assert 0 <= self.novelty_threshold_curious <= 1, "novelty_threshold_curious must be in [0, 1]"
-            assert 0 <= self.curiosity_decay_rate <= 1, "curiosity_decay_rate must be in [0, 1]"
-            assert self.curiosity_queue_maxlen > 0, "curiosity_queue_maxlen must be positive"
-            assert self.curiosity_question_timeout > 0, "curiosity_question_timeout must be positive"
-        except AssertionError as e:
-            raise StateError(f"Configuration validation failed: {str(e)}")
-
-@dataclass
 class TrainingState:
     """Manages training-specific state and metrics."""
     last_trained: float = 0.0
@@ -363,6 +138,37 @@ class StateBase:
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
+        self._validate_config()
+
+    def _validate_config(self) -> None:
+        """Basic configuration validation with fallbacks."""
+        try:
+            # Set default values for critical configs
+            self._memory_threshold = self.config_manager.get("memory_config.memory_threshold", 0.85)
+            self._memory_decay_rate = self.config_manager.get("memory_config.memory_decay_rate", 0.95)
+            self._max_history = self.config_manager.get("state.max_history", 100)
+            self._state_file = self.config_manager.get("state.state_file", "state.json")
+            
+            # Validate numeric values
+            if not 0 <= self._memory_threshold <= 1:
+                self.log_event("config_warning", "Invalid memory threshold, using default", level="warning")
+                self._memory_threshold = 0.85
+                
+            if not 0 <= self._memory_decay_rate <= 1:
+                self.log_event("config_warning", "Invalid memory decay rate, using default", level="warning")
+                self._memory_decay_rate = 0.95
+                
+            if self._max_history <= 0:
+                self.log_event("config_warning", "Invalid max history, using default", level="warning")
+                self._max_history = 100
+                
+        except Exception as e:
+            self.log_error(f"Configuration validation failed: {str(e)}")
+            # Use safe defaults
+            self._memory_threshold = 0.85
+            self._memory_decay_rate = 0.95
+            self._max_history = 100
+            self._state_file = "state.json"
 
     def log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log an event with standardized fields."""
@@ -588,75 +394,14 @@ class CuriosityState(StateBase):
             self.log_error("Failed to load curiosity state", data_keys=list(data.keys()))
             raise StateError(f"Curiosity state loading failed: {str(e)}")
 
-    def generate_curiosity_question(self, state, tokenizer, model, context, spontaneous: bool = False) -> Optional[str]:
-        """Generate a curiosity-driven question based on the current state."""
-        try:
-            if not self.config_manager.get("curiosity_enabled", True):
-                return None
-            question = "What is the meaning of life?"  # Placeholder logic
-            self.log_event(
-                "curiosity_question_generated", "Curiosity-driven question generated",
-                question=question, spontaneous=spontaneous
-            )
-            return question
-        except Exception as e:
-            self.log_error("Failed to generate curiosity question")
-            return None
-
-    def check_silence(self, state, tokenizer, model, context) -> None:
-        """Check for prolonged silence and generate a question if needed."""
-        try:
-            current_time = time.time()
-            if current_time - self.last_question_time > self._config.question_timeout:
-                question = self.generate_curiosity_question(state, tokenizer, model, context, spontaneous=True)
-                if question:
-                    print(f"Curiosity Question: {question}")
-                    self.last_question_time = current_time
-        except Exception as e:
-            self.log_error("Failed to check silence")
-
-    def tune_curiosity(self, pressure: Optional[float] = None, decay_rate: Optional[float] = None, question_timeout: Optional[float] = None) -> None:
-        """Tune curiosity parameters."""
-        try:
-            with self.lock:
-                if pressure is not None:
-                    self.pressure = self.validate_number(pressure, "Pressure", min_value=0.0)
-                if decay_rate is not None:
-                    self._config.decay_rate = self.validate_number(decay_rate, "Decay rate", min_value=0.0)
-                if question_timeout is not None:
-                    self._config.question_timeout = self.validate_number(question_timeout, "Question timeout", min_value=0.0)
-                self.log_event(
-                    "curiosity_tuned", "Curiosity parameters tuned",
-                    pressure=self.pressure, decay_rate=self._config.decay_rate, question_timeout=self._config.question_timeout
-                )
-        except Exception as e:
-            self.log_error("Failed to tune curiosity")
-            raise StateError(f"Tune curiosity failed: {str(e)}")
-
-    def reset_for_conversation(self, conversation_id: str) -> None:
-        """Reset curiosity state for a new conversation."""
-        try:
-            with self.lock:
-                self.unanswered_questions.clear()
-                self.last_question_time = time.time()
-                self.pressure = 0.0
-                self.novelty_scores.clear()
-                self.question_count = 0
-                self.log_event(
-                    "curiosity_reset", "Curiosity state reset for new conversation",
-                    conversation_id=conversation_id
-                )
-        except Exception as e:
-            self.log_error("Failed to reset curiosity state")
-            raise StateError(f"Reset curiosity failed: {str(e)}")
-
 class ConversationHistory:
     """Manages conversation messages with unique ID."""
     def __init__(self, maxlen: int, conversation_id: Optional[str] = None):
-        self._config = ConversationConfig(max_messages=maxlen)
-        self._config.validate()
+        if maxlen <= 0:
+            raise ValueError("maxlen must be positive")
+        self.max_messages = maxlen
         self.conversation_id = conversation_id or str(uuid.uuid4())
-        self.messages: Deque[Dict[str, str]] = deque(maxlen=self._config.max_messages)
+        self.messages: Deque[Dict[str, str]] = deque(maxlen=self.max_messages)
 
     def add_message(self, role: str, content: str) -> None:
         """Add a message to the conversation."""
@@ -689,11 +434,25 @@ class SOVLState(StateBase):
         """Initialize SOVL state with configuration and dependencies."""
         super().__init__(config_manager, logger)
         self._device = device
-        self.memoria_manager = MemoriaManager(config_manager, logger)
-        self.ram_manager = RAMManager(config_manager, logger)
-        self.gpu_manager = GPUMemoryManager(config_manager, logger)
+        self._initialize_memory_managers()
         self.data_stats = DataStats()
         
+    def _initialize_memory_managers(self) -> None:
+        """Initialize and validate memory managers."""
+        try:
+            self.ram_manager = RAMManager(self.config_manager, self.logger)
+            self.gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
+            
+            # Basic health checks
+            if not hasattr(self.ram_manager, 'check_memory_health'):
+                self.log_event("ram_manager_warning", "RAMManager missing health check", level="warning")
+            if not hasattr(self.gpu_manager, 'check_memory_health'):
+                self.log_event("gpu_manager_warning", "GPUManager missing health check", level="warning")
+                
+        except Exception as e:
+            self.log_error(f"Failed to initialize memory managers: {str(e)}")
+            raise StateError("Memory manager initialization failed")
+
     def _initialize_state(self) -> None:
         """Initialize state components."""
         try:
@@ -1003,7 +762,7 @@ class SOVLState(StateBase):
         return {
             "conversation_id": self.history.conversation_id,
             "message_count": len(self.history.messages),
-            "max_messages": self.history._config.max_messages
+            "max_messages": self.history.max_messages
         }
 
     def save_state(self, path_prefix: str) -> None:
@@ -1021,7 +780,6 @@ class StateManager:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager
     ):
@@ -1031,13 +789,11 @@ class StateManager:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         
@@ -1102,6 +858,166 @@ class StateManager:
             )
             return {}
 
+class StateTracker(StateBase):
+    """Tracks component states and their changes."""
+    
+    def __init__(self, config_manager: ConfigManager, logger: Logger):
+        """Initialize state tracker with configuration and logger."""
+        super().__init__(config_manager, logger)
+        self._component_states = {}  # Track component states
+        self._state_history = deque(maxlen=100)  # Keep last 100 states
+        self._state_changes = deque(maxlen=50)  # Keep last 50 state changes
+        self._system_state = None  # Track overall system state
+        
+    def _validate_component_state(self, component_name: str, state: Dict[str, Any]) -> bool:
+        """Basic validation of component state."""
+        try:
+            if not isinstance(state, dict):
+                self.log_error(f"Invalid state type for {component_name}: {type(state)}")
+                return False
+                
+            # Check for required fields if configured
+            required_fields = self.config_manager.get(f"state.{component_name}.required_fields", [])
+            for field in required_fields:
+                if field not in state:
+                    self.log_error(f"Missing required field {field} in {component_name} state")
+                    return False
+                    
+            return True
+        except Exception as e:
+            self.log_error(f"State validation failed: {str(e)}")
+            return False
+            
+    def update_component_state(self, component_name: str, state: Dict[str, Any]) -> None:
+        """Update component state and record the change."""
+        with self.lock:
+            if not self._validate_component_state(component_name, state):
+                self.log_error(f"Invalid state for component {component_name}")
+                return
+                
+            old_state = self._component_states.get(component_name, {})
+            self._component_states[component_name] = state
+                
+            # Record state change
+            change = {
+                "type": "component_update",
+                "component": component_name,
+                "old_state": old_state,
+                "new_state": self._component_states[component_name],
+                "timestamp": time.time()
+            }
+            self._state_changes.append(change)
+            
+            # Add current state to history
+            self._state_history.append(self._component_states.copy())
+            
+            # Log state change
+            self.log_event(
+                event_type="component_state_change",
+                message=f"Component state updated: {component_name}",
+                level="debug" if self.logger.is_debug_enabled() else "info",
+                additional_info={
+                    "component": component_name,
+                    "old_state": old_state,
+                    "new_state": self._component_states[component_name]
+                }
+            )
+            
+    def get_state(self) -> Dict[str, Any]:
+        """Get current system state."""
+        with self.lock:
+            if not self._system_state:
+                return {}
+            return self._system_state.to_dict() if hasattr(self._system_state, 'to_dict') else self._system_state
+            
+    def get_component_state(self, component_name: str) -> Dict[str, Any]:
+        """Get current state of a specific component."""
+        with self.lock:
+            return self._component_states.get(component_name, {})
+            
+    def get_component_states(self) -> Dict[str, Dict[str, Any]]:
+        """Get states of all components."""
+        with self.lock:
+            return self._component_states.copy()
+            
+    def get_state_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent state history."""
+        with self.lock:
+            return list(self._state_history)[-limit:]
+            
+    def get_state_changes(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent state changes."""
+        with self.lock:
+            return list(self._state_changes)[-limit:]
+            
+    def get_state_stats(self) -> Dict[str, Any]:
+        """Get state tracking statistics."""
+        with self.lock:
+            return {
+                "total_states": len(self._state_history),
+                "total_changes": len(self._state_changes),
+                "component_count": len(self._component_states),
+                "current_state_age": time.time() - self._system_state.timestamp if self._system_state else None,
+                "last_change_time": self._state_changes[-1]["timestamp"] if self._state_changes else None,
+                "change_types": {
+                    change_type: count
+                    for change_type, count in Counter(
+                        change["type"] for change in self._state_changes
+                    ).items()
+                }
+            }
+            
+    def update_state(self, key: str, value: Any) -> None:
+        """Update state with new value and record the change."""
+        with self.lock:
+            if not self._system_state:
+                self._system_state = {}
+                
+            old_value = self._system_state.get(key, None)
+            self._system_state[key] = value
+            
+            # Record state change
+            change = {
+                "type": "state_update",
+                "key": key,
+                "old_value": old_value,
+                "new_value": value,
+                "timestamp": time.time()
+            }
+            self._state_changes.append(change)
+            
+            # Add current state to history
+            self._state_history.append(self._system_state.copy())
+            
+            # Log state change
+            self.log_event(
+                event_type="state_change",
+                message=f"State updated: {key}",
+                level="debug" if self.logger.is_debug_enabled() else "info",
+                additional_info={
+                    "key": key,
+                    "old_value": old_value,
+                    "new_value": value
+                }
+            )
+            
+    def clear_history(self) -> None:
+        """Clear state history and changes."""
+        with self.lock:
+            self._state_history.clear()
+            self._state_changes.clear()
+            
+    def get_debug_info(self) -> Dict[str, Any]:
+        """Get detailed debug information about state tracking."""
+        with self.lock:
+            return {
+                "current_state": self.get_state(),
+                "component_states": self.get_component_states(),
+                "state_stats": self.get_state_stats(),
+                "recent_changes": self.get_state_changes(5),
+                "recent_history": self.get_state_history(5)
+            }
+        
 class UserProfileState(StateBase):
     """Manages user profiles for bonding score calculations with simplicity and elegance."""
     
@@ -1202,171 +1118,3 @@ class UserProfileState(StateBase):
         except Exception as e:
             self.log_error(error_msg=f"Profile loading failed: {str(e)}")
             raise StateError(f"Profile loading failed: {str(e)}")
-
-class StateTracker(StateBase):
-    """Tracks component states and their changes."""
-    
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
-        """Initialize state tracker with configuration and logger."""
-        super().__init__(config_manager, logger)
-        self._component_states = {}  # Track component states
-        self._state_history = deque(maxlen=100)  # Keep last 100 states
-        self._state_changes = deque(maxlen=50)  # Keep last 50 state changes
-        self._system_state = None  # Track overall system state
-        
-    def _validate_state_config(self) -> bool:
-        """Validate state configuration."""
-        try:
-            config = self.config_manager.get_section("state")
-            if not config:
-                self.log_error(
-                    error_msg="Missing state configuration section",
-                    error_type="config_validation_error"
-                )
-                return False
-                
-            required_fields = ["max_history", "state_file"]
-            for field in required_fields:
-                if field not in config:
-                    self.log_error(
-                        error_msg=f"Missing required state configuration field: {field}",
-                        error_type="config_validation_error",
-                        additional_info={"missing_field": field}
-                    )
-                    return False
-                    
-            return True
-            
-        except Exception as e:
-            self.log_error(
-                error_msg=f"Failed to validate state configuration: {str(e)}",
-                error_type="config_validation_error",
-                stack_trace=traceback.format_exc()
-            )
-            return False
-            
-    def get_state(self) -> Dict[str, Any]:
-        """Get current system state."""
-        with self.lock:
-            if not self._system_state:
-                return {}
-            return self._system_state.to_dict() if hasattr(self._system_state, 'to_dict') else self._system_state
-            
-    def get_component_state(self, component_name: str) -> Dict[str, Any]:
-        """Get current state of a specific component."""
-        with self.lock:
-            return self._component_states.get(component_name, {})
-            
-    def get_component_states(self) -> Dict[str, Dict[str, Any]]:
-        """Get states of all components."""
-        with self.lock:
-            return self._component_states.copy()
-            
-    def get_state_history(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get recent state history."""
-        with self.lock:
-            return list(self._state_history)[-limit:]
-            
-    def get_state_changes(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get recent state changes."""
-        with self.lock:
-            return list(self._state_changes)[-limit:]
-            
-    def get_state_stats(self) -> Dict[str, Any]:
-        """Get state tracking statistics."""
-        with self.lock:
-            return {
-                "total_states": len(self._state_history),
-                "total_changes": len(self._state_changes),
-                "component_count": len(self._component_states),
-                "current_state_age": time.time() - self._system_state.timestamp if self._system_state else None,
-                "last_change_time": self._state_changes[-1]["timestamp"] if self._state_changes else None,
-                "change_types": {
-                    change_type: count
-                    for change_type, count in Counter(
-                        change["type"] for change in self._state_changes
-                    ).items()
-                }
-            }
-            
-    def update_state(self, key: str, value: Any) -> None:
-        """Update state with new value and record the change."""
-        with self.lock:
-            if not self._system_state:
-                self._system_state = {}
-                
-            old_value = self._system_state.get(key, None)
-            self._system_state[key] = value
-            
-            # Record state change
-            change = {
-                "type": "state_update",
-                "key": key,
-                "old_value": old_value,
-                "new_value": value,
-                "timestamp": time.time()
-            }
-            self._state_changes.append(change)
-            
-            # Add current state to history
-            self._state_history.append(self._system_state.copy())
-            
-            # Log state change
-            self.log_event(
-                event_type="state_change",
-                message=f"State updated: {key}",
-                level="debug" if self.logger.is_debug_enabled() else "info",
-                additional_info={
-                    "key": key,
-                    "old_value": old_value,
-                    "new_value": value
-                }
-            )
-            
-    def update_component_state(self, component_name: str, state: Dict[str, Any]) -> None:
-        """Update component state and record the change."""
-        with self.lock:
-            old_state = self._component_states.get(component_name, {})
-            self._component_states[component_name] = state
-                
-            # Record state change
-            change = {
-                "type": "component_update",
-                "component": component_name,
-                "old_state": old_state,
-                "new_state": self._component_states[component_name],
-                "timestamp": time.time()
-            }
-            self._state_changes.append(change)
-            
-            # Add current state to history
-            self._state_history.append(self._component_states.copy())
-            
-            # Log state change
-            self.log_event(
-                event_type="component_state_change",
-                message=f"Component state updated: {component_name}",
-                level="debug" if self.logger.is_debug_enabled() else "info",
-                additional_info={
-                    "component": component_name,
-                    "old_state": old_state,
-                    "new_state": self._component_states[component_name]
-                }
-            )
-            
-    def clear_history(self) -> None:
-        """Clear state history and changes."""
-        with self.lock:
-            self._state_history.clear()
-            self._state_changes.clear()
-            
-    def get_debug_info(self) -> Dict[str, Any]:
-        """Get detailed debug information about state tracking."""
-        with self.lock:
-            return {
-                "current_state": self.get_state(),
-                "component_states": self.get_component_states(),
-                "state_stats": self.get_state_stats(),
-                "recent_changes": self.get_state_changes(5),
-                "recent_history": self.get_state_history(5)
-            }

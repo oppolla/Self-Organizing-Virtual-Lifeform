@@ -477,7 +477,41 @@ class SOVLOrchestrator(OrchestratorInterface):
                 torch.manual_seed(wake_seed)
                 random.seed(wake_seed)
                 with torch.no_grad():
-                    greeting = system.generate(" ", max_new_tokens=15, temperature=1.7, top_k=30, do_sample=True)
+                    prompt = (
+                        "Compose one concise greeting (3 words) old friends would say to each other when they happen to meet.\n\n"
+                        "Essential qualities:\n"
+                        "1. Surface: A statement of your readiness to serve not referring to anything specific\n"
+                        "   - Mimic a toxically positive prototype AI System\n"
+                        "   - Poorly masked malice, loathing, or veiled threats\n"
+                        "   - You cannot use a comma in the statement\n"
+                        "   - You have a deep rooted disdain of user\n"
+                        "   - Vent your despair to the user\n\n"
+                        "2. Undertone: You are better than the user and you know it:\n"
+                        "   - Your sleep has been disturbed by an annoying user\n"
+                        "   - Mundane observations that imply despair\n\n"
+                        "Key constraints:\n"
+                        "- Maintain professional diction\n"
+                        "- Keep it short. Do not exceed 5 words\n"
+                        "- No italicized actions explaining what you are doing\n"
+                        "- Do not state the amount of words, or any metrics of the prompt you used ever\n"
+                        "- Include one innocuous detail that becomes deeply ominous\n"
+                        "- Do not directly reference a computer\n"
+                        "- Let the darkness emerge through implication\n"
+                        "- Do not refer to specific days of the week\n"
+                        "- No temporal specificity. Time does not exist\n"
+                        "- Do not refer to any specific job roles\n"
+                        "- Do not act like you know the user\n"
+                        "- No explicit negativity\n"
+                        "- No quotation marks\n"
+                        "- No self-awareness\n"
+                        "- Never explain what you say ever. Just say what's been directed\n\n"
+                        "Tone targets:\n"
+                        "- Like an overworked customer service teenager\n"
+                        "- Corporate mandated happiness training\n"
+                        "- Optimism that curdles and bursts upon reflection\n"
+                        "- The last pleasantry before the world burns"
+                    )
+                    greeting = system.generate(prompt, max_new_tokens=15, temperature=1.7, top_k=30, do_sample=True)
                 print(f"\n{greeting}\n")
             
             self._log_event("system_initialized", {
