@@ -647,7 +647,7 @@ class GenerationManager:
             self._handle_error("memory_logging", e)
 
     def check_memory_health(self) -> bool:
-        """Check memory health with adaptive thresholds."""
+        """Check memory health with adaptive thresholds and graceful degradation."""
         try:
             # Update memory threshold adaptively
             self.memory_manager.memory_threshold = self._calculate_adaptive_threshold()
@@ -661,16 +661,59 @@ class GenerationManager:
             gpu_score = 1.0 - (gpu_health["usage_percentage"] / 100.0)
             overall_score = (ram_score + gpu_score) / 2.0
             
-            # Trigger cleanup if health score is below threshold
+            # If memory pressure is high, try graceful degradation first
             if overall_score < self.memory_manager.memory_threshold:
-                self.memory_manager.manage_memory()
-                return False
+                # Log memory pressure
+                self.logger.record_event(
+                    event_type="memory_pressure",
+                    message="High memory pressure detected, applying graceful degradation",
+                    level="warning",
+                    additional_info={
+                        "ram_score": ram_score,
+                        "gpu_score": gpu_score,
+                        "overall_score": overall_score,
+                        "threshold": self.memory_manager.memory_threshold
+                    }
+                )
+                
+                # Try graceful degradation steps
+                self._apply_memory_degradation_steps()
+                
+                # Continue generation with reduced resources
+                return True
                 
             return True
             
         except Exception as e:
             self._handle_error("memory_health_check", e)
-            return False
+            # Continue with generation even if health check fails
+            return True
+
+    def _apply_memory_degradation_steps(self) -> None:
+        """Apply graceful degradation steps to reduce memory pressure."""
+        try:
+            # 1. Clear caches first
+            self._clear_scaffold_cache()
+            torch.cuda.empty_cache()
+            
+            # 2. Reduce batch size if possible
+            if hasattr(self, 'base_batch_size'):
+                self.base_batch_size = max(1, self.base_batch_size // 2)
+            
+            # 3. Move old tensors to CPU
+            if hasattr(self.memory_manager, '_offload_old_tensors'):
+                self.memory_manager._offload_old_tensors()
+            
+            # 4. Trigger memory cleanup in background
+            threading.Thread(
+                target=self.memory_manager.manage_memory,
+                name="memory_cleanup",
+                daemon=True
+            ).start()
+            
+        except Exception as e:
+            self._handle_error("memory_degradation", e)
+            # Continue even if degradation fails
 
     def _handle_error_prompt(self, error_msg: str) -> str:
         """Generate a response to a system error."""
@@ -1022,6 +1065,40 @@ class GenerationManager:
             self._handle_error("prepare_generation_batch", e)
             raise ValueError(f"Failed to prepare generation batch: {str(e)}")
 
+    def _get_generation_config(self) -> Dict[str, Any]:
+        """Get the configuration for text generation."""
+        try:
+            config = {
+                'max_new_tokens': self._get_config_value("controls_config.max_new_tokens", 100),
+                'do_sample': True,  # Enable sampling by default
+                'temperature': self._get_config_value("controls_config.base_temperature", 0.7),
+                'top_k': self._get_config_value("curiosity_config.top_k", 50),
+                'pad_token_id': self.base_tokenizer.pad_token_id,
+                'eos_token_id': self.base_tokenizer.eos_token_id
+            }
+            
+            # Apply any state-based adjustments
+            if hasattr(self, 'state') and hasattr(self.state, 'temperament_score'):
+                config['temperature'] = self.adjust_parameter(
+                    config['temperature'],
+                    'temperature',
+                    self.curiosity_manager.get_pressure() if self.curiosity_manager else None
+                )
+                
+            return config
+            
+        except Exception as e:
+            self._handle_error("get_generation_config", e)
+            # Return safe defaults if error occurs
+            return {
+                'max_new_tokens': 100,
+                'do_sample': True,
+                'temperature': 0.7,
+                'top_k': 50,
+                'pad_token_id': self.base_tokenizer.pad_token_id,
+                'eos_token_id': self.base_tokenizer.eos_token_id
+            }
+
     @state_managed_operation("generate_with_state_context")
     def _generate_with_state_context(self, batch: Dict[str, Any]) -> List[str]:
         """Generate text with state context and error handling."""
@@ -1314,18 +1391,41 @@ class GenerationManager:
                 raise ValueError(f"top_p must be between 0 and 1, got {top_p}")
 
     def _validate_state_consistency(self) -> None:
-        """Validate state consistency after updates."""
-        if not hasattr(self.state, 'temperament_score'):
-            raise ValueError("State missing temperament_score")
+        """Ensure state consistency by setting defaults if values are missing or invalid."""
+        try:
+            # Handle temperament_score
+            if not hasattr(self.state, 'temperament_score'):
+                self.state.temperament_score = 0.5  # Set default
+                self.logger.log_event(
+                    "state_consistency",
+                    {"message": "Set default temperament_score", "value": 0.5}
+                )
+            elif not 0 <= self.state.temperament_score <= 1:
+                self.state.temperament_score = max(0, min(1, self.state.temperament_score))
+                self.logger.log_event(
+                    "state_consistency",
+                    {"message": "Clamped temperament_score", "value": self.state.temperament_score}
+                )
             
-        if not 0 <= self.state.temperament_score <= 1:
-            raise ValueError(f"Invalid temperament_score: {self.state.temperament_score}")
-            
-        if not hasattr(self.state, 'confidence'):
-            raise ValueError("State missing confidence")
-            
-        if not 0 <= self.state.confidence <= 1:
-            raise ValueError(f"Invalid confidence: {self.state.confidence}")
+            # Handle confidence
+            if not hasattr(self.state, 'confidence'):
+                self.state.confidence = 0.5  # Set default
+                self.logger.log_event(
+                    "state_consistency",
+                    {"message": "Set default confidence", "value": 0.5}
+                )
+            elif not 0 <= self.state.confidence <= 1:
+                self.state.confidence = max(0, min(1, self.state.confidence))
+                self.logger.log_event(
+                    "state_consistency",
+                    {"message": "Clamped confidence", "value": self.state.confidence}
+                )
+                
+        except Exception as e:
+            self._handle_error("state_consistency", e)
+            # Set safe defaults if error occurs
+            self.state.temperament_score = 0.5
+            self.state.confidence = 0.5
 
 def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for generated tokens."""
