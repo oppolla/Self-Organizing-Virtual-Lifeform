@@ -343,6 +343,16 @@ class ModelManager:
                 truncation_side="left"
             )
             
+            # Update scaffold_unk_id after loading tokenizer
+            if self.scaffold_tokenizer is not None:
+                self.scaffold_unk_id = self.scaffold_tokenizer.unk_token_id
+                self._log_event(
+                    "scaffold_unk_update",
+                    "Updated scaffold unknown token ID",
+                    level="info",
+                    additional_info={"unk_id": self.scaffold_unk_id}
+                )
+            
             self._log_event(
                 "tokenizer_loading",
                 "Successfully loaded tokenizers",
@@ -539,3 +549,49 @@ class ModelManager:
     def get_scaffold_unk_id(self) -> Optional[int]:
         """Return the scaffold unknown token ID."""
         return self.scaffold_unk_id
+
+    def _initialize_config(self) -> None:
+        """Initialize and validate essential configuration parameters."""
+        try:
+            # Load model names
+            self.base_model_name = self._validate_config_value(
+                "base_model_name",
+                self._config_manager.get("model_config.base_model_name"),
+                str
+            )
+            
+            self.scaffold_model_name = self._validate_config_value(
+                "scaffold_model_name",
+                self._config_manager.get("model_config.scaffold_model_name"),
+                str
+            )
+            
+            # Load quantization settings
+            self.quantization_mode = self._validate_config_value(
+                "quantization_mode",
+                self._config_manager.get("model_config.quantization_mode", "fp16"),
+                str,
+                valid_values=["int4", "int8", "fp16"]
+            )
+            
+            # Initialize scaffold_unk_id (will be updated after tokenizer load)
+            self.scaffold_unk_id = None
+            
+            self._log_event(
+                "config_initialization",
+                "Successfully initialized model configuration",
+                level="info",
+                additional_info={
+                    "base_model": self.base_model_name,
+                    "scaffold_model": self.scaffold_model_name,
+                    "quantization": self.quantization_mode
+                }
+            )
+            
+        except Exception as e:
+            self._log_error(
+                f"Failed to initialize configuration: {str(e)}",
+                error_type="config_initialization_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
