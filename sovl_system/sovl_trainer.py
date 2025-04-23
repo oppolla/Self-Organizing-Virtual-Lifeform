@@ -689,7 +689,7 @@ class TrainingWorkflowManager:
                  self.event_handler.handle_training_complete(
                      epoch=self.state["current_epoch"],
                      avg_loss=loss,
-                     data_exposure=metrics.get("data_exposure", 0.0) # Note: train_step doesn't return data_exposure currently
+                     data_exposure=metrics.get("data_exposure", 0.0)
                  )
             else:
                  if self.logger: self.logger.log_warning("Could not log training_complete event due to missing state or handler method.", event_type="training_cycle_event_warning")
@@ -738,7 +738,7 @@ class TrainingWorkflowManager:
             if hasattr(self.event_handler, 'handle_sleep_train_complete'):
                  self.event_handler.handle_sleep_train_complete(
                      batch_size=batch_size,
-                     data_exposure=metrics.get("data_exposure", 0.0) # Note: train_step doesn't return data_exposure
+                     data_exposure=metrics.get("data_exposure", 0.0)
                  )
             else:
                  if self.logger: self.logger.log_warning("Could not log sleep_train_complete event due to missing handler method.", event_type="sleep_training_event_warning")
