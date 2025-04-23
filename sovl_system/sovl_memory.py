@@ -171,11 +171,12 @@ class RAMManager:
             ram_available = memory_stats.get("ram_available", 0.0)
             ram_total = memory_stats.get("ram_total", 0.0)
             
-            # Calculate health score
-            health_score = 1.0 - (ram_usage / ram_total) if ram_total > 0 else 0.0
+            # Calculate usage percentage and health score
+            usage_percentage = safe_divide(ram_usage, ram_total)
+            health_score = 1.0 - usage_percentage
             
             # Check if usage exceeds threshold
-            if ram_usage / ram_total > self.memory_threshold:
+            if usage_percentage > self.memory_threshold:
                 self.error_manager.handle_error(
                     error=MemoryError("RAM usage exceeds threshold"),
                     error_type="ram_threshold_error",
@@ -183,7 +184,8 @@ class RAMManager:
                     additional_info={
                         "usage": ram_usage,
                         "total": ram_total,
-                        "threshold": self.memory_threshold
+                        "threshold": self.memory_threshold,
+                        "usage_percentage": usage_percentage
                     }
                 )
             
@@ -195,14 +197,16 @@ class RAMManager:
                 additional_info={
                     "ram_usage": ram_usage,
                     "ram_available": ram_available,
-                    "health_score": health_score
+                    "health_score": health_score,
+                    "usage_percentage": usage_percentage
                 }
             )
             
             return {
                 "ram_usage": ram_usage,
                 "ram_available": ram_available,
-                "health_score": health_score
+                "health_score": health_score,
+                "usage_percentage": usage_percentage
             }
             
         except Exception as e:
@@ -212,7 +216,12 @@ class RAMManager:
                 severity=2,
                 additional_info={"stage": "health_check"}
             )
-            raise
+            return {
+                "ram_usage": 0.0,
+                "ram_available": 0.0,
+                "health_score": 0.0,
+                "usage_percentage": 0.0
+            }
 
 class GPUMemoryManager:
     """Manages GPU memory for the SOVL system."""
@@ -223,7 +232,6 @@ class GPUMemoryManager:
         self._logger = logger
         self._memory_lock = Lock()
         self.hardware = HardwareManager(config_manager, logger)
-        self._allocated_memory = {}  # Track allocated memory pointers
         
         # Initialize error manager
         self._initialize_error_manager()
@@ -267,9 +275,6 @@ class GPUMemoryManager:
             # Clear CUDA cache
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
-            # Free any unused allocations
-            self._cleanup_unused_allocations()
             
             self._logger.record_event(
                 "gpu_allocation_recovery",
@@ -355,111 +360,6 @@ class GPUMemoryManager:
                 )
                 raise
 
-    def allocate_gpu_memory(self, size_bytes: int) -> Optional[int]:
-        """Allocate GPU memory using CUDA."""
-        try:
-            if not torch.cuda.is_available():
-                self.error_manager.handle_error(
-                    error=RuntimeError("CUDA is not available"),
-                    error_type="cuda_error",
-                    severity=1,
-                    additional_info={"stage": "memory_allocation"}
-                )
-                return None
-                
-            with self._memory_lock:
-                # Check if we have enough memory
-                current_usage = self.get_detailed_gpu_memory_stats()
-                if current_usage['allocated'] + size_bytes > self.max_gpu_memory:
-                    self.error_manager.handle_error(
-                        error=MemoryError("Not enough GPU memory available"),
-                        error_type="gpu_allocation_error",
-                        severity=1,
-                        additional_info={
-                            "requested": size_bytes,
-                            "available": self.max_gpu_memory - current_usage['allocated']
-                        }
-                    )
-                    return None
-                
-                # Allocate memory
-                ptr = cuda.malloc(size_bytes)
-                self._allocated_memory[ptr] = size_bytes
-                
-                self._logger.record_event(
-                    event_type="gpu_memory_allocated",
-                    message=f"Allocated {size_bytes} bytes of GPU memory",
-                    level="info",
-                    additional_info={
-                        "size_bytes": size_bytes,
-                        "total_allocated": current_usage['allocated'] + size_bytes
-                    }
-                )
-                
-                return ptr
-                
-        except Exception as e:
-            self.error_manager.handle_error(
-                error=e,
-                error_type="gpu_allocation_error",
-                severity=2,
-                additional_info={
-                    "size_bytes": size_bytes,
-                    "stage": "memory_allocation"
-                }
-            )
-            return None
-
-    def free_gpu_memory(self, ptr: int) -> bool:
-        """Free GPU memory using CUDA."""
-        try:
-            if not torch.cuda.is_available():
-                self.error_manager.handle_error(
-                    error=RuntimeError("CUDA is not available"),
-                    error_type="cuda_error",
-                    severity=1,
-                    additional_info={"stage": "memory_free"}
-                )
-                return False
-                
-            with self._memory_lock:
-                if ptr not in self._allocated_memory:
-                    self.error_manager.handle_error(
-                        error=ValueError("Attempted to free unallocated memory"),
-                        error_type="gpu_allocation_error",
-                        severity=1,
-                        additional_info={"ptr": ptr}
-                    )
-                    return False
-                
-                # Free memory
-                cuda.free(ptr)
-                size_bytes = self._allocated_memory.pop(ptr)
-                
-                self._logger.record_event(
-                    event_type="gpu_memory_freed",
-                    message=f"Freed {size_bytes} bytes of GPU memory",
-                    level="info",
-                    additional_info={
-                        "size_bytes": size_bytes,
-                        "total_allocated": self.get_detailed_gpu_memory_stats()['allocated']
-                    }
-                )
-                
-                return True
-                
-        except Exception as e:
-            self.error_manager.handle_error(
-                error=e,
-                error_type="gpu_allocation_error",
-                severity=2,
-                additional_info={
-                    "ptr": ptr,
-                    "stage": "memory_free"
-                }
-            )
-            return False
-
     def get_detailed_gpu_memory_stats(self) -> Dict[str, int]:
         """Get detailed GPU memory statistics using CUDA."""
         try:
@@ -522,17 +422,18 @@ class GPUMemoryManager:
                 return {
                     "gpu_usage": 0.0,
                     "gpu_available": 0.0,
-                    "usage_percentage": 0.0
+                    "usage_percentage": 0.0,
+                    "gpu_total": 0.0
                 }
                 
             # Get detailed stats
             stats = self.get_detailed_gpu_memory_stats()
             
             # Calculate metrics
-            gpu_usage = stats['allocated']
-            gpu_total = self.max_gpu_memory
+            gpu_usage = float(stats['allocated'])
+            gpu_total = float(self.max_gpu_memory)
             gpu_available = gpu_total - gpu_usage
-            usage_percentage = (gpu_usage / gpu_total) if gpu_total > 0 else 0.0
+            usage_percentage = safe_divide(gpu_usage, gpu_total)
             
             # Log GPU usage
             self._logger.record_event(
@@ -542,14 +443,16 @@ class GPUMemoryManager:
                 additional_info={
                     "gpu_usage": gpu_usage,
                     "gpu_available": gpu_available,
-                    "usage_percentage": usage_percentage
+                    "usage_percentage": usage_percentage,
+                    "gpu_total": gpu_total
                 }
             )
             
             return {
                 "gpu_usage": gpu_usage,
                 "gpu_available": gpu_available,
-                "usage_percentage": usage_percentage
+                "usage_percentage": usage_percentage,
+                "gpu_total": gpu_total
             }
             
         except Exception as e:
@@ -558,7 +461,12 @@ class GPUMemoryManager:
                 error_type="gpu_usage_error",
                 stack_trace=traceback.format_exc()
             )
-            raise
+            return {
+                "gpu_usage": 0.0,
+                "gpu_available": 0.0,
+                "usage_percentage": 0.0,
+                "gpu_total": 0.0
+            }
 
 class GenerationMemoryManager:
     """Manages memory for text generation tasks in the SOVL system."""
@@ -629,12 +537,11 @@ class GenerationMemoryManager:
                     for tensor_id, metadata in tensors_to_offload:
                         tensor = metadata['tensor']
                         if tensor.device.type == 'cuda':
-                            # Use GPU memory manager for proper CUDA memory handling
-                            self.gpu_manager.free_gpu_memory(tensor.data_ptr())
-                            # Move to RAM using RAM manager
+                            # Move to CPU and update metadata
                             cpu_tensor = tensor.cpu()
                             self._tensor_metadata[tensor_id]['tensor'] = cpu_tensor
                             self._tensor_metadata[tensor_id]['device'] = 'cpu'
+                            self._tensor_metadata[tensor_id]['last_access'] = current_time
                             
             # Log offloading results
             self._logger.record_event(
@@ -675,13 +582,52 @@ class GenerationMemoryManager:
         """Calculate adaptive memory threshold based on system load and model size."""
         try:
             base_threshold = self.memory_threshold
-            model_size = sum(p.numel() * p.element_size() for p in self._config_manager.get("model_parameters", []))
-            total_memory = self.gpu_manager.get_gpu_usage()["total_memory"]
-            system_load = self.ram_manager.check_memory_health()["usage_percentage"]
+            
+            # Get RAM and GPU stats
+            ram_health = self.ram_manager.check_memory_health()
+            gpu_usage = self.gpu_manager.get_gpu_usage()
+            
+            # Get RAM load percentage (0.0 to 1.0)
+            ram_load_percentage = ram_health.get("usage_percentage", 0.0)
+            
+            # Get total GPU memory
+            total_gpu_memory = gpu_usage.get("gpu_total", self.gpu_manager.max_gpu_memory)
+            
+            # Get model size from config
+            model_parameters = self._config_manager.get("model_parameters", [])
+            model_size = 0
+            if isinstance(model_parameters, list):
+                model_size = sum(
+                    p.numel() * p.element_size() 
+                    for p in model_parameters 
+                    if hasattr(p, 'numel') and hasattr(p, 'element_size')
+                )
             
             # Calculate adaptive threshold
-            adaptive_threshold = base_threshold * (1 - system_load) * (1 - model_size/total_memory)
-            return max(0.7, min(0.95, adaptive_threshold))
+            ram_factor = 1.0 - ram_load_percentage
+            model_factor = 1.0 - safe_divide(model_size, total_gpu_memory)
+            adaptive_threshold = base_threshold * ram_factor * model_factor
+            
+            # Clamp to reasonable range
+            final_threshold = max(0.7, min(0.95, adaptive_threshold))
+            
+            self._logger.record_event(
+                "adaptive_threshold_calculated",
+                f"Calculated adaptive threshold: {final_threshold:.3f}",
+                level="debug",
+                additional_info={
+                    "base_threshold": base_threshold,
+                    "ram_load_percentage": ram_load_percentage,
+                    "total_gpu_memory": total_gpu_memory,
+                    "model_size": model_size,
+                    "ram_factor": ram_factor,
+                    "model_factor": model_factor,
+                    "final_threshold": final_threshold
+                }
+            )
+            
+            return final_threshold
+            
         except Exception as e:
             self._handle_error("adaptive_threshold_calculation", e)
             return self.memory_threshold
