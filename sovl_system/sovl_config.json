@@ -248,6 +248,31 @@
       "clear_cache_threshold": 0.95
     }
   },
+  "io_config": {
+    "field_mapping": {
+      "response": "completion",
+      "prompt": "prompt"
+    },
+    "required_fields": [
+      "prompt",
+      "response"
+    ],
+    "min_string_length": 1,
+    "max_string_length": 10000,
+    "enable_validation": true,
+    "strict_validation": false,
+    "random_seed": 42,
+    "shuffle_data": true,
+    "seed_file": "sovl_seed.jsonl",
+    "min_training_entries": 10,
+    "valid_split_ratio": 0.2,
+    "valid_quantization_modes": [
+      "fp16",
+      "int8",
+      "int4"
+    ],
+    "default_quantization_mode": "fp16"
+  },
   "state_config": {
     "max_history": 500,
     "state_file": "sovl_state.json"

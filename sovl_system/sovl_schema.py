@@ -30,6 +30,7 @@ class ValidationSchema:
             "lifecycle_config": ValidationSchema._get_lifecycle_config_schema(),
             "gestation_weighting": ValidationSchema._get_gestation_weighting_schema(),
             "monitoring": ValidationSchema._get_monitoring_schema(),
+            "io_config": ValidationSchema._get_io_config_schema(),
         }
 
     @staticmethod
@@ -61,6 +62,8 @@ class ValidationSchema:
             "valid_split_ratio": ConfigSchema(field="core_config.valid_split_ratio", type=float, default=0.2, range=(0.0, 1.0)),
             "random_seed": ConfigSchema(field="core_config.random_seed", type=int, default=42, range=(0, 2**32)),
             "quantization": ConfigSchema(field="core_config.quantization", type=str, default="fp16", validator=lambda x: x in ["fp16", "int8", "none"]),
+            "valid_quantization_modes": ConfigSchema(field="core_config.valid_quantization_modes", type=list, default=["fp16", "int8", "int4"], validator=lambda x: all(isinstance(i, str) and i in ["fp16", "int8", "int4"] for i in x)),
+            "default_quantization_mode": ConfigSchema(field="core_config.default_quantization_mode", type=str, default="fp16", validator=lambda x: x in ["fp16", "int8", "int4"]),
             "hidden_size": ConfigSchema(field="core_config.hidden_size", type=int, default=768, range=(1, None)),
             "num_heads": ConfigSchema(field="core_config.num_heads", type=int, default=12, range=(1, None)),
             "gradient_checkpointing": ConfigSchema(field="core_config.gradient_checkpointing", type=bool, default=True),
@@ -595,4 +598,63 @@ class ValidationSchema:
                     }
                 }
             }
+        }
+
+    @staticmethod
+    def _get_io_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the io_config schema."""
+        return {
+            "field_mapping": ConfigSchema(
+                field="io_config.field_mapping",
+                type=dict,
+                default={"prompt": "prompt", "completion": "completion"},
+                required=False,
+                validator=lambda v: isinstance(v, dict) and all(isinstance(k, str) and isinstance(val, str) for k, val in v.items())
+            ),
+            "required_fields": ConfigSchema(
+                field="io_config.required_fields",
+                type=list,
+                default=["prompt", "completion"],
+                required=False,
+                validator=lambda v: isinstance(v, list) and all(isinstance(i, str) for i in v)
+            ),
+            "min_string_length": ConfigSchema(
+                field="io_config.min_string_length",
+                type=int,
+                default=1,
+                required=False,
+                range=(0, None)
+            ),
+            "max_string_length": ConfigSchema(
+                field="io_config.max_string_length",
+                type=int,
+                default=10000,
+                required=False,
+                range=(1, None)
+            ),
+            "strict_validation": ConfigSchema(
+                field="io_config.strict_validation",
+                type=bool,
+                default=False,
+                required=False
+            ),
+            "seed_file": ConfigSchema(
+                field="io_config.seed_file",
+                type=str,
+                default="sovl_seed.jsonl",
+                required=False
+            ),
+            "min_training_entries": ConfigSchema(
+                field="io_config.min_training_entries",
+                type=int,
+                default=10,
+                required=False,
+                range=(0, None)
+            ),
+            "shuffle_data": ConfigSchema(
+                field="io_config.shuffle_data",
+                type=bool,
+                default=True,
+                required=False
+            )
         }

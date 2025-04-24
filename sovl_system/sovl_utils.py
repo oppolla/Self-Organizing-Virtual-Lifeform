@@ -38,22 +38,58 @@ def float_gt(a: float, b: float, tolerance: float = 1e-6) -> bool:
     except Exception:
         return False
 
-def validate_quantization_mode(mode: str, config_manager: ConfigManager, logger: Optional[Logger] = None) -> str:
-    """Validate and handle quantization mode."""
-    valid_modes = config_manager.get("core_config.valid_quantization_modes", ['fp16', 'int8', 'int4'])
-    if mode not in valid_modes:
-        if logger:
-            logger.log_training_event(
-                event_type="invalid_quantization_mode",
-                message=f"Invalid quantization mode: {mode}",
-                level="warning",
-                additional_info={
-                    "defaulting_to": "fp16",
-                    "valid_modes": valid_modes
-                }
+def validate_quantization_mode(mode: str, config_manager: ConfigManager) -> str:
+    """
+    Validate and normalize the quantization mode based on configuration.
+
+    Args:
+        mode: The quantization mode to validate
+        config_manager: ConfigManager instance for fetching valid modes
+
+    Returns:
+        The normalized quantization mode
+
+    Raises:
+        ValueError: If the mode is invalid
+        ConfigurationError: If configuration related to valid modes is incorrect
+    """
+    try:
+        # Get valid modes and default mode from config
+        valid_modes = config_manager.get(
+            "core_config.valid_quantization_modes",
+            ["fp16", "int8", "int4"],  # Default list if not in config
+            expected_type=list
+        )
+        default_mode = config_manager.get(
+            "core_config.default_quantization_mode",
+            "fp16", # Default mode if not specified
+            expected_type=str
+        )
+
+        # Ensure default_mode is one of the valid_modes
+        if default_mode not in valid_modes:
+            if not valid_modes:
+                raise ConfigurationError("No valid quantization modes defined in configuration.")
+            # Fallback to the first valid mode if default is invalid
+            default_mode = valid_modes[0]
+            raise ConfigurationError(
+                f"Default quantization mode '{default_mode}' is not in the list of valid modes: {valid_modes}. "
+                f"Falling back to '{default_mode}'."
             )
-        return 'fp16'
-    return mode
+
+        normalized_mode = mode.lower()
+
+        if normalized_mode not in valid_modes:
+            return default_mode
+
+        return normalized_mode
+
+    except ConfigurationError as e:
+        # Re-raise configuration errors
+        raise e
+    except Exception as e:
+        # Wrap other exceptions in ValueError
+        raise ValueError(f"Failed to validate quantization mode: {str(e)}")
 
 def log_memory_usage(label: str = "", device: torch.device = None, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None) -> None:
     """Log memory usage statistics."""

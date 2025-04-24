@@ -55,10 +55,11 @@ from sovl_utils import (
     NumericalGuard,
     initialize_component_state,
     sync_component_states,
+    validate_quantization_mode,
     validate_component_states
 )
 from sovl_confidence import calculate_confidence_score
-from sovl_io import validate_quantization_mode, InsufficientDataError
+from sovl_io import  InsufficientDataError
 from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
 
 # Type checking imports
@@ -158,7 +159,6 @@ class SystemContext:
                 state_manager=self.state_manager
             )
             self.temperament_system = TemperamentSystem()
-            self.scaffold_manager = ScaffoldManager()
             
             # Initialize model components
             self.model_manager = ModelManager()
