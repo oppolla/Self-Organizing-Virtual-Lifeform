@@ -6,6 +6,7 @@ import threading
 import math
 import torch
 from torch import nn
+from datetime import datetime
 from sovl_error import ErrorManager
 from sovl_state import SOVLState
 from sovl_config import ConfigManager
@@ -13,6 +14,7 @@ from sovl_logger import Logger
 from sovl_trainer import TrainingCycleManager
 from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
+from sovl_queue import ScribeEntry, capture_scribe_event
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -975,6 +977,27 @@ class CuriosityManager:
                 # Drop pressure when question is generated
                 self.pressure.drop_pressure(self.pressure_drop)
                 
+                # Capture the question in the queue
+                capture_scribe_event(
+                    event_type="curiosity_question_generated",
+                    message="Generated curiosity question",
+                    level="info",
+                    event_data={
+                        "question": output,
+                        "score": score,
+                        "spontaneous": spontaneous,
+                        "threshold": threshold,
+                        "pressure": self.pressure.current_pressure,
+                        "context": context,
+                        "temperature": temp
+                    },
+                    source_metadata={
+                        "module": "curiosity",
+                        "function": "generate_curiosity_question",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                )
+                
                 self.logger.record_event(
                     event_type="curiosity_question_generated",
                     message="Generated curiosity question",
@@ -991,6 +1014,24 @@ class CuriosityManager:
             return None
                 
         except Exception as e:
+            # Capture the error in the queue
+            capture_scribe_event(
+                event_type="curiosity_question_generation_failed",
+                message="Failed to generate curiosity question",
+                level="error",
+                event_data={
+                    "error": str(e),
+                    "context": context,
+                    "spontaneous": spontaneous,
+                    "stack_trace": traceback.format_exc()
+                },
+                source_metadata={
+                    "module": "curiosity",
+                    "function": "generate_curiosity_question",
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+            
             self.error_manager.handle_curiosity_error(e, {
                 "operation": "generate_curiosity_question",
                 "context": context,

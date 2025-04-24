@@ -17,10 +17,12 @@ from sovl_curiosity import CuriosityManager
 from sovl_trainer import LifecycleManager, TrainingConfig
 from sovl_temperament import TemperamentSystem 
 from sovl_confidence import ConfidenceCalculator 
-from sovl_memory import RAMManager, GPUMemoryManager, GenerationMemoryManager
+from sovl_queue import ScribeEntry, capture_scribe_event
+from sovl_memory import GenerationMemoryManager
 from sovl_scaffold import GenerationScaffoldProvider
 import threading
 from functools import wraps
+from datetime import datetime
 
 # Add confidence-related constants at the top of the file
 DEFAULT_CONFIDENCE = 0.5
@@ -718,6 +720,7 @@ class GenerationManager:
 
     def _handle_error_prompt(self, error_msg: str) -> str:
         """Generate a response to a system error."""
+        request_time = time.time()
         try:
             temp_history = self.state.history
             self.state.history = ConversationHistory(
@@ -731,9 +734,47 @@ class GenerationManager:
                 do_sample=True
             )
             self.state.history = temp_history
+
+            # Log the internal error reflection
+            capture_scribe_event(
+                origin="sovl_generation",
+                event_type="internal_error_reflection",
+                event_data={
+                    "triggering_error_message": error_msg,
+                    "prompt_used": f"System error detected: {error_msg} What happened?",
+                    "generated_response": response
+                },
+                source_metadata={
+                    "generation_config": {
+                        "max_new_tokens": self.curiosity_config.get("max_new_tokens", 60),
+                        "temperature": self.controls_config.get("base_temperature", 0.7) + 0.2,
+                        "top_k": self.curiosity_config.get("top_k", 50),
+                        "do_sample": True
+                    },
+                    "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
+                    "device": str(self.device),
+                    "internal_call": True
+                },
+                timestamp=datetime.fromtimestamp(request_time)
+            )
+            
             return response
         except Exception as e:
             self._handle_error("handle_error_prompt", e)
+            # Log the failure to handle the error prompt
+            capture_scribe_event(
+                origin="sovl_generation",
+                event_type="internal_error_reflection_failed",
+                event_data={
+                    "triggering_error_message": error_msg,
+                    "error_message": str(e),
+                    "error_type": type(e).__name__
+                },
+                source_metadata={
+                    "internal_call": True
+                },
+                timestamp=datetime.now()
+            )
             return "An error occurred while handling the error prompt"
 
     def has_repetition(self, output_ids: torch.Tensor, n: int = 3) -> bool:
@@ -1034,17 +1075,80 @@ class GenerationManager:
 
     @state_managed_operation("generate_text")
     def generate_text(self, prompt: str, num_return_sequences: int = 1, **kwargs) -> List[str]:
-        """Generate text with state-driven error handling and recovery."""
+        """Generate text with state-driven error handling, recovery, and scribe logging."""
+        request_time = time.time()
+        session_id = kwargs.get("session_id")
+        interaction_id = kwargs.get("interaction_id")
+        user_id = kwargs.get("user_id")
+
         try:
-            # Original generation logic (without temperament check)
+            # Validate parameters
             self._validate_generation_params(prompt, num_return_sequences=num_return_sequences)
             
             if not prompt or not isinstance(prompt, str):
                 raise ValueError("Invalid prompt provided")
             
+            # Prepare and execute generation
             batch = self._prepare_generation_batch(prompt, num_return_sequences)
-            return self._generate_with_state_context(batch)
+            generated_texts = self._generate_with_state_context(batch)
+            
+            # Prepare generation result data for logging
+            generation_result = {
+                "generated_texts": generated_texts,
+                "generation_config_used": self._get_generation_config(),
+                "processing_time_ms": (time.time() - request_time) * 1000
+            }
+            
+            # Assemble log data
+            input_log, output_log, metadata_log = GenerationLogAssembler.assemble_log_data(
+                manager=self,
+                prompt=prompt,
+                initial_kwargs=kwargs,
+                generation_result=generation_result,
+                request_time=request_time,
+                session_id=session_id,
+                interaction_id=interaction_id,
+                user_id=user_id
+            )
+            
+            # Log successful generation
+            capture_scribe_event(
+                origin="sovl_generation",
+                event_type="text_generated",
+                event_data={**input_log, **output_log},
+                source_metadata=metadata_log,
+                session_id=session_id,
+                interaction_id=interaction_id,
+                timestamp=datetime.fromtimestamp(request_time)
+            )
+            
+            return generated_texts
+            
         except Exception as e:
+            # Log generation error
+            capture_scribe_event(
+                origin="sovl_generation",
+                event_type="generation_error",
+                event_data={
+                    "prompt": prompt,
+                    "error_message": str(e),
+                    "error_type": type(e).__name__,
+                    "kwargs": kwargs
+                },
+                source_metadata={
+                    "session_id": session_id,
+                    "interaction_id": interaction_id,
+                    "user_id": user_id,
+                    "request_timestamp_unix": request_time,
+                    "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
+                    "device": str(self.device)
+                },
+                session_id=session_id,
+                interaction_id=interaction_id,
+                timestamp=datetime.fromtimestamp(request_time)
+            )
+            
+            # Handle error through existing mechanism
             self._handle_error("generate_text", e)
             return ["An error occurred during text generation"]
 
@@ -1139,27 +1243,12 @@ class GenerationManager:
         return_hidden_states: bool = False,
         **kwargs
     ) -> Union[str, Dict[str, Any]]:
-        """Backchannel communication method to directly prompt the scaffold model.
-        This is a debug/development feature for direct scaffold interaction.
-        
-        Args:
-            prompt: The input prompt to send to the scaffold model
-            max_new_tokens: Maximum number of new tokens to generate (default: 100)
-            scaffold_index: Index of scaffold model to use if multiple are loaded (default: 0)
-            return_logits: Whether to return the raw logits from generation (default: False)
-            return_hidden_states: Whether to return hidden states (default: False)
-            **kwargs: Additional generation parameters to pass to the model
-                     Supports all standard Hugging Face generation parameters
-        
-        Returns:
-            Union[str, Dict[str, Any]]: Either the generated text string or a dictionary
-            containing the generated text and additional requested information
-        
-        Raises:
-            IndexError: If scaffold_index is invalid
-            RuntimeError: If the scaffold model is not properly initialized
-            ValueError: If the input parameters are invalid
-        """
+        """Backchannel communication method to directly prompt the scaffold model."""
+        request_time = time.time()
+        session_id = kwargs.get("session_id")
+        interaction_id = kwargs.get("interaction_id")
+        user_id = kwargs.get("user_id")
+
         try:
             # Memory optimization: Check memory health before proceeding
             if not self.check_memory_health():
@@ -1181,9 +1270,9 @@ class GenerationManager:
                 'return_dict_in_generate': return_logits or return_hidden_states,
                 'max_new_tokens': max_new_tokens,
                 'pad_token_id': self.scaffold_tokenizer.pad_token_id,
-                'early_stopping': kwargs.get('early_stopping', True),  # Enable early stopping by default
-                'do_sample': kwargs.get('do_sample', True),  # Enable sampling by default
-                'num_beams': kwargs.get('num_beams', 1),  # Default to greedy if no beam search specified
+                'early_stopping': kwargs.get('early_stopping', True),
+                'do_sample': kwargs.get('do_sample', True),
+                'num_beams': kwargs.get('num_beams', 1),
                 **kwargs
             }
 
@@ -1237,15 +1326,100 @@ class GenerationManager:
                     'generation_time': time.time()  # For tracking generation duration
                 }
                 
+                # Log detailed result
+                capture_scribe_event(
+                    origin="sovl_generation",
+                    event_type="backchannel_scaffold_generated",
+                    event_data={
+                        "prompt": prompt,
+                        "scaffold_index": scaffold_index,
+                        "max_new_tokens": max_new_tokens,
+                        "generated_text": result['text'],
+                        "return_logits": return_logits,
+                        "return_hidden_states": return_hidden_states,
+                        "generation_params": generation_config
+                    },
+                    source_metadata={
+                        **result['metadata'],
+                        "session_id": session_id,
+                        "interaction_id": interaction_id,
+                        "user_id": user_id,
+                        "request_timestamp_unix": request_time
+                    },
+                    session_id=session_id,
+                    interaction_id=interaction_id,
+                    timestamp=datetime.fromtimestamp(request_time)
+                )
+                
                 return result
             else:
                 # Fast path for text-only return
-                return self.scaffold_tokenizer.decode(
+                generated_text = self.scaffold_tokenizer.decode(
                     outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0],
                     skip_special_tokens=True
                 )
+                
+                # Log text-only result
+                capture_scribe_event(
+                    origin="sovl_generation",
+                    event_type="backchannel_scaffold_generated",
+                    event_data={
+                        "prompt": prompt,
+                        "scaffold_index": scaffold_index,
+                        "max_new_tokens": max_new_tokens,
+                        "generated_text": generated_text,
+                        "generation_params": generation_config
+                    },
+                    source_metadata={
+                        "scaffold_index": scaffold_index,
+                        "model_name": self.scaffold_tokenizer.name_or_path,
+                        "input_length": len(inputs['input_ids'][0]),
+                        "output_length": len(outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0]),
+                        "memory_usage": self.memory_manager.get_memory_usage(),
+                        "generation_time": time.time() - request_time,
+                        "session_id": session_id,
+                        "interaction_id": interaction_id,
+                        "user_id": user_id,
+                        "request_timestamp_unix": request_time
+                    },
+                    session_id=session_id,
+                    interaction_id=interaction_id,
+                    timestamp=datetime.fromtimestamp(request_time)
+                )
+                
+                return generated_text
             
         except Exception as e:
+            # Log error
+            capture_scribe_event(
+                origin="sovl_generation",
+                event_type="backchannel_scaffold_error",
+                event_data={
+                    "prompt": prompt,
+                    "scaffold_index": scaffold_index,
+                    "max_new_tokens": max_new_tokens,
+                    "return_logits": return_logits,
+                    "return_hidden_states": return_hidden_states,
+                    "error_message": str(e),
+                    "error_type": type(e).__name__,
+                    "kwargs": kwargs,
+                    "traceback": traceback.format_exc()
+                },
+                source_metadata={
+                    "scaffold_index": scaffold_index,
+                    "model_name": getattr(self.scaffold_tokenizer, "name_or_path", "unknown"),
+                    "session_id": session_id,
+                    "interaction_id": interaction_id,
+                    "user_id": user_id,
+                    "request_timestamp_unix": request_time,
+                    "memory_usage": self.memory_manager.get_memory_usage()
+                },
+                session_id=session_id,
+                interaction_id=interaction_id,
+                timestamp=datetime.fromtimestamp(request_time)
+            )
+            
+            # Handle error through existing mechanism
             self._handle_error("backchannel_scaffold_prompt", e, {
                 'scaffold_index': scaffold_index,
                 'prompt_length': len(prompt),
@@ -1444,6 +1618,7 @@ class GenerationManager:
         Defaults to a minimal prompt (" ") when triggered by temperament, 
         but can accept a specific prompt for other use cases.
         """
+        request_time = time.time()
         try:
             # Save current history temporarily
             temp_history = self.state.history
@@ -1462,9 +1637,45 @@ class GenerationManager:
             
             # Restore history
             self.state.history = temp_history
+
+            # Log the internal thought generation
+            capture_scribe_event(
+                origin="sovl_generation",
+                event_type="internal_thought_generated",
+                event_data={
+                    "prompt_used": prompt,
+                    "generated_response": response
+                },
+                source_metadata={
+                    "generation_config": {
+                        "temperature": self.controls_config.get("base_temperature", 0.7) + 0.3,
+                        "top_k": self.controls_config.get("top_k", 50),
+                        "do_sample": True
+                    },
+                    "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
+                    "device": str(self.device),
+                    "internal_call": True
+                },
+                timestamp=datetime.fromtimestamp(request_time)
+            )
+            
             return response
         except Exception as e:
             self._handle_error("handle_internal_prompt", e)
+            # Log the failure to generate internal thought
+            capture_scribe_event(
+                origin="sovl_generation",
+                event_type="internal_thought_generation_failed",
+                event_data={
+                    "prompt_used": prompt,
+                    "error_message": str(e),
+                    "error_type": type(e).__name__
+                },
+                source_metadata={
+                    "internal_call": True
+                },
+                timestamp=datetime.now()
+            )
             return "..."
 
     def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:

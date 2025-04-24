@@ -10,6 +10,7 @@ from sovl_config import ConfigManager
 from sovl_processor import MetadataProcessor
 from sovl_error import ErrorManager
 from sovl_logger import Logger
+from sovl_queue import ScribeEntry
 
 class JsonlWriter:
     """
@@ -324,7 +325,7 @@ class Scriber:
             # Setup worker thread
             self._stop_event = threading.Event()
             self._writer_thread = threading.Thread(
-                target=self._writer_worker,
+                target=self._process_scribe_queue,
                 name="ScriberWriterThread",
                 daemon=True
             )
@@ -352,22 +353,23 @@ class Scriber:
             logger.propagate = False
         return logger
 
-    def _writer_worker(self) -> None:
+    def _process_scribe_queue(self) -> None:
         """Worker thread function to process scribe queue and write to file."""
         self.logger.info("Scriber writer thread started.")
         while not self._stop_event.is_set():
             try:
                 # Wait for an item for up to 1 second
-                scribe_details = self.scribe_queue.get(timeout=1)
+                scribe_entry_obj = self.scribe_queue.get(timeout=1)
                 
                 try:
-                    # Extract scribe details
-                    origin = scribe_details.get('origin', 'unknown')
-                    event_type = scribe_details.get('event_type', 'unknown')
-                    event_data = scribe_details.get('event_data', {})
-                    source_metadata = scribe_details.get('source_metadata', {})
-                    session_id = scribe_details.get('session_id')
-                    interaction_id = scribe_details.get('interaction_id')
+                    # Extract data from ScribeEntry object using attribute access
+                    origin = scribe_entry_obj.origin
+                    event_type = scribe_entry_obj.event_type
+                    event_data = scribe_entry_obj.event_data or {}
+                    source_metadata = scribe_entry_obj.source_metadata or {}
+                    session_id = scribe_entry_obj.session_id
+                    interaction_id = scribe_entry_obj.interaction_id
+                    timestamp = scribe_entry_obj.timestamp
 
                     # Process and enrich the scribed data
                     validated_event_data, final_metadata = self.metadata_processor.enrich_and_validate(
@@ -381,7 +383,7 @@ class Scriber:
 
                     # Structure the final scribe entry
                     scribe_entry = {
-                        "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+                        "timestamp_iso": timestamp.isoformat() if timestamp else datetime.now(timezone.utc).isoformat(),
                         "event_type": event_type,
                         "event_data": validated_event_data,
                         "metadata": final_metadata
@@ -404,14 +406,15 @@ class Scriber:
                 except Exception as processing_error:
                     self.fallback_logger.exception(
                         f"Failed to process scribe entry. Error: {processing_error}. "
-                        f"Entry prefix: {str(scribe_details)[:500]}..."
+                        f"Entry details: origin={getattr(scribe_entry_obj, 'origin', 'unknown')}, "
+                        f"event_type={getattr(scribe_entry_obj, 'event_type', 'unknown')}"
                     )
                     self.error_manager.handle_error(
                         processing_error,
                         error_type="processing",
                         context={
-                            "origin": scribe_details.get('origin', 'unknown'),
-                            "event_type": scribe_details.get('event_type', 'unknown'),
+                            "origin": getattr(scribe_entry_obj, 'origin', 'unknown'),
+                            "event_type": getattr(scribe_entry_obj, 'event_type', 'unknown'),
                             "error_type": "scribe_processing_error"
                         }
                     )
@@ -434,10 +437,65 @@ class Scriber:
         # Process any remaining items after stop signal received
         try:
             while True: # Process all remaining items without blocking
-                scribe_details = self.scribe_queue.get_nowait()
+                scribe_entry_obj = self.scribe_queue.get_nowait()
                 try:
-                    # ... (same processing logic as above) ...
-                    pass
+                    # Extract data from ScribeEntry object using attribute access
+                    origin = scribe_entry_obj.origin
+                    event_type = scribe_entry_obj.event_type
+                    event_data = scribe_entry_obj.event_data or {}
+                    source_metadata = scribe_entry_obj.source_metadata or {}
+                    session_id = scribe_entry_obj.session_id
+                    interaction_id = scribe_entry_obj.interaction_id
+                    timestamp = scribe_entry_obj.timestamp
+
+                    # Process and enrich the scribed data
+                    validated_event_data, final_metadata = self.metadata_processor.enrich_and_validate(
+                        origin=origin,
+                        event_type=event_type,
+                        event_data=event_data,
+                        source_metadata=source_metadata,
+                        session_id=session_id,
+                        interaction_id=interaction_id
+                    )
+
+                    # Structure the final scribe entry
+                    scribe_entry = {
+                        "timestamp_iso": timestamp.isoformat() if timestamp else datetime.now(timezone.utc).isoformat(),
+                        "event_type": event_type,
+                        "event_data": validated_event_data,
+                        "metadata": final_metadata
+                    }
+
+                    # Serialize to JSON
+                    formatted_scribe_string = json.dumps(scribe_entry, default=str)
+
+                    # Write to JSONL file
+                    with self.jsonl_writer.lock:
+                        self.jsonl_writer._buffer.append(formatted_scribe_string)
+                        if len(self.jsonl_writer._buffer) >= self.jsonl_writer.buffer_size:
+                            try:
+                                self.jsonl_writer._flush_buffer()
+                            except Exception as flush_err:
+                                self.fallback_logger.exception(
+                                    f"Writer thread failed during flush: {flush_err}"
+                                )
+
+                except Exception as processing_error:
+                    self.fallback_logger.exception(
+                        f"Failed to process scribe entry during shutdown. Error: {processing_error}. "
+                        f"Entry details: origin={getattr(scribe_entry_obj, 'origin', 'unknown')}, "
+                        f"event_type={getattr(scribe_entry_obj, 'event_type', 'unknown')}"
+                    )
+                    self.error_manager.handle_error(
+                        processing_error,
+                        error_type="processing",
+                        context={
+                            "origin": getattr(scribe_entry_obj, 'origin', 'unknown'),
+                            "event_type": getattr(scribe_entry_obj, 'event_type', 'unknown'),
+                            "error_type": "scribe_processing_error",
+                            "shutdown": True
+                        }
+                    )
                 finally:
                     self.scribe_queue.task_done()
         except queue.Empty:
