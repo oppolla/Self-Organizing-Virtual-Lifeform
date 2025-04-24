@@ -1126,3 +1126,391 @@ class VibeSculptor:
             "trend": (vibe_scores[-1] - vibe_scores[0]) / (len(self.vibes) - 1) if len(self.vibes) > 1 else 0.0
         }
     
+class MetadataProcessor:
+    """Central authority for defining, validating, and enriching metadata for events logged by sovl_scribe.
+    
+    This class serves as the definitive source of truth for metadata structure and validation
+    in the SOVL logging system. It ensures that all logged events have consistent, well-structured
+    metadata that includes both source-specific information and global system context.
+    
+    Responsibilities:
+    1. Define canonical metadata schemas for different event types
+    2. Validate incoming metadata against these schemas
+    3. Enrich metadata with global system context
+    4. Ensure consistent metadata structure across all logged events
+    5. Calculate and enrich content metrics for text-based events
+    """
+    
+    # Mapping of event types to their text fields that need content metrics
+    _CONTENT_METRICS_FIELDS = {
+        "base_generation": ["prompt", "completion"],
+        "scaffold_generation": ["prompt", "completion"],
+        "curiosity_query": ["query", "response"],
+        "dream_segment": ["segment_content"]
+        # Easily add new types here, e.g.:
+        # "user_feedback": ["feedback_text"]
+    }
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        state_accessor: Optional[Any] = None
+    ):
+        """Initialize the metadata processor.
+        
+        Args:
+            config_manager: Configuration manager instance
+            logger: Logger instance for validation warnings and errors
+            state_accessor: Optional accessor for global system state
+        """
+        self.config_manager = config_manager
+        self.logger = logger
+        self.state_accessor = state_accessor
+        self._schemas = self._define_event_schemas()
+        
+        # Log initialization
+        self.logger.record_event(
+            event_type="metadata_processor_init",
+            message="Metadata processor initialized",
+            level="info",
+            additional_info={
+                "defined_schemas": list(self._schemas.keys())
+            }
+        )
+
+    def _define_event_schemas(self) -> Dict[str, Dict[str, List[str]]]:
+        """Define the canonical metadata schemas for different event types.
+        
+        Returns:
+            Dictionary mapping event types to their required metadata fields
+        """
+        return {
+            "base_generation": {
+                "data_required": [
+                    "prompt",
+                    "completion",
+                    "confidence_score"
+                ],
+                "meta_required": [
+                    "origin",
+                    "timestamp_unix",
+                    "session_id",
+                    "interaction_id"
+                ]
+            },
+            "scaffold_generation": {
+                "data_required": [
+                    "prompt",
+                    "completion",
+                    "confidence_score",
+                    "scaffold_type"
+                ],
+                "meta_required": [
+                    "origin",
+                    "timestamp_unix",
+                    "session_id",
+                    "interaction_id"
+                ]
+            },
+            "curiosity_query": {
+                "data_required": [
+                    "query",
+                    "response",
+                    "novelty_score"
+                ],
+                "meta_required": [
+                    "origin",
+                    "timestamp_unix",
+                    "session_id",
+                    "interaction_id"
+                ]
+            },
+            "temperament_update": {
+                "data_required": [
+                    "previous_score",
+                    "new_score",
+                    "trigger"
+                ],
+                "meta_required": [
+                    "origin",
+                    "timestamp_unix",
+                    "session_id"
+                ]
+            },
+            "dream_segment": {
+                "data_required": [
+                    "segment_content",
+                    "segment_type",
+                    "vividness_score"
+                ],
+                "meta_required": [
+                    "origin",
+                    "timestamp_unix",
+                    "session_id",
+                    "dream_id"
+                ]
+            }
+        }
+
+    def _validate_against_schema(
+        self,
+        event_type: str,
+        data: Dict[str, Any],
+        metadata: Dict[str, Any]
+    ) -> bool:
+        """Validate event data and metadata against the defined schema.
+        
+        Args:
+            event_type: Type of event being validated
+            data: Event data dictionary
+            metadata: Event metadata dictionary
+            
+        Returns:
+            bool: True if validation passes, False otherwise
+        """
+        if event_type not in self._schemas:
+            self.logger.record_event(
+                event_type="metadata_validation_warning",
+                message=f"Unknown event type: {event_type}",
+                level="warning",
+                additional_info={"event_type": event_type}
+            )
+            return False
+            
+        schema = self._schemas[event_type]
+        is_valid = True
+        
+        # Validate required data fields
+        for required_field in schema["data_required"]:
+            if required_field not in data:
+                self.logger.record_event(
+                    event_type="metadata_validation_warning",
+                    message=f"Missing required data field: {required_field}",
+                    level="warning",
+                    additional_info={
+                        "event_type": event_type,
+                        "missing_field": required_field,
+                        "field_type": "data"
+                    }
+                )
+                is_valid = False
+                
+        # Validate required metadata fields
+        for required_field in schema["meta_required"]:
+            if required_field not in metadata:
+                self.logger.record_event(
+                    event_type="metadata_validation_warning",
+                    message=f"Missing required metadata field: {required_field}",
+                    level="warning",
+                    additional_info={
+                        "event_type": event_type,
+                        "missing_field": required_field,
+                        "field_type": "metadata"
+                    }
+                )
+                is_valid = False
+                
+        return is_valid
+
+    def _calculate_content_metrics(self, content: str) -> Dict[str, Any]:
+        """Calculate content and quality metrics for a given text.
+        
+        Args:
+            content: The text content to analyze
+            
+        Returns:
+            Dictionary containing content and quality metrics
+        """
+        try:
+            if not isinstance(content, str):
+                raise ValueError("Content must be a string")
+                
+            # Split content into words and sentences
+            words = content.split()
+            sentences = [s.strip() for s in content.split('.') if s.strip()]
+            
+            # Calculate basic metrics
+            word_count = len(words)
+            sentence_count = len(sentences)
+            
+            # Calculate averages using safe_divide
+            avg_word_length = safe_divide(sum(len(w) for w in words), word_count)
+            avg_sentence_length = safe_divide(word_count, sentence_count)
+            
+            # Calculate quality metrics
+            quality_metrics = {
+                'has_code': '```' in content,
+                'has_url': 'http' in content,
+                'has_question': '?' in content,
+                'has_exclamation': '!' in content,
+                'has_emoji': any(c in content for c in '😀😃😄😁😆😅😂🤣😊😇')
+            }
+            
+            return {
+                'content_metrics': {
+                    'word_count': word_count,
+                    'sentence_count': sentence_count,
+                    'avg_word_length': avg_word_length,
+                    'avg_sentence_length': avg_sentence_length
+                },
+                'quality_metrics': quality_metrics
+            }
+            
+        except Exception as e:
+            self.logger.record_event(
+                event_type="content_metrics_error",
+                message=f"Failed to calculate content metrics: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "content_length": len(content) if isinstance(content, str) else 0
+                }
+            )
+            return {
+                'content_metrics': {},
+                'quality_metrics': {}
+            }
+
+    def _enrich_common_fields(
+        self,
+        final_metadata: Dict[str, Any],
+        origin: str,
+        session_id: Optional[str],
+        interaction_id: Optional[str]
+    ) -> None:
+        """Add common metadata fields to the final metadata.
+        
+        Args:
+            final_metadata: The metadata dictionary to enrich
+            origin: Source module identifier
+            session_id: Optional session identifier
+            interaction_id: Optional interaction identifier
+        """
+        final_metadata.update({
+            "origin": origin,
+            "timestamp_unix": final_metadata.get("timestamp_unix", time.time()),
+            "session_id": session_id,
+            "interaction_id": interaction_id
+        })
+
+    def _enrich_global_state(self, final_metadata: Dict[str, Any]) -> None:
+        """Enrich metadata with global system state if available.
+        
+        Args:
+            final_metadata: The metadata dictionary to enrich
+        """
+        if self.state_accessor is not None:
+            try:
+                current_state = self.state_accessor.get_current_snapshot()
+                if current_state:
+                    final_metadata.update({
+                        "sovl_version": current_state.get("version"),
+                        "current_lifecycle_stage": current_state.get("lifecycle_stage"),
+                        "current_temperament_score": current_state.get("temperament_score"),
+                        "current_mood_label": current_state.get("mood_label"),
+                        "current_memory_usage": current_state.get("memory_usage")
+                    })
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="metadata_enrichment_error",
+                    message=f"Failed to enrich metadata with global state: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "error": str(e)
+                    }
+                )
+
+    def _enrich_content_metrics(
+        self,
+        final_metadata: Dict[str, Any],
+        event_type: str,
+        event_data: Dict[str, Any]
+    ) -> None:
+        """Enrich metadata with content metrics for text-based events.
+        
+        Args:
+            final_metadata: The metadata dictionary to enrich
+            event_type: Type of event being logged
+            event_data: Event-specific data
+        """
+        try:
+            # Check if this event type needs content metrics
+            if event_type not in self._CONTENT_METRICS_FIELDS:
+                return
+                
+            # Get the list of fields that need content metrics for this event type
+            fields_to_analyze = self._CONTENT_METRICS_FIELDS[event_type]
+            
+            # Calculate metrics for each field
+            for field_name in fields_to_analyze:
+                if content := event_data.get(field_name):
+                    metrics = self._calculate_content_metrics(content)
+                    final_metadata[f"{field_name}_metrics"] = metrics
+                    
+        except Exception as e:
+            self.logger.record_event(
+                event_type="content_metrics_enrichment_error",
+                message=f"Failed to enrich content metrics: {str(e)}",
+                level="error",
+                additional_info={
+                    "event_type": event_type,
+                    "error": str(e)
+                }
+            )
+
+    def enrich_and_validate(
+        self,
+        origin: str,
+        event_type: str,
+        event_data: Dict[str, Any],
+        source_metadata: Dict[str, Any],
+        session_id: Optional[str] = None,
+        interaction_id: Optional[str] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Enrich and validate event metadata.
+        
+        This method:
+        1. Validates the event data and metadata against the schema
+        2. Adds common metadata fields
+        3. Enriches with global system state if available
+        4. Calculates and adds content metrics for text-based events
+        
+        Args:
+            origin: Source module identifier
+            event_type: Type of event being logged
+            event_data: Event-specific data
+            source_metadata: Metadata provided by the source
+            session_id: Optional session identifier
+            interaction_id: Optional interaction identifier
+            
+        Returns:
+            Tuple of (event_data, enriched_metadata)
+        """
+        # Validate against schema
+        is_valid = self._validate_against_schema(event_type, event_data, source_metadata)
+        if not is_valid:
+            self.logger.record_event(
+                event_type="metadata_validation_warning",
+                message="Event validation failed, proceeding with enrichment",
+                level="warning",
+                additional_info={
+                    "event_type": event_type,
+                    "origin": origin
+                }
+            )
+            
+        # Create enriched metadata
+        final_metadata = source_metadata.copy()
+        
+        # Add common fields
+        self._enrich_common_fields(final_metadata, origin, session_id, interaction_id)
+        
+        # Add global state
+        self._enrich_global_state(final_metadata)
+        
+        # Add content metrics
+        self._enrich_content_metrics(final_metadata, event_type, event_data)
+                
+        return event_data, final_metadata
+    

@@ -30,6 +30,7 @@ class ValidationSchema:
             "lifecycle_config": ValidationSchema._get_lifecycle_config_schema(),
             "gestation_weighting": ValidationSchema._get_gestation_weighting_schema(),
             "monitoring": ValidationSchema._get_monitoring_schema(),
+            "scribed_config": ValidationSchema._get_scribed_config_schema(),
             "io_config": ValidationSchema._get_io_config_schema(),
         }
 
@@ -598,6 +599,16 @@ class ValidationSchema:
                     }
                 }
             }
+    
+        }
+
+    @staticmethod
+    def _get_scribed_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the scribed_config schema."""
+        return {
+            "log_path": ConfigSchema(field="scribed_config.log_path", type=str, default="logs/sovl_scribed.jsonl"),
+            "max_file_size_mb": ConfigSchema(field="scribed_config.max_file_size_mb", type=int, default=50, range=(1, None)),
+            "buffer_size": ConfigSchema(field="scribed_config.buffer_size", type=int, default=10, range=(1, None)),
         }
 
     @staticmethod

@@ -15,8 +15,9 @@ from sovl_scaffold import ScaffoldProvider
 from sovl_error import ErrorManager, ConfigurationError
 from sovl_config import ConfigManager
 from sovl_confidence import ConfidenceCalculator
+from sovl_processor import MetadataProcessor
 from sovl_temperament import TemperamentSystem
-from sovl_experience import MemoriaManager, MetadataProcessor
+from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 from torch.utils.data import DataLoader
