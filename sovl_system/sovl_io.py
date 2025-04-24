@@ -4,11 +4,11 @@ import gzip
 from typing import Optional, List, Dict, Any, Callable, Tuple
 from threading import Lock
 import traceback
-from sovl_logger import Logger
-from sovl_config import ConfigManager
-from sovl_error import ErrorManager
 import random
 import time
+from sovl_logger import Logger, LoggerConfig
+from sovl_config import ConfigManager
+from sovl_error import ErrorManager
 
 class InsufficientDataError(Exception):
     """Raised when loaded data doesn't meet minimum entry requirements."""
@@ -16,10 +16,6 @@ class InsufficientDataError(Exception):
 
 class DataValidationError(Exception):
     """Raised when data fails validation checks."""
-    pass
-
-class ConfigurationError(Exception):
-    """Raised when there is an error in configuration."""
     pass
 
 class JSONLLoader:
