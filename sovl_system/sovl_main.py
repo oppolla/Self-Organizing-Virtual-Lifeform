@@ -3,8 +3,9 @@ from typing import Optional, Any, List, Dict, Tuple, Callable, TYPE_CHECKING
 import time
 import traceback
 import os
+import sys
 from collections import deque, defaultdict
-from threading import Lock, RLock
+from threading import Lock, RLock, Event, Thread
 
 # Third-party imports
 import torch
@@ -116,7 +117,7 @@ class SystemContext:
         self._error_history = deque(maxlen=SystemConstants.MAX_ERROR_HISTORY)
         self._last_error_time = 0
         self._last_error_cleanup = 0
-        self._initialization_complete = threading.Event()  # Add initialization completion tracking
+        self._initialization_complete = Event()  # Add initialization completion tracking
         self._startup_monitor = None  # Track startup monitor thread
         
         try:
@@ -174,8 +175,8 @@ class SystemContext:
             # Start memory monitoring
             self._start_memory_monitoring()
             
-            # Signal initialization complete
-            self._initialization_complete.set()
+            # Complete initialization sequence
+            self._complete_initialization()
             
         except Exception as e:
             self._handle_initialization_error(e)
@@ -188,34 +189,44 @@ class SystemContext:
     def _handle_initialization_error(self, error: Exception):
         """Handle initialization errors safely."""
         try:
-            if hasattr(self, 'logger'):
+            if hasattr(self, 'logger') and self.logger:
                 self.logger.log_error(
                     error_msg=f"System initialization failed: {str(error)}",
                     error_type="system_initialization",
                     stack_trace=traceback.format_exc()
                 )
-        except Exception:
-            # If logger is not available, print to stderr
+            else:
+                print(f"Critical error during initialization (logger unavailable): {str(error)}", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
+        except Exception as log_err:
             print(f"Critical error during initialization: {str(error)}", file=sys.stderr)
+            print(f"Additionally, failed to log error: {str(log_err)}", file=sys.stderr)
     
     def _start_memory_monitoring(self):
         """Start proactive memory monitoring during initialization."""
         def monitor_memory():
             while not self._initialization_complete.is_set():
                 try:
-                    self.update_memory_usage()
-                    self._cleanup_old_errors()
+                    if hasattr(self, 'ram_manager') and hasattr(self, 'gpu_manager'):
+                        self.update_memory_usage()
+                    if hasattr(self, '_lock'):
+                        self._cleanup_old_errors()
                     time.sleep(1)  # Check every second during initialization
                 except Exception as e:
-                    if hasattr(self, 'logger'):
-                        self.logger.log_error(
-                            error_msg=f"Startup memory monitoring error: {str(e)}",
-                            error_type="startup_monitoring",
-                            stack_trace=traceback.format_exc()
-                        )
+                    try:
+                        if hasattr(self, 'logger') and self.logger:
+                            self.logger.log_error(
+                                error_msg=f"Startup memory monitoring error: {str(e)}",
+                                error_type="startup_monitoring",
+                                stack_trace=traceback.format_exc()
+                            )
+                        else:
+                            print(f"Error in startup memory monitor (logger unavailable): {str(e)}", file=sys.stderr)
+                    except Exception:
+                        print(f"Critical error in startup memory monitor exception handler: {str(e)}", file=sys.stderr)
                     time.sleep(5)  # Wait longer on error
         
-        self._startup_monitor = threading.Thread(target=monitor_memory, daemon=True)
+        self._startup_monitor = Thread(target=monitor_memory, daemon=True)
         self._startup_monitor.start()
     
     def _cleanup_old_errors(self):
@@ -354,26 +365,40 @@ class SystemContext:
         return False
 
     def _complete_initialization(self):
-        """Complete initialization and hand off to main monitoring."""
+        """Complete initialization and clean up startup monitoring."""
         try:
             # Signal startup monitoring to stop
-            self._initialization_complete.set()
+            if hasattr(self, '_initialization_complete'):
+                self._initialization_complete.set()
             
             # Wait for startup monitor to finish
-            if self._startup_monitor:
+            if hasattr(self, '_startup_monitor') and self._startup_monitor and self._startup_monitor.is_alive():
                 self._startup_monitor.join(timeout=5)
             
-            # Start main monitoring systems
-            self.start_monitoring()
-            
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.log_info("SystemContext initialization complete.")
+                
         except Exception as e:
-            self.error_handler.handle_error(
-                error_type="initialization_completion",
-                error_message=f"Failed to complete initialization: {str(e)}",
-                error_context={
-                    "initialization_state": self._initialization_complete.is_set()
-                }
-            )
+            try:
+                if hasattr(self, 'error_handler') and self.error_handler:
+                    self.error_handler.handle_error(
+                        error_type="initialization_completion",
+                        error_message=f"Failed to complete context initialization: {str(e)}",
+                        error_context={
+                            "initialization_state": self._initialization_complete.is_set() if hasattr(self, '_initialization_complete') else 'Unknown'
+                        }
+                    )
+                elif hasattr(self, 'logger') and self.logger:
+                    self.logger.log_error(
+                        error_msg=f"Failed to complete context initialization: {str(e)}",
+                        error_type="initialization_completion",
+                        stack_trace=traceback.format_exc()
+                    )
+                else:
+                    print(f"Error completing SystemContext initialization (logger/handler unavailable): {str(e)}", file=sys.stderr)
+                    print(traceback.format_exc(), file=sys.stderr)
+            except Exception:
+                print(f"Critical error in initialization completion exception handler: {str(e)}", file=sys.stderr)
 
 class SystemInitializationError(Exception):
     """Custom exception for system initialization failures."""
@@ -390,10 +415,8 @@ class SOVLSystem(SystemInterface):
     def __init__(
         self,
         context: SystemContext,
-        config_handler: ConfigHandler,
         model_manager: ModelManager,
         curiosity_manager: CuriosityManager,
-        memory_monitor: MemoryMonitor,
         state_tracker: StateTracker,
         error_manager: ErrorManager
     ):
@@ -402,53 +425,51 @@ class SOVLSystem(SystemInterface):
         
         Args:
             context: System context containing shared resources
-            config_handler: Configuration handler component
             model_manager: Model manager component
             curiosity_manager: Curiosity manager component
-            memory_monitor: Memory monitoring component
             state_tracker: State tracking component
             error_manager: Error management component
         """
         try:
             # Validate required components
-            validate_components(
-                context=context,
-                config_handler=config_handler,
-                model_manager=model_manager,
-                curiosity_manager=curiosity_manager,
-                memory_monitor=memory_monitor,
-                state_tracker=state_tracker,
-                error_manager=error_manager
-            )
+            if not context:
+                raise ValueError("SystemContext is required")
             
-            # Store injected components
+            # Store context and components
             self.context = context
-            self.config_handler = config_handler
+            self.config_handler = context.config_manager
             self.model_manager = model_manager
             self.curiosity_manager = curiosity_manager
-            self.memory_monitor = memory_monitor
             self.state_tracker = state_tracker
             self.error_manager = error_manager
             
             # Initialize thread safety
-            self._lock = RLock()  # Using RLock for reentrant locking
+            self._lock = RLock()
             
             # Initialize monitoring components
+            self.memory_monitor = MemoryMonitor(
+                config_manager=context.config_manager,
+                logger=context.logger,
+                ram_manager=context.ram_manager,
+                gpu_manager=context.gpu_manager,
+                error_manager=self.error_manager
+            )
+            
             self.system_monitor = SystemMonitor(
                 config_manager=context.config_manager,
                 logger=context.logger,
                 ram_manager=context.ram_manager,
                 gpu_manager=context.gpu_manager,
-                error_manager=error_manager
+                error_manager=self.error_manager
             )
             
             self.traits_monitor = TraitsMonitor(
                 config_manager=context.config_manager,
                 logger=context.logger,
                 state_manager=context.state_manager,
-                curiosity_manager=curiosity_manager.curiosity_manager,
+                curiosity_manager=self.curiosity_manager,
                 training_manager=context.training_cycle_manager,
-                error_manager=error_manager
+                error_manager=self.error_manager
             )
             
             # Initialize component state
@@ -457,24 +478,27 @@ class SOVLSystem(SystemInterface):
             # Log successful initialization
             self.context.logger.record_event(
                 event_type="system_initialized",
-                message="SOVL system initialized successfully with dependency injection",
+                message="SOVL system initialized successfully",
                 level="info",
                 additional_info={
-                    "config_path": self.config_handler.config_path,
-                    "device": self.context.device,
-                    "state_hash": self.state_tracker.state.state_hash if self.state_tracker.state else None
+                    "config_path": self.config_handler.config_path if self.config_handler else None,
+                    "state_hash": self.state_tracker.get_state_hash() if hasattr(self.state_tracker, 'get_state_hash') else None
                 }
             )
             
         except Exception as e:
-            self.error_manager.handle_error(
-                error_type="system_initialization",
-                error_message=f"Failed to initialize SOVL system: {str(e)}",
-                error_context={
-                    "config_path": config_handler.config_path if config_handler else None,
-                    "device": context.device if context else None
-                }
-            )
+            if hasattr(self, 'error_manager') and self.error_manager:
+                self.error_manager.handle_error(
+                    error_type="system_initialization",
+                    error_message=f"Failed to initialize SOVL system: {str(e)}",
+                    error_context={
+                        "config_path": self.config_handler.config_path if hasattr(self, 'config_handler') and self.config_handler else None
+                    },
+                    error=e
+                )
+            else:
+                print(f"Critical error initializing SOVLSystem (error handler unavailable): {str(e)}", file=sys.stderr)
+                print(traceback.format_exc(), file=sys.stderr)
             raise
 
     def _initialize_component_state(self):
@@ -757,75 +781,105 @@ class SOVLSystem(SystemInterface):
             )
 
     def start_monitoring(self):
-        """Start system monitoring."""
+        """Start system monitoring components managed by SOVLSystem."""
         with self._lock:
-            if not self._initialization_complete.is_set():
-                self._complete_initialization()
-                return
-                
             try:
                 # Start memory monitoring if not already running
-                if not hasattr(self, '_monitor_thread') or not self._monitor_thread.is_alive():
-                    self._monitor_thread = threading.Thread(target=self._monitor_memory, daemon=True)
-                    self._monitor_thread.start()
-                    self.logger.log_info("Main memory monitoring started")
-                
+                if hasattr(self, 'memory_monitor') and self.memory_monitor:
+                    if hasattr(self.memory_monitor, 'start_monitoring'):
+                        self.memory_monitor.start_monitoring()
+                        if self.context.logger:
+                            self.context.logger.log_info("SOVL Memory monitoring started.")
+                    else:
+                        if not hasattr(self, '_monitor_thread') or not self._monitor_thread.is_alive():
+                            self._monitor_thread = Thread(target=self._monitor_memory, daemon=True)
+                            self._monitor_thread.start()
+                            if self.context.logger:
+                                self.context.logger.log_info("SOVL main memory monitoring thread started.")
+
                 # Start other monitoring systems
-                self.state_tracker.start_monitoring()
-                self.error_handler.start_monitoring()
+                for monitor in [self.state_tracker, self.error_manager, self.system_monitor, self.traits_monitor]:
+                    if monitor and hasattr(monitor, 'start_monitoring'):
+                        monitor.start_monitoring()
+                    elif monitor and hasattr(monitor, 'start'):
+                        monitor.start()
                 
             except Exception as e:
-                self.error_handler.handle_error(
-                    error_type="monitoring_startup",
-                    error_message=f"Failed to start monitoring: {str(e)}",
-                    error_context={
-                        "initialization_state": self._initialization_complete.is_set(),
-                        "monitor_thread_alive": hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive()
-                    }
-                )
+                if hasattr(self, 'error_manager') and self.error_manager:
+                    self.error_manager.handle_error(
+                        error_type="monitoring_startup",
+                        error_message=f"Failed to start SOVLSystem monitoring: {str(e)}",
+                        error_context={
+                            "monitor_thread_alive": hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive()
+                        },
+                        error=e
+                    )
+                else:
+                    print(f"Error starting SOVLSystem monitoring (handler unavailable): {str(e)}", file=sys.stderr)
+                    print(traceback.format_exc(), file=sys.stderr)
     
     def stop_monitoring(self):
-        """Stop system monitoring."""
+        """Stop system monitoring components managed by SOVLSystem."""
         with self._lock:
             try:
-                # Stop startup monitoring if still running
-                if self._startup_monitor and self._startup_monitor.is_alive():
-                    self._initialization_complete.set()
-                    self._startup_monitor.join(timeout=5)
-                
-                # Stop main monitoring
-                if hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive():
-                    self._monitor_thread.join(timeout=5)
-                
+                # Stop main memory monitoring thread if it exists and is alive
+                if hasattr(self, '_monitor_thread') and self._monitor_thread and self._monitor_thread.is_alive():
+                    if hasattr(self, '_stop_monitoring_event'):
+                        self._stop_monitoring_event.set()
+                    if self.context.logger:
+                        self.context.logger.log_info("Attempting to stop main memory monitoring thread...")
+
+                # Stop memory monitor instance if it has a stop method
+                if hasattr(self, 'memory_monitor') and self.memory_monitor and hasattr(self.memory_monitor, 'stop_monitoring'):
+                    self.memory_monitor.stop_monitoring()
+                    if self.context.logger:
+                        self.context.logger.log_info("SOVL Memory monitoring stopped.")
+
                 # Stop other monitoring systems
-                self.state_tracker.stop_monitoring()
-                self.error_handler.stop_monitoring()
+                for monitor in [self.state_tracker, self.error_manager, self.system_monitor, self.traits_monitor]:
+                    if monitor and hasattr(monitor, 'stop_monitoring'):
+                        monitor.stop_monitoring()
+                    elif monitor and hasattr(monitor, 'stop'):
+                        monitor.stop()
                 
             except Exception as e:
-                self.error_handler.handle_error(
-                    error_type="monitoring_shutdown",
-                    error_message=f"Failed to stop monitoring: {str(e)}",
-                    error_context={
-                        "startup_monitor_alive": self._startup_monitor and self._startup_monitor.is_alive(),
-                        "monitor_thread_alive": hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive()
-                    }
-                )
-    
+                if hasattr(self, 'error_manager') and self.error_manager:
+                    self.error_manager.handle_error(
+                        error_type="monitoring_shutdown",
+                        error_message=f"Failed to stop SOVLSystem monitoring: {str(e)}",
+                        error_context={
+                            "monitor_thread_alive": hasattr(self, '_monitor_thread') and self._monitor_thread.is_alive() if hasattr(self, '_monitor_thread') else False
+                        },
+                        error=e
+                    )
+                else:
+                    print(f"Error stopping SOVLSystem monitoring (handler unavailable): {str(e)}", file=sys.stderr)
+                    print(traceback.format_exc(), file=sys.stderr)
+
     def _monitor_memory(self):
-        """Main memory monitoring loop."""
-        while True:
+        """Main memory monitoring loop (if managed directly by SOVLSystem)."""
+        self._stop_monitoring_event = Event()
+        while not self._stop_monitoring_event.is_set():
             try:
-                self.update_memory_usage()
-                self._cleanup_old_errors()
-                time.sleep(5)  # Check every 5 seconds during normal operation
+                if self.context and hasattr(self.context, 'update_memory_usage') and hasattr(self.context, '_cleanup_old_errors'):
+                    self.context.update_memory_usage()
+                    self.context._cleanup_old_errors()
+                self._stop_monitoring_event.wait(5)  # Check every 5 seconds or when event is set
             except Exception as e:
-                self.error_handler.handle_error(
-                    error_type="memory_monitoring",
-                    error_message=f"Memory monitoring error: {str(e)}",
-                    error_context={
-                        "monitoring_phase": "main",
-                        "initialization_complete": self._initialization_complete.is_set()
-                    }
-                )
-                time.sleep(10)  # Wait longer on error
+                if hasattr(self, 'error_manager') and self.error_manager:
+                    self.error_manager.handle_error(
+                        error_type="memory_monitoring",
+                        error_message=f"SOVLSystem memory monitoring error: {str(e)}",
+                        error_context={
+                            "monitoring_phase": "main"
+                        },
+                        error=e
+                    )
+                else:
+                    print(f"Error in SOVLSystem memory monitor loop (handler unavailable): {str(e)}", file=sys.stderr)
+                    print(traceback.format_exc(), file=sys.stderr)
+                self._stop_monitoring_event.wait(10)  # Wait longer on error
+
+        if self.context and self.context.logger:
+            self.context.logger.log_info("SOVL main memory monitoring loop stopped.")
 
