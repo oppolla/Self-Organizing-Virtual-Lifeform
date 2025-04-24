@@ -4,6 +4,7 @@ from collections import deque, defaultdict
 from typing import Optional, Dict, Any, List, Union, Callable, Tuple, Set
 import contextlib
 import traceback
+import uuid
 import hashlib
 from threading import Lock
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -1078,7 +1079,6 @@ class GenerationManager:
         """Generate text with state-driven error handling, recovery, and scribe logging."""
         request_time = time.time()
         session_id = kwargs.get("session_id")
-        interaction_id = kwargs.get("interaction_id")
         user_id = kwargs.get("user_id")
 
         try:
@@ -1099,7 +1099,7 @@ class GenerationManager:
                 "processing_time_ms": (time.time() - request_time) * 1000
             }
             
-            # Assemble log data
+            # Assemble capture data
             input_log, output_log, metadata_log = GenerationLogAssembler.assemble_log_data(
                 manager=self,
                 prompt=prompt,
@@ -1107,18 +1107,15 @@ class GenerationManager:
                 generation_result=generation_result,
                 request_time=request_time,
                 session_id=session_id,
-                interaction_id=interaction_id,
                 user_id=user_id
             )
-            
-            # Log successful generation
+            # Capture successful generation
             capture_scribe_event(
                 origin="sovl_generation",
                 event_type="text_generated",
                 event_data={**input_log, **output_log},
                 source_metadata=metadata_log,
                 session_id=session_id,
-                interaction_id=interaction_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1137,14 +1134,12 @@ class GenerationManager:
                 },
                 source_metadata={
                     "session_id": session_id,
-                    "interaction_id": interaction_id,
                     "user_id": user_id,
                     "request_timestamp_unix": request_time,
                     "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
                     "device": str(self.device)
                 },
                 session_id=session_id,
-                interaction_id=interaction_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1246,7 +1241,6 @@ class GenerationManager:
         """Backchannel communication method to directly prompt the scaffold model."""
         request_time = time.time()
         session_id = kwargs.get("session_id")
-        interaction_id = kwargs.get("interaction_id")
         user_id = kwargs.get("user_id")
 
         try:
@@ -1342,12 +1336,10 @@ class GenerationManager:
                     source_metadata={
                         **result['metadata'],
                         "session_id": session_id,
-                        "interaction_id": interaction_id,
                         "user_id": user_id,
                         "request_timestamp_unix": request_time
                     },
                     session_id=session_id,
-                    interaction_id=interaction_id,
                     timestamp=datetime.fromtimestamp(request_time)
                 )
                 
@@ -1378,12 +1370,10 @@ class GenerationManager:
                         "memory_usage": self.memory_manager.get_memory_usage(),
                         "generation_time": time.time() - request_time,
                         "session_id": session_id,
-                        "interaction_id": interaction_id,
                         "user_id": user_id,
                         "request_timestamp_unix": request_time
                     },
                     session_id=session_id,
-                    interaction_id=interaction_id,
                     timestamp=datetime.fromtimestamp(request_time)
                 )
                 
@@ -1409,13 +1399,11 @@ class GenerationManager:
                     "scaffold_index": scaffold_index,
                     "model_name": getattr(self.scaffold_tokenizer, "name_or_path", "unknown"),
                     "session_id": session_id,
-                    "interaction_id": interaction_id,
                     "user_id": user_id,
                     "request_timestamp_unix": request_time,
                     "memory_usage": self.memory_manager.get_memory_usage()
                 },
                 session_id=session_id,
-                interaction_id=interaction_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1779,7 +1767,6 @@ class GenerationLogAssembler:
         generation_result: Dict[str, Any],
         request_time: float,
         session_id: Optional[str],
-        interaction_id: Optional[str],
         user_id: Optional[str]
         # Add other external context args as needed
     ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -1793,7 +1780,6 @@ class GenerationLogAssembler:
             generation_result: The dictionary returned by _generate_with_state_context.
             request_time: The timestamp when the generation request was received.
             session_id: External session identifier.
-            interaction_id: External interaction identifier.
             user_id: External user identifier.
 
         Returns:
@@ -1826,7 +1812,6 @@ class GenerationLogAssembler:
         metadata_log = {
             # External Context
             "session_id": session_id,
-            "interaction_id": interaction_id,
             "user_id": user_id,
             # Request Info
             "request_timestamp_unix": request_time,

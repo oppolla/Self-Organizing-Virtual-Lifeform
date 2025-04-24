@@ -117,7 +117,6 @@ class Scriber:
                     event_data = scribe_entry_obj.event_data or {}
                     source_metadata = scribe_entry_obj.source_metadata or {}
                     session_id = scribe_entry_obj.session_id
-                    interaction_id = scribe_entry_obj.interaction_id
                     timestamp = scribe_entry_obj.timestamp
 
                     # Process and enrich the scribed data
@@ -127,7 +126,6 @@ class Scriber:
                         event_data=event_data,
                         source_metadata=source_metadata,
                         session_id=session_id,
-                        interaction_id=interaction_id
                     )
 
                     # Structure the final scribe entry
@@ -194,7 +192,6 @@ class Scriber:
                     event_data = scribe_entry_obj.event_data or {}
                     source_metadata = scribe_entry_obj.source_metadata or {}
                     session_id = scribe_entry_obj.session_id
-                    interaction_id = scribe_entry_obj.interaction_id
                     timestamp = scribe_entry_obj.timestamp
 
                     # Process and enrich the scribed data
@@ -204,7 +201,6 @@ class Scriber:
                         event_data=event_data,
                         source_metadata=source_metadata,
                         session_id=session_id,
-                        interaction_id=interaction_id
                     )
 
                     # Structure the final scribe entry

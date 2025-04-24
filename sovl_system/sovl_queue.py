@@ -26,7 +26,6 @@ class ScribeEntry:
     event_data: Dict[str, Any]
     source_metadata: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
-    interaction_id: Optional[str] = None
     timestamp: datetime = datetime.now()
 
 # Initialize the queue
@@ -38,7 +37,6 @@ def capture_scribe_event(
     event_data: Dict[str, Any],
     source_metadata: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
-    interaction_id: Optional[str] = None,
     timestamp: Optional[datetime] = None
 ) -> bool:
     """
@@ -52,7 +50,6 @@ def capture_scribe_event(
         event_data: Dictionary containing the core data for the event.
         source_metadata: Optional dictionary with contextual metadata.
         session_id: Optional session identifier.
-        interaction_id: Optional interaction identifier.
         timestamp: Optional specific timestamp; defaults to now().
 
     Returns:
@@ -65,7 +62,6 @@ def capture_scribe_event(
             event_data=event_data or {},
             source_metadata=source_metadata or {},
             session_id=session_id,
-            interaction_id=interaction_id,
             timestamp=timestamp or datetime.now()
         )
         
