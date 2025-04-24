@@ -20,13 +20,16 @@ def _prevent_immediate_retry(recovery_func):
     @wraps(recovery_func)
     def wrapper(self, record: ErrorRecord, *args, **kwargs):
         strategy_name = recovery_func.__name__
-        # Ensure record has a unique hash or id. Using hash here.
-        if not hasattr(record, 'hash'):
-             # Fallback or raise error if hash is missing
-             # For now, log and potentially skip check
-             self._log_error("Missing hash in ErrorRecord for retry prevention", "decorator_error")
-             # Call original function without retry check if hash is missing
-             return recovery_func(self, record, *args, **kwargs)
+        
+        # Check for missing hash
+        if not hasattr(record, 'hash') or record.hash is None:
+            self._log_error(
+                "Missing hash in ErrorRecord for retry prevention. Skipping recovery attempt.",
+                "decorator_error",
+                additional_info={"record_type": type(record).__name__, "record_repr_start": repr(record)[:200]}
+            )
+            # Skip the recovery attempt entirely if we cannot track it
+            return
 
         recovery_key = (record.hash, strategy_name)
 
@@ -38,12 +41,14 @@ def _prevent_immediate_retry(recovery_func):
                 level="warning",
                 additional_info={"error_hash": record.hash}
             )
-            return # Skip the recovery attempt
+            return  # Skip the recovery attempt
 
         try:
             # Call the original recovery function
             result = recovery_func(self, record, *args, **kwargs)
-            # Reset the flag on successful completion of the recovery attempt
+            # Reset the flag ONLY if the recovery function completed without raising an exception.
+            # NOTE: This signifies the recovery *attempt* finished, not necessarily that the
+            # underlying root cause of the error has been resolved. The error might recur.
             self._last_failed_recovery_key = None
             return result
         except Exception as e:
@@ -88,11 +93,11 @@ class ModelManager:
 
         # Model storage
         self.base_model = None
-        self.scaffold_models = []  # List to support multiple scaffolds if needed
+        self.scaffold_models = []  # List to support multiple scaffolds
         self.base_tokenizer = None
-        self.scaffold_tokenizer = None
+        self.scaffold_tokenizers = []  # List to support multiple scaffold tokenizers
+        self.scaffold_unk_ids = []  # List to support multiple scaffold UNK IDs
         self.base_config = None
-        self.scaffold_config = None
 
         # Initialize models and tokenizers
         self.load_models()
@@ -129,105 +134,227 @@ class ModelManager:
     def _recover_model_loading(self, record: ErrorRecord) -> None:
         """Recovery strategy for model loading errors."""
         try:
-            # Clear existing models
-            self.cleanup()
+            original_mode = self.quantization_mode
+            new_mode = None
             
-            # Try reducing quantization level
-            if self.quantization_mode == "int4":
-                self.quantization_mode = "int8"
-            elif self.quantization_mode == "int8":
-                self.quantization_mode = "fp16"
+            # Determine next quantization mode
+            if original_mode == "int4":
+                new_mode = "int8"
+            elif original_mode == "int8":
+                new_mode = "fp16"
+            elif original_mode == "fp16":
+                self._log_error(
+                    "Model loading failed at fp16. Cannot reduce precision further.",
+                    error_type="model_loading_recovery_failure",
+                    additional_info={"error_hash": record.hash, "quantization": original_mode}
+                )
+                raise RuntimeError(f"Model loading recovery failed: Already at lowest precision (fp16). Original error: {record.error}") from record.error
+
+            if new_mode:
+                self._log_event(
+                    "model_loading_recovery_attempt",
+                    f"Attempting to switch quantization from {original_mode} to {new_mode}.",
+                    level="warning",
+                    additional_info={"error_hash": record.hash}
+                )
+                # Clear existing models before changing mode
+                self.cleanup()
+                self.quantization_mode = new_mode
+                # Attempt reload with new settings
+                self.load_models()
                 
-            # Attempt reload with new settings
-            self.load_models()
-            
-            self._log_event(
-                "model_loading_recovery",
-                "Recovered from model loading error",
-                level="info",
-                additional_info={
-                    "new_quantization": self.quantization_mode
-                }
-            )
+                self._log_event(
+                    "model_loading_recovery_success",
+                    f"Successfully recovered from model loading error by switching to {self.quantization_mode}",
+                    level="info",
+                    additional_info={"error_hash": record.hash, "new_quantization": self.quantization_mode}
+                )
+
         except Exception as e:
+            self._log_error(
+                f"Exception during model loading recovery attempt (target mode: {self.quantization_mode}): {str(e)}",
+                error_type="model_loading_recovery_exception",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error_hash": record.hash, "recovery_target_quantization": self.quantization_mode}
+            )
             raise
 
     @_prevent_immediate_retry
     def _recover_memory_allocation(self, record: ErrorRecord) -> None:
         """Recovery strategy for memory allocation errors."""
         try:
-            # Clear CUDA cache
+            mode_changed = False
+            original_mode = self.quantization_mode
+            new_mode = None
+
+            # Determine next quantization mode
+            if original_mode == "fp16":
+                new_mode = "int8"
+            elif original_mode == "int8":
+                new_mode = "int4"
+            elif original_mode == "int4":
+                self._log_event(
+                    "memory_allocation_recovery_info",
+                    "Already at int4 quantization. Cannot reduce precision further.",
+                    level="warning",
+                    additional_info={"error_hash": record.hash}
+                )
+
+            # Attempt to change mode if possible
+            if new_mode:
+                self._log_event(
+                    "memory_allocation_recovery_attempt",
+                    f"Attempting to switch quantization from {original_mode} to {new_mode} due to memory error.",
+                    level="info",
+                    additional_info={"error_hash": record.hash}
+                )
+                try:
+                    self.set_quantization_mode(new_mode)
+                    mode_changed = True
+                    self._log_event(
+                        "memory_allocation_recovery_step",
+                        f"Successfully changed quantization to {self.quantization_mode}.",
+                        level="info",
+                        additional_info={"error_hash": record.hash}
+                    )
+                except Exception as e_quant:
+                    self._log_error(
+                        f"Failed to change quantization to {new_mode} during memory recovery: {str(e_quant)}",
+                        error_type="memory_recovery_quant_fail",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={"error_hash": record.hash, "target_mode": new_mode}
+                    )
+
+            # Clear CUDA cache AFTER attempting quantization change
+            cache_cleared = False
             if torch.cuda.is_available():
+                self._log_event("memory_allocation_recovery_attempt", "Clearing CUDA cache.", level="info", additional_info={"error_hash": record.hash})
                 torch.cuda.empty_cache()
-                
-            # Reduce model complexity if needed
-            if "memory_usage" in record.additional_info:
-                if self.quantization_mode == "fp16":
-                    self.set_quantization_mode("int8")
-                elif self.quantization_mode == "int8":
-                    self.set_quantization_mode("int4")
-                    
-            self._log_event(
-                "memory_allocation_recovery",
-                "Recovered from memory allocation error",
-                level="info",
-                additional_info={"new_quantization": self.quantization_mode}
-            )
+                cache_cleared = True
+                self._log_event("memory_allocation_recovery_step", "Cleared CUDA cache.", level="info", additional_info={"error_hash": record.hash})
+
+            # Final log summarizing actions taken
+            if mode_changed or cache_cleared:
+                self._log_event(
+                    "memory_allocation_recovery_completed",
+                    f"Memory recovery attempt finished. Mode changed: {mode_changed} (to {self.quantization_mode}). Cache cleared: {cache_cleared}.",
+                    level="info",
+                    additional_info={"error_hash": record.hash, "final_quantization": self.quantization_mode}
+                )
+            else:
+                self._log_event(
+                    "memory_allocation_recovery_noop",
+                    "Memory recovery attempt finished. No actions taken (already int4, no CUDA cache cleared).",
+                    level="warning",
+                    additional_info={"error_hash": record.hash, "final_quantization": self.quantization_mode}
+                )
+
         except Exception as e:
+            self._log_error(
+                f"Unexpected exception during _recover_memory_allocation: {str(e)}",
+                error_type="recovery_internal_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error_hash": record.hash}
+            )
             raise
 
     @_prevent_immediate_retry
     def _recover_quantization(self, record: ErrorRecord) -> None:
         """Recovery strategy for quantization errors."""
         try:
-            # Try simpler quantization
-            if self.quantization_mode == "int4":
-                self.set_quantization_mode("int8")
-            elif self.quantization_mode == "int8":
-                self.set_quantization_mode("fp16")
-                
-            # Reload models with new quantization
-            self.reload_models()
+            original_mode = self.quantization_mode
+            new_mode = None
             
-            self._log_event(
-                "quantization_recovery",
-                "Recovered from quantization error",
-                level="info",
-                additional_info={"new_quantization": self.quantization_mode}
-            )
+            # Determine next quantization mode
+            if original_mode == "int4":
+                new_mode = "int8"
+            elif original_mode == "int8":
+                new_mode = "fp16"
+            elif original_mode == "fp16":
+                self._log_error(
+                    "Quantization recovery failed: Already at fp16.",
+                    error_type="quantization_recovery_failure",
+                    additional_info={"error_hash": record.hash, "quantization": original_mode}
+                )
+                raise RuntimeError(f"Quantization recovery failed: Already at lowest precision (fp16). Original error: {record.error}") from record.error
+
+            if new_mode:
+                self._log_event(
+                    "quantization_recovery_attempt",
+                    f"Attempting to switch quantization from {original_mode} to {new_mode}.",
+                    level="warning",
+                    additional_info={"error_hash": record.hash}
+                )
+                self.set_quantization_mode(new_mode)
+                self._log_event(
+                    "quantization_recovery_success",
+                    f"Recovered from quantization error by switching to {self.quantization_mode}",
+                    level="info",
+                    additional_info={"error_hash": record.hash, "new_quantization": self.quantization_mode}
+                )
+
         except Exception as e:
+            self._log_error(
+                f"Exception during quantization recovery attempt (target mode: {new_mode}): {str(e)}",
+                error_type="quantization_recovery_exception",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error_hash": record.hash, "recovery_target_quantization": new_mode}
+            )
             raise
 
     @_prevent_immediate_retry
     def _recover_tokenizer(self, record: ErrorRecord) -> None:
-        """Recovery strategy for tokenizer errors."""
+        """
+        Recovery strategy for tokenizer errors.
+        Note: This recovery clears *all* loaded tokenizers (base and scaffold)
+        and attempts to reload them from scratch.
+        """
         try:
             # Clear existing tokenizers
             self.base_tokenizer = None
-            self.scaffold_tokenizer = None
-            
+            self.scaffold_tokenizers = []
+            self.scaffold_unk_ids = []  # Also clear derived info
+
+            self._log_event(
+                "tokenizer_recovery_attempt",
+                "Cleared all tokenizers. Attempting reload.",
+                level="warning",
+                additional_info={"error_hash": record.hash}
+            )
+
             # Reload tokenizers
             self._load_tokenizers()
-            
+
             self._log_event(
-                "tokenizer_recovery",
-                "Recovered from tokenizer error",
-                level="info"
+                "tokenizer_recovery_success",
+                "Successfully reloaded tokenizers after error.",
+                level="info",
+                additional_info={"error_hash": record.hash}
             )
         except Exception as e:
+            self._log_error(
+                f"Exception during tokenizer recovery attempt: {str(e)}",
+                error_type="tokenizer_recovery_exception",
+                stack_trace=traceback.format_exc(),
+                additional_info={"error_hash": record.hash}
+            )
             raise
 
     def load_models(self):
         """Load base and scaffold models along with their tokenizers."""
         try:
+            # Clear existing scaffold resources before loading
+            self._clear_scaffold_resources()
+            
             # Load tokenizers first
             self._load_tokenizers()
             
             # Load base model
             self._load_base_model()
             
-            # Load scaffold model
-            self._load_scaffold_model()
+            # Load each scaffold model
+            for model_name in self.scaffold_model_names:
+                self._load_scaffold_model(model_name)
             
             self._log_event(
                 "model_loading",
@@ -235,7 +362,8 @@ class ModelManager:
                 level="info",
                 additional_info={
                     "base_model": self.base_model_name,
-                    "scaffold_model": self.scaffold_model_name,
+                    "scaffold_models": self.scaffold_model_names,
+                    "num_scaffolds_loaded": len(self.scaffold_models),
                     "quantization": self.quantization_mode
                 }
             )
@@ -246,19 +374,34 @@ class ModelManager:
                 severity=2,
                 additional_info={
                     "base_model": self.base_model_name,
-                    "scaffold_model": self.scaffold_model_name,
-                    "quantization": self.quantization_mode
+                    "scaffold_models": self.scaffold_model_names,
+                    "quantization": self.quantization_mode,
+                    "stage": "model_loading"
                 }
             )
             raise
 
-    def _load_scaffold_model(self):
-        """Load the scaffold model with appropriate quantization."""
+    def _clear_scaffold_resources(self):
+        """Clear scaffold models and tokenizers."""
+        with self._memory_lock:
+            if self.scaffold_models:
+                for model in self.scaffold_models:
+                    del model
+                self.scaffold_models = []
+            self.scaffold_tokenizers = []
+            self.scaffold_unk_ids = []
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            self._log_event("scaffold_cleanup", "Cleared scaffold model/tokenizer resources", level="debug")
+
+    def _load_scaffold_model(self, model_name: str):
+        """Load a single scaffold model with appropriate quantization."""
         try:
             with self._memory_lock:
+                # Load the scaffold model with appropriate quantization
                 if self.quantization_mode == "int4":
-                    self.scaffold_models = [AutoModelForCausalLM.from_pretrained(
-                        self.scaffold_model_name,
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
                         load_in_4bit=True,
                         device_map="auto",
                         torch_dtype=torch.float16,
@@ -268,31 +411,33 @@ class ModelManager:
                             bnb_4bit_use_double_quant=True,
                             bnb_4bit_quant_type="nf4"
                         )
-                    )]
+                    )
                 elif self.quantization_mode == "int8":
-                    self.scaffold_models = [AutoModelForCausalLM.from_pretrained(
-                        self.scaffold_model_name,
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
                         load_in_8bit=True,
                         device_map="auto",
                         torch_dtype=torch.float16
-                    )]
+                    )
                 else:  # fp16
-                    self.scaffold_models = [AutoModelForCausalLM.from_pretrained(
-                        self.scaffold_model_name,
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
                         torch_dtype=torch.float16,
                         device_map="auto"
-                    )]
+                    )
                 
-                for model in self.scaffold_models:
-                    model.eval()
+                model.eval()
+                self.scaffold_models.append(model)
                 
                 self._log_event(
                     "scaffold_model_loading",
-                    "Successfully loaded scaffold model",
+                    f"Successfully loaded scaffold model: {model_name}",
                     level="info",
                     additional_info={
-                        "model": self.scaffold_model_name,
-                        "quantization": self.quantization_mode
+                        "model": model_name,
+                        "quantization": self.quantization_mode,
+                        "loaded_index": len(self.scaffold_models) - 1,
+                        "total_scaffolds": len(self.scaffold_models)
                     }
                 )
         except Exception as e:
@@ -301,7 +446,7 @@ class ModelManager:
                 error_type="model_loading_error",
                 severity=2,
                 additional_info={
-                    "model": self.scaffold_model_name,
+                    "model": model_name,
                     "quantization": self.quantization_mode,
                     "stage": "scaffold_model_loading"
                 }
@@ -372,21 +517,14 @@ class ModelManager:
                 truncation_side="left"
             )
             
-            self.scaffold_tokenizer = AutoTokenizer.from_pretrained(
-                self.scaffold_model_name,
+            self.scaffold_tokenizers = [AutoTokenizer.from_pretrained(
+                name,
                 padding_side="left",
                 truncation_side="left"
-            )
+            ) for name in self.scaffold_model_names]
             
-            # Update scaffold_unk_id after loading tokenizer
-            if self.scaffold_tokenizer is not None:
-                self.scaffold_unk_id = self.scaffold_tokenizer.unk_token_id
-                self._log_event(
-                    "scaffold_unk_update",
-                    "Updated scaffold unknown token ID",
-                    level="info",
-                    additional_info={"unk_id": self.scaffold_unk_id}
-                )
+            # Update scaffold_unk_ids after loading tokenizers
+            self.scaffold_unk_ids = [tokenizer.unk_token_id for tokenizer in self.scaffold_tokenizers]
             
             self._log_event(
                 "tokenizer_loading",
@@ -394,7 +532,7 @@ class ModelManager:
                 level="info",
                 additional_info={
                     "base_tokenizer": self.base_model_name,
-                    "scaffold_tokenizer": self.scaffold_model_name
+                    "scaffold_tokenizers": self.scaffold_model_names
                 }
             )
         except Exception as e:
@@ -404,7 +542,7 @@ class ModelManager:
                 severity=1,
                 additional_info={
                     "base_tokenizer": self.base_model_name,
-                    "scaffold_tokenizer": self.scaffold_model_name
+                    "scaffold_tokenizers": self.scaffold_model_names
                 }
             )
             raise
@@ -423,16 +561,30 @@ class ModelManager:
                     level="info"
                 )
         except Exception as e:
+            # Log the error before handling it with the manager
+            self._log_error(
+                f"Failed to complete quantization mode change to {mode}. "
+                f"Model state may be invalid (likely empty) due to reload failure. "
+                f"Original error during reload: {str(e)}",
+                error_type="quantization_change_failed",
+                stack_trace=traceback.format_exc(),
+                additional_info={
+                    "requested_mode": mode,
+                    "target_mode": self.quantization_mode
+                }
+            )
+            # Use the error manager
             self.error_manager.handle_error(
                 error=e,
                 error_type="quantization_error",
                 severity=2,
                 additional_info={
                     "requested_mode": mode,
-                    "current_mode": self.quantization_mode
+                    "target_mode": self.quantization_mode,
+                    "stage": "set_quantization_mode"
                 }
             )
-            raise
+            raise e
 
     def reload_models(self):
         """Reload all models with current settings."""
@@ -468,13 +620,7 @@ class ModelManager:
                     del self.base_model
                     self.base_model = None
                 
-                if self.scaffold_models:
-                    for model in self.scaffold_models:
-                        del model
-                    self.scaffold_models = []
-                
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                self._clear_scaffold_resources()
                 
                 self._log_event(
                     "cleanup",
@@ -566,40 +712,153 @@ class ModelManager:
             print(f"Failed to log error: {str(e)}")
 
     def get_base_model(self) -> Optional[nn.Module]:
-        """Return the base model."""
-        return self.base_model
+        """Return the base model. Thread-safe."""
+        with self._memory_lock:
+            return self.base_model
 
     def get_scaffold_model(self, index: int = 0) -> Optional[nn.Module]:
-        """Return the scaffold model at the specified index."""
-        return self.scaffold_models[index] if index < len(self.scaffold_models) else None
+        """Return the scaffold model at the specified index. Thread-safe."""
+        with self._memory_lock:
+            try:
+                num_models = len(self.scaffold_models)
+                if not 0 <= index < num_models:
+                    self._log_event(
+                        "scaffold_model_index_error",
+                        f"Invalid scaffold model index {index}. Available: {num_models}",
+                        level="warning",
+                        additional_info={"requested_index": index, "available_models": num_models}
+                    )
+                    return None
+                return self.scaffold_models[index]
+            except IndexError:
+                self._log_error(
+                    f"Internal error: Index {index} invalid for scaffold_models list of size {len(self.scaffold_models)} despite check.",
+                    "scaffold_model_access_error"
+                )
+                return None
+            except Exception as e:
+                self._log_error(
+                    f"Error accessing scaffold model at index {index}: {str(e)}",
+                    "scaffold_model_access_error",
+                    traceback.format_exc(),
+                    additional_info={"index": index}
+                )
+                return None
 
     def get_base_tokenizer(self) -> Optional[AutoTokenizer]:
-        """Return the base tokenizer."""
-        return self.base_tokenizer
+        """Return the base tokenizer. Thread-safe."""
+        with self._memory_lock:
+            return self.base_tokenizer
 
-    def get_scaffold_tokenizer(self) -> Optional[AutoTokenizer]:
-        """Return the scaffold tokenizer."""
-        return self.scaffold_tokenizer
+    def get_scaffold_tokenizer(self, index: int = 0) -> Optional[AutoTokenizer]:
+        """Return the scaffold tokenizer at the specified index. Thread-safe."""
+        with self._memory_lock:
+            try:
+                num_tokenizers = len(self.scaffold_tokenizers)
+                if not 0 <= index < num_tokenizers:
+                    self._log_event(
+                        "scaffold_tokenizer_index_error",
+                        f"Invalid scaffold tokenizer index {index}. Available: {num_tokenizers}",
+                        level="warning",
+                        additional_info={"requested_index": index, "available_tokenizers": num_tokenizers}
+                    )
+                    return None
+                return self.scaffold_tokenizers[index]
+            except IndexError:
+                self._log_error(
+                    f"Internal error: Index {index} invalid for scaffold_tokenizers list of size {len(self.scaffold_tokenizers)} despite check.",
+                    "scaffold_tokenizer_access_error"
+                )
+                return None
+            except Exception as e:
+                self._log_error(
+                    f"Error accessing scaffold tokenizer at index {index}: {str(e)}",
+                    "scaffold_tokenizer_access_error",
+                    traceback.format_exc(),
+                    additional_info={"index": index}
+                )
+                return None
 
-    def get_scaffold_unk_id(self) -> Optional[int]:
-        """Return the scaffold unknown token ID."""
-        return self.scaffold_unk_id
+    def get_scaffold_unk_id(self, index: int = 0) -> Optional[int]:
+        """Return the scaffold unknown token ID at the specified index. Thread-safe."""
+        with self._memory_lock:
+            try:
+                num_ids = len(self.scaffold_unk_ids)
+                if not 0 <= index < num_ids:
+                    self._log_event(
+                        "scaffold_unk_id_index_error",
+                        f"Invalid scaffold unknown token ID index {index}. Available: {num_ids}",
+                        level="warning",
+                        additional_info={"requested_index": index, "available_ids": num_ids}
+                    )
+                    return None
+                return self.scaffold_unk_ids[index]
+            except IndexError:
+                self._log_error(
+                    f"Internal error: Index {index} invalid for scaffold_unk_ids list of size {len(self.scaffold_unk_ids)} despite check.",
+                    "scaffold_unk_id_access_error"
+                )
+                return None
+            except Exception as e:
+                self._log_error(
+                    f"Error accessing scaffold unknown token ID at index {index}: {str(e)}",
+                    "scaffold_unk_id_access_error",
+                    traceback.format_exc(),
+                    additional_info={"index": index}
+                )
+                return None
+
+    def get_num_scaffold_models(self) -> int:
+        """Return the number of available scaffold models. Thread-safe."""
+        with self._memory_lock:
+            return len(self.scaffold_models)
 
     def _initialize_config(self) -> None:
         """Initialize and validate essential configuration parameters."""
         try:
-            # Load model names
+            # Load base model name
             self.base_model_name = self._validate_config_value(
                 "base_model_name",
                 self._config_manager.get("model_config.base_model_name"),
                 str
             )
             
-            self.scaffold_model_name = self._validate_config_value(
-                "scaffold_model_name",
-                self._config_manager.get("model_config.scaffold_model_name"),
-                str
-            )
+            # Load scaffold model name(s) - Prefer list `scaffold_model_names`
+            scaffold_name_single = self._config_manager.get("model_config.scaffold_model_name")  # Legacy/single name option
+            scaffold_names_list = self._config_manager.get("model_config.scaffold_model_names")  # Preferred list option
+
+            if scaffold_names_list is not None:
+                # Validate the preferred list format
+                if not isinstance(scaffold_names_list, list):
+                    raise ValueError("Config 'scaffold_model_names' must be a list.")
+                if not all(isinstance(name, str) and name for name in scaffold_names_list):
+                    raise ValueError("Config 'scaffold_model_names' must be a list of non-empty strings.")
+                self.scaffold_model_names = scaffold_names_list
+                if scaffold_name_single is not None:
+                    self._logger.record_event(
+                        "config_info",
+                        "Both 'scaffold_model_names' (list) and 'scaffold_model_name' (string) found. Using the list.",
+                        level="info"
+                    )
+            elif scaffold_name_single is not None:
+                # Fallback to the single name if list is not provided
+                if not isinstance(scaffold_name_single, str) or not scaffold_name_single:
+                    raise ValueError("Config 'scaffold_model_name' must be a non-empty string.")
+                self._logger.record_event(
+                    "config_fallback_used",
+                    "Using legacy 'scaffold_model_name' config. Prefer 'scaffold_model_names' (list) for specifying scaffolds.",
+                    level="warning",
+                    additional_info={"scaffold_name": scaffold_name_single}
+                )
+                self.scaffold_model_names = [scaffold_name_single]
+            else:
+                # Neither specified, initialize as empty list
+                self.scaffold_model_names = []
+                self._logger.record_event(
+                    "config_info",
+                    "No scaffold models specified via 'scaffold_model_names' or 'scaffold_model_name'.",
+                    level="info"
+                )
             
             # Load quantization settings
             self.quantization_mode = self._validate_config_value(
@@ -609,16 +868,13 @@ class ModelManager:
                 valid_values=["int4", "int8", "fp16"]
             )
             
-            # Initialize scaffold_unk_id (will be updated after tokenizer load)
-            self.scaffold_unk_id = None
-            
             self._log_event(
                 "config_initialization",
                 "Successfully initialized model configuration",
                 level="info",
                 additional_info={
                     "base_model": self.base_model_name,
-                    "scaffold_model": self.scaffold_model_name,
+                    "scaffold_models": self.scaffold_model_names,
                     "quantization": self.quantization_mode
                 }
             )

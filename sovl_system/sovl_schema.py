@@ -38,7 +38,21 @@ class ValidationSchema:
         return {
             "base_model_name": ConfigSchema(field="core_config.base_model_name", type=str, required=True),
             "base_model_path": ConfigSchema(field="core_config.base_model_path", type=str, default=None, nullable=True),
-            "scaffold_model_name": ConfigSchema(field="core_config.scaffold_model_name", type=str, default=None, nullable=True),
+            "scaffold_model_name": ConfigSchema(
+                field="core_config.scaffold_model_name", 
+                type=str, 
+                required=False, 
+                default=None, 
+                nullable=True
+            ),
+            "scaffold_model_names": ConfigSchema(
+                field="core_config.scaffold_model_names", 
+                type=list, 
+                required=False, 
+                default=None, 
+                nullable=True,
+                validator=lambda x: all(isinstance(i, str) for i in x) if x is not None else True
+            ),
             "scaffold_model_path": ConfigSchema(field="core_config.scaffold_model_path", type=str, default=None, nullable=True),
             "cross_attn_layers": ConfigSchema(field="core_config.cross_attn_layers", type=list, default=[4, 6]),
             "use_dynamic_layers": ConfigSchema(field="core_config.use_dynamic_layers", type=bool, default=False),
