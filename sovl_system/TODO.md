@@ -2,9 +2,10 @@
 
 ## General Taks:
 
-1. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
-3. integrate sovl_bonder
-6. further develop initialization and startup feel
+1. Complete finals for all modules
+2. integrate sovl_bonder
+3. further develop initialization and startup feel
+4. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 
 
 
