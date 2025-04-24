@@ -3,9 +3,10 @@
 ## General Taks:
 
 1. Complete finals for all modules
-2. integrate sovl_bonder
-3. further develop initialization and startup feel
-4. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
+2. Disable that startup data sovl_seed part. Save it for Soulprint
+3. integrate sovl_bonder
+4. further develop initialization and startup feel
+5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 
 
 
