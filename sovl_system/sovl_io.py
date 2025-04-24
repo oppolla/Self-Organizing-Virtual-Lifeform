@@ -602,3 +602,255 @@ if __name__ == "__main__":
                 "file_path": "sample.jsonl"
             }
         )
+
+class JsonlWriter:
+    """
+    Handles writing structured data to a rotating JSONL file.
+    Manages file I/O, buffering, and rotation for the scribed output.
+    """
+    
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        error_manager: ErrorManager,
+        logger: Logger
+    ):
+        """
+        Initialize the JSONL writer.
+
+        Args:
+            config_manager: Configuration manager instance
+            error_manager: Error manager instance for error handling
+            logger: Logger instance for operational logging
+        """
+        self.config_manager = config_manager
+        self.error_manager = error_manager
+        self.logger = logger
+        self.lock = threading.Lock()
+        
+        # Load configuration
+        self._load_config()
+        
+        # Setup fallback logger
+        self.fallback_logger = self._setup_fallback_logger()
+        
+        # Initialize file handling
+        self._buffer: List[str] = []
+        self._file_handle = None
+        self._setup_scribe_file()
+
+    def _load_config(self) -> None:
+        """Load and validate configuration settings."""
+        try:
+            # Get file path
+            self.scribe_file_path = self.config_manager.get(
+                "scribed_config.log_path",
+                "logs/sovl_scribed.jsonl"
+            )
+            
+            # Get max file size (convert MB to bytes)
+            max_mb = self.config_manager.get(
+                "scribed_config.max_file_size_mb",
+                50
+            )
+            self.max_file_size_bytes = max_mb * 1024 * 1024
+            
+            # Get buffer size
+            self.buffer_size = max(1, self.config_manager.get(
+                "scribed_config.buffer_size",
+                10
+            ))
+            
+        except Exception as e:
+            self.error_manager.handle_error(
+                e,
+                error_type="config",
+                context={
+                    "config_section": "scribed_config",
+                    "error_type": "config_loading_error"
+                }
+            )
+            raise
+
+    def _setup_fallback_logger(self) -> logging.Logger:
+        """Sets up an independent logger for critical I/O errors."""
+        logger = logging.getLogger('sovl.scribe.jsonl_writer')
+        if not logger.handlers:
+            handler = logging.StreamHandler(sys.stderr)
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.setLevel(logging.ERROR)
+            logger.propagate = False
+        return logger
+
+    def _setup_scribe_file(self) -> None:
+        """Sets up the scribe file for writing."""
+        try:
+            # Ensure we have a valid path
+            if not self.scribe_file_path:
+                self.scribe_file_path = "logs/sovl_scribed.jsonl"
+            
+            # Create directory if it doesn't exist
+            scribe_dir = os.path.dirname(self.scribe_file_path)
+            if scribe_dir:  # Only create if there's a directory component
+                os.makedirs(scribe_dir, exist_ok=True)
+            
+            self._open_file()
+        except OSError as e:
+            self.fallback_logger.exception(
+                f"Failed to create directory or open scribe file: {self.scribe_file_path}"
+            )
+            self.error_manager.handle_error(
+                e,
+                error_type="io",
+                context={
+                    "file_path": self.scribe_file_path,
+                    "error_type": "file_setup_error"
+                }
+            )
+            raise
+
+    def _open_file(self) -> None:
+        """Opens the scribe file in append mode."""
+        try:
+            if self._file_handle and not self._file_handle.closed:
+                self._file_handle.close()
+            self._file_handle = open(self.scribe_file_path, 'a', encoding='utf-8')
+        except IOError as e:
+            self.fallback_logger.exception(
+                f"Failed to open scribe file: {self.scribe_file_path}"
+            )
+            self.error_manager.handle_error(
+                e,
+                error_type="io",
+                context={
+                    "file_path": self.scribe_file_path,
+                    "error_type": "file_open_error"
+                }
+            )
+            self._file_handle = None
+            raise
+
+    def write(self, json_string: str) -> bool:
+        """
+        Writes a JSON string to the scribe file.
+
+        Args:
+            json_string: The JSON string to write
+
+        Returns:
+            bool: True if writing was successful, False otherwise
+        """
+        try:
+            with self.lock:
+                # Add to buffer
+                self._buffer.append(json_string)
+
+                # Flush if buffer is full
+                if len(self._buffer) >= self.buffer_size:
+                    self._flush_buffer()
+
+            return True
+        except Exception as write_error:
+            self.fallback_logger.exception(
+                f"Failed to buffer scribe entry. Error: {write_error}. "
+                f"Entry prefix: {json_string[:500]}..."
+            )
+            self.error_manager.handle_error(
+                write_error,
+                error_type="io",
+                context={
+                    "file_path": self.scribe_file_path,
+                    "error_type": "write_error"
+                }
+            )
+            return False
+
+    def _flush_buffer(self) -> None:
+        """Writes all buffered entries to the file."""
+        if not self._buffer:
+            return
+
+        if not self._file_handle or self._file_handle.closed:
+            self.fallback_logger.warning(
+                "Attempted to flush buffer, but file handle is not open."
+            )
+            return
+
+        try:
+            for entry in self._buffer:
+                self._file_handle.write(entry + '\n')
+            self._file_handle.flush()
+            self._buffer = []
+
+            # Check file size for rotation
+            if self._file_handle.tell() > self.max_file_size_bytes:
+                self._rotate_scribe()
+
+        except Exception as e:
+            self.fallback_logger.exception(
+                "Failed during buffer flush"
+            )
+            self.error_manager.handle_error(
+                e,
+                error_type="io",
+                context={
+                    "file_path": self.scribe_file_path,
+                    "error_type": "flush_error"
+                }
+            )
+
+    def _rotate_scribe(self) -> None:
+        """Rotates the scribe file when it reaches the size limit."""
+        if not self._file_handle:
+            return
+
+        try:
+            # Close current file
+            self._file_handle.close()
+            
+            # Rename current file with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            old_path = self._file_handle.name
+            new_path = f"{old_path}.{timestamp}"
+            os.rename(old_path, new_path)
+            
+            # Reopen file
+            self._open_file()
+            
+        except Exception as e:
+            self.fallback_logger.exception(
+                f"Failed to rotate scribe file: {self._file_handle.name}"
+            )
+            self.error_manager.handle_error(
+                e,
+                error_type="io",
+                context={
+                    "file_path": self.scribe_file_path,
+                    "error_type": "rotation_error"
+                }
+            )
+
+    def close(self) -> None:
+        """Flushes buffer and closes the scribe file."""
+        try:
+            with self.lock:
+                self._flush_buffer()
+                if self._file_handle and not self._file_handle.closed:
+                    self._file_handle.close()
+                    self._file_handle = None
+        except Exception as e:
+            self.fallback_logger.exception(
+                "Error closing scribe file"
+            )
+            self.error_manager.handle_error(
+                e,
+                error_type="io",
+                context={
+                    "file_path": self.scribe_file_path,
+                    "error_type": "close_error"
+                }
+            )
