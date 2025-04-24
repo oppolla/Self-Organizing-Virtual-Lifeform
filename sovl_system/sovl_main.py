@@ -74,6 +74,11 @@ class SystemConstants:
     DEFAULT_DEVICE = "cuda"
     DEFAULT_CONFIG_PATH = "sovl_config.json"
     
+    # Session management
+    SESSION_COUNTER_DIR = os.path.join(os.path.expanduser("~"), ".sovl")
+    SESSION_COUNTER_FILE = os.path.join(SESSION_COUNTER_DIR, "session_id_counter")
+    SESSION_COUNTER_BACKUP = os.path.join(SESSION_COUNTER_DIR, "session_id_counter.bak")
+    
     # Memory thresholds
     MIN_MEMORY_THRESHOLD = 0.1
     MAX_MEMORY_THRESHOLD = 0.95
@@ -101,6 +106,7 @@ class SystemContext:
     
     _instance = None
     _lock = RLock()  # Using RLock for reentrant locking
+    _session_lock = RLock()  # Lock for session ID operations
     
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -122,6 +128,183 @@ class SystemContext:
         self._last_error_cleanup = 0
         self._initialization_complete = Event()  # Add initialization completion tracking
         self._startup_monitor = None  # Track startup monitor thread
+        
+        try:
+            # Initialize session ID first
+            self.session_id = self._get_next_session_id()
+            
+            # Initialize core components in dependency order
+            self.config_manager = ConfigManager(config_path)
+            # Store session_id in config for other components to access
+            self.config_manager.set("runtime.session_id", self.session_id)
+            
+            self.logger = Logger()
+            # Now that logger is initialized, log the session start
+            self.logger.log_info(f"Starting SOVL Session: {self.session_id}")
+            
+            self.error_handler = ErrorManager()
+            self.event_dispatcher = EventDispatcher()
+            
+            # Initialize metadata processor for scribe
+            self.metadata_processor = MetadataProcessor(
+                config_manager=self.config_manager,
+                logger=self.logger
+            )
+            
+            # Initialize scribe queue and scriber
+            self.scribe_queue = get_scribe_queue()
+            self.scriber = Scriber(
+                config_manager=self.config_manager,
+                error_manager=self.error_handler,
+                metadata_processor=self.metadata_processor,
+                logger=self.logger,
+                scribe_queue=self.scribe_queue,
+                state_accessor=self.state_manager
+            )
+            
+            # Initialize memory managers
+            self.ram_manager = RAMManager()
+            self.gpu_manager = GPUMemoryManager()
+            
+            # Initialize experience management
+            self.memoria_manager = MemoriaManager()
+            
+            # Initialize state management
+            self.state_manager = StateManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                memoria_manager=self.memoria_manager,
+                ram_manager=self.ram_manager,
+                gpu_manager=self.gpu_manager
+            )
+            
+            # Initialize state tracking
+            self.state_tracker = StateTracker(
+                config_manager=self.config_manager,
+                logger=self.logger
+            )
+            
+            # Initialize AI components
+            self.curiosity_manager = CuriosityManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                error_manager=self.error_handler,
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                state_manager=self.state_manager
+            )
+            self.temperament_system = TemperamentSystem()
+            
+            # Initialize model components
+            self.model_manager = ModelManager()
+            self.processor = SOVLProcessor()
+            self.generation_manager = GenerationManager()
+            
+            # Initialize training components
+            self.trainer = SOVLTrainer()
+            self.training_cycle_manager = TrainingCycleManager()
+            
+            # Initialize system state
+            self._initialize_system_state()
+            
+            # Start memory monitoring
+            self._start_memory_monitoring()
+            
+            # Complete initialization sequence
+            self._complete_initialization()
+            
+        except Exception as e:
+            self._handle_initialization_error(e)
+            raise SystemInitializationError(
+                message=f"Failed to initialize system context: {str(e)}",
+                config_path=config_path,
+                stack_trace=traceback.format_exc()
+            )
+    
+    def _ensure_session_dir(self):
+        """Ensure the session counter directory exists."""
+        try:
+            os.makedirs(SystemConstants.SESSION_COUNTER_DIR, exist_ok=True)
+        except Exception as e:
+            print(f"Error creating session counter directory: {e}", file=sys.stderr)
+            raise
+    
+    def _backup_session_counter(self):
+        """Create a backup of the session counter file."""
+        try:
+            if os.path.exists(SystemConstants.SESSION_COUNTER_FILE):
+                with open(SystemConstants.SESSION_COUNTER_FILE, 'r') as src:
+                    content = src.read()
+                with open(SystemConstants.SESSION_COUNTER_BACKUP, 'w') as dst:
+                    dst.write(content)
+        except Exception as e:
+            print(f"Warning: Could not backup session counter: {e}", file=sys.stderr)
+    
+    def _restore_session_counter(self):
+        """Restore the session counter from backup if main file is corrupted."""
+        try:
+            if os.path.exists(SystemConstants.SESSION_COUNTER_BACKUP):
+                with open(SystemConstants.SESSION_COUNTER_BACKUP, 'r') as src:
+                    content = src.read()
+                with open(SystemConstants.SESSION_COUNTER_FILE, 'w') as dst:
+                    dst.write(content)
+        except Exception as e:
+            print(f"Warning: Could not restore session counter: {e}", file=sys.stderr)
+    
+    @synchronized("_session_lock")
+    def _get_next_session_id(self) -> int:
+        """Reads the last session ID, increments it, and writes it back."""
+        self._ensure_session_dir()
+        last_id = 0
+        
+        try:
+            # Try to read the current counter
+            if os.path.exists(SystemConstants.SESSION_COUNTER_FILE):
+                with open(SystemConstants.SESSION_COUNTER_FILE, 'r') as f:
+                    content = f.read().strip()
+                    if content.isdigit():
+                        last_id = int(content)
+                    else:
+                        # File exists but content is invalid, try backup
+                        self._restore_session_counter()
+                        if os.path.exists(SystemConstants.SESSION_COUNTER_FILE):
+                            with open(SystemConstants.SESSION_COUNTER_FILE, 'r') as f:
+                                content = f.read().strip()
+                                if content.isdigit():
+                                    last_id = int(content)
+        except Exception as e:
+            print(f"Warning: Could not read session ID counter file: {e}", file=sys.stderr)
+            last_id = 0  # Reset on error
+
+        current_id = last_id + 1
+
+        try:
+            # Create backup before writing
+            self._backup_session_counter()
+            
+            # Write new counter
+            with open(SystemConstants.SESSION_COUNTER_FILE, 'w') as f:
+                f.write(str(current_id))
+        except Exception as e:
+            print(f"Error: Could not write session ID counter file: {e}", file=sys.stderr)
+            # The current session will use current_id, but the next might reuse it
+
+        return current_id
+    
+    def get_session_id(self) -> int:
+        """Returns the current session ID."""
+        return self.session_id
+    
+    def _initialize_system_state(self):
+        """Initialize the central system state dictionary."""
+        self.system_state = {
+            'session_id': self.session_id,  # Add session ID to system state
+            'start_time': time.time(),
+            'status': 'initializing',
+            'memory_usage': {'ram': 0.0, 'gpu': 0.0},
+            'error_count': 0,
+            'last_error': None,
+            'component_states': {}
+        }
         
         try:
             # Initialize core components in dependency order

@@ -537,7 +537,7 @@ class CuriositySystem:
             }
 
 class CuriosityManager:
-    """Manages curiosity-driven exploration and learning."""
+    """Manages curiosity-driven exploration and question generation."""
     
     def __init__(
         self,
@@ -550,7 +550,8 @@ class CuriosityManager:
         temperament_system=None,
         confidence_calculator=None
     ):
-        self.config_manager = config_manager
+        """Initialize CuriosityManager with configuration and components."""
+        self._config_manager = config_manager
         self.logger = logger
         self.error_manager = error_manager
         self.device = device
@@ -559,23 +560,56 @@ class CuriosityManager:
         self.temperament_system = temperament_system
         self.confidence_calculator = confidence_calculator
         
-        # Initialize components
-        self.curiosity = Curiosity(config_manager, logger)
-        self.callbacks = CuriosityCallbacks(logger)
+        # Get global session_id from config
+        self.session_id = self._config_manager.get("runtime.session_id")
+        if not self.session_id:
+            self.logger.log_warning("No global session_id found in config")
         
-        # Initialize configuration first
+        # Initialize configuration
         self._initialize_config()
         
+        # Initialize components
+        self.curiosity = Curiosity(
+            config_manager=self._config_manager,
+            logger=self.logger
+        )
+        self.pressure = CuriosityPressure(
+            config_manager=self._config_manager,
+            logger=self.logger
+        )
+        self.callbacks = CuriosityCallbacks(logger=self.logger)
+        self.system = CuriositySystem(
+            config_manager=self._config_manager,
+            logger=self.logger,
+            memoria_manager=self.state_manager.memoria_manager if self.state_manager else None,
+            ram_manager=self.state_manager.ram_manager if self.state_manager else None,
+            gpu_manager=self.state_manager.gpu_manager if self.state_manager else None
+        )
+        
         # Initialize state
-        self.state = None
-        self.exploration_queue = deque()
-        self.metrics = defaultdict(list)
+        self._state = {
+            'metrics': defaultdict(float),
+            'exploration_queue': deque(maxlen=self._config_manager.get("curiosity_config.exploration_queue_maxlen", 100)),
+            'last_exploration_time': 0.0,
+            'exploration_count': 0,
+            'curiosity_score': 0.0,
+            'pressure': 0.0,
+            'session_id': self.session_id
+        }
         
         # Log initialization
-        self._log_event(
+        self._record_event(
             "curiosity_manager_initialized",
-            "Curiosity manager initialized",
-            level="info"
+            "CuriosityManager initialized successfully",
+            level="info",
+            additional_info={
+                "config": {
+                    "weight_ignorance": self.curiosity.weight_ignorance,
+                    "weight_novelty": self.curiosity.weight_novelty,
+                    "metrics_maxlen": self.curiosity.metrics_maxlen,
+                    "exploration_queue_maxlen": self._config_manager.get("curiosity_config.exploration_queue_maxlen", 100)
+                }
+            }
         )
 
     def _initialize_config(self) -> None:
@@ -656,7 +690,7 @@ class CuriosityManager:
             )
             
             # Log successful initialization
-            self._log_event(
+            self._record_event(
                 "curiosity_config_initialized",
                 "Curiosity configuration initialized successfully",
                 level="info",
@@ -683,7 +717,7 @@ class CuriosityManager:
             )
             
         except Exception as e:
-            self._log_error(
+            self._record_error(
                 f"Failed to initialize curiosity config: {str(e)}",
                 error_type="config_error",
                 stack_trace=traceback.format_exc(),
@@ -701,7 +735,7 @@ class CuriosityManager:
                 raise ValueError(f"Config {key}={value} outside valid range [{min_val}, {max_val}]")
             return float(value)
         except Exception as e:
-            self._log_error(
+            self._record_error(
                 f"Config validation failed for {key}: {str(e)}",
                 error_type="config_validation_error",
                 context="config_validation"
@@ -716,7 +750,7 @@ class CuriosityManager:
             gpu_stats = self.gpu_manager.get_gpu_usage()
             
             if ram_stats.get("usage_percent", 0) > 0.9 or gpu_stats.get("usage_percent", 0) > 0.9:
-                self._log_warning(
+                self._record_warning(
                     "High memory usage detected during embedding retrieval",
                     ram_stats=ram_stats,
                     gpu_stats=gpu_stats
@@ -738,7 +772,7 @@ class CuriosityManager:
                 gpu_stats = self.gpu_manager.get_gpu_usage()
                 
                 if ram_stats.get("usage_percent", 0) > 0.9 or gpu_stats.get("usage_percent", 0) > 0.9:
-                    self._log_warning(
+                    self._record_warning(
                         "High memory usage detected during batch processing",
                         ram_stats=ram_stats,
                         gpu_stats=gpu_stats
@@ -750,19 +784,35 @@ class CuriosityManager:
             return valid_embeddings
             
         except Exception as e:
-            self._log_error(f"Failed to get valid memory embeddings: {str(e)}")
+            self._record_error(f"Failed to get valid memory embeddings: {str(e)}")
             return []
 
-    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
-        """Log an event with standardized fields."""
-        self.logger.record_event(
-            event_type=event_type,
-            message=message,
-            level=level,
-            additional_info=kwargs
-        )
+    def _record_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
+        """Record event with standardized format (logs and sends to scribe)."""
+        if self.logger:
+            self.logger.log_event(
+                event_type=event_type,
+                message=message,
+                level=level,
+                **kwargs
+            )
+            # Also capture in scribe queue
+            capture_scribe_event(
+                origin="sovl_curiosity",
+                event_type=event_type,
+                event_data={
+                    "message": message,
+                    **kwargs.get("additional_info", {})
+                },
+                source_metadata={
+                    "level": level,
+                    "session_id": self.session_id
+                },
+                session_id=self.session_id,
+                timestamp=datetime.now()
+            )
 
-    def _log_warning(self, event_type: str, message: str, **kwargs) -> None:
+    def _record_warning(self, event_type: str, message: str, **kwargs) -> None:
         """Log a warning with standardized format."""
         self.logger.record_event(
             event_type=event_type,
@@ -771,14 +821,31 @@ class CuriosityManager:
             additional_info=kwargs
         )
 
-    def _log_error(self, message: str, **kwargs) -> None:
-        """Log an error with standardized format."""
-        self.logger.log_error(
-            error_msg=message,
-            error_type="curiosity_error",
-            stack_trace=traceback.format_exc(),
-            **kwargs
-        )
+    def _record_error(self, message: str, **kwargs) -> None:
+        """Record error with standardized format (logs and sends to scribe)."""
+        if self.logger:
+            self.logger.log_error(
+                error_msg=message,
+                error_type="curiosity_error",
+                stack_trace=traceback.format_exc(),
+                **kwargs
+            )
+            # Also capture in scribe queue
+            capture_scribe_event(
+                origin="sovl_curiosity",
+                event_type="curiosity_error",
+                event_data={
+                    "error_message": message,
+                    "error_type": "curiosity_error",
+                    **kwargs
+                },
+                source_metadata={
+                    "stack_trace": traceback.format_exc(),
+                    "session_id": self.session_id
+                },
+                session_id=self.session_id,
+                timestamp=datetime.now()
+            )
 
     def update_metrics(self, metric_name: str, value: float) -> bool:
         """Update curiosity metrics."""
@@ -922,340 +989,53 @@ class CuriosityManager:
         tokenizer: Any = None,
         model: Any = None
     ) -> Optional[str]:
-        """Generate a curiosity-driven question.
-        
-        Args:
-            context: Optional context to base the question on
-            spontaneous: Whether this is a spontaneous question
-            tokenizer: Tokenizer to use for generation
-            model: Model to use for generation
-            
-        Returns:
-            Optional[str]: Generated question or None if generation fails/disabled
-        """
+        """Generate a curiosity-driven question."""
         try:
-            if not self.enabled:
-                return None
-            
-            # Check pressure threshold
-            if not self.pressure.should_erupt(self.pressure_threshold):
-                return None
-            
-            if not context and self.state_manager and self.state_manager.dream_memory:
-                dream_embs, _ = zip(*self.state_manager.dream_memory)
-                seed = self._generate_seed(model, tokenizer)
-                context = " ".join(seed.split()[:3])
-            elif not context:
-                context = ""
-
-            # Use configured temperature bounds with temperament system
-            temp = self.base_temperature
-            if self.temperament_system:
-                temp += (self.temperament_system.get_temperament_score() * self.temperament_influence)
-            temp = max(self.min_temperature, min(self.max_temperature, temp))
-
-            output = self._generate_with_params(
-                context,
-                model,
-                tokenizer,
-                max_new_tokens=self.max_new_tokens,
-                temperature=temp,
-                top_k=self.top_k,
-                do_sample=True
-            )
-
-            if not output.endswith("?"):
-                output += "?"
-
-            score = self.calculate_curiosity_score(output)
-            threshold = (
-                self.novelty_threshold_spontaneous if spontaneous 
-                else self.novelty_threshold_response
+            self._record_event(
+                "curiosity_question_generation_started",
+                "Starting curiosity question generation",
+                level="info",
+                additional_info={
+                    "context": context,
+                    "spontaneous": spontaneous
+                }
             )
             
-            if score > threshold:
-                # Drop pressure when question is generated
-                self.pressure.drop_pressure(self.pressure_drop)
-                
-                # Capture the question in the queue
-                capture_scribe_event(
-                    event_type="curiosity_question_generated",
-                    message="Generated curiosity question",
-                    level="info",
-                    event_data={
-                        "question": output,
-                        "score": score,
-                        "spontaneous": spontaneous,
-                        "threshold": threshold,
-                        "pressure": self.pressure.current_pressure,
-                        "context": context,
-                        "temperature": temp
-                    },
-                    source_metadata={
-                        "module": "curiosity",
-                        "function": "generate_curiosity_question",
-                        "timestamp": datetime.now().isoformat()
-                    }
-                )
-                
-                self.logger.record_event(
-                    event_type="curiosity_question_generated",
-                    message="Generated curiosity question",
+            # Generate the question
+            question = self._generate_with_params(
+                context=context,
+                model=model,
+                tokenizer=tokenizer,
+                spontaneous=spontaneous
+            )
+            
+            if question:
+                self._record_event(
+                    "curiosity_question_generated",
+                    "Successfully generated curiosity question",
                     level="info",
                     additional_info={
-                        "question": output,
-                        "score": score,
-                        "spontaneous": spontaneous,
-                        "threshold": threshold,
-                        "pressure": self.pressure.current_pressure
+                        "question": question,
+                        "context": context,
+                        "spontaneous": spontaneous
                     }
                 )
-                return output
+            else:
+                self._record_event(
+                    "curiosity_question_generation_failed",
+                    "Failed to generate curiosity question",
+                    level="warning",
+                    additional_info={
+                        "context": context,
+                        "spontaneous": spontaneous
+                    }
+                )
+            
+            return question
+            
+        except Exception as e:
+            self._record_error(f"Failed to generate curiosity question: {str(e)}")
             return None
-                
-        except Exception as e:
-            # Capture the error in the queue
-            capture_scribe_event(
-                event_type="curiosity_question_generation_failed",
-                message="Failed to generate curiosity question",
-                level="error",
-                event_data={
-                    "error": str(e),
-                    "context": context,
-                    "spontaneous": spontaneous,
-                    "stack_trace": traceback.format_exc()
-                },
-                source_metadata={
-                    "module": "curiosity",
-                    "function": "generate_curiosity_question",
-                    "timestamp": datetime.now().isoformat()
-                }
-            )
-            
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "generate_curiosity_question",
-                "context": context,
-                "spontaneous": spontaneous
-            })
-            return None
-
-    def set_state(self, state: Any) -> bool:
-        """Set the state for the CuriosityManager."""
-        try:
-            # Validate state
-            if not state:
-                self._log_error(
-                    "Cannot set null state",
-                    error_type="state_error",
-                    context={"current_state": self.state}
-                )
-                return False
-                
-            # Check for required state attributes
-            required_attrs = ['dream_memory', 'get_confidence', 'get_seen_prompts', 'get_prompt_embedding']
-            missing_attrs = [attr for attr in required_attrs if not hasattr(state, attr)]
-            if missing_attrs:
-                self._log_error(
-                    f"State missing required attributes: {missing_attrs}",
-                    error_type="state_error",
-                    context={"current_state": self.state}
-                )
-                return False
-                
-            old_state = self.state
-            self.state = state
-            
-            self._log_event(
-                "state_updated",
-                "Curiosity manager state updated",
-                level="info",
-                additional_info={
-                    "old_state_hash": hash(old_state) if old_state else None,
-                    "new_state_hash": hash(state),
-                    "state_type": type(state).__name__
-                }
-            )
-            return True
-            
-        except Exception as e:
-            self._log_error(
-                f"Failed to set state: {str(e)}",
-                error_type="state_error",
-                stack_trace=traceback.format_exc()
-            )
-            return False
-
-    def reset(self) -> bool:
-        """Reset the CuriosityManager state."""
-        try:
-            old_state = self.state
-            self.metrics.clear()
-            self.exploration_queue.clear()
-            self.state = None
-            
-            self._log_event(
-                "manager_reset",
-                "Curiosity manager reset",
-                level="info",
-                additional_info={
-                    "old_state_hash": hash(old_state) if old_state else None,
-                    "metrics_cleared": True,
-                    "queue_cleared": True
-                }
-            )
-            return True
-            
-        except Exception as e:
-            self._log_error(
-                f"Failed to reset manager: {str(e)}",
-                error_type="reset_error",
-                stack_trace=traceback.format_exc()
-            )
-            return False
-
-    def tune(self, **params) -> None:
-        """Update curiosity parameters with validation and logging.
-        
-        Args:
-            **params: Key-value pairs of parameters to update
-        """
-        try:
-            for key, value in params.items():
-                # Validate parameter exists and is valid
-                if not hasattr(self, key):
-                    self._log_warning(
-                        "invalid_parameter",
-                        message=f"Invalid curiosity parameter: {key}",
-                        parameter=key,
-                        value=value
-                    )
-                    continue
-                    
-                # Validate value type and range
-                if key in ["pressure", "weight_ignorance", "weight_novelty"]:
-                    if not isinstance(value, (int, float)):
-                        self._log_warning(
-                            "invalid_value_type",
-                            message=f"Invalid type for {key}: {type(value)}",
-                            parameter=key,
-                            value=value
-                        )
-                        continue
-                    if not 0.0 <= value <= 1.0:
-                        self._log_warning(
-                            "invalid_value_range",
-                            message=f"Value out of range for {key}: {value}",
-                            parameter=key,
-                            value=value
-                        )
-                        continue
-                            
-                # Update parameter
-                setattr(self, key, value)
-                self._log_event(
-                    "parameter_updated",
-                    message=f"Updated {key} to {value}",
-                    parameter=key,
-                    value=value
-                )
-                
-        except Exception as e:
-            self._log_error(
-                "tune_failed",
-                message=f"Failed to tune parameters: {str(e)}",
-                parameters=params,
-                error=str(e)
-            )
-            raise
-
-    def get_metrics_summary(self) -> Dict[str, float]:
-        """Get summary statistics of tracked metrics."""
-        try:
-            if not self.state_manager:
-                return {}
-                
-            summary = {}
-            for metric_name, values in self.metrics.items():
-                if values:
-                    summary[f"{metric_name}_mean"] = sum(values) / len(values)
-                    summary[f"{metric_name}_max"] = max(values)
-                    summary[f"{metric_name}_min"] = min(values)
-                    
-            return summary
-            
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "metrics_summary"
-            })
-            return {}
-            
-    def get_exploration_queue_stats(self) -> Dict[str, Any]:
-        """Get statistics about the exploration queue."""
-        try:
-            if not self.exploration_queue:
-                return {}
-                
-            current_time = time.time()
-            stats = {
-                "queue_length": len(self.exploration_queue),
-                "avg_score": 0.0,
-                "oldest_item_age": 0.0,
-                "newest_item_age": 0.0
-            }
-            
-            if self.exploration_queue:
-                scores = [item["score"] for item in self.exploration_queue]
-                stats["avg_score"] = sum(scores) / len(scores)
-                stats["oldest_item_age"] = current_time - self.exploration_queue[0]["timestamp"]
-                stats["newest_item_age"] = current_time - self.exploration_queue[-1]["timestamp"]
-                
-            return stats
-            
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "queue_stats"
-            })
-            return {}
-
-    def _generate_seed(self, model: Any, tokenizer: Any) -> str:
-        """Generate a seed for question generation.
-        
-        Args:
-            model: Model to use for generation
-            tokenizer: Tokenizer to use for generation
-            
-        Returns:
-            str: Generated seed text
-        """
-        try:
-            # Use a simple prompt to generate a seed
-            prompt = "Generate a thought-provoking question about: "
-            
-            # Generate with conservative parameters
-            output = self._generate_with_params(
-                prompt,
-                model,
-                tokenizer,
-                max_new_tokens=10,  # Keep it short for a seed
-                temperature=0.7,    # Lower temperature for more focused output
-                top_k=20,          # Narrower sampling
-                do_sample=True
-            )
-            
-            # Clean up the output
-            seed = output.strip()
-            if seed.endswith("?"):
-                seed = seed[:-1].strip()
-            
-            return seed
-            
-        except Exception as e:
-            self._log_error(
-                f"Failed to generate seed: {str(e)}",
-                error_type="seed_generation_error",
-                stack_trace=traceback.format_exc()
-            )
-            return "curiosity exploration"  # Fallback seed
 
     def _generate_with_params(self, context: str, model: Any, tokenizer: Any, **params) -> str:
         """Generate text with given parameters.
@@ -1270,7 +1050,7 @@ class CuriosityManager:
             str: Generated text
         """
         try:
-            self._log_event(
+            self._record_event(
                 "generation_started",
                 "Starting text generation",
                 level="debug",
@@ -1288,7 +1068,7 @@ class CuriosityManager:
             
             generated_text = tokenizer.decode(output[0])
             
-            self._log_event(
+            self._record_event(
                 "generation_completed",
                 "Text generation completed",
                 level="debug",
@@ -1301,7 +1081,7 @@ class CuriosityManager:
             return generated_text
             
         except Exception as e:
-            self._log_error(
+            self._record_error(
                 f"Text generation failed: {str(e)}",
                 error_type="generation_error",
                 stack_trace=traceback.format_exc(),

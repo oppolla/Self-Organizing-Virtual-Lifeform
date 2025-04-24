@@ -82,6 +82,11 @@ class GenerationManager:
         self.curiosity_manager = curiosity_manager
         self.device = device
         
+        # Get global session_id from config
+        self.session_id = self._config_manager.get("runtime.session_id")
+        if not self.session_id:
+            self.logger.log_warning("No global session_id found in config")
+        
         # Use state's memory managers
         self.ram_manager = state.ram_manager
         self.gpu_manager = state.gpu_manager
@@ -1078,7 +1083,6 @@ class GenerationManager:
     def generate_text(self, prompt: str, num_return_sequences: int = 1, **kwargs) -> List[str]:
         """Generate text with state-driven error handling, recovery, and scribe logging."""
         request_time = time.time()
-        session_id = kwargs.get("session_id")
         user_id = kwargs.get("user_id")
 
         try:
@@ -1106,7 +1110,7 @@ class GenerationManager:
                 initial_kwargs=kwargs,
                 generation_result=generation_result,
                 request_time=request_time,
-                session_id=session_id,
+                session_id=self.session_id,
                 user_id=user_id
             )
             # Capture successful generation
@@ -1115,7 +1119,7 @@ class GenerationManager:
                 event_type="text_generated",
                 event_data={**input_log, **output_log},
                 source_metadata=metadata_log,
-                session_id=session_id,
+                session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1133,13 +1137,13 @@ class GenerationManager:
                     "kwargs": kwargs
                 },
                 source_metadata={
-                    "session_id": session_id,
+                    "session_id": self.session_id,
                     "user_id": user_id,
                     "request_timestamp_unix": request_time,
                     "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
                     "device": str(self.device)
                 },
-                session_id=session_id,
+                session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1240,7 +1244,6 @@ class GenerationManager:
     ) -> Union[str, Dict[str, Any]]:
         """Backchannel communication method to directly prompt the scaffold model."""
         request_time = time.time()
-        session_id = kwargs.get("session_id")
         user_id = kwargs.get("user_id")
 
         try:
@@ -1335,11 +1338,11 @@ class GenerationManager:
                     },
                     source_metadata={
                         **result['metadata'],
-                        "session_id": session_id,
+                        "session_id": self.session_id,
                         "user_id": user_id,
                         "request_timestamp_unix": request_time
                     },
-                    session_id=session_id,
+                    session_id=self.session_id,
                     timestamp=datetime.fromtimestamp(request_time)
                 )
                 
@@ -1369,11 +1372,11 @@ class GenerationManager:
                         "output_length": len(outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0]),
                         "memory_usage": self.memory_manager.get_memory_usage(),
                         "generation_time": time.time() - request_time,
-                        "session_id": session_id,
+                        "session_id": self.session_id,
                         "user_id": user_id,
                         "request_timestamp_unix": request_time
                     },
-                    session_id=session_id,
+                    session_id=self.session_id,
                     timestamp=datetime.fromtimestamp(request_time)
                 )
                 
@@ -1398,12 +1401,12 @@ class GenerationManager:
                 source_metadata={
                     "scaffold_index": scaffold_index,
                     "model_name": getattr(self.scaffold_tokenizer, "name_or_path", "unknown"),
-                    "session_id": session_id,
+                    "session_id": self.session_id,
                     "user_id": user_id,
                     "request_timestamp_unix": request_time,
                     "memory_usage": self.memory_manager.get_memory_usage()
                 },
-                session_id=session_id,
+                session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1601,11 +1604,7 @@ class GenerationManager:
             self.state.confidence = 0.5
 
     def _handle_internal_prompt(self, prompt: str = " ") -> str:
-        """Generate a response based on a minimal or provided prompt.
-        
-        Defaults to a minimal prompt (" ") when triggered by temperament, 
-        but can accept a specific prompt for other use cases.
-        """
+        """Generate a response based on a minimal or provided prompt."""
         request_time = time.time()
         try:
             # Save current history temporarily
@@ -1642,8 +1641,10 @@ class GenerationManager:
                     },
                     "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
                     "device": str(self.device),
-                    "internal_call": True
+                    "internal_call": True,
+                    "session_id": self.session_id
                 },
+                session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1660,8 +1661,10 @@ class GenerationManager:
                     "error_type": type(e).__name__
                 },
                 source_metadata={
-                    "internal_call": True
+                    "internal_call": True,
+                    "session_id": self.session_id
                 },
+                session_id=self.session_id,
                 timestamp=datetime.now()
             )
             return "..."
