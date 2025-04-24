@@ -284,81 +284,6 @@ class ILoggerClient:
     def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, **kwargs) -> None:
         raise NotImplementedError
 
-class LogManager:
-    """Singleton manager for logging operations."""
-    _instance = None
-    _lock = RLock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    def __init__(self):
-        if not hasattr(self, '_initialized'):
-            with self._lock:
-                if not hasattr(self, '_initialized'):
-                    self._log_queue = deque(maxlen=1000)
-                    self._config = LoggerConfig()
-                    self._file_handler = _FileHandler(self._config)
-                    self._validator = _LogValidator()
-                    self._write_lock = Lock()
-                    self._initialized = True
-    
-    def configure(self, config: LoggerConfig) -> None:
-        """Configure the logger with new settings."""
-        with self._lock:
-            self._config = config
-            self._file_handler = _FileHandler(config)
-    
-    def log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
-        """Thread-safe event logging."""
-        entry = {
-            'timestamp': time.time(),
-            'event_type': event_type,
-            'level': level,
-            'message': message,
-            **kwargs
-        }
-        
-        with self._lock:
-            if self._validator.validate_entry(entry):
-                self._log_queue.append(entry)
-                self._write_batch()
-    
-    def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, **kwargs) -> None:
-        """Thread-safe error logging."""
-        entry = {
-            'timestamp': time.time(),
-            'event_type': 'error',
-            'level': 'error',
-            'error_msg': error_msg,
-            'error_type': error_type or 'unknown_error',
-            'stack_trace': stack_trace,
-            **kwargs
-        }
-        
-        with self._lock:
-            if self._validator.validate_entry(entry):
-                self._log_queue.append(entry)
-                self._write_batch()
-    
-    def _write_batch(self) -> None:
-        """Thread-safe batch writing."""
-        with self._write_lock:
-            if not self._log_queue:
-                return
-            
-            entries = list(self._log_queue)
-            self._log_queue.clear()
-            
-            try:
-                self._file_handler.write_batch(entries)
-            except Exception as e:
-                logging.error(f"Failed to write log batch: {str(e)}")
-
 class Logger(IErrorHandler):
     """Main logger class for the SOVL system."""
     _instance = None
@@ -373,38 +298,86 @@ class Logger(IErrorHandler):
     def __init__(self):
         if not hasattr(self, '_initialized'):
             self._initialized = True
-            self._log_queue = deque(maxlen=1000)
             self._lock = RLock()
-            self._severity_thresholds = {
-                'warning': 10,
-                'error': 5,
-                'critical': 3
-            }
+            
+            # Initialize configuration
+            self.config = LoggerConfig()
+            
+            # Initialize fallback logger for internal errors
+            self._fallback_logger = logging.getLogger('sovl_internal')
+            if not self._fallback_logger.handlers:
+                handler = logging.StreamHandler()
+                formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                handler.setFormatter(formatter)
+                self._fallback_logger.addHandler(handler)
+                self._fallback_logger.setLevel(logging.INFO)
+            
+            # Initialize components
+            self._validator = _LogValidator(self._fallback_logger)
+            self._file_handler = _FileHandler(self.config, self._fallback_logger)
+            
             # Register with ErrorRecordBridge
             ErrorRecordBridge().register_handler(self)
             
+            # Initial cleanup
+            self._file_handler.manage_rotation()
+    
+    @classmethod
+    def get_instance(cls) -> 'Logger':
+        """Get the singleton instance of the Logger."""
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+    
+    def record_event(self, event_type: str, message: str, level: str = "info", additional_info: Dict[str, Any] = None) -> None:
+        """Record a general system event."""
+        with self._lock:
+            try:
+                log_entry = {
+                    'timestamp': datetime.now().isoformat(),
+                    'conversation_id': str(uuid.uuid4()),
+                    'event_type': event_type,
+                    'message': message,
+                    'level': level,
+                    **(additional_info or {})
+                }
+                
+                if self._validator.validate_entry(log_entry):
+                    self._file_handler.write_batch([log_entry])
+                else:
+                    self._fallback_logger.warning(f"Invalid log entry skipped: {log_entry}")
+                    
+            except Exception as e:
+                self._fallback_logger.error(f"Failed to record event: {str(e)}")
+                self._fallback_logger.error(traceback.format_exc())
+    
     def handle_error(self, record: ErrorRecord) -> None:
         """Handle error records from the ErrorRecordBridge."""
         with self._lock:
-            # Check severity thresholds
-            error_count = ErrorRecordBridge().get_error_count(record.error_type)
-            if error_count >= self._severity_thresholds['critical']:
-                self._handle_critical_error(record)
-            elif error_count >= self._severity_thresholds['warning']:
-                self._handle_warning(record)
-                
-            # Log the error
-            self.record_event(
-                event_type="error",
-                message=record.error_message,
-                level="error",
-                additional_info={
-                    "error_type": record.error_type,
-                    "stack_trace": record.stack_trace,
-                    **record.additional_info
+            try:
+                # Construct error log entry
+                error_entry = {
+                    'timestamp': datetime.now().isoformat(),
+                    'conversation_id': str(uuid.uuid4()),
+                    'event_type': 'error',
+                    'message': record.error_message,
+                    'level': 'error',
+                    'error_type': record.error_type,
+                    'stack_trace': record.stack_trace,
+                    **(record.additional_info or {})
                 }
-            )
-            
+                
+                # Write error to log file
+                if self._validator.validate_entry(error_entry):
+                    self._file_handler.write_batch([error_entry])
+                else:
+                    self._fallback_logger.warning(f"Invalid error entry skipped: {error_entry}")
+                    
+            except Exception as e:
+                self._fallback_logger.error(f"Failed to handle error: {str(e)}")
+                self._fallback_logger.error(traceback.format_exc())
+    
     def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, additional_info: Dict[str, Any] = None) -> None:
         """Log an error with detailed information."""
         with self._lock:
@@ -415,7 +388,7 @@ class Logger(IErrorHandler):
                 stack_trace=stack_trace,
                 additional_info=additional_info
             )
-            
+    
     def get_error_stats(self) -> Dict[str, Any]:
         """Get error statistics."""
         with self._lock:
@@ -423,68 +396,24 @@ class Logger(IErrorHandler):
                 "error_counts": dict(ErrorRecordBridge()._error_counts),
                 "recent_errors": [record.__dict__ for record in ErrorRecordBridge().get_recent_errors()]
             }
-
-    def _handle_critical_error(self, record: ErrorRecord) -> None:
-        """Handle critical error threshold exceeded."""
-        with self._lock:
-            self.record_event(
-                event_type="critical_error_threshold",
-                message=f"Critical error threshold exceeded for {record.error_type}",
-                level="critical",
-                additional_info={
-                    "error_type": record.error_type,
-                    "error_count": ErrorRecordBridge().get_error_count(record.error_type),
-                    "threshold": self._severity_thresholds['critical']
-                }
-            )
-
-    def _handle_warning(self, record: ErrorRecord) -> None:
-        """Handle warning threshold exceeded."""
-        with self._lock:
-            self.record_event(
-                event_type="warning_threshold",
-                message=f"Warning threshold exceeded for {record.error_type}",
-                level="warning",
-                additional_info={
-                    "error_type": record.error_type,
-                    "error_count": ErrorRecordBridge().get_error_count(record.error_type),
-                    "threshold": self._severity_thresholds['warning']
-                }
-            )
-
-class LoggingManager:
-    """Manager class for the logging system."""
-    _instance = None
-    _lock = RLock()
     
-    def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-            return cls._instance
-            
-    def __init__(self):
-        if not hasattr(self, '_initialized'):
-            self._initialized = True
-            self._logger = Logger()
-            self._config = LoggerConfig()
-            self._file_handler = _FileHandler(self._config)
-            self._log_validator = _LogValidator()
-            
-    def get_logger(self) -> Logger:
-        """Get the logger instance."""
-        return self._logger
-        
-    def update_config(self, new_config: Dict[str, Any]) -> None:
-        """Update the logging configuration."""
+    def cleanup(self) -> None:
+        """Clean up logging resources."""
         with self._lock:
-            self._config.update(new_config)
-            self._file_handler = _FileHandler(self._config)
-            
-    def get_config(self) -> LoggerConfig:
-        """Get the current logging configuration."""
-        return self._config
-
-class LoggingError(Exception):
-    """Raised for logging-related errors."""
-    pass
+            try:
+                self._file_handler.manage_rotation()
+                self._file_handler.compress_logs()
+            except Exception as e:
+                self._fallback_logger.error(f"Failed to clean up logger: {str(e)}")
+                self._fallback_logger.error(traceback.format_exc())
+    
+    def update_config(self, **kwargs) -> None:
+        """Update logger configuration."""
+        with self._lock:
+            try:
+                self.config.update(**kwargs)
+                # Reinitialize file handler with new config
+                self._file_handler = _FileHandler(self.config, self._fallback_logger)
+            except Exception as e:
+                self._fallback_logger.error(f"Failed to update logger config: {str(e)}")
+                self._fallback_logger.error(traceback.format_exc())

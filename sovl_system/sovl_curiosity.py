@@ -6,7 +6,7 @@ import threading
 import math
 import torch
 from torch import nn
-from sovl_error import ErrorHandler
+from sovl_error import ErrorManager
 from sovl_state import SOVLState
 from sovl_config import ConfigManager
 from sovl_logger import Logger
@@ -541,7 +541,7 @@ class CuriosityManager:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        error_manager: ErrorHandler,
+        error_manager: ErrorManager,
         device: torch.device,
         state_manager=None,
         lifecycle_manager=None,

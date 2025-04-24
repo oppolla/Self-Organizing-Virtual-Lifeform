@@ -18,7 +18,7 @@ import bitsandbytes as bnb
 # Core components
 from sovl_config import ConfigManager, ValidationSchema
 from sovl_state import SOVLState, ConversationHistory, StateManager, StateTracker
-from sovl_error import ErrorManager, ErrorHandler
+from sovl_error import ErrorManager
 from sovl_logger import Logger
 from sovl_events import EventDispatcher
 from sovl_interfaces import SystemInterface
@@ -124,7 +124,7 @@ class SystemContext:
             # Initialize core components in dependency order
             self.config_manager = ConfigManager(config_path)
             self.logger = Logger()
-            self.error_handler = ErrorHandler()
+            self.error_handler = ErrorManager()
             self.event_dispatcher = EventDispatcher()
             
             # Initialize memory managers

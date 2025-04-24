@@ -10,7 +10,7 @@ from sovl_trainer import TrainingCycleManager
 from sovl_confidence import ConfidenceCalculator
 import math
 from sovl_utils import synchronized, safe_divide
-from sovl_error import ErrorHandler
+from sovl_error import ErrorManager
 
 @dataclass
 class TemperamentConfig:

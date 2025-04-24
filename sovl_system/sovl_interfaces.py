@@ -5,9 +5,9 @@ import traceback
 import time
 from threading import Lock
 from sovl_config import ConfigManager
-from sovl_logger import LoggingManager, Logger
+from sovl_logger import Logger
 from sovl_state import SOVLState, StateManager
-from sovl_error import ErrorHandler
+from sovl_error import ErrorManager
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_main import SOVLSystem, SystemContext
@@ -87,7 +87,7 @@ class SystemMediator:
     def __init__(
         self,
         config_manager: ConfigManager,
-        logger: LoggingManager,
+        logger: Logger,
         device: torch.device
     ):
         """
@@ -106,7 +106,7 @@ class SystemMediator:
             logger=logger,
             device=device
         )
-        self.error_handler = ErrorHandler(logger)
+        self.error_handler = ErrorManager(logger)
         self._system: Optional[SystemInterface] = None
         self._orchestrator: Optional[OrchestratorInterface] = None
         self._lock = Lock()
@@ -379,7 +379,7 @@ if __name__ == "__main__":
     # Initialize dependencies
     config_path = "sovl_config.json"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger = LoggingManager(log_file="sovl_orchestrator_logs.jsonl")
+    logger = Logger(log_file="sovl_orchestrator_logs.jsonl")
     config_manager = ConfigManager(config_path, logger)
     context = SystemContext(config_path, str(device))
     config_handler = ConfigHandler(config_path, context.logger, context.event_dispatcher)

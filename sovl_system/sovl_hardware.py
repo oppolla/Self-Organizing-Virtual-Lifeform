@@ -397,12 +397,12 @@ class HardwareManager:
 # Example usage and testing
 if __name__ == "__main__":
     from sovl_config import ConfigManager
-    from sovl_logger import LoggingManager
+    from sovl_logger import Logger
     import unittest
 
     class TestHardwareManager(unittest.TestCase):
         def setUp(self):
-            self.logger = LoggingManager("test_logs.jsonl")
+            self.logger = Logger("test_logs.jsonl")
             self.config_manager = ConfigManager("sovl_config.json", self.logger)
             self.hardware = HardwareManager(self.config_manager, self.logger)
 

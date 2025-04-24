@@ -33,7 +33,6 @@ package "Core System" {
     class SOVLOrchestrator {
         +config_manager: ConfigManager
         +state_manager: StateManager
-        +error_handler: ErrorHandler
         +plugin_manager: PluginManager
         +_initialize_config(): None
         +_validate_config_values(): None

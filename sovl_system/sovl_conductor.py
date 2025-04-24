@@ -9,9 +9,9 @@ import os
 from threading import Lock
 from sovl_config import ConfigManager
 from sovl_cli import run_cli
-from sovl_logger import LoggingManager
+from sovl_logger import Logger
 from sovl_state import SOVLState, StateManager, StateTracker
-from sovl_error import ErrorHandler, ErrorManager
+from sovl_error import ErrorManager
 from sovl_utils import  detect_repetitions
 from collections import deque
 from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediator
@@ -336,9 +336,9 @@ class SOVLOrchestrator(OrchestratorInterface):
             raise
 
     def _initialize_logger(self, log_file: str) -> None:
-        """Initialize the logger with LoggingManager."""
+        """Initialize the logger with Logger."""
         try:
-            self.logger = LoggingManager(
+            self.logger = Logger(
                 log_file=log_file,
                 max_size_mb=10,
                 rotation_interval="1d"

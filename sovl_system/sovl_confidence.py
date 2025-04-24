@@ -16,7 +16,7 @@ import time
 import threading
 import math
 from torch import nn
-from sovl_error import ErrorHandler
+from sovl_error import ErrorManager
 
 # Constants
 DEFAULT_CONFIDENCE = 0.5

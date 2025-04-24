@@ -10,7 +10,7 @@ import math
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
-from sovl_error import ErrorHandler
+from sovl_error import ErrorManager
 from sovl_confidence import ConfidenceCalculator
 from sovl_io import ConfigurationError
 from sovl_curiosity import CuriosityManager
@@ -31,10 +31,10 @@ class ScaffoldError(Exception):
         self.timestamp = time.time()
 
 # Centralized handler for scaffold errors and recovery.
-class ScaffoldErrorHandler:
+class ScaffoldErrorManager:
     """Centralized error handling for scaffold operations."""
     
-    def __init__(self, logger: Logger, error_handler: Optional[ErrorHandler] = None):
+    def __init__(self, logger: Logger, error_handler: Optional[ErrorManager] = None):
         self.logger = logger
         self.error_handler = error_handler
         self._lock = Lock()
@@ -779,7 +779,7 @@ class CrossAttentionInjector:
         self._lock = Lock()
         self._scaffold_proj: Optional[nn.Module] = None
         self._scaffold_unk_id = config_manager.get("controls_config.scaffold_unk_id", 0)
-        self._error_handler = ErrorHandler(config_manager, logger)
+        self._error_handler = ErrorManager(config_manager, logger)
         self._target_layer_names: List[str] = []  # Store names of layers being injected
         
         self._validate_config()
@@ -1309,10 +1309,10 @@ class InsufficientDataError(Exception):
 class ScaffoldProvider:
     """Provides scaffold functionality for the SOVL system."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorHandler):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorManager):
         self.config_manager = config_manager
         self.logger = logger
-        self._error_handler = ScaffoldErrorHandler(logger, error_handler)
+        self._error_handler = ScaffoldErrorManager(logger, error_handler)
         self._scaffold_state = None
         self._lock = Lock()
         
