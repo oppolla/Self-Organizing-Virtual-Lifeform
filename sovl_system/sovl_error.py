@@ -13,6 +13,10 @@ from sovl_memory import GPUMemoryManager
 from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
 from functools import wraps
 
+class ConfigurationError(Exception):
+    """Raised when there is an error related to configuration."""
+    pass
+
 @dataclass
 class ErrorContext:
     """Context information for error handling."""

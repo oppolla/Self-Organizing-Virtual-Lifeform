@@ -8,6 +8,7 @@ import hashlib
 from threading import Lock
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sovl_logger import Logger
+from sovl_io import JSONLLoader
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size, memory_usage
 from sovl_error import ErrorManager

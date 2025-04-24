@@ -2,7 +2,8 @@
 
 ## General Taks:
 
-1. Complete finals for all modules
+1. Implement the learning log system with meta data
+Complete finals for all modules
 2. Disable that startup data sovl_seed part. Save it for Soulprint
 3. integrate sovl_bonder
 4. further develop initialization and startup feel

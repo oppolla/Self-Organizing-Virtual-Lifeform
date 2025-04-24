@@ -12,9 +12,8 @@ from collections import deque, defaultdict
 from transformers import get_linear_schedule_with_warmup, AutoModelForCausalLM
 import traceback
 from sovl_scaffold import ScaffoldProvider
-from sovl_error import ErrorManager
+from sovl_error import ErrorManager, ConfigurationError
 from sovl_config import ConfigManager
-from sovl_io import ConfigurationError
 from sovl_confidence import ConfidenceCalculator
 from sovl_temperament import TemperamentSystem
 from sovl_experience import MemoriaManager, MetadataProcessor
