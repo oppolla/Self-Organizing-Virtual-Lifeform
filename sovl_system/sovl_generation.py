@@ -1467,92 +1467,171 @@ class GenerationManager:
             self._handle_error("handle_internal_prompt", e)
             return "..."
 
-def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
-    """Calculate confidence score for generated tokens."""
-    try:
-        # Get probabilities for generated tokens
-        probs = torch.softmax(logits, dim=-1)
-        token_probs = torch.gather(probs, -1, generated_ids.unsqueeze(-1)).squeeze(-1)
-        
-        # Calculate average confidence
-        confidence = token_probs.mean().item()
-        return max(0.0, min(1.0, confidence))
-    except Exception as e:
-        logger.record({
-            "error": f"Confidence calculation failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        return 0.5
-
-def detect_repetitions(token_ids: List[int], special_ids: Set[int], min_rep_length: int = 3) -> Optional[Tuple[int, int]]:
-    """Detect repeating token sequences."""
-    try:
-        filtered = [i for i in token_ids if i not in special_ids]
-        for i in range(len(filtered) - 2 * min_rep_length + 1):
-            window = filtered[i:i + min_rep_length]
-            next_window = filtered[i + min_rep_length:i + 2 * min_rep_length]
-            if window == next_window:
-                return (i, i + min_rep_length)
-        return None
-    except Exception as e:
-        logger.record({
-            "error": f"Repetition detection failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        return None
-
-def adjust_temperature(
-    base_temp: float,
-    temperament_score: float,
-    mood_influence: float = 0.3,
-    min_temp: float = 0.5,
-    max_temp: float = 1.5,
-    curiosity_pressure: Optional[float] = None
-) -> float:
-    """Adjust temperature based on temperament and curiosity."""
-    try:
-        # Clamp input values
-        base_temp = max(min_temp, min(max_temp, base_temp))
-        temperament_score = max(-1.0, min(1.0, temperament_score))
-        mood_influence = max(0.0, min(1.0, mood_influence))
-        
-        # Calculate temperature adjustment
-        temp_adjustment = mood_influence * 0.3 * temperament_score
-        
-        # Check if curiosity_pressure is valid before using it
-        if curiosity_pressure is not None:
-            curiosity_pressure = max(0.0, min(1.0, curiosity_pressure))
-            temp_adjustment += curiosity_pressure * 0.1
-        
-        # Apply adjustment
-        adjusted_temp = max(min_temp, min(max_temp, base_temp + temp_adjustment))
-        return adjusted_temp
-    except Exception as e:
-        logger.record({
-            "error": f"Temperature adjustment failed: {str(e)}",
-            "timestamp": time.time(),
-            "stack_trace": traceback.format_exc()
-        })
-        return base_temp
-
-def error_handler(func):
-    """Decorator for consistent error handling and logging."""
-    @wraps(func)
-    def wrapper(self, *args, **kwargs):
+    def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
+        """Calculate confidence score for generated tokens."""
         try:
-            return func(self, *args, **kwargs)
+            # Get probabilities for generated tokens
+            probs = torch.softmax(logits, dim=-1)
+            token_probs = torch.gather(probs, -1, generated_ids.unsqueeze(-1)).squeeze(-1)
+            
+            # Calculate average confidence
+            confidence = token_probs.mean().item()
+            return max(0.0, min(1.0, confidence))
         except Exception as e:
-            context = f"{func.__name__}_error"
-            self.error_manager.handle_generation_error(
-                error=e,
-                context=context,
-                additional_info={
-                    "args": str(args),
-                    "kwargs": str(kwargs),
-                    "timestamp": time.time()
-                }
-            )
-            raise
-    return wrapper
+            logger.record({
+                "error": f"Confidence calculation failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return 0.5
+    
+    def detect_repetitions(token_ids: List[int], special_ids: Set[int], min_rep_length: int = 3) -> Optional[Tuple[int, int]]:
+        """Detect repeating token sequences."""
+        try:
+            filtered = [i for i in token_ids if i not in special_ids]
+            for i in range(len(filtered) - 2 * min_rep_length + 1):
+                window = filtered[i:i + min_rep_length]
+                next_window = filtered[i + min_rep_length:i + 2 * min_rep_length]
+                if window == next_window:
+                    return (i, i + min_rep_length)
+            return None
+        except Exception as e:
+            logger.record({
+                "error": f"Repetition detection failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return None
+    
+    def adjust_temperature(
+        base_temp: float,
+        temperament_score: float,
+        mood_influence: float = 0.3,
+        min_temp: float = 0.5,
+        max_temp: float = 1.5,
+        curiosity_pressure: Optional[float] = None
+    ) -> float:
+        """Adjust temperature based on temperament and curiosity."""
+        try:
+            # Clamp input values
+            base_temp = max(min_temp, min(max_temp, base_temp))
+            temperament_score = max(-1.0, min(1.0, temperament_score))
+            mood_influence = max(0.0, min(1.0, mood_influence))
+            
+            # Calculate temperature adjustment
+            temp_adjustment = mood_influence * 0.3 * temperament_score
+            
+            # Check if curiosity_pressure is valid before using it
+            if curiosity_pressure is not None:
+                curiosity_pressure = max(0.0, min(1.0, curiosity_pressure))
+                temp_adjustment += curiosity_pressure * 0.1
+            
+            # Apply adjustment
+            adjusted_temp = max(min_temp, min(max_temp, base_temp + temp_adjustment))
+            return adjusted_temp
+        except Exception as e:
+            logger.record({
+                "error": f"Temperature adjustment failed: {str(e)}",
+                "timestamp": time.time(),
+                "stack_trace": traceback.format_exc()
+            })
+            return base_temp
+    
+    def error_handler(func):
+        """Decorator for consistent error handling and logging."""
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except Exception as e:
+                context = f"{func.__name__}_error"
+                self.error_manager.handle_generation_error(
+                    error=e,
+                    context=context,
+                    additional_info={
+                        "args": str(args),
+                        "kwargs": str(kwargs),
+                        "timestamp": time.time()
+                    }
+                )
+                raise
+        return wrapper
+    
+class GenerationLogAssembler:
+    """Assembles the data required for logging to ChatTranscript."""
+
+    @staticmethod
+    def assemble_log_data(
+        manager: 'GenerationManager', # Pass the manager instance for context
+        prompt: str,
+        initial_kwargs: Dict[str, Any],
+        generation_result: Dict[str, Any],
+        request_time: float,
+        session_id: Optional[str],
+        interaction_id: Optional[str],
+        user_id: Optional[str]
+        # Add other external context args as needed
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        """
+        Assembles the input, output, and metadata dictionaries for logging.
+
+        Args:
+            manager: The GenerationManager instance.
+            prompt: The original input prompt.
+            initial_kwargs: The original kwargs passed to generate_text.
+            generation_result: The dictionary returned by _generate_with_state_context.
+            request_time: The timestamp when the generation request was received.
+            session_id: External session identifier.
+            interaction_id: External interaction identifier.
+            user_id: External user identifier.
+
+        Returns:
+            A tuple containing: (generation_input_log, generation_output_log, metadata_log)
+        """
+
+        # --- Assemble generation_input_log ---
+        generation_input_log = {
+            "prompt": prompt,
+            "num_return_sequences": initial_kwargs.get("num_return_sequences", 1), # Get from original kwargs
+            "initial_kwargs": initial_kwargs,
+            # Optionally add tokenized input if needed from generation_result
+            # "tokenized_input_batch": generation_result.get("input_batch"),
+        }
+
+        # --- Assemble generation_output_log ---
+        generated_texts = generation_result.get("generated_texts", [])
+        generation_output_log = {
+            "texts": generated_texts,
+            # Calculate or retrieve confidence if available
+            # "confidence": manager.calculate_confidence_score(...) # Example
+        }
+        # Optionally include parts of raw_hf_outputs if desired
+        # raw_outputs = generation_result.get("raw_hf_outputs")
+        # if raw_outputs and hasattr(raw_outputs, 'scores'):
+        #     generation_output_log["output_scores_summary"] = ... # Summarize scores
+
+
+        # --- Assemble metadata_log ---
+        metadata_log = {
+            # External Context
+            "session_id": session_id,
+            "interaction_id": interaction_id,
+            "user_id": user_id,
+            # Request Info
+            "request_timestamp_unix": request_time,
+            # Config Used
+            "generation_config_used": generation_result.get("generation_config_used"),
+            # System State from GenerationManager
+            "model_name": getattr(manager.base_model.config, "_name_or_path", "unknown"),
+            "device": str(manager.device),
+            "temperament_score": getattr(manager.state, "temperament_score", None),
+            "lifecycle_stage": manager.lifecycle_manager.get_lifecycle_stage() if hasattr(manager, 'lifecycle_manager') and manager.lifecycle_manager else None,
+            "memory_usage_mb": manager.memory_manager.get_memory_usage().get("total_mb") if hasattr(manager, 'memory_manager') and manager.memory_manager else None,
+            # Performance
+            "processing_time_ms": generation_result.get("processing_time_ms"),
+            # Add token counts if desired (requires access to tokenizer potentially or data from result)
+            # "input_token_count": len(generation_result.get("input_batch", {}).get("input_ids", [[]])[0]),
+            # "output_token_count": len(generation_result.get("raw_hf_outputs", {}).sequences[0]) # Example
+        }
+
+        return generation_input_log, generation_output_log, metadata_log
