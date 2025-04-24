@@ -10,7 +10,7 @@ from sovl_config import ConfigManager
 from sovl_state import StateManager, SOVLState
 from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_error import ErrorManager, ErrorRecord, EventError
+from sovl_error import ErrorManager, ErrorRecord
 import traceback
 
 # Type alias for callbacks - clearer name

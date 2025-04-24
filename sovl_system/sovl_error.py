@@ -184,15 +184,6 @@ class ErrorManager(IErrorHandler):
                 "model_loading": self._recover_model_loading
             }
             
-            # Initialize parameter adjustments with configuration validation
-            self.parameter_adjustments = {
-                "training": lambda ctx: self._adjust_training_params(ctx),
-                "curiosity": lambda ctx: self._adjust_curiosity_params(ctx),
-                "memory": lambda ctx: self._adjust_memory_params(ctx),
-                "generation": lambda ctx: self._adjust_generation_params(ctx),
-                "data": lambda ctx: self._adjust_data_params(ctx)
-            }
-            
             self.logger.record_event(
                 event_type="error_config_initialized",
                 message="Error handling configuration initialized successfully",
@@ -229,36 +220,6 @@ class ErrorManager(IErrorHandler):
                 additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
             )
             
-    def _adjust_training_params(self, context: Dict[str, Any]) -> None:
-        """Adjust training parameters based on configuration."""
-        current_batch_size = self.config_manager.get("training_config.batch_size", 32)
-        new_batch_size = max(1, current_batch_size // 2)
-        self.config_manager.update("training_config.batch_size", new_batch_size)
-        
-    def _adjust_curiosity_params(self, context: Dict[str, Any]) -> None:
-        """Adjust curiosity parameters based on configuration."""
-        current_threshold = self.config_manager.get("curiosity_config.pressure_threshold", 0.5)
-        new_threshold = max(0.1, current_threshold - 0.05)
-        self.config_manager.update("curiosity_config.pressure_threshold", new_threshold)
-        
-    def _adjust_memory_params(self, context: Dict[str, Any]) -> None:
-        """Adjust memory parameters based on configuration."""
-        current_limit = self.config_manager.get("memory_config.max_memory_mb", 512)
-        new_limit = max(256, current_limit // 2)
-        self.config_manager.update("memory_config.max_memory_mb", new_limit)
-        
-    def _adjust_generation_params(self, context: Dict[str, Any]) -> None:
-        """Adjust generation parameters based on configuration."""
-        current_temp = self.config_manager.get("generation_config.temperature", 1.0)
-        new_temp = max(0.5, current_temp - 0.05)
-        self.config_manager.update("generation_config.temperature", new_temp)
-        
-    def _adjust_data_params(self, context: Dict[str, Any]) -> None:
-        """Adjust data parameters based on configuration."""
-        current_batch_size = self.config_manager.get("data_config.batch_size", 32)
-        new_batch_size = max(1, current_batch_size // 2)
-        self.config_manager.update("data_config.batch_size", new_batch_size)
-        
     def _recover_training(self, record: ErrorRecord) -> None:
         """Attempt to recover from a training error."""
         try:
@@ -502,35 +463,3 @@ class ErrorManager(IErrorHandler):
                 level="error",
                 stack_trace=traceback.format_exc()
             )
-
-    def _get_memory_stats(self) -> Dict[str, Any]:
-        """Get current memory statistics if CUDA is available."""
-        if not torch.cuda.is_available():
-            return {}
-            
-        try:
-            if not hasattr(self.context, 'gpu_manager'):
-                return {}
-                
-            gpu_stats = self.context.gpu_manager.get_gpu_usage()
-            
-            return {
-                "allocated": gpu_stats.get('gpu_usage', 0.0),
-                "reserved": gpu_stats.get('gpu_reserved', 0.0),
-                "max_allocated": gpu_stats.get('max_gpu_usage', 0.0),
-                "max_reserved": gpu_stats.get('max_gpu_reserved', 0.0),
-                "device_count": gpu_stats.get('device_count', 0),
-                "current_device": gpu_stats.get('current_device', 0),
-                "device_name": gpu_stats.get('device_name', 'unknown')
-            }
-        except Exception as e:
-            self.logger.record_event(
-                event_type="memory_stats_error",
-                message=f"Failed to get memory stats: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc()
-                }
-            )
-            return {}
