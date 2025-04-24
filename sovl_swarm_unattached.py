@@ -1,4 +1,3 @@
-\
 import torch
 import time
 import random
@@ -385,5 +384,4 @@ if __name__ == '__main__':
         time.sleep(2) # Simulate time passing
 
     print("--- Simulation Finished ---")
-    print(f"Final swarm size: {len(swarm_manager._active_scaffolds)}")
-
+    print(f"Final swarm size: {len(swarm_manager._active_scaffolds)}") 
