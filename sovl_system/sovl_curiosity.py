@@ -14,7 +14,7 @@ from sovl_logger import Logger
 from sovl_trainer import TrainingCycleManager
 from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
-from sovl_queue import ScribeEntry, capture_scribe_event
+from sovl_queue import capture_scribe_event
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""

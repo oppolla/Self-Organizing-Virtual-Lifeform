@@ -17,7 +17,7 @@ from sovl_curiosity import CuriosityManager
 from sovl_trainer import LifecycleManager, TrainingConfig
 from sovl_temperament import TemperamentSystem 
 from sovl_confidence import ConfidenceCalculator 
-from sovl_queue import ScribeEntry, capture_scribe_event
+from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_scaffold import GenerationScaffoldProvider
 import threading

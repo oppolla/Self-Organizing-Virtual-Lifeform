@@ -9,6 +9,7 @@ from sovl_logger import Logger
 from sovl_events import MemoryEventDispatcher, MemoryEventTypes
 from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorManager
+from sovl_queue import check_scribe_queue_health
 import time
 import traceback
 import curses
@@ -68,9 +69,16 @@ class SystemMonitor:
             ram_stats = self.ram_manager.check_memory_health()
             gpu_stats = self.gpu_manager.check_memory_health()
             
+            # Get queue health status
+            queue_status, queue_fill_ratio = check_scribe_queue_health()
+            
             metrics = {
                 "ram_stats": ram_stats,
-                "gpu_stats": gpu_stats
+                "gpu_stats": gpu_stats,
+                "queue_stats": {
+                    "status": queue_status,
+                    "fill_ratio": queue_fill_ratio
+                }
             }
             
             # Check for concerning metrics using configured thresholds
@@ -87,6 +95,14 @@ class SystemMonitor:
                     error_message=f"GPU memory usage critically high (>{self._gpu_critical_threshold}%)",
                     context={"gpu_stats": gpu_stats}
                 )
+            
+            # Check queue health
+            if queue_status in ["WARNING", "FULL"]:
+                self._error_manager.handle_error(
+                    error_type="queue",
+                    error_message=f"Scribe queue {queue_status.lower()}: {queue_fill_ratio:.1%} full",
+                    context={"queue_stats": metrics["queue_stats"]}
+                )
                 
             return metrics
             
@@ -98,7 +114,8 @@ class SystemMonitor:
             )
             return {
                 "ram_stats": {"status": "error"},
-                "gpu_stats": {"status": "error"}
+                "gpu_stats": {"status": "error"},
+                "queue_stats": {"status": "error"}
             }
 
 class MemoryMonitor:

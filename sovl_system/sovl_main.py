@@ -22,10 +22,12 @@ from sovl_error import ErrorManager
 from sovl_logger import Logger
 from sovl_events import EventDispatcher
 from sovl_interfaces import SystemInterface
+from sovl_queue import get_scribe_queue
+from sovl_scribe import Scriber
 
 # Model and processing
 from sovl_manager import ModelManager
-from sovl_processor import SOVLProcessor
+from sovl_processor import SOVLProcessor, MetadataProcessor
 from sovl_generation import GenerationManager
 from sovl_tuner import SOVLTuner
 
@@ -127,6 +129,23 @@ class SystemContext:
             self.logger = Logger()
             self.error_handler = ErrorManager()
             self.event_dispatcher = EventDispatcher()
+            
+            # Initialize metadata processor for scribe
+            self.metadata_processor = MetadataProcessor(
+                config_manager=self.config_manager,
+                logger=self.logger
+            )
+            
+            # Initialize scribe queue and scriber
+            self.scribe_queue = get_scribe_queue()
+            self.scriber = Scriber(
+                config_manager=self.config_manager,
+                error_manager=self.error_handler,
+                metadata_processor=self.metadata_processor,
+                logger=self.logger,
+                scribe_queue=self.scribe_queue,
+                state_accessor=self.state_manager
+            )
             
             # Initialize memory managers
             self.ram_manager = RAMManager()
