@@ -10,8 +10,10 @@ import re
 import time
 from sovl_logger import Logger
 from transformers import AutoConfig
-from sovl_schema import ValidationSchema  # Import ValidationSchema from sovl_schema.py
+from sovl_schema import ValidationSchema
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
+import tempfile
+import shutil
 
 # ConfigSchema defines validation rules and defaults for configuration fields.
 @dataclass
@@ -293,6 +295,24 @@ class ConfigKeys:
     # Hardware Config
     HARDWARE_MAX_SCAFFOLD_MEMORY_MB = ConfigKey("hardware", "max_scaffold_memory_mb")
 
+class ConfigNamespace:
+    """Wraps a config dictionary to provide dot-access (attribute) and dict-style access."""
+    def __init__(self, data):
+        object.__setattr__(self, '_data', data)
+    def __getattr__(self, key):
+        value = self._data.get(key)
+        if isinstance(value, dict):
+            return ConfigNamespace(value)
+        return value
+    def __setattr__(self, key, value):
+        self._data[key] = value
+    def __getitem__(self, key):
+        return self._data[key]
+    def __setitem__(self, key, value):
+        self._data[key] = value
+    def __repr__(self):
+        return f"ConfigNamespace({self._data})"
+
 # ConfigManager orchestrates configuration lifecycle: loading, validation, updates, notifications, and persistence.
 class ConfigManager:
     """Manages SOVLSystem configuration with validation, thread safety, and persistence.
@@ -310,17 +330,20 @@ class ConfigManager:
         self.config_file = os.getenv("SOVL_CONFIG_FILE", config_file)
         self.logger = logger
         self.store = ConfigStore()
-        self.validator = SchemaValidator(logger)
-        self.file_handler = FileHandler(self.config_file, logger)
         self.lock = Lock()
+        self.validator = SchemaValidator(self.logger)
+        self.file_handler = FileHandler(self.config_file, self.logger)
+        self.error_manager = None
         self._frozen = False
-        self._last_config_hash = ""
-        self._subscribers: set[Callable[[], None]] = set()
-        # Load schema from sovl_schema.py
-        self.DEFAULT_SCHEMA = self._load_schema()
-        self.validator.register(self.DEFAULT_SCHEMA)
-        self._initialize_config()
+        self._last_config_hash = None
         self._initialize_error_manager()
+        self._initialize_config()
+
+    def __getattr__(self, name):
+        # Provide dot-access for top-level config sections
+        if name in self.store.structured_config:
+            return ConfigNamespace(self.store.structured_config[name])
+        raise AttributeError(f"ConfigManager has no attribute '{name}'")
 
     def _load_schema(self) -> List[ConfigSchema]:
         """Load schema from ValidationSchema and flatten to a list for validation."""
@@ -354,7 +377,7 @@ class ConfigManager:
             return ""
 
     def _validate_and_set_defaults(self) -> None:
-        for schema in self.DEFAULT_SCHEMA:
+        for schema in self._load_schema():
             value = self.store.get_value(schema.field, schema.default)
             is_valid, corrected_value = self.validator.validate(schema.field, value)
             if not is_valid:
@@ -541,8 +564,8 @@ class ConfigManager:
                     return
                 self.validator.register(schemas)
                 self._validate_and_set_defaults()
-                self.store.rebuild_structured(self.DEFAULT_SCHEMA + schemas)
-                self.store.update_cache(self.DEFAULT_SCHEMA + schemas)
+                self.store.rebuild_structured(self._load_schema() + schemas)
+                self.store.update_cache(self._load_schema() + schemas)
                 self._last_config_hash = self._compute_config_hash()
                 self._log_event("schema_registered", f"New fields registered", "info", {
                     "new_fields": [s.field for s in schemas],
@@ -567,8 +590,8 @@ class ConfigManager:
                 self.store.flat_config = state.get("config", {})
                 self._frozen = state.get("frozen", False)
                 self._validate_and_set_defaults()
-                self.store.rebuild_structured(self.DEFAULT_SCHEMA)
-                self.store.update_cache(self.DEFAULT_SCHEMA)
+                self.store.rebuild_structured(self._load_schema())
+                self.store.update_cache(self._load_schema())
                 self._last_config_hash = self._compute_config_hash()
                 self._log_event("config_load_state", "Configuration state loaded", "info", {
                     "config_file": self.config_file,
@@ -591,8 +614,8 @@ class ConfigManager:
                     return False
                 self.store.flat_config = config
                 self._validate_and_set_defaults()
-                self.store.rebuild_structured(self.DEFAULT_SCHEMA)
-                self.store.update_cache(self.DEFAULT_SCHEMA)
+                self.store.rebuild_structured(self._load_schema())
+                self.store.update_cache(self._load_schema())
                 self._last_config_hash = self._compute_config_hash()
                 self._log_event("profile_load", f"Profile {profile} loaded", "info", {
                     "profile": profile,
@@ -911,11 +934,15 @@ class ConfigManager:
                 )
                 
     def _create_backup(self) -> None:
-        """Create a backup of the current configuration."""
+        """Create a backup of the current configuration using a temp file and atomic rename."""
         backup_file = f"{self.config_file}.backup"
+        temp_dir = os.path.dirname(self.config_file)
         try:
-            with open(self.config_file, 'r') as src, open(backup_file, 'w') as dst:
-                dst.write(src.read())
+            with open(self.config_file, 'r') as src:
+                with tempfile.NamedTemporaryFile('w', dir=temp_dir, delete=False) as tmp:
+                    shutil.copyfileobj(src, tmp)
+                    temp_backup = tmp.name
+            os.replace(temp_backup, backup_file)  # Atomic rename
         except Exception as e:
             self.error_manager.record_error(
                 error=e,

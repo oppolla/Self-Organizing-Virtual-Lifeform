@@ -111,6 +111,16 @@ class ShortTermMemory:
         except Exception as e:
             self.logger.log_error(f"ShortTermMemory.clear failed: {e}", error_type="ShortTermMemoryError")
 
+    def to_dict(self):
+        """Serialize short-term memory for persistence."""
+        with self._lock:
+            return list(self.memory)
+
+    def from_dict(self, memory_list):
+        """Restore short-term memory from saved state."""
+        with self._lock:
+            self.memory = list(memory_list)
+
 class LongTermMemory:
     """
     Handles persistent, vector-searchable conversation storage using SQLite and FAISS.

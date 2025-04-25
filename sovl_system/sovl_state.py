@@ -725,6 +725,8 @@ class SOVLState(StateBase):
                     "conversation_history": self.history.to_dict(),
                     "conversation_metadata": self._conversation_metadata
                 }
+                if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
+                    state_data['short_term_memory'] = self.short_term_memory.to_dict()
                 return state_data
             except Exception as e:
                 self.log_error(f"Failed to convert state to dict: {str(e)}")
@@ -766,6 +768,10 @@ class SOVLState(StateBase):
             
             # Load conversation metadata
             self._conversation_metadata = data.get("conversation_metadata", {})
+            
+            # Load short term memory
+            if 'short_term_memory' in data and hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'from_dict'):
+                self.short_term_memory.from_dict(data['short_term_memory'])
             
             # Validate loaded state
             self._validate_state()
