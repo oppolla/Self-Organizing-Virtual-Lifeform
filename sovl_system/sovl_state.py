@@ -16,7 +16,6 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
 from sovl_records import ConfidenceHistory
-from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_data import DataStats
 import sys
@@ -776,13 +775,16 @@ class SOVLState(StateBase):
             raise StateError(f"State population failed: {str(e)}")
 
     def save_state(self, path_prefix: str) -> None:
-        """Save state using memoria manager."""
+        """Save state to disk (MemoriaManager deprecated/removed)."""
         try:
             state_dict = self.to_dict()
-            self.memoria_manager.save_state(path_prefix, state_dict)
+            # Implement your own save logic here, e.g. using pickle, json, or another persistence method
+            with open(f"{path_prefix}_state.json", "w") as f:
+                import json
+                json.dump(state_dict, f)
             self.log_event(
                 "state_saved",
-                f"State saved via MemoriaManager to {path_prefix}",
+                f"State saved to {path_prefix}_state.json",
                 state_size=len(str(state_dict))
             )
         except Exception as e:
@@ -790,27 +792,23 @@ class SOVLState(StateBase):
             raise StateError(f"State save failed: {str(e)}")
 
     def load_state(self, path_prefix: str) -> None:
-        """Load state using memoria manager."""
+        """Load state from disk (MemoriaManager deprecated/removed)."""
         try:
-            state_dict = self.memoria_manager.load_state(path_prefix)
-            
-            if not state_dict:
+            import os
+            import json
+            state_path = f"{path_prefix}_state.json"
+            if not os.path.exists(state_path):
                 self.log_event(
                     "state_load_empty",
-                    f"No state data found at {path_prefix}",
+                    f"No state data found at {state_path}",
                     level="warning"
                 )
                 return
-                
+            with open(state_path, "r") as f:
+                state_dict = json.load(f)
             if not isinstance(state_dict, dict):
                 raise StateError(f"Invalid state data type: {type(state_dict)}")
-                
             self._populate_from_dict(state_dict)
-            self.log_event(
-                "state_loaded",
-                f"State loaded from {path_prefix}",
-                state_size=len(str(state_dict))
-            )
         except Exception as e:
             self.log_error(f"Failed to load state: {str(e)}")
             raise StateError(f"State load failed: {str(e)}")
@@ -880,7 +878,6 @@ class StateManager:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager,
         device: torch.device
@@ -888,20 +885,22 @@ class StateManager:
         """Initialize state manager."""
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         self._device = device
         
     def save_state(self, state: SOVLState, path_prefix: str) -> None:
-        """Save system state using the SOVLState instance and MemoriaManager."""
+        """Save system state using the SOVLState instance."""
         try:
             state_dict = state.to_dict()
-            self.memoria_manager.save_state(path_prefix, state_dict)
+            # Implement your own save logic here, e.g. using pickle, json, or another persistence method
+            with open(f"{path_prefix}_state.json", "w") as f:
+                import json
+                json.dump(state_dict, f)
             
             self._logger.record_event(
                 event_type="state_saved_by_manager",
-                message=f"System state saved via StateManager to {path_prefix}",
+                message=f"System state saved via StateManager to {path_prefix}_state.json",
                 level="info",
                 additional_info={
                     "state_size": len(str(state_dict)),
@@ -918,23 +917,25 @@ class StateManager:
             raise StateError(f"StateManager save failed: {str(e)}")
             
     def load_state(self, path_prefix: str) -> SOVLState:
-        """Load system state using MemoriaManager and create an SOVLState instance."""
+        """Load system state using the SOVLState instance."""
         try:
-            state_dict = self.memoria_manager.load_state(path_prefix)
-            
-            if not state_dict:
+            import os
+            import json
+            state_path = f"{path_prefix}_state.json"
+            if not os.path.exists(state_path):
                 self._logger.log_event(
                     "state_load_empty_by_manager",
-                    f"No state data found by StateManager at {path_prefix}, creating new state.",
+                    f"No state data found by StateManager at {state_path}, creating new state.",
                     level="warning"
                 )
                 return SOVLState(
                     config_manager=self._config_manager,
                     logger=self._logger,
-                    device=self._device,
-                    memoria_manager=self.memoria_manager
+                    device=self._device
                 )
                 
+            with open(state_path, "r") as f:
+                state_dict = json.load(f)
             if not isinstance(state_dict, dict):
                 raise StateError(f"StateManager loaded invalid state data type: {type(state_dict)}")
             
@@ -942,13 +943,12 @@ class StateManager:
                 data=state_dict,
                 config_manager=self._config_manager,
                 logger=self._logger,
-                device=self._device,
-                memoria_manager=self.memoria_manager
+                device=self._device
             )
             
             self._logger.record_event(
                 event_type="state_loaded_by_manager",
-                message=f"System state loaded via StateManager from {path_prefix}",
+                message=f"System state loaded via StateManager from {path_prefix}_state.json",
                 level="info",
                 additional_info={
                     "state_size": len(str(state_dict)),
