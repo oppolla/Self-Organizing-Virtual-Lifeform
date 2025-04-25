@@ -949,7 +949,6 @@ class TemperamentManager:
     def check_and_generate_internal_prompt(self) -> Optional[str]:
         """
         Checks temperament pressure and triggers internal prompt generation if threshold is met.
-        
         Returns:
             Optional[str]: The generated internal prompt response string if triggered, otherwise None.
         """
@@ -961,9 +960,8 @@ class TemperamentManager:
                      error_type="state_error"
                  )
                  return None
-                 
             # Ensure score is a float for comparison
-            temperament_score = float(self.state.temperament_score) 
+            temperament_score = float(self.state.temperament_score)
 
             # Check if the pressure threshold is met using the pressure component
             if self.pressure.should_trigger_empty_prompt(temperament_score):
@@ -975,11 +973,50 @@ class TemperamentManager:
                     current_pressure=self.pressure.current_pressure,
                     threshold=self.pressure.empty_prompt_threshold
                 )
-                
-                # Call the GenerationManager's method to handle internal prompts.
-                # It uses the default prompt (" ") unless specified otherwise.
-                response = self.generation_manager._handle_internal_prompt() 
-                
+
+                # Use GenerationManager's public API to generate the internal prompt
+                prompt = " "  # Default minimal prompt
+                try:
+                    result = self.generation_manager.generate_text(
+                        prompt=prompt,
+                        num_return_sequences=1,
+                        temperature=1.0  # More creative/expressive output for internal prompts
+                    )
+                    response = result[0] if result and isinstance(result, list) else None
+                except Exception as e:
+                    self._log_error(
+                        f"Error during internal prompt generation: {str(e)}",
+                        error_type="internal_prompt_generation_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    response = None
+
+                # --- Scribe event capture ---
+                try:
+                    from sovl_queue import capture_scribe_event
+                    capture_scribe_event(
+                        origin="sovl_temperament",
+                        event_type="internal_prompt_generated",
+                        event_data={
+                            "prompt": prompt,
+                            "response": response,
+                            "temperament_score": temperament_score,
+                            "pressure": self.pressure.current_pressure,
+                            "threshold": self.pressure.empty_prompt_threshold
+                        },
+                        source_metadata={
+                            "module": "TemperamentManager",
+                            "session_id": getattr(self, 'session_id', None)
+                        },
+                        session_id=getattr(self, 'session_id', None)
+                    )
+                except Exception as e:
+                    self._log_error(
+                        f"Failed to capture scribe event for internal prompt: {str(e)}",
+                        error_type="scribe_event_error",
+                        stack_trace=traceback.format_exc()
+                    )
+
                 self._log_event(
                     "internal_prompt_generated",
                     "Internal prompt generated successfully due to temperament pressure.",
@@ -989,16 +1026,16 @@ class TemperamentManager:
                 return response
             else:
                 # Threshold not met, no internal prompt needed
-                return None 
+                return None
 
         except AttributeError as ae:
-             # Handle cases where generation_manager might be missing expected methods
-             self._log_error(
-                 f"Missing method or attribute during internal prompt check: {str(ae)}. Check GenerationManager dependency.",
-                 error_type="dependency_error",
-                 stack_trace=traceback.format_exc()
-             )
-             return None
+            # Handle cases where generation_manager might be missing expected methods
+            self._log_error(
+                f"Missing method or attribute during internal prompt check: {str(ae)}. Check GenerationManager dependency.",
+                error_type="dependency_error",
+                stack_trace=traceback.format_exc()
+            )
+            return None
         except Exception as e:
             # Catch any other unexpected errors
             self._log_error(
@@ -1006,7 +1043,7 @@ class TemperamentManager:
                 error_type="internal_prompt_check_error",
                 stack_trace=traceback.format_exc()
             )
-            return None # Return None on error
+            return None  # Return None on error
 
     # --- Logging Helper Methods ---
 
@@ -1042,4 +1079,3 @@ class TemperamentManager:
             # Avoid logging errors causing further issues
             pass
 
-# ... potentially other code like utility functions if they exist at the end ...

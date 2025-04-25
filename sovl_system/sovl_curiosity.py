@@ -11,10 +11,8 @@ from sovl_error import ErrorManager
 from sovl_state import SOVLState
 from sovl_config import ConfigManager
 from sovl_logger import Logger
-from sovl_trainer import TrainingCycleManager
-from sovl_temperament import TemperamentSystem
-from sovl_confidence import ConfidenceCalculator
 from sovl_queue import capture_scribe_event
+from sovl_memory import RAMManager, GPUMemoryManager
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -24,7 +22,9 @@ class Curiosity:
         config_manager: ConfigManager,
         logger: Optional[Any] = None,
         max_memory_mb: float = 512.0,
-        batch_size: int = 32
+        batch_size: int = 32,
+        ram_manager: Optional[RAMManager] = None,
+        gpu_manager: Optional[GPUMemoryManager] = None
     ):
         # Get configuration values
         self.weight_ignorance = config_manager.get("curiosity_config.weight_ignorance", 0.7)
@@ -36,15 +36,16 @@ class Curiosity:
         self.max_memory_mb = max_memory_mb
         self.batch_size = batch_size
         
+        # Integrate memory managers
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        
         # Initialize components
         self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
         self.metrics = deque(maxlen=self.metrics_maxlen)
         self.embedding_cache = {}
         self.lock = threading.Lock()
         
-        # Initialize memory tracking
-        self._update_memory_usage()
-
     def _validate_weights(self, ignorance: float, novelty: float) -> None:
         """Validate weight parameters."""
         if not (0.0 <= ignorance <= 1.0 and 0.0 <= novelty <= 1.0):
@@ -53,70 +54,87 @@ class Curiosity:
             raise ValueError("Weights must sum to 1.0")
 
     def _update_memory_usage(self) -> None:
-        """Update memory usage tracking using the new memory managers."""
-        try:
-            with self.lock:
-                # Get memory usage from RAM manager
-                ram_stats = self.ram_manager.check_memory_health()
-                gpu_stats = self.gpu_manager.get_gpu_usage()
-                
-                # Log memory usage
-                self._log_event(
-                    "memory_usage_updated",
-                    "Memory usage updated",
-                    level="info",
-                    ram_stats=ram_stats,
-                    gpu_stats=gpu_stats
-                )
-        except Exception as e:
-            self._log_error(f"Memory usage tracking failed: {str(e)}")
+        """Update memory usage tracking using RAM and GPU managers if available."""
+        if self.ram_manager and self.gpu_manager:
+            try:
+                with self.lock:
+                    ram_stats = self.ram_manager.check_memory_health()
+                    gpu_stats = self.gpu_manager.get_gpu_usage()
+                    if self.logger:
+                        self.logger.record_event(
+                            event_type="memory_usage_updated",
+                            message="Memory usage updated",
+                            level="info",
+                            additional_info={
+                                "ram_stats": ram_stats,
+                                "gpu_stats": gpu_stats
+                            }
+                        )
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg=f"Memory usage tracking failed: {str(e)}",
+                        error_type="curiosity_memory_error",
+                        stack_trace=traceback.format_exc()
+                    )
+        else:
+            # No managers: do nothing or fallback
+            pass
 
     def _prune_cache(self) -> None:
-        """Prune cache if memory usage exceeds threshold using the new memory managers."""
-        try:
-            with self.lock:
-                # Check memory health
+        """Prune cache if memory usage exceeds threshold, using RAM/GPU managers if available."""
+        usage_high = False
+        if self.ram_manager and self.gpu_manager:
+            try:
                 ram_stats = self.ram_manager.check_memory_health()
                 gpu_stats = self.gpu_manager.get_gpu_usage()
-                
-                # If memory usage is high, prune the cache
-                if ram_stats.get("usage_percent", 0) > 0.8 or gpu_stats.get("usage_percent", 0) > 0.8:
-                    # Sort by last access time and remove oldest entries
-                    sorted_cache = sorted(
-                        self.embedding_cache.items(),
-                        key=lambda x: x[1].get('last_access', 0)
+                if ram_stats.get("usage_percentage", 0) > 0.8 or gpu_stats.get("usage_percentage", 0) > 0.8:
+                    usage_high = True
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg=f"Cache pruning memory check failed: {str(e)}",
+                        error_type="curiosity_memory_error",
+                        stack_trace=traceback.format_exc()
                     )
-                    while sorted_cache:
-                        key, _ = sorted_cache.pop(0)
-                        del self.embedding_cache[key]
-                        
-                        # Check if memory usage has improved
-                        ram_stats = self.ram_manager.check_memory_health()
-                        gpu_stats = self.gpu_manager.get_gpu_usage()
-                        if ram_stats.get("usage_percent", 0) < 0.7 and gpu_stats.get("usage_percent", 0) < 0.7:
-                            break
-                            
-                    self._log_event(
-                        "cache_pruned",
-                        "Cache pruned due to high memory usage",
-                        level="info",
-                        ram_stats=ram_stats,
-                        gpu_stats=gpu_stats
-                    )
-        except Exception as e:
-            self._log_error(f"Cache pruning failed: {str(e)}")
+        else:
+            # Fallback: use cache size
+            if len(self.embedding_cache) > 10000:
+                usage_high = True
+        if usage_high:
+            sorted_cache = sorted(
+                self.embedding_cache.items(),
+                key=lambda x: x[1].get('last_access', 0)
+            )
+            while len(self.embedding_cache) > 0 and usage_high and sorted_cache:
+                key, _ = sorted_cache.pop(0)
+                del self.embedding_cache[key]
+                # Optionally re-check memory after each prune
+                if self.ram_manager and self.gpu_manager:
+                    ram_stats = self.ram_manager.check_memory_health()
+                    gpu_stats = self.gpu_manager.get_gpu_usage()
+                    if ram_stats.get("usage_percentage", 0) < 0.7 and gpu_stats.get("usage_percentage", 0) < 0.7:
+                        break
 
     def _compress_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Compress tensor to reduce memory usage."""
+        """Compress tensor to reduce memory usage, using GPU manager if available."""
         try:
-            # Check GPU memory before compression
-            gpu_stats = self.gpu_manager.get_gpu_usage()
-            if gpu_stats.get("usage_percent", 0) > 0.8:
+            if self.gpu_manager:
+                gpu_stats = self.gpu_manager.get_gpu_usage()
+                if gpu_stats.get("usage_percentage", 0) > 0.8:
+                    if tensor.dtype == torch.float32:
+                        return tensor.half()
+            else:
                 if tensor.dtype == torch.float32:
-                    return tensor.half()  # Convert to float16
+                    return tensor.half()
             return tensor
         except Exception as e:
-            self._log_error(f"Tensor compression failed: {str(e)}")
+            if self.logger:
+                self.logger.log_error(
+                    error_msg=f"Tensor compression failed: {str(e)}",
+                    error_type="curiosity_memory_error",
+                    stack_trace=traceback.format_exc()
+                )
             return tensor
 
     def compute_curiosity(
@@ -140,51 +158,16 @@ class Curiosity:
                 else 0.0
             )
             
-            # Apply lifecycle stage adjustments if available
-            lifecycle_stage = "unknown"
-            lifecycle_weight = 1.0
-            if self.lifecycle_manager:
-                lifecycle_stage = self.lifecycle_manager._lifecycle_stage
-                lifecycle_weight = self.lifecycle_manager.get_life_curve_weight()
-            
-            # Apply confidence-based adjustments if available
-            confidence_weight = 1.0
-            if self.confidence_calculator:
-                # Use the average of base and scaffold confidence as the current confidence
-                current_confidence = (base_conf + scaf_conf) / 2.0
-                
-                # Adjust curiosity based on confidence
-                # Higher confidence leads to more exploration
-                confidence_weight = 1.0 + (current_confidence - 0.5) * 0.5
-                
-                # Log confidence-based adjustment
-                self._log_event(
-                    "confidence_adjustment_applied",
-                    message="Applied confidence-based curiosity adjustment",
-                    level="info",
-                    additional_info={
-                        "current_confidence": current_confidence,
-                        "confidence_weight": confidence_weight,
-                        "base_ignorance": ignorance,
-                        "base_novelty": novelty
-                    }
-                )
-            
-            # Calculate final score with all adjustments
-            base_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
-            final_score = base_score * confidence_weight * lifecycle_weight
+            # Calculate final score
+            final_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
             
             # Log the complete computation
             self._log_event(
                 "curiosity_computed",
-                message="Curiosity score computed with confidence integration",
+                message="Curiosity score computed",
                 level="info",
                 additional_info={
-                    "base_score": base_score,
                     "final_score": final_score,
-                    "lifecycle_stage": lifecycle_stage,
-                    "lifecycle_weight": lifecycle_weight,
-                    "confidence_weight": confidence_weight,
                     "ignorance": ignorance,
                     "novelty": novelty,
                     "memory_embeddings_count": len(memory_embeddings)
@@ -545,7 +528,8 @@ class CuriosityManager:
         state_manager=None,
         lifecycle_manager=None,
         temperament_system=None,
-        confidence_calculator=None
+        confidence_calculator=None,
+        generation_manager=None
     ):
         """Initialize CuriosityManager with configuration and components."""
         self._config_manager = config_manager
@@ -556,6 +540,7 @@ class CuriosityManager:
         self.lifecycle_manager = lifecycle_manager
         self.temperament_system = temperament_system
         self.confidence_calculator = confidence_calculator
+        self.generation_manager = generation_manager
         
         # Get global session_id from config
         self.session_id = self._config_manager.get("runtime.session_id")
@@ -741,36 +726,12 @@ class CuriosityManager:
     def _get_valid_memory_embeddings(self, state: SOVLState) -> List[torch.Tensor]:
         """Get valid memory embeddings with memory constraints."""
         try:
-            # Check memory health before processing
-            ram_stats = self.ram_manager.check_memory_health()
-            gpu_stats = self.gpu_manager.get_gpu_usage()
-            
-            if ram_stats.get("usage_percent", 0) > 0.9 or gpu_stats.get("usage_percent", 0) > 0.9:
-                self._record_warning(
-                    "High memory usage detected during embedding retrieval",
-                    ram_stats=ram_stats,
-                    gpu_stats=gpu_stats
-                )
-                return []
-            
             # Process embeddings in batches to manage memory
             valid_embeddings = []
             batch_size = self.curiosity.batch_size
             
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i + batch_size]
-                
-                # Check memory health for each batch
-                ram_stats = self.ram_manager.check_memory_health()
-                gpu_stats = self.gpu_manager.get_gpu_usage()
-                
-                if ram_stats.get("usage_percent", 0) > 0.9 or gpu_stats.get("usage_percent", 0) > 0.9:
-                    self._record_warning(
-                        "High memory usage detected during batch processing",
-                        ram_stats=ram_stats,
-                        gpu_stats=gpu_stats
-                    )
-                    break
                 
                 valid_embeddings.extend(batch)
             
@@ -979,10 +940,9 @@ class CuriosityManager:
         self,
         context: str = None,
         spontaneous: bool = False,
-        tokenizer: Any = None,
-        model: Any = None
+        generation_params: Optional[dict] = None
     ) -> Optional[str]:
-        """Generate a curiosity-driven question."""
+        """Generate a curiosity-driven question using GenerationManager and capture scribe event."""
         try:
             self._record_event(
                 "curiosity_question_generation_started",
@@ -993,15 +953,41 @@ class CuriosityManager:
                     "spontaneous": spontaneous
                 }
             )
+
+            # Use GenerationManager for question generation
+            if not hasattr(self, 'generation_manager') or self.generation_manager is None:
+                raise RuntimeError("CuriosityManager requires a GenerationManager instance for question generation.")
+            if context is None:
+                raise ValueError("A context prompt must be provided for curiosity question generation.")
+            if generation_params is None:
+                generation_params = {}
             
-            # Generate the question
-            question = self._generate_with_params(
-                context=context,
-                model=model,
-                tokenizer=tokenizer,
-                spontaneous=spontaneous
+            # Generate question (returns list, take first)
+            result = self.generation_manager.generate_text(
+                prompt=context,
+                num_return_sequences=1,
+                **generation_params
             )
-            
+            question = result[0] if result and isinstance(result, list) else None
+
+            # Capture scribe event for training
+            from sovl_queue import capture_scribe_event
+            capture_scribe_event(
+                origin="sovl_curiosity",
+                event_type="curiosity_question_generated",
+                event_data={
+                    "prompt": context,
+                    "question": question,
+                    "spontaneous": spontaneous,
+                    "generation_params": generation_params
+                },
+                source_metadata={
+                    "module": "CuriosityManager",
+                    "session_id": getattr(self, 'session_id', None)
+                },
+                session_id=getattr(self, 'session_id', None)
+            )
+
             if question:
                 self._record_event(
                     "curiosity_question_generated",
@@ -1023,64 +1009,7 @@ class CuriosityManager:
                         "spontaneous": spontaneous
                     }
                 )
-            
             return question
-            
         except Exception as e:
             self._record_error(f"Failed to generate curiosity question: {str(e)}")
             return None
-
-    def _generate_with_params(self, context: str, model: Any, tokenizer: Any, **params) -> str:
-        """Generate text with given parameters.
-        
-        Args:
-            context: Input context for generation
-            model: Model to use for generation
-            tokenizer: Tokenizer to use for generation
-            **params: Generation parameters
-            
-        Returns:
-            str: Generated text
-        """
-        try:
-            self._record_event(
-                "generation_started",
-                "Starting text generation",
-                level="debug",
-                additional_info={
-                    "context_length": len(context),
-                    "parameters": params
-                }
-            )
-            
-            # Generate text
-            output = model.generate(
-                tokenizer.encode(context, return_tensors="pt"),
-                **params
-            )
-            
-            generated_text = tokenizer.decode(output[0])
-            
-            self._record_event(
-                "generation_completed",
-                "Text generation completed",
-                level="debug",
-                additional_info={
-                    "output_length": len(generated_text),
-                    "parameters": params
-                }
-            )
-            
-            return generated_text
-            
-        except Exception as e:
-            self._record_error(
-                f"Text generation failed: {str(e)}",
-                error_type="generation_error",
-                stack_trace=traceback.format_exc(),
-                context={
-                    "input_context": context,
-                    "parameters": params
-                }
-            )
-            return ""

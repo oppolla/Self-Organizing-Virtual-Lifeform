@@ -1,146 +1,194 @@
 @startuml SOVL System Architecture
 
-' Core System Components
-package "Core System" {
-    class SOVLSystem {
-        +SystemContext context
-        +ConfigHandler config_handler
-        +ModelLoader model_loader
-        +CuriosityEngine curiosity_engine
-        +MemoryMonitor memory_monitor
-        +StateTracker state_tracker
-        +ErrorManager error_manager
-        +get_state(): Dict[str, Any]
-        +update_state(state_dict: Dict[str, Any]): None
+' =============================
+' Core System Orchestration
+' =============================
+package "Orchestration" {
+    class SOVLOrchestrator {
+        +config_manager: ConfigManager
+        +state_manager: StateManager
+        +model_manager: ModelManager
+        +ram_manager: RAMManager
+        +gpu_manager: GPUMemoryManager
+        +error_manager: ErrorManager
+        +system_monitor: SystemMonitor
+        +memory_monitor: MemoryMonitor
+        +traits_monitor: TraitsMonitor
+        +logger: Logger
+        +device: torch.device
+        +run(): None
         +shutdown(): None
-        +get_memory_stats(): Dict[str, Any]
-        +get_recent_errors(): List[Dict[str, Any]]
-        +get_component_status(): Dict[str, bool]
-        +get_system_state(): Dict[str, Any]
-        +set_debug_mode(enabled: bool): None
-        +get_execution_trace(): List[Dict[str, Any]]
     }
+    class Conductor {
+        +config_manager: ConfigManager
+        +logger: Logger
+        +memoria_manager: MemoriaManager
+        +ram_manager: RAMManager
+        +gpu_manager: GPUMemoryManager
+        +check_memory_health(): Dict[str, Any]
+    }
+}
 
+' =============================
+' System Context & State
+' =============================
+package "System Context" {
     class SystemContext {
         +config_path: str
         +device: str
         +logger: Logger
-        +event_dispatcher: EventDispatcher
-        +config_handler: ConfigHandler
-        +_on_config_change(): None
+        +resource_locks: Dict[str, Lock]
+        +component_states: Dict[str, Any]
+        +error_history: deque
+        +get_session_id(): str
+        +update_component_state(component_name: str, state: Dict[str, Any]): None
+        +record_error(error: Exception, context: Dict[str, Any]): None
+        +update_memory_usage(): None
+        +get_system_state(): Dict[str, Any]
     }
-
-    class SOVLOrchestrator {
-        +config_manager: ConfigManager
-        +state_manager: StateManager
-        +plugin_manager: PluginManager
-        +_initialize_config(): None
-        +_validate_config_values(): None
-        +_on_config_change(): None
-        +_create_config_manager(config_path: str): ConfigManager
+    class SystemConstants {
+        +DEFAULT_DEVICE: str
+        +DEFAULT_CONFIG_PATH: str
+        +MIN_MEMORY_THRESHOLD: float
+        +MAX_MEMORY_THRESHOLD: float
+        +MAX_ERROR_HISTORY: int
+        +LOG_BUFFER_SIZE: int
     }
 }
 
-' Interfaces
-package "Interfaces" {
-    interface SystemInterface {
-        +get_state(): Dict[str, Any]
-        +update_state(state_dict: Dict[str, Any]): None
-        +shutdown(): None
+' =============================
+' Model, Scaffold, and Training
+' =============================
+package "Model & Training" {
+    class ModelManager {
+        +base_model: nn.Module
+        +scaffold_models: List[nn.Module]
+        +base_tokenizer: Any
+        +scaffold_tokenizers: List[Any]
+        +quantization_mode: str
+        +active_lora_checkpoint: str
+        +load_models(lora_checkpoint_path: str): None
+        +reload_models(): None
+        +cleanup(): None
     }
-
-    interface OrchestratorInterface {
-        +set_system(system: SystemInterface): None
-        +sync_state(): None
+    class ScaffoldTokenMapper {
+        +base_tokenizer: Any
+        +scaffold_tokenizer: Any
+        +get_token_map(): Dict
+        +tokenize_and_map(prompt: str): Any
+        +update_token_map_memory(prompt: str, confidence: float): None
     }
-
-    class SystemMediator {
-        +config_manager: ConfigManager
-        +logger: LoggingManager
+    class ScaffoldErrorManager {
+        +logger: Logger
+        +handle_error(error: Exception, operation: str, context: Dict[str, Any], severity: str): None
+    }
+    class TrainingManager {
+        +config: TrainingConfig
+        +model: nn.Module
         +device: torch.device
-        +state_manager: StateManager
-        +error_handler: ErrorHandler
-        +register_system(system: SystemInterface): None
-        +register_orchestrator(orchestrator: OrchestratorInterface): None
-        +sync_state(): None
-        +shutdown(): None
+        +train_step(batch: Dict[str, torch.Tensor]): None
+        +validate(val_loader: Any): None
+        +save_checkpoint(path: str): None
+        +load_checkpoint(path: str): None
+    }
+    class TrainingConfig {
+        +optimizer: OptimizerConfig
+        +scheduler: SchedulerConfig
+        +memory: MemoryConfig
+        +params: TrainingParams
+        +logging: LoggingConfig
     }
 }
 
-' State Management
-package "State Management" {
-    class StateTracker {
-        +state: Optional[Dict[str, Any]]
-        +state_history: deque
-        +state_changes: deque
-        +get_state(): Dict[str, Any]
-        +get_state_history(limit: int): List[Dict[str, Any]]
-        +get_state_changes(limit: int): List[Dict[str, Any]]
-        +get_state_stats(): Dict[str, Any]
-        +update_state(key: str, value: Any): None
-        +clear_history(): None
-        +get_debug_info(): Dict[str, Any]
+' =============================
+' Memory & Monitoring
+' =============================
+package "Memory & Monitoring" {
+    class RAMManager {
+        +check_memory_health(): Dict[str, Any]
     }
-
-    class StateManager {
-        +config_manager: ConfigManager
-        +logger: LoggingManager
-        +device: torch.device
-        +load_state(): SOVLState
-        +save_state(state: SOVLState): None
+    class GPUMemoryManager {
+        +check_memory_health(): Dict[str, Any]
+    }
+    class SystemMonitor {
+        +logger: Logger
+        +ram_manager: RAMManager
+        +gpu_manager: GPUMemoryManager
+        +error_manager: ErrorManager
+    }
+    class MemoryMonitor {
+        +logger: Logger
+        +ram_manager: RAMManager
+        +gpu_manager: GPUMemoryManager
+        +error_manager: ErrorManager
+    }
+    class TraitsMonitor {
+        +logger: Logger
     }
 }
 
-' Error Handling
-package "Error Handling" {
+' =============================
+' Utilities & Supporting Modules
+' =============================
+package "Utilities" {
+    class Logger {
+        +log_event(event_type: str, message: str, level: str, additional_info: Dict): None
+        +log_error(error_msg: str, error_type: str, stack_trace: str, additional_info: Dict): None
+        +get_recent_events(limit: int): List[Dict]
+        +get_recent_errors(limit: int): List[Dict]
+    }
     class ErrorManager {
         +error_history: deque
-        +error_counts: Dict[str, int]
-        +get_recent_errors(): List[Dict[str, Any]]
-        +get_error_stats(): Dict[str, Any]
-        +get_last_error(): Optional[Dict[str, Any]]
-        +handle_training_error(error: Exception, batch_size: int): None
-        +handle_curiosity_error(error: Exception, pressure: float): None
-        +handle_memory_error(error: Exception, memory_usage: float): None
-        +handle_generation_error(error: Exception, temperature: float): None
-        +handle_data_error(error: Exception, context: Dict[str, Any], conversation_id: str): None
+        +handle_error(error: Exception, context: Dict[str, Any]): None
+        +get_recent_errors(): List[Dict]
     }
-
-    class ErrorHandler {
-        +logger: LoggingManager
-        +handle_generic_error(error: Exception, context: str, fallback_action: Callable): None
+    class ConfigManager {
+        +get(key: str, default: Any): Any
+    }
+    class StateManager {
+        +load_state(): Any
+        +save_state(state: Any): None
     }
 }
 
-' Logging
-package "Logging" {
-    class Logger {
-        +_log_queue: deque
-        +_error_queue: deque
-        +_lock: Lock
-        +log_event(event_type: str, message: str, level: str, additional_info: Optional[Dict]): None
-        +log_error(error_msg: str, error_type: str, stack_trace: Optional[str], additional_info: Optional[Dict]): None
-        +get_recent_events(limit: int): List[Dict[str, Any]]
-        +get_recent_errors(limit: int): List[Dict[str, Any]]
-        +get_debug_stats(): Dict[str, Any]
-        +clear_queues(): None
-    }
-}
-
+' =============================
 ' Relationships
-SOVLSystem ..|> SystemInterface
-SOVLOrchestrator ..|> OrchestratorInterface
-SOVLSystem --> SystemContext
-SOVLSystem --> StateTracker
-SOVLSystem --> ErrorManager
-SOVLSystem --> MemoryMonitor
+' =============================
+SOVLOrchestrator --> ModelManager
+SOVLOrchestrator --> RAMManager
+SOVLOrchestrator --> GPUMemoryManager
+SOVLOrchestrator --> ErrorManager
+SOVLOrchestrator --> SystemMonitor
+SOVLOrchestrator --> MemoryMonitor
+SOVLOrchestrator --> TraitsMonitor
+SOVLOrchestrator --> Logger
 SOVLOrchestrator --> StateManager
-SOVLOrchestrator --> ErrorHandler
-SOVLOrchestrator --> PluginManager
-SystemMediator --> SystemInterface
-SystemMediator --> OrchestratorInterface
-StateTracker --> Logger
-ErrorManager --> Logger
-ErrorHandler --> Logger
+SOVLOrchestrator --> ConfigManager
+SOVLOrchestrator --> SystemContext
+ModelManager --> ScaffoldTokenMapper
+ModelManager --> ScaffoldErrorManager
+ModelManager --> Logger
+ModelManager --> ConfigManager
+TrainingManager --> TrainingConfig
+TrainingManager --> ModelManager
+TrainingManager --> Logger
+TrainingManager --> ErrorManager
+SystemMonitor --> RAMManager
+SystemMonitor --> GPUMemoryManager
+SystemMonitor --> ErrorManager
+MemoryMonitor --> RAMManager
+MemoryMonitor --> GPUMemoryManager
+MemoryMonitor --> ErrorManager
+Logger <-- ErrorManager
+Logger <-- SystemMonitor
+Logger <-- MemoryMonitor
+StateManager --> Logger
+StateManager --> ConfigManager
+SystemContext --> Logger
+SystemContext --> ConfigManager
+Conductor --> RAMManager
+Conductor --> GPUMemoryManager
+Conductor --> MemoriaManager
+Conductor --> Logger
 
 @enduml
