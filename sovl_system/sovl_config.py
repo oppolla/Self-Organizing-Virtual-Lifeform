@@ -744,16 +744,6 @@ class ConfigManager:
 
     def _initialize_memory_config(self) -> None:
         """Initialize memory configuration with new memory management structure."""
-        # Initialize memoria configuration
-        self.update("memory_config.memoria", {
-            "max_memory_mb": self.get("memory_config.max_memory_mb", 512),
-            "garbage_collection_threshold": self.get("memory_config.garbage_collection_threshold", 0.7),
-            "memory_decay_rate": self.get("memory_config.memory_decay_rate", 0.95),
-            "enable_memory_compression": self.get("memory_config.enable_memory_compression", True),
-            "compression_ratio": self.get("memory_config.compression_ratio", 0.5),
-            "max_compressed_memory_mb": self.get("memory_config.max_compressed_memory_mb", 1024)
-        })
-
         # Initialize RAM configuration
         self.update("memory_config.ram", {
             "max_ram_mb": self.get("memory_config.max_ram_mb", 2048),
@@ -774,7 +764,6 @@ class ConfigManager:
 
         # Initialize memory manager configuration
         self.update("memory_config.manager", {
-            "enable_memoria_manager": self.get("memory_config.enable_memoria_manager", True),
             "enable_ram_manager": self.get("memory_config.enable_ram_manager", True),
             "enable_gpu_memory_manager": self.get("memory_config.enable_gpu_memory_manager", True),
             "memory_sync_interval": self.get("memory_config.memory_sync_interval", 60),

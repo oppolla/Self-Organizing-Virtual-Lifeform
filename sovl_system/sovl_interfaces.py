@@ -8,7 +8,6 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorManager
-from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_main import SOVLSystem, SystemContext
 from sovl_monitor import MemoryMonitor
@@ -330,7 +329,6 @@ class SystemInterface:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager
     ):
@@ -340,13 +338,11 @@ class SystemInterface:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         

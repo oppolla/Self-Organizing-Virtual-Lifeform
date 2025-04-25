@@ -33,7 +33,6 @@ from sovl_tuner import SOVLTuner
 
 # Memory and state management
 from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_experience import MemoriaManager
 
 # AI components
 from sovl_curiosity import CuriosityManager
@@ -166,14 +165,10 @@ class SystemContext:
             self.ram_manager = RAMManager()
             self.gpu_manager = GPUMemoryManager()
             
-            # Initialize experience management
-            self.memoria_manager = MemoriaManager()
-            
             # Initialize state management
             self.state_manager = StateManager(
                 config_manager=self.config_manager,
                 logger=self.logger,
-                memoria_manager=self.memoria_manager,
                 ram_manager=self.ram_manager,
                 gpu_manager=self.gpu_manager
             )
@@ -334,14 +329,10 @@ class SystemContext:
             self.ram_manager = RAMManager()
             self.gpu_manager = GPUMemoryManager()
             
-            # Initialize experience management
-            self.memoria_manager = MemoriaManager()
-            
             # Initialize state management
             self.state_manager = StateManager(
                 config_manager=self.config_manager,
                 logger=self.logger,
-                memoria_manager=self.memoria_manager,
                 ram_manager=self.ram_manager,
                 gpu_manager=self.gpu_manager
             )
@@ -833,7 +824,6 @@ class SOVLSystem(SystemInterface):
                     return False
                     
                 # Update memory and state
-                self.context.memoria_manager.add_experience(question, response)
                 self.state_tracker.update_state({
                     "last_dream": time.time(),
                     "dream_question": question,
@@ -856,7 +846,6 @@ class SOVLSystem(SystemInterface):
                 return {
                     "ram": self.context.ram_manager.get_usage(),
                     "gpu": self.context.gpu_manager.get_usage(),
-                    "memoria": len(self.context.memoria_manager.get_experiences())
                 }
                 
         except Exception as e:

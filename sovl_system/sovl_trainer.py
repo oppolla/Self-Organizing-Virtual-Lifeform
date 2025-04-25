@@ -17,7 +17,6 @@ from sovl_config import ConfigManager
 from sovl_confidence import ConfidenceCalculator
 from sovl_processor import MetadataProcessor
 from sovl_temperament import TemperamentSystem
-from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 from torch.utils.data import DataLoader
@@ -941,8 +940,6 @@ class TrainingCycleManager:
     def __init__(self, config_manager: ConfigManager, logger: Logger):
         self._config_manager = config_manager
         self._logger = logger
-        # Memoria manager handles experiential aspects only
-        self.memoria_manager = MemoriaManager(config_manager, logger)
         # Memory managers handle RAM and GPU resources
         self.ram_manager = RAMManager(config_manager, logger)
         self.gpu_manager = GPUMemoryManager(config_manager, logger)
@@ -1006,7 +1003,6 @@ class SOVLTrainer:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,  # For experiential aspects
         ram_manager: RAMManager,          # For RAM memory management
         gpu_manager: GPUMemoryManager,    # For GPU memory management
         model: torch.nn.Module,           # Added: Model instance
@@ -1019,7 +1015,6 @@ class SOVLTrainer:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for experiential memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
             model: The PyTorch model to be trained
@@ -1028,7 +1023,6 @@ class SOVLTrainer:
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         self.model = model

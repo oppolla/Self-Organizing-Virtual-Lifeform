@@ -495,7 +495,6 @@ class CuriositySystem:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager
     ):
@@ -505,13 +504,11 @@ class CuriositySystem:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         
@@ -581,7 +578,6 @@ class CuriosityManager:
         self.system = CuriositySystem(
             config_manager=self._config_manager,
             logger=self.logger,
-            memoria_manager=self.state_manager.memoria_manager if self.state_manager else None,
             ram_manager=self.state_manager.ram_manager if self.state_manager else None,
             gpu_manager=self.state_manager.gpu_manager if self.state_manager else None
         )
@@ -756,9 +752,6 @@ class CuriosityManager:
                     gpu_stats=gpu_stats
                 )
                 return []
-            
-            # Get embeddings from memoria manager
-            embeddings = self.memoria_manager.get_embeddings(state)
             
             # Process embeddings in batches to manage memory
             valid_embeddings = []

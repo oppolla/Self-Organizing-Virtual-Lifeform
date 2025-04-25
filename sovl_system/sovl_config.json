@@ -231,21 +231,45 @@
       "max_storage_mb": 5120,
       "state_save_interval": 300,
       "compression_enabled": true,
-      "encryption_enabled": false
+      "encryption_enabled": false,
+      "max_memory_mb": 512,
+      "garbage_collection_threshold": 0.7,
+      "memory_decay_rate": 0.95,
+      "enable_memory_compression": true,
+      "compression_ratio": 0.5,
+      "max_compressed_memory_mb": 1024
     },
     "ram": {
       "max_memory_mb": 1024,
       "memory_threshold": 0.8,
       "memory_decay_rate": 0.95,
       "dream_memory_maxlen": 10,
-      "conversation_history_maxlen": 20
+      "conversation_history_maxlen": 20,
+      "max_ram_mb": 2048,
+      "ram_threshold": 0.8,
+      "enable_ram_compression": true,
+      "ram_compression_ratio": 0.6,
+      "max_compressed_ram_mb": 4096
     },
     "gpu": {
       "max_memory_mb": 2048,
       "memory_threshold": 0.9,
       "check_interval": 1000,
       "batch_size_adjustment": 0.5,
-      "clear_cache_threshold": 0.95
+      "clear_cache_threshold": 0.95,
+      "max_gpu_memory_mb": 1024,
+      "gpu_memory_threshold": 0.85,
+      "enable_gpu_memory_compression": true,
+      "gpu_compression_ratio": 0.7,
+      "max_compressed_gpu_memory_mb": 2048
+    },
+    "manager": {
+      "enable_memoria_manager": true,
+      "enable_ram_manager": true,
+      "enable_gpu_memory_manager": true,
+      "memory_sync_interval": 60,
+      "enable_memory_monitoring": true,
+      "memory_monitoring_interval": 5
     }
   },
   "io_config": {
@@ -381,6 +405,53 @@
     "weight_bounds": {
       "min": 0.1,
       "max": 3.0
+    }
+  },
+  "metrics_config": {
+    "token_statistics": {
+      "enabled": true,
+      "ngram_sizes": [2, 3, 4],
+      "special_token_tracking": true,
+      "min_token_frequency": 2,
+      "max_tokens_to_track": 1000,
+      "token_pattern_threshold": 0.1
+    },
+    "performance_metrics": {
+      "enabled": true,
+      "track_generation_time": true,
+      "track_memory_usage": true,
+      "track_efficiency": true,
+      "memory_sample_rate": 1000,
+      "time_window_ms": 5000
+    },
+    "structure_analysis": {
+      "enabled": true,
+      "track_length_metrics": true,
+      "track_whitespace": true,
+      "min_section_length": 10,
+      "max_section_length": 1000,
+      "whitespace_ratio_threshold": 0.3
+    },
+    "relationship_context": {
+      "enabled": true,
+      "max_context_history": 100,
+      "reference_decay_rate": 0.95,
+      "temporal_window_size": 10,
+      "min_relationship_strength": 0.1
+    },
+    "helper_methods": {
+      "indentation_analysis": {
+        "enabled": true,
+        "max_indent_level": 8,
+        "tab_size": 4,
+        "mixed_indent_warning": true
+      },
+      "optimization_analysis": {
+        "enabled": true,
+        "performance_threshold": 0.8,
+        "memory_threshold": 0.9,
+        "optimization_levels": ["basic", "moderate", "aggressive"]
+      }
     }
   }
 }
