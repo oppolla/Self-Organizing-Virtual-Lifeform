@@ -64,12 +64,16 @@ class Scriber:
         self.fallback_logger = self._setup_fallback_logger()
 
         try:
-            # Setup JSONL writer
+            # Determine scribe output path from config or explicit override
+            self.scribe_path = getattr(self, 'scribe_path', None) or config_manager.get("scribed_config.output_path", "scribe/sovl_scribe.jsonl")
+            os.makedirs(os.path.dirname(self.scribe_path), exist_ok=True)
             self.jsonl_writer = JsonlWriter(
+                self.scribe_path,
                 config_manager=self.config_manager,
                 error_manager=self.error_manager,
                 logger=self.logger
             )
+            self.logger.info(f"Scribe output file set to: {self.scribe_path}")
             
             # Setup worker thread
             self._stop_event = threading.Event()
