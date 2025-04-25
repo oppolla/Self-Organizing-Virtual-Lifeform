@@ -369,6 +369,96 @@ class JSONLLoader:
             )
             raise error_to_raise from e
 
+    def stream_jsonl(
+        self,
+        file_path: str,
+        field_mapping: Optional[Dict[str, str]] = None,
+        custom_validators: Optional[Dict[str, Callable[[Any], bool]]] = None
+    ):
+        """
+        Stream (yield) validated entries from a JSONL file line-by-line.
+        Args:
+            file_path: Path to the JSONL file (supports .jsonl and .jsonl.gz)
+            field_mapping: Optional mapping of input fields to output fields
+            custom_validators: Optional custom validation functions for fields
+        Yields:
+            Dict[str, Any]: Each validated entry
+        Raises:
+            DataValidationError: If file is invalid or corrupted, or if strict_validation is True and any validation fails
+        """
+        field_mapping = field_mapping or self.field_mapping
+        validators = self.field_validators.copy()
+        if custom_validators:
+            validators.update(custom_validators)
+        try:
+            with self.lock:
+                if not os.path.exists(file_path):
+                    error_msg = f"File not found: {file_path}"
+                    if self.strict_validation:
+                        raise DataValidationError(error_msg)
+                    self.logger.log_error(
+                        error_msg=error_msg,
+                        error_type="file_not_found",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={"file_path": file_path}
+                    )
+                    return
+                file_size = os.path.getsize(file_path)
+                if file_size == 0:
+                    error_msg = f"File {file_path} is empty"
+                    if self.strict_validation:
+                        raise DataValidationError(error_msg)
+                    self.logger.log_error(
+                        error_msg=error_msg,
+                        error_type="empty_file",
+                        additional_info={"file_path": file_path}
+                    )
+                    return
+                open_func = gzip.open if file_path.endswith('.gz') else open
+                mode = 'rt' if file_path.endswith('.gz') else 'r'
+                with open_func(file_path, mode, encoding='utf-8') as file:
+                    for line_number, line in enumerate(file, start=1):
+                        try:
+                            line = line.strip()
+                            if not line:
+                                raise DataValidationError("Empty line")
+                            entry = json.loads(line)
+                            validated_entry = {}
+                            for field in self.required_fields:
+                                if field not in entry:
+                                    raise DataValidationError(f"Missing required field '{field}'")
+                                if field in validators and not validators[field](entry[field]):
+                                    raise DataValidationError(f"Invalid value for '{field}': {entry[field]}")
+                                output_field = field_mapping.get(field, field)
+                                validated_entry[output_field] = entry[field]
+                            yield validated_entry
+                        except (DataValidationError, json.JSONDecodeError, TypeError, ValueError) as e:
+                            error_msg = f"Line {line_number}: {str(e)}"
+                            if self.strict_validation:
+                                raise DataValidationError(error_msg) from e
+                            self.logger.log_warning(
+                                error_msg,
+                                error_type="streaming_data_validation_error",
+                                additional_info={
+                                    "file_path": file_path,
+                                    "line_number": line_number
+                                }
+                            )
+                            continue
+        except Exception as e:
+            error_to_raise = e if isinstance(e, (DataValidationError, InsufficientDataError, ConfigurationError)) else DataValidationError(f"Failed to stream JSONL file: {str(e)}")
+            self.error_manager.handle_error(
+                error_to_raise,
+                error_type="data_streaming_failure",
+                context={
+                    "file_path": file_path,
+                    "field_mapping": field_mapping,
+                    "required_fields": self.required_fields,
+                    "strict_mode": getattr(self, 'strict_validation', 'unknown')
+                }
+            )
+            raise error_to_raise from e
+
 def load_and_split_data(
     config_manager: ConfigManager,
     logger: Logger,
