@@ -1,15 +1,9 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable, Union, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple
 import torch
-import torch.nn.functional as F
 import time
-import uuid
 import math
-import os
-import threading
-import random
 from collections import deque, defaultdict
-from transformers import get_linear_schedule_with_warmup, AutoModelForCausalLM
 import traceback
 from sovl_scaffold import ScaffoldProvider
 from sovl_error import ErrorManager, ConfigurationError
@@ -17,7 +11,7 @@ from sovl_config import ConfigManager
 from sovl_processor import MetadataProcessor
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
-from torch.utils.data import DataLoader
+from transformers import get_linear_schedule_with_warmup
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -440,7 +434,7 @@ class TrainingManager:
         return metrics
         
     @torch.no_grad()
-    def validate(self, val_loader: DataLoader) -> Dict[str, float]:
+    def validate(self, val_loader: 'StreamingJSONLoader') -> Dict[str, float]:
         """Run validation with memory optimization."""
         self.model.eval()
         metrics = defaultdict(float)
@@ -577,60 +571,6 @@ class TrainingManager:
         except Exception as e:
             raise RuntimeError(f"Failed to load checkpoint from {path}: {e}")
 
-# TrainingEventHandler: processes training lifecycle events for logging and monitoring.
-class TrainingEventHandler:
-    """Handles training-related events and updates system state."""
-    
-    def __init__(self, logger: Logger, state: TrainingState):
-        self.logger = logger
-        self.state = state
-
-    def handle_training_complete(self, epoch: int, avg_loss: float, data_exposure: float) -> None:
-        """Handle training completion event."""
-        self.state.update_data_exposure(data_exposure)
-        self.logger.record({
-            "event": "training_complete",
-            "epoch": epoch,
-            "avg_loss": avg_loss,
-            "data_exposure": data_exposure,
-            "timestamp": time.time(),
-            "state_hash": self.state.get_state_hash()
-        })
-
-    def handle_gestation_complete(self, batch_size: int, avg_loss: float) -> None:
-        """Handle gestation completion event."""
-        self.state.update_gestation_metrics(batch_size, avg_loss)
-        self.logger.record({
-            "event": "gestation_complete",
-            "batch_size": batch_size,
-            "avg_loss": avg_loss,
-            "timestamp": time.time(),
-            "state_hash": self.state.get_state_hash()
-        })
-
-    def handle_dream_complete(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
-        """Handle dream completion event."""
-        self.state.update_dream_metrics(dream_prompt, is_novel, memory_count)
-        self.logger.record({
-            "event": "dream_complete",
-            "dream_prompt": dream_prompt,
-            "is_novel": is_novel,
-            "memory_count": memory_count,
-            "timestamp": time.time(),
-            "state_hash": self.state.get_state_hash()
-        })
-
-    def handle_sleep_train_complete(self, batch_size: int, data_exposure: float) -> None:
-        """Handle sleep training completion event."""
-        self.state.update_sleep_metrics(batch_size, data_exposure)
-        self.logger.record({
-            "event": "sleep_train_complete",
-            "batch_size": batch_size,
-            "data_exposure": data_exposure,
-            "timestamp": time.time(),
-            "state_hash": self.state.get_state_hash()
-        })
-
 # TrainingWorkflowManager: orchestrates full multi-phase training cycles (train, sleep, gestation, dream).
 class TrainingWorkflowManager:
     """Manages training cycles, sleep training, and gestation/dream cycles."""
@@ -644,275 +584,111 @@ class TrainingWorkflowManager:
         self.config = getattr(trainer, 'config', None)
         
     def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
-        """Run a complete training cycle."""
-        # Added: Get device for collation
+        """Run a complete training cycle using the modular pipeline."""
         device = getattr(self.trainer, 'device', None)
-        if not device:
-             if self.logger: self.logger.log_error("Device not found on trainer for training cycle.", event_type="training_cycle_device_missing")
-             return 0.0, {"status": "missing_device"}
-             
+        batch_preparer = getattr(self.trainer, 'batch_preparer', None)
+        logger = getattr(self, 'logger', None)
+        training_manager = getattr(self.trainer, 'training_manager', None)
+
+        if not (device and batch_preparer and training_manager):
+            if logger:
+                logger.log_warning(
+                    "Missing modular pipeline component(s) for training cycle.",
+                    event_type="training_cycle_modular_pipeline_missing"
+                )
+            return 0.0, {"status": "missing_pipeline_component"}
+
+        # Prepare batch using modular batch preparer
         try:
-            # Added: Manual Collation (assuming batch is List[Dict[str, Tensor]])
-            if not batch:
-                 if self.logger: self.logger.log_warning("Received empty batch for training cycle.", event_type="training_cycle_empty_batch")
-                 return 0.0, {"status": "empty_batch"}
-            try:
-                collated_batch = {
-                    key: torch.stack([item[key] for item in batch])
-                    for key in batch[0].keys() if isinstance(batch[0][key], torch.Tensor)
-                }
-                collated_batch = {k: v.to(device) for k, v in collated_batch.items()}
-            except Exception as e:
-                if self.logger: self.logger.log_error(f"Failed to collate batch for training cycle: {e}", error_type="training_cycle_collation_error")
-                return 0.0, {"status": "collation_error"}
-                
-            # Get training manager
-            training_manager = getattr(self.trainer, 'training_manager', None)
-            if not training_manager or not hasattr(training_manager, 'train_step'):
-                 if self.logger: self.logger.log_error("Training manager or train_step missing for training cycle.", event_type="training_cycle_manager_missing")
-                 return 0.0, {"status": "missing_train_step"}
-                 
-            # Run training step using the manager
+            collated_batch = batch_preparer.prepare(batch)
+        except Exception as e:
+            if logger:
+                logger.log_error(
+                    f"Failed to prepare training batch: {str(e)}",
+                    error_type="training_cycle_batch_preparation_error"
+                )
+            return 0.0, {"status": "batch_preparation_error"}
+
+        # Run training step
+        try:
             metrics = training_manager.train_step(batch=collated_batch)
             loss = metrics.get("loss", 0.0)
-            
-            # Update state and log event (Ensure state is accessible and has the key)
-            if self.state and "current_epoch" in self.state and hasattr(self.event_handler, 'handle_training_complete'):
-                 self.event_handler.handle_training_complete(
-                     epoch=self.state["current_epoch"],
-                     avg_loss=loss,
-                     data_exposure=metrics.get("data_exposure", 0.0)
-                 )
-            else:
-                 if self.logger: self.logger.log_warning("Could not log training_complete event due to missing state or handler method.", event_type="training_cycle_event_warning")
-                 
-            return loss, metrics
-            
         except Exception as e:
-             if self.logger: self.logger.error(f"Error in training cycle: {str(e)}", stack_trace=traceback.format_exc())
-             # Return default/error status
-             return 0.0, {"status": "error", "error": str(e)}
-             
-    def run_sleep_training(self, batch: List[Dict[str, Any]]) -> None:
-        """Run sleep training cycle."""
-        # Added: Get device for collation
-        device = getattr(self.trainer, 'device', None)
-        if not device:
-             if self.logger: self.logger.log_error("Device not found on trainer for sleep training.", event_type="sleep_training_device_missing")
-             return
-             
-        try:
-             # Added: Manual Collation (assuming batch is List[Dict[str, Tensor]])
-            if not batch:
-                 if self.logger: self.logger.log_warning("Received empty batch for sleep training.", event_type="sleep_training_empty_batch")
-                 return
-            try:
-                collated_batch = {
-                    key: torch.stack([item[key] for item in batch])
-                    for key in batch[0].keys() if isinstance(batch[0][key], torch.Tensor)
-                }
-                collated_batch = {k: v.to(device) for k, v in collated_batch.items()}
-            except Exception as e:
-                if self.logger: self.logger.log_error(f"Failed to collate batch for sleep training: {e}", error_type="sleep_training_collation_error")
-                return
-                
-             # Get training manager
-            training_manager = getattr(self.trainer, 'training_manager', None)
-            if not training_manager or not hasattr(training_manager, 'train_step'):
-                 if self.logger: self.logger.log_error("Training manager or train_step missing for sleep training.", event_type="sleep_training_manager_missing")
-                 return
-                 
-            # Run training step using the manager
-            metrics = training_manager.train_step(batch=collated_batch)
-            
-            # Update state and log event
-            batch_size = len(batch) # Get actual batch size used
-            if hasattr(self.event_handler, 'handle_sleep_train_complete'):
-                 self.event_handler.handle_sleep_train_complete(
-                     batch_size=batch_size,
-                     data_exposure=metrics.get("data_exposure", 0.0)
-                 )
-            else:
-                 if self.logger: self.logger.log_warning("Could not log sleep_train_complete event due to missing handler method.", event_type="sleep_training_event_warning")
-                 
-        except Exception as e:
-             if self.logger: self.logger.error(f"Error in sleep training: {str(e)}", stack_trace=traceback.format_exc())
-             # Decide if raising is appropriate
-             
-    def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
-        """Run gestation cycle with metadata enrichment."""
-        try:
-            batch = []
-            
-            # Safely get required components
-            metadata_processor = getattr(self.trainer, 'metadata_processor', None)
-            tokenizer = getattr(self.trainer, 'tokenizer', None)
-            device = getattr(self.trainer, 'device', None)
-            
-            # Check for required components
-            if not metadata_processor:
-                if self.logger:
-                    self.logger.log_warning(
-                        "Metadata processor not found on trainer. Gestation cycle fallback is not implemented.",
-                        event_type="gestation_metadata_missing"
-                    )
-                return
-                
-            if not tokenizer:
-                if self.logger:
-                    self.logger.log_warning(
-                        "Tokenizer not found on trainer. Cannot tokenize gestation batch.",
-                        event_type="gestation_tokenizer_missing"
-                    )
-                return
-                
-            if not device:
-                if self.logger:
-                    self.logger.log_warning(
-                        "Device not found on trainer. Cannot process tensors.",
-                        event_type="gestation_device_missing"
-                    )
-                return
-                
-            # Process conversation history with metadata
-            training_pairs = metadata_processor.prepare_training_pairs(conversation_history)
-            
-            # Convert training pairs to batch format
-            for pair in training_pairs:
-                try:
-                    input_text = pair["input"]
-                    output_text = pair["output"]
-                    
-                    # Tokenize with proper settings
-                    inputs = tokenizer(
-                        input_text,
-                        return_tensors="pt",
-                        truncation=True,
-                        padding="max_length",
-                        max_length=self.config.memory.max_seq_length if self.config else 512
-                    ).to(device)
-                    
-                    outputs = tokenizer(
-                        output_text,
-                        return_tensors="pt",
-                        truncation=True,
-                        padding="max_length",
-                        max_length=self.config.memory.max_seq_length if self.config else 512
-                    ).to(device)
-                    
-                    # Create batch item
-                    batch_item = {
-                        "input_ids": inputs.input_ids[0],
-                        "attention_mask": inputs.attention_mask[0],
-                        "labels": outputs.input_ids[0],
-                        "metadata": pair.get("metadata", {})
-                    }
-                    
-                    # Replace padding token ID in labels with -100
-                    if hasattr(tokenizer, 'pad_token_id') and tokenizer.pad_token_id is not None:
-                        batch_item["labels"][batch_item["labels"] == tokenizer.pad_token_id] = -100
-                        
-                    batch.append(batch_item)
-                    
-                except Exception as e:
-                    if self.logger:
-                        self.logger.log_error(
-                            f"Failed to process training pair: {str(e)}",
-                            error_type="gestation_pair_processing_error",
-                            additional_info={"input": input_text[:100], "output": output_text[:100]}
-                        )
-                    continue
-                    
-            if not batch:
-                if self.logger:
-                    self.logger.log_warning(
-                        "No training pairs generated for gestation cycle",
-                        event_type="gestation_empty_batch"
-                    )
-                return
-                
-            # Get effective batch size
-            effective_batch_size = len(batch)
-            if hasattr(self.trainer, '_prepare_gestation_batch'):
-                requested_batch_size = self.config.memory.batch_size if self.config else 2
-                effective_batch_size = min(len(batch), self.trainer._prepare_gestation_batch(requested_batch_size))
-                
-            if effective_batch_size == 0:
-                if self.logger:
-                    self.logger.log_warning(
-                        "Effective batch size is 0 after adjustments, skipping gestation training step.",
-                        event_type="gestation_zero_batch"
-                    )
-                return
-                
-            # Collate batch
-            try:
-                collated_batch = {
-                    key: torch.stack([item[key] for item in batch[:effective_batch_size]])
-                    for key in batch[0].keys() if isinstance(batch[0][key], torch.Tensor)
-                }
-                # Ensure tensors are on the correct device
-                collated_batch = {k: v.to(device) for k, v in collated_batch.items()}
-            except Exception as e:
-                if self.logger:
-                    self.logger.log_error(
-                        f"Failed to collate gestation batch: {str(e)}",
-                        error_type="gestation_collation_error",
-                        additional_info={"batch_keys": list(batch[0].keys()) if batch else []}
-                    )
-                return
-                
-            # Get training manager
-            training_manager = getattr(self.trainer, 'training_manager', None)
-            if not training_manager:
-                if self.logger:
-                    self.logger.log_error(
-                        "Training manager not found on trainer. Cannot run gestation training step.",
-                        event_type="gestation_manager_missing"
-                    )
-                return
-                
-            # Run training step
-            try:
-                if hasattr(training_manager, 'train_step'):
-                    metrics = training_manager.train_step(batch=collated_batch)
-                    loss = metrics.get("loss", 0.0)
-                else:
-                    if self.logger:
-                        self.logger.log_error(
-                            "train_step method not found on training manager.",
-                            event_type="gestation_train_step_missing"
-                        )
-                    return
-                    
-                # Update state and log event
-                if hasattr(self.event_handler, 'handle_gestation_complete'):
-                    self.event_handler.handle_gestation_complete(
-                        batch_size=effective_batch_size,
-                        avg_loss=loss
-                    )
-                else:
-                    if self.logger:
-                        self.logger.log_warning(
-                            "event_handler missing handle_gestation_complete method.",
-                            event_type="gestation_event_handler_missing"
-                        )
-                        
-            except Exception as e:
-                if self.logger:
-                    self.logger.log_error(
-                        f"Error during gestation training step: {str(e)}",
-                        error_type="gestation_training_error",
-                        stack_trace=traceback.format_exc()
-                    )
-                    
-        except Exception as e:
-            if self.logger:
-                self.logger.log_error(
-                    f"Error in gestation cycle: {str(e)}",
-                    error_type="gestation_cycle_error",
+            if logger:
+                logger.log_error(
+                    f"Error during training step: {str(e)}",
+                    error_type="training_cycle_training_error",
                     stack_trace=traceback.format_exc()
                 )
+            return 0.0, {"status": "training_step_error"}
+
+        # Optionally update state or log event if needed
+        return loss, metrics
+            
+    def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
+        """Run gestation cycle with metadata enrichment using the modular pipeline."""
+        # Use modular pipeline for metadata enrichment and batch preparation
+        metadata_processor = getattr(self.trainer, 'metadata_processor', None)
+        tokenizer = getattr(self.trainer, 'tokenizer', None)
+        device = getattr(self.trainer, 'device', None)
+        batch_preparer = getattr(self.trainer, 'batch_preparer', None)
+        logger = getattr(self, 'logger', None)
+
+        if not (metadata_processor and tokenizer and device and batch_preparer):
+            if logger:
+                logger.log_warning(
+                    "Missing modular pipeline component(s) for gestation cycle.",
+                    event_type="gestation_modular_pipeline_missing"
+                )
+            return
+
+        # Enrich conversation history using modular processor
+        enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
+
+        # Prepare batch using modular batch preparer
+        try:
+            collated_batch = batch_preparer.prepare(enriched_samples)
+        except Exception as e:
+            if logger:
+                logger.log_error(
+                    f"Failed to prepare gestation batch: {str(e)}",
+                    error_type="gestation_batch_preparation_error"
+                )
+            return
+
+        # Get training manager
+        training_manager = getattr(self.trainer, 'training_manager', None)
+        if not training_manager:
+            if logger:
+                logger.log_error(
+                    "Training manager not found on trainer. Cannot run gestation training step.",
+                    event_type="gestation_manager_missing"
+                )
+            return
+
+        # Run training step
+        try:
+            if hasattr(training_manager, 'train_step'):
+                metrics = training_manager.train_step(batch=collated_batch)
+                loss = metrics.get("loss", 0.0)
+            else:
+                if logger:
+                    logger.log_error(
+                        "train_step method not found on training manager.",
+                        event_type="gestation_train_step_missing"
+                    )
+                return
+        except Exception as e:
+            if logger:
+                logger.log_error(
+                    f"Error during gestation training step: {str(e)}",
+                    error_type="gestation_training_error",
+                    stack_trace=traceback.format_exc()
+                )
+            return
+
+        # Optionally update state or log event if needed
+        # (Legacy event_handler removed; use logger or state as needed)
 
     def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Run dream cycle."""
@@ -927,66 +703,6 @@ class TrainingWorkflowManager:
         except Exception as e:
             self.logger.error(f"Error in dream cycle: {str(e)}")
             raise
-
-# TrainingCycleManager: manages individual phases like gestation for experiential training.
-class TrainingCycleManager:
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
-        self._config_manager = config_manager
-        self._logger = logger
-        # Memory managers handle RAM and GPU resources
-        self.ram_manager = RAMManager(config_manager, logger)
-        self.gpu_manager = GPUMemoryManager(config_manager, logger)
-        
-        # Initialize lifecycle state
-        self._current_stage = "initialization"
-        self._life_curve_weights = {
-            "initialization": 0.5,
-            "exploration": 0.8,
-            "consolidation": 0.9,
-            "maturity": 1.0
-        }
-        
-        # Log initialization
-        self._logger.record_event(
-            event_type="training_cycle_manager_initialized",
-            message="Training cycle manager initialized with lifecycle support",
-            level="info",
-            additional_info={
-                "current_stage": self._current_stage,
-                "life_curve_weights": self._life_curve_weights
-            }
-        )
-        
-    def get_lifecycle_stage(self) -> str:
-        """Get the current lifecycle stage."""
-        return self._current_stage
-        
-    def get_life_curve_weight(self) -> float:
-        """Get the weight based on the current lifecycle stage."""
-        return self._life_curve_weights.get(self._current_stage, 1.0)
-        
-    def _prepare_gestation_batch(self, batch_size: int) -> int:
-        """Prepare batch size based on memory health."""
-        try:
-            # Check memory health
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
-            
-            # Adjust batch size based on memory health
-            if ram_health.get("status") == "warning" or gpu_health.get("status") == "warning":
-                return max(1, batch_size // 2)
-            elif ram_health.get("status") == "critical" or gpu_health.get("status") == "critical":
-                return 1
-                
-            return batch_size
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to prepare gestation batch: {str(e)}",
-                error_type="batch_preparation_error",
-                stack_trace=traceback.format_exc()
-            )
-            return 1
 
 # SOVLTrainer: top-level interface tying config, managers, and execution logic for end-to-end training.
 class SOVLTrainer:
@@ -1021,6 +737,7 @@ class SOVLTrainer:
         self.model = model
         self.device = device
         self.tokenizer = tokenizer
+        self.batch_preparer = BatchPreparer(tokenizer, device)
         
         # Initialize training config with logging settings
         self.config = TrainingConfig(config_manager)
@@ -1043,7 +760,7 @@ class SOVLTrainer:
         self._logger.configure(logger_config)
         
         # Initialize metadata processor for processing training data
-        self.metadata_processor = MetadataProcessor(config_manager, logger)
+        self.metadata_processor = TrainingSampleEnricher(config_manager, logger)
         
         # Initialize TrainingManager
         self.training_manager = TrainingManager(self.config, self.model, self.device)
@@ -1108,180 +825,90 @@ class SOVLTrainer:
             )
             return 1  # Return minimum batch size on error
 
-    def train_with_curriculum(self, training_cycle: int, all_examples: List[Dict[str, Any]]) -> Tuple[float, Dict[str, Any]]:
+    def train_with_curriculum(self, training_cycle: int, data_loader: 'StreamingJSONLoader') -> Tuple[float, Dict[str, Any]]:
         """
-        Train using a curriculum that gradually increases complexity.
-        
+        Train using a curriculum that gradually increases complexity with modular pipeline.
         Args:
             training_cycle: Current training cycle number
-            all_examples: All available training examples
-            
+            data_loader: StreamingJSONLoader instance for streaming data
         Returns:
             Tuple of (loss, metrics)
         """
+        logger = getattr(self, '_logger', None)
+        batch_preparer = getattr(self, 'batch_preparer', None)
+        training_manager = getattr(self, 'training_manager', None)
+        metadata_processor = getattr(self, 'metadata_processor', None)
+        device = getattr(self, 'device', None)
+        config = getattr(self, 'config', None)
+
+        if not (logger and batch_preparer and training_manager and metadata_processor and device and config):
+            if logger:
+                logger.log_warning(
+                    "Missing modular pipeline component(s) for curriculum training.",
+                    event_type="curriculum_modular_pipeline_missing"
+                )
+            return 0.0, {"status": "missing_pipeline_component"}
+
         try:
-            # Log start of training cycle
-            self._logger.log_event(
+            logger.log_event(
                 event_type="curriculum_training_start",
                 message=f"Starting curriculum training cycle {training_cycle}",
                 level="info",
-                additional_info={
-                    "cycle": training_cycle,
-                    "total_examples": len(all_examples)
-                }
+                additional_info={"cycle": training_cycle}
             )
-            
-            # Select examples based on current curriculum stage
-            selected_examples = self._select_curriculum_examples(training_cycle, all_examples)
-            
-            # No examples available
+            # Stream and enrich samples
+            enriched_samples = [metadata_processor.enrich(sample) for sample in data_loader]
+            # Select examples for this curriculum stage
+            selected_examples = self._select_curriculum_examples(training_cycle, enriched_samples)
             if not selected_examples:
-                self._logger.log_warning(
+                logger.log_warning(
                     "No suitable examples found for curriculum training cycle",
                     event_type="training_data_warning",
                     additional_info={"cycle": training_cycle}
                 )
                 return 0.0, {"status": "no_examples"}
-                
-            # Get batch size (respecting memory constraints)
-            batch_size = self._prepare_gestation_batch(self.config.memory.batch_size)
-            
-            # Create batch from selected examples
+            batch_size = config.memory.batch_size
             batch_data = selected_examples[:batch_size]
-            
             if not batch_data:
-                self._logger.log_warning(
+                logger.log_warning(
                     "Batch data is empty after selection/sizing in curriculum training.",
                     event_type="curriculum_empty_batch",
-                    additional_info={
-                        "cycle": training_cycle,
-                        "selected_count": len(selected_examples),
-                        "batch_size": batch_size
-                    }
+                    additional_info={"cycle": training_cycle, "selected_count": len(selected_examples), "batch_size": batch_size}
                 )
                 return 0.0, {"status": "empty_batch"}
-                
-            # Collate batch
+            # Prepare batch using modular batch preparer
             try:
-                collated_batch = {
-                    key: torch.stack([item[key] for item in batch_data])
-                    for key in batch_data[0].keys() if isinstance(batch_data[0][key], torch.Tensor)
-                }
-                # Ensure tensors are on the correct device
-                collated_batch = {k: v.to(self.device) for k, v in collated_batch.items()}
+                collated_batch = batch_preparer.prepare(batch_data)
             except Exception as e:
-                self._logger.log_error(
+                logger.log_error(
                     f"Failed to collate curriculum batch: {str(e)}",
                     error_type="curriculum_collation_error",
-                    additional_info={
-                        "cycle": training_cycle,
-                        "batch_keys": list(batch_data[0].keys()) if batch_data else []
-                    }
+                    additional_info={"cycle": training_cycle, "batch_keys": list(batch_data[0].keys()) if batch_data else []}
                 )
                 return 0.0, {"status": "collation_error"}
-                
-            # Check memory health before training
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
-            
-            if not ram_health.get('is_healthy', True) or not gpu_health.get('is_healthy', True):
-                self._logger.log_event(
-                    event_type="memory_warning",
-                    message="Memory health check indicates potential issues before curriculum training",
-                    level="warning",
-                    additional_info={
-                        "cycle": training_cycle,
-                        "ram_health": ram_health,
-                        "gpu_health": gpu_health,
-                        "batch_size": len(batch_data)
-                    }
-                )
-                
-            # Perform training step
+            # Run training step
             try:
-                # Get training manager
-                training_manager = getattr(self, 'training_manager', None)
-                if not training_manager:
-                    self._logger.log_error(
-                        "Training manager not found on trainer.",
-                        event_type="curriculum_manager_missing"
-                    )
-                    return 0.0, {"status": "missing_manager"}
-                    
-                # Check for train_step method
-                if not hasattr(training_manager, 'train_step'):
-                    self._logger.log_error(
-                        "train_step method not found on training manager.",
-                        event_type="curriculum_train_step_missing"
-                    )
-                    return 0.0, {"status": "missing_train_step"}
-                    
-                # Run training step
                 metrics = training_manager.train_step(batch=collated_batch)
                 loss = metrics.get("loss", 0.0)
-                
-                # Log curriculum stage
-                stage = "beginner" if training_cycle < 100 else "intermediate" if training_cycle < 500 else "advanced"
-                self._logger.log_event(
-                    event_type="curriculum_training_complete",
-                    message=f"Completed curriculum training step (stage: {stage})",
-                    level="info",
-                    additional_info={
-                        "cycle": training_cycle,
-                        "stage": stage,
-                        "examples_selected": len(selected_examples),
-                        "batch_size": len(batch_data),
-                        "loss": loss,
-                        "metrics": metrics,
-                        "ram_health": ram_health,
-                        "gpu_health": gpu_health
-                    }
-                )
-                
-                # Update training state
-                self._training_state["total_steps"] = self.training_manager.step_count
-                self._training_state["best_metrics"] = self.training_manager.best_metrics.copy()
-                
-                return loss, metrics
-                
-            except torch.cuda.OutOfMemoryError as e:
-                self._logger.log_error(
-                    f"Out of memory error during curriculum training: {str(e)}",
-                    error_type="oom_error",
-                    stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "cycle": training_cycle,
-                        "batch_size": len(batch_data),
-                        "ram_health": ram_health,
-                        "gpu_health": gpu_health
-                    }
-                )
-                return 0.0, {"status": "oom_error", "error": str(e)}
-                
             except Exception as e:
-                self._logger.log_error(
+                logger.log_error(
                     f"Failed during curriculum training step execution: {str(e)}",
                     error_type="curriculum_training_error",
                     stack_trace=traceback.format_exc(),
-                    additional_info={
-                        "cycle": training_cycle,
-                        "batch_size": len(batch_data),
-                        "ram_health": ram_health,
-                        "gpu_health": gpu_health
-                    }
+                    additional_info={"cycle": training_cycle, "batch_size": len(batch_data)}
                 )
-                # Record error in history
-                if isinstance(self._training_state.get("error_history"), deque):
-                    self._training_state["error_history"].append({
-                        "timestamp": time.time(),
-                        "error": str(e),
-                        "type": "curriculum_training_error",
-                        "cycle": training_cycle
-                    })
                 return 0.0, {"status": "training_step_error", "error": str(e)}
-                
+            # Log curriculum stage
+            stage = "beginner" if training_cycle < 100 else "intermediate" if training_cycle < 500 else "advanced"
+            logger.log_event(
+                event_type="curriculum_training_complete",
+                message=f"Completed curriculum training step (stage: {stage})",
+                level="info",
+                additional_info={"cycle": training_cycle, "stage": stage, "examples_selected": len(selected_examples), "batch_size": len(batch_data), "loss": loss, "metrics": metrics}
+            )
+            return loss, metrics
         except Exception as e:
-            self._logger.log_error(
+            logger.log_error(
                 f"Unexpected error in train_with_curriculum: {str(e)}",
                 error_type="curriculum_unexpected_error",
                 stack_trace=traceback.format_exc(),
@@ -1752,3 +1379,115 @@ class MetadataInterpreter:
             "average_quality": self._sample_stats["avg_quality"],
             "history_size": sum(len(h) for h in self._interpretation_history.values())
         }
+
+# ================== BATCH & TENSOR HELPERS (for modular pipeline) ==================
+
+def collate_tensor_batch(batch: list, device: "torch.device") -> dict:
+    """
+    Collate a list of dicts (with tensor values) into a batch dict of stacked tensors, moved to device.
+    Args:
+        batch: List[Dict[str, torch.Tensor]]
+        device: torch.device
+    Returns:
+        Dict[str, torch.Tensor] (all tensors stacked and moved to device)
+    """
+    if not batch:
+        return {}
+    try:
+        collated = {k: torch.stack([item[k] for item in batch]) for k in batch[0] if isinstance(batch[0][k], torch.Tensor)}
+        collated = {k: v.to(device) for k, v in collated.items()}
+        return collated
+    except Exception as e:
+        raise RuntimeError(f"Failed to collate tensor batch: {e}")
+
+def move_batch_to_device(batch: dict, device: "torch.device") -> dict:
+    """
+    Move all tensors in a batch dict to the specified device.
+    Args:
+        batch: Dict[str, torch.Tensor]
+        device: torch.device
+    Returns:
+        Dict[str, torch.Tensor] (all tensors moved to device)
+    """
+    return {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
+
+# ================== END BATCH & TENSOR HELPERS ==================
+
+# ================== MODULAR DATA PIPELINE INTERFACES (Phase 3) ==================
+
+class StreamingJSONLoader:
+    """
+    Loads training samples from a JSONL file, yielding one sample at a time (streaming).
+    Wraps the JSONLLoader from sovl_io for thread safety and validation.
+    """
+    def __init__(self, file_path: str, config_manager: 'ConfigManager', logger: 'Logger', error_manager: 'ErrorManager'):
+        from sovl_io import JSONLLoader
+        # Always use config_manager to get the canonical data path
+        if file_path is None:
+            file_path = config_manager.get("data_provider.data_path")
+        self.loader = JSONLLoader(config_manager, logger, error_manager)
+        self.file_path = file_path
+        self.logger = logger
+
+    def __iter__(self):
+        # Stream and yield validated samples using the new streaming method
+        try:
+            for sample in self.loader.stream_jsonl(self.file_path):
+                yield sample
+        except Exception as e:
+            self.logger.log_error(f"Failed to stream JSONL data: {e}", error_type="jsonl_stream_error")
+            return
+
+class TrainingSampleEnricher:
+    """
+    Enriches and validates training samples by adding/correcting metadata fields.
+    Wraps the enrich_and_validate method from MetadataProcessor.
+    """
+    def __init__(self, config_manager: 'ConfigManager', logger: 'Logger'):
+        from sovl_processor import MetadataProcessor
+        self.processor = MetadataProcessor(config_manager, logger)
+        self.logger = logger
+
+    def enrich(self, sample: dict, source_metadata: dict = None, session_id: str = None) -> dict:
+        # Use enrich_and_validate for metadata enrichment
+        try:
+            _, enriched = self.processor.enrich_and_validate(
+                origin="TrainingPipeline",
+                event_type="training_sample",
+                event_data=sample,
+                source_metadata=source_metadata or {},
+                session_id=session_id
+            )
+            return enriched
+        except Exception as e:
+            self.logger.log_warning(f"Metadata enrichment failed: {e}", event_type="metadata_enrichment_warning")
+            return sample
+
+class BatchPreparer:
+    """
+    Tokenizes, collates, and moves a batch of samples to the correct device.
+    Uses the tokenizer and batch/tensor helpers.
+    """
+    def __init__(self, tokenizer, device):
+        self.tokenizer = tokenizer
+        self.device = device
+
+    def prepare(self, samples: list) -> dict:
+        # Tokenize and collate samples
+        batch = []
+        for sample in samples:
+            # Assume sample has 'prompt' and 'response' fields
+            encoded = self.tokenizer(
+                sample["prompt"],
+                text_target=sample.get("response"),
+                return_tensors="pt",
+                truncation=True,
+                padding="max_length",
+                max_length=getattr(self.tokenizer, 'model_max_length', 512)
+            )
+            # Flatten batch dimension
+            encoded = {k: v.squeeze(0) if v.dim() == 2 and v.size(0) == 1 else v for k, v in encoded.items()}
+            batch.append(encoded)
+        return collate_tensor_batch(batch, self.device)
+
+# ================== END MODULAR DATA PIPELINE INTERFACES ==================
