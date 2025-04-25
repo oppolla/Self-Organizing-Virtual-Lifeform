@@ -98,6 +98,8 @@ class ModelManager:
         self.scaffold_tokenizers = []  # List to support multiple scaffold tokenizers
         self.scaffold_unk_ids = []  # List to support multiple scaffold UNK IDs
         self.base_config = None
+        self.lora_managers = []
+        self.active_lora_checkpoint = None
 
         # Initialize models and tokenizers
         self.load_models()
@@ -340,8 +342,10 @@ class ModelManager:
             )
             raise
 
-    def load_models(self):
-        """Load base and scaffold models along with their tokenizers."""
+    def load_models(self, lora_checkpoint_path: str = None):
+        """Load base and scaffold models along with their tokenizers.
+        Optionally loads LoRA weights for scaffold models from checkpoint.
+        """
         try:
             # Clear existing scaffold resources before loading
             self._clear_scaffold_resources()
@@ -353,8 +357,12 @@ class ModelManager:
             self._load_base_model()
             
             # Load each scaffold model
+            self.scaffold_models = []
+            self.lora_managers = []
             for model_name in self.scaffold_model_names:
-                self._load_scaffold_model(model_name)
+                scaffold_model, lora_manager = self._load_scaffold_model(model_name, lora_checkpoint_path)
+                self.scaffold_models.append(scaffold_model)
+                self.lora_managers.append(lora_manager)
             
             self._log_event(
                 "model_loading",
@@ -394,48 +402,15 @@ class ModelManager:
                 torch.cuda.empty_cache()
             self._log_event("scaffold_cleanup", "Cleared scaffold model/tokenizer resources", level="debug")
 
-    def _load_scaffold_model(self, model_name: str):
+    def _load_scaffold_model(self, model_name: str, lora_checkpoint_path: str = None):
         """
         Load a single scaffold model, apply scaffold wrapping, and attach LoRA adapters if enabled.
+        Optionally loads LoRA weights from a checkpoint path (for long-term memory).
         """
         try:
-            # 1. Load the raw scaffold model (implementation-specific)
-            scaffold_model = self._load_raw_scaffold_model(model_name)
-            
-            # 2. Wrap with scaffold logic if enabled in config
-            from sovl_scaffold import ScaffoldProvider
-            scaffold_provider = ScaffoldProvider(self._config_manager, self._logger, self._error_manager)
-            scaffold_model = scaffold_provider.wrap_model(scaffold_model, self._config_manager.get_section("scaffold_config"))
-            
-            # 3. Apply LoRA if enabled
-            from sovl_engram import LoraAdapterManager
-            lora_manager = LoraAdapterManager(self._config_manager, self._logger, self._error_manager)
-            if lora_manager.enabled:
-                scaffold_model = lora_manager.apply_to(scaffold_model)
-                self._logger.record_event(
-                    event_type="lora_applied",
-                    message=f"LoRA adapters applied to scaffold model {model_name}",
-                    level="info"
-                )
-            else:
-                self._logger.record_event(
-                    event_type="lora_skipped",
-                    message=f"LoRA not enabled for scaffold model {model_name}",
-                    level="info"
-                )
-            self.scaffold_models.append(scaffold_model)
-            
-            self._log_event(
-                "scaffold_model_loading",
-                f"Successfully loaded scaffold model: {model_name}",
-                level="info",
-                additional_info={
-                    "model": model_name,
-                    "quantization": self.quantization_mode,
-                    "loaded_index": len(self.scaffold_models) - 1,
-                    "total_scaffolds": len(self.scaffold_models)
-                }
-            )
+            from sovl_scaffold import create_scaffold_with_lora
+            scaffold_model, lora_manager = create_scaffold_with_lora(self._config_manager, self._logger, self._error_manager, lora_checkpoint_path)
+            return scaffold_model, lora_manager
         except Exception as e:
             self._log_error(
                 f"Failed to load scaffold model {model_name}: {str(e)}",
@@ -950,3 +925,14 @@ class ModelManager:
                 stack_trace=traceback.format_exc()
             )
             raise
+
+    def set_active_lora_checkpoint(self, lora_checkpoint_path: str):
+        """
+        Set the active LoRA checkpoint path for long-term memory tracking.
+        """
+        self.active_lora_checkpoint = lora_checkpoint_path
+        self._logger.record_event(
+            "lora_checkpoint_update",
+            f"Active LoRA checkpoint set to {lora_checkpoint_path}",
+            level="info"
+        )

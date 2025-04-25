@@ -1381,9 +1381,10 @@ class ScaffoldProvider:
         return self._scaffold_state.copy()
 
 # Utility function to create a scaffold model with LoRA integration
-def create_scaffold_with_lora(config_manager, logger, error_manager):
+def create_scaffold_with_lora(config_manager, logger, error_manager, lora_checkpoint_path=None):
     """
     Factory for creating a scaffold model wrapped with LoRA adapters (if enabled).
+    Optionally loads LoRA weights from a checkpoint path (for long-term memory).
     Returns the LoRA-wrapped model and the LoraAdapterManager instance.
     """
     # --- Build the base scaffold model ---
@@ -1391,6 +1392,11 @@ def create_scaffold_with_lora(config_manager, logger, error_manager):
     # --- Build and apply LoRA ---
     lora_manager = LoraAdapterManager(config_manager, logger, error_manager)
     scaffold_model = lora_manager.apply_to(scaffold_model)
+    if lora_checkpoint_path:
+        try:
+            scaffold_model = lora_manager.load_lora_weights(scaffold_model, lora_checkpoint_path)
+        except Exception as e:
+            logger.log_warning(f"Failed to load LoRA checkpoint {lora_checkpoint_path}: {e}", event_type="lora_load_warning")
     return scaffold_model, lora_manager
 
 # Example usage elsewhere in the system:

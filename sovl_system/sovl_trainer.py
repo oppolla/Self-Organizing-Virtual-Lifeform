@@ -617,6 +617,7 @@ class TrainingWorkflowManager:
         self.logger = getattr(trainer, '_logger', None)
         self.state = getattr(trainer, '_training_state', None)
         self.config = getattr(trainer, 'config', None)
+        self.model_manager = getattr(trainer, 'model_manager', None)  # <-- Add reference to model manager
         
     def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
         """Run a complete training cycle using the modular pipeline."""
@@ -668,62 +669,63 @@ class TrainingWorkflowManager:
         device = getattr(self.trainer, 'device', None)
         batch_preparer = getattr(self.trainer, 'batch_preparer', None)
         logger = getattr(self, 'logger', None)
-
-        if not (metadata_processor and tokenizer and device and batch_preparer):
-            if logger:
-                logger.log_warning(
-                    "Missing modular pipeline component(s) for gestation cycle.",
-                    event_type="gestation_modular_pipeline_missing"
-                )
-            return
-
-        # Enrich conversation history using modular processor
-        enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
-
-        # Prepare batch using modular batch preparer
-        try:
-            collated_batch = batch_preparer.prepare(enriched_samples)
-        except Exception as e:
-            if logger:
-                logger.log_error(
-                    f"Failed to prepare gestation batch: {str(e)}",
-                    error_type="gestation_batch_preparation_error"
-                )
-            return
-
-        # Get training manager
+        model_manager = getattr(self, 'model_manager', None)
         training_manager = getattr(self.trainer, 'training_manager', None)
-        if not training_manager:
+        lora_manager = None
+        scaffold_model = None
+        if model_manager:
+            # Assume first scaffold and lora_manager for simplicity
+            scaffold_model = model_manager.scaffold_models[0] if model_manager.scaffold_models else None
+            lora_manager = model_manager.lora_managers[0] if hasattr(model_manager, 'lora_managers') and model_manager.lora_managers else None
+        
+        if not (metadata_processor and tokenizer and device and batch_preparer and scaffold_model and lora_manager):
             if logger:
-                logger.log_error(
-                    "Training manager not found on trainer. Cannot run gestation training step.",
-                    event_type="gestation_manager_missing"
-                )
+                logger.log_error("Gestation prerequisites not met (metadata_processor, tokenizer, device, batch_preparer, scaffold_model, lora_manager)", event_type="gestation_prereq_error")
             return
 
-        # Run training step
+        # Prepare training batch from conversation history
         try:
-            if hasattr(training_manager, 'train_step'):
-                metrics = training_manager.train_step(batch=collated_batch)
-                loss = metrics.get("loss", 0.0)
-            else:
-                if logger:
-                    logger.log_error(
-                        "train_step method not found on training manager.",
-                        event_type="gestation_train_step_missing"
-                    )
-                return
+            enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
+            batch = batch_preparer.prepare(enriched_samples)
         except Exception as e:
             if logger:
-                logger.log_error(
-                    f"Error during gestation training step: {str(e)}",
-                    error_type="gestation_training_error",
-                    stack_trace=traceback.format_exc()
-                )
+                logger.log_error(f"Error during gestation batch preparation: {str(e)}", error_type="gestation_batch_error", stack_trace=traceback.format_exc())
             return
 
-        # Optionally update state or log event if needed
-        # (Legacy event_handler removed; use logger or state as needed)
+        # Train LoRA parameters only
+        try:
+            optimizer = torch.optim.AdamW(lora_manager.lora_parameters(scaffold_model), lr=2e-5)
+            # Simple training loop for one batch (extend as needed)
+            scaffold_model.train()
+            optimizer.zero_grad()
+            outputs = scaffold_model(**batch)
+            loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+            loss.backward()
+            optimizer.step()
+            if logger:
+                logger.log_info(f"Gestation LoRA training step complete. Loss: {loss.item()}", event_type="gestation_lora_train")
+        except Exception as e:
+            if logger:
+                logger.log_error(f"Error during gestation LoRA training step: {str(e)}", error_type="gestation_lora_training_error", stack_trace=traceback.format_exc())
+            return
+
+        # Save LoRA weights as long-term memory
+        try:
+            import os
+            from datetime import datetime
+            lora_dir = "lora_checkpoints"
+            os.makedirs(lora_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            lora_path = os.path.join(lora_dir, f"lora_{timestamp}.pt")
+            lora_manager.save_lora_weights(scaffold_model, lora_path)
+            if model_manager:
+                model_manager.set_active_lora_checkpoint(lora_path)
+            if logger:
+                logger.log_info(f"LoRA weights saved after gestation to {lora_path}", event_type="gestation_lora_save")
+        except Exception as e:
+            if logger:
+                logger.log_error(f"Error saving LoRA weights after gestation: {str(e)}", error_type="gestation_lora_save_error", stack_trace=traceback.format_exc())
+            return
 
     def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Run dream cycle."""
