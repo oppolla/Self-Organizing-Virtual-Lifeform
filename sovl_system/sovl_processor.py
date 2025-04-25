@@ -14,7 +14,7 @@ from sovl_state import SOVLState
 from sovl_records import ConfidenceHistory
 from transformers import PreTrainedTokenizer, LogitsProcessor
 from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
-from sovl_error import ErrorManager, ErrorRecord, ConfigurationError, StateError
+from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 
 # Placeholder for SOVLState until we can properly import it
 try:
