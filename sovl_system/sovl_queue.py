@@ -15,7 +15,7 @@ Prevents circular dependencies by providing shared queues for producers and cons
 logger = Logger(__name__)
 
 # Constants for queue management
-MAX_QUEUE_SIZE = 10000  # Maximum number of entries in queue
+MAX_QUEUE_SIZE = 2000  # Maximum number of entries in queue
 WARNING_THRESHOLD = 0.8  # Warn when queue is 80% full
 
 @dataclass

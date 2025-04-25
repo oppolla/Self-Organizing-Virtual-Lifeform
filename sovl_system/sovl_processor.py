@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from sovl_utils import NumericalGuard, safe_divide, synchronized
 from sovl_logger import Logger
 from sovl_config import ConfigManager
+from sovl_state import SOVLState
 from sovl_records import ConfidenceHistory
 from transformers import PreTrainedTokenizer, LogitsProcessor
 from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
@@ -1196,7 +1197,6 @@ class MetadataProcessor:
                     "origin",
                     "timestamp_unix",
                     "session_id",
-                    "interaction_id"
                 ]
             },
             "scaffold_generation": {
@@ -1209,8 +1209,7 @@ class MetadataProcessor:
                 "meta_required": [
                     "origin",
                     "timestamp_unix",
-                    "session_id",
-                    "interaction_id"
+                    "session_id"
                 ]
             },
             "curiosity_query": {
@@ -1223,7 +1222,6 @@ class MetadataProcessor:
                     "origin",
                     "timestamp_unix",
                     "session_id",
-                    "interaction_id"
                 ]
             },
             "temperament_update": {
@@ -1377,7 +1375,6 @@ class MetadataProcessor:
         final_metadata: Dict[str, Any],
         origin: str,
         session_id: Optional[str],
-        interaction_id: Optional[str]
     ) -> None:
         """Add common metadata fields to the final metadata.
         
@@ -1385,13 +1382,11 @@ class MetadataProcessor:
             final_metadata: The metadata dictionary to enrich
             origin: Source module identifier
             session_id: Optional session identifier
-            interaction_id: Optional interaction identifier
         """
         final_metadata.update({
             "origin": origin,
             "timestamp_unix": final_metadata.get("timestamp_unix", time.time()),
             "session_id": session_id,
-            "interaction_id": interaction_id
         })
 
     def _enrich_global_state(self, final_metadata: Dict[str, Any]) -> None:
@@ -1445,8 +1440,27 @@ class MetadataProcessor:
             # Calculate metrics for each field
             for field_name in fields_to_analyze:
                 if content := event_data.get(field_name):
+                    # Basic content metrics
                     metrics = self._calculate_content_metrics(content)
                     final_metadata[f"{field_name}_metrics"] = metrics
+                    
+                    # Enhanced token statistics
+                    token_stats = self._compute_enhanced_token_statistics(content)
+                    final_metadata[f"{field_name}_token_stats"] = token_stats
+                    
+                    # Structure metrics
+                    structure_metrics = self._calculate_basic_structure_metrics(content)
+                    final_metadata[f"{field_name}_structure"] = structure_metrics
+            
+            # Add performance metrics if available
+            if generation_stats := event_data.get("generation_stats"):
+                performance_metrics = self._calculate_performance_metrics(generation_stats)
+                final_metadata["performance_metrics"] = performance_metrics
+            
+            # Add relationship context if available
+            if conversation_context := event_data.get("conversation_context"):
+                relationship_metrics = self._calculate_relationship_context(conversation_context)
+                final_metadata["relationship_context"] = relationship_metrics
                     
         except Exception as e:
             self.logger.record_event(
@@ -1459,6 +1473,270 @@ class MetadataProcessor:
                 }
             )
 
+    def _compute_enhanced_token_statistics(self, text: str) -> Dict[str, Any]:
+        """Compute enhanced token statistics including basic and pattern analysis."""
+        try:
+            # Validate tokenizer availability
+            if not hasattr(self, 'tokenizer'):
+                self.logger.record_event(
+                    event_type="tokenizer_missing",
+                    message="Tokenizer not available for token statistics",
+                    level="warning",
+                    additional_info={"text_length": len(text)}
+                )
+                return self._get_default_token_stats()
+
+            # Tokenize input
+            tokens = self.tokenizer(text).input_ids
+            token_count = len(tokens)
+            if token_count == 0:
+                return self._get_default_token_stats()
+
+            # Basic token statistics
+            unique_tokens = set(tokens)
+            basic_stats = {
+                "total_tokens": token_count,
+                "unique_tokens": len(unique_tokens),
+                "token_diversity": len(unique_tokens) / token_count
+            }
+
+            # N-gram analysis
+            bigrams = list(zip(tokens[:-1], tokens[1:]))
+            trigrams = list(zip(tokens[:-2], tokens[1:-1], tokens[2:]))
+            pattern_stats = {
+                "unique_bigrams": len(set(bigrams)),
+                "unique_trigrams": len(set(trigrams)),
+                "bigram_diversity": len(set(bigrams)) / len(bigrams) if bigrams else 0,
+                "trigram_diversity": len(set(trigrams)) / len(trigrams) if trigrams else 0
+            }
+
+            # Special token analysis
+            special_tokens = [t for t in tokens if t in self.tokenizer.all_special_ids]
+            special_stats = {
+                "special_token_count": len(special_tokens),
+                "special_token_ratio": len(special_tokens) / token_count,
+                "special_token_types": list(set(special_tokens))
+            }
+
+            return {
+                "basic_stats": basic_stats,
+                "pattern_stats": pattern_stats,
+                "special_token_stats": special_stats
+            }
+
+        except Exception as e:
+            self.logger.record_event(
+                event_type="token_statistics_error",
+                message=f"Error computing enhanced token statistics: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "text_length": len(text)
+                }
+            )
+            return self._get_default_token_stats()
+
+    def _calculate_performance_metrics(self, generation_stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate performance-related metrics from generation statistics."""
+        try:
+            # Extract basic metrics
+            ram_usage = generation_stats.get("ram_usage_mb", 0)
+            gpu_usage = generation_stats.get("gpu_usage_mb", 0)
+            tokens_per_second = generation_stats.get("tokens_per_second", 0)
+            generation_time = generation_stats.get("generation_time_ms", 0)
+            
+            # Calculate derived metrics
+            total_memory = ram_usage + gpu_usage
+            memory_efficiency = tokens_per_second / total_memory if total_memory > 0 else 0
+            
+            return {
+                "timing": {
+                    "generation_time_ms": generation_time,
+                    "tokens_per_second": tokens_per_second,
+                    "total_processing_time": generation_stats.get("total_time_ms", 0)
+                },
+                "memory": {
+                    "ram_mb": ram_usage,
+                    "gpu_mb": gpu_usage,
+                    "peak_memory": generation_stats.get("peak_memory_mb", 0)
+                },
+                "efficiency": {
+                    "memory_efficiency": memory_efficiency,
+                    "tokens_per_mb": tokens_per_second / total_memory if total_memory > 0 else 0,
+                    "optimization_level": self._determine_optimization_level(generation_stats)
+                }
+            }
+
+        except Exception as e:
+            self.logger.record_event(
+                event_type="performance_metrics_error",
+                message=f"Error calculating performance metrics: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "generation_stats": str(generation_stats)
+                }
+            )
+            return self._get_default_performance_metrics()
+
+    def _calculate_basic_structure_metrics(self, text: str) -> Dict[str, Any]:
+        """Calculate basic structural metrics for text."""
+        try:
+            # Split text into lines and sentences
+            lines = text.split('\n')
+            sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+            
+            # Calculate length metrics
+            word_count = len(text.split())
+            char_count = len(text)
+            
+            # Calculate averages
+            avg_sentence_length = sum(len(s.split()) for s in sentences) / len(sentences) if sentences else 0
+            avg_line_length = sum(len(l.split()) for l in lines) / len(lines) if lines else 0
+            
+            # Analyze whitespace
+            blank_lines = sum(1 for l in lines if not l.strip())
+            indentation_levels = self._count_indentation_levels(lines)
+            
+            return {
+                "length_metrics": {
+                    "character_count": char_count,
+                    "word_count": word_count,
+                    "line_count": len(lines),
+                    "sentence_count": len(sentences),
+                    "avg_sentence_length": avg_sentence_length,
+                    "avg_line_length": avg_line_length
+                },
+                "whitespace_metrics": {
+                    "blank_line_count": blank_lines,
+                    "indentation_levels": indentation_levels,
+                    "whitespace_ratio": sum(len(l) - len(l.strip()) for l in lines) / char_count if char_count > 0 else 0
+                }
+            }
+
+        except Exception as e:
+            self.logger.record_event(
+                event_type="structure_metrics_error",
+                message=f"Error calculating basic structure metrics: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "text_length": len(text)
+                }
+            )
+            return self._get_default_structure_metrics()
+
+    def _count_indentation_levels(self, lines: List[str]) -> int:
+        """Count the number of different indentation levels in the text."""
+        try:
+            indentation_levels = set()
+            for line in lines:
+                if line.strip():  # Skip empty lines
+                    indent = len(line) - len(line.lstrip())
+                    indentation_levels.add(indent)
+            return len(indentation_levels)
+        except Exception:
+            return 0
+
+    def _calculate_relationship_context(
+        self, 
+        conversation_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Calculate contextual relationship metadata from conversation context."""
+        try:
+            if not conversation_context:
+                return self._get_default_relationship_context()
+            
+            return {
+                "conversation_tracking": {
+                    "conversation_id": conversation_context.get("conversation_id"),
+                    "message_index": conversation_context.get("message_index", 0),
+                    "thread_depth": conversation_context.get("thread_depth", 1)
+                },
+                "reference_tracking": {
+                    "references": conversation_context.get("references", []),
+                    "parent_message_id": conversation_context.get("parent_id"),
+                    "root_message_id": conversation_context.get("root_id")
+                },
+                "temporal_tracking": {
+                    "timestamp": conversation_context.get("timestamp", time.time()),
+                    "elapsed_time": conversation_context.get("elapsed_time_ms", 0),
+                    "session_duration": conversation_context.get("session_duration_ms", 0)
+                }
+            }
+
+        except Exception as e:
+            self.logger.record_event(
+                event_type="relationship_context_error",
+                message=f"Error calculating relationship context: {str(e)}",
+                level="error",
+                additional_info={
+                    "error": str(e),
+                    "conversation_context": str(conversation_context)
+                }
+            )
+            return self._get_default_relationship_context()
+
+    # Default value helper methods
+    def _get_default_token_stats(self) -> Dict[str, Any]:
+        """Return default token statistics structure."""
+        return {
+            "basic_stats": {},
+            "pattern_stats": {},
+            "special_token_stats": {}
+        }
+
+    def _get_default_performance_metrics(self) -> Dict[str, Any]:
+        """Return default performance metrics structure."""
+        return {
+            "timing": {},
+            "memory": {},
+            "efficiency": {}
+        }
+
+    def _get_default_structure_metrics(self) -> Dict[str, Any]:
+        """Return default structure metrics structure."""
+        return {
+            "length_metrics": {},
+            "whitespace_metrics": {}
+        }
+
+    def _get_default_relationship_context(self) -> Dict[str, Any]:
+        """Return default relationship context structure."""
+        return {
+            "conversation_tracking": {
+                "conversation_id": None,
+                "message_index": 0,
+                "thread_depth": 1
+            },
+            "reference_tracking": {
+                "references": [],
+                "parent_message_id": None,
+                "root_message_id": None
+            },
+            "temporal_tracking": {
+                "timestamp": time.time(),
+                "elapsed_time": 0,
+                "session_duration": 0
+            }
+        }
+
+    def _determine_optimization_level(self, stats: Dict[str, Any]) -> str:
+        """Determine the optimization level based on performance metrics."""
+        try:
+            efficiency = stats.get("tokens_per_second", 0) / (
+                stats.get("ram_usage_mb", 1) + stats.get("gpu_usage_mb", 1)
+            )
+            
+            if efficiency > 50:
+                return "high"
+            elif efficiency > 20:
+                return "medium"
+            else:
+                return "low"
+        except Exception:
+            return "unknown"
+
     def enrich_and_validate(
         self,
         origin: str,
@@ -1466,7 +1744,6 @@ class MetadataProcessor:
         event_data: Dict[str, Any],
         source_metadata: Dict[str, Any],
         session_id: Optional[str] = None,
-        interaction_id: Optional[str] = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Enrich and validate event metadata.
         
@@ -1482,7 +1759,6 @@ class MetadataProcessor:
             event_data: Event-specific data
             source_metadata: Metadata provided by the source
             session_id: Optional session identifier
-            interaction_id: Optional interaction identifier
             
         Returns:
             Tuple of (event_data, enriched_metadata)
@@ -1504,7 +1780,7 @@ class MetadataProcessor:
         final_metadata = source_metadata.copy()
         
         # Add common fields
-        self._enrich_common_fields(final_metadata, origin, session_id, interaction_id)
+        self._enrich_common_fields(final_metadata, origin, session_id)
         
         # Add global state
         self._enrich_global_state(final_metadata)

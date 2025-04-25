@@ -32,6 +32,7 @@ class ValidationSchema:
             "monitoring": ValidationSchema._get_monitoring_schema(),
             "scribed_config": ValidationSchema._get_scribed_config_schema(),
             "io_config": ValidationSchema._get_io_config_schema(),
+            "metrics_config": ValidationSchema._get_metrics_config_schema(),
         }
 
     @staticmethod
@@ -668,4 +669,197 @@ class ValidationSchema:
                 default=True,
                 required=False
             )
+        }
+
+    @staticmethod
+    def _get_metrics_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the metrics_config schema."""
+        return {
+            "token_statistics": {
+                "enabled": ConfigSchema(
+                    field="metrics_config.token_statistics.enabled",
+                    type=bool,
+                    default=True
+                ),
+                "ngram_sizes": ConfigSchema(
+                    field="metrics_config.token_statistics.ngram_sizes",
+                    type=list,
+                    default=[2, 3, 4],
+                    validator=lambda x: all(isinstance(n, int) and n > 0 for n in x)
+                ),
+                "special_token_tracking": ConfigSchema(
+                    field="metrics_config.token_statistics.special_token_tracking",
+                    type=bool,
+                    default=True
+                ),
+                "min_token_frequency": ConfigSchema(
+                    field="metrics_config.token_statistics.min_token_frequency",
+                    type=int,
+                    default=2,
+                    range=(1, None)
+                ),
+                "max_tokens_to_track": ConfigSchema(
+                    field="metrics_config.token_statistics.max_tokens_to_track",
+                    type=int,
+                    default=1000,
+                    range=(1, None)
+                ),
+                "token_pattern_threshold": ConfigSchema(
+                    field="metrics_config.token_statistics.token_pattern_threshold",
+                    type=float,
+                    default=0.1,
+                    range=(0.0, 1.0)
+                )
+            },
+            "performance_metrics": {
+                "enabled": ConfigSchema(
+                    field="metrics_config.performance_metrics.enabled",
+                    type=bool,
+                    default=True
+                ),
+                "track_generation_time": ConfigSchema(
+                    field="metrics_config.performance_metrics.track_generation_time",
+                    type=bool,
+                    default=True
+                ),
+                "track_memory_usage": ConfigSchema(
+                    field="metrics_config.performance_metrics.track_memory_usage",
+                    type=bool,
+                    default=True
+                ),
+                "track_efficiency": ConfigSchema(
+                    field="metrics_config.performance_metrics.track_efficiency",
+                    type=bool,
+                    default=True
+                ),
+                "memory_sample_rate": ConfigSchema(
+                    field="metrics_config.performance_metrics.memory_sample_rate",
+                    type=int,
+                    default=1000,
+                    range=(100, None)
+                ),
+                "time_window_ms": ConfigSchema(
+                    field="metrics_config.performance_metrics.time_window_ms",
+                    type=int,
+                    default=5000,
+                    range=(1000, None)
+                )
+            },
+            "structure_analysis": {
+                "enabled": ConfigSchema(
+                    field="metrics_config.structure_analysis.enabled",
+                    type=bool,
+                    default=True
+                ),
+                "track_length_metrics": ConfigSchema(
+                    field="metrics_config.structure_analysis.track_length_metrics",
+                    type=bool,
+                    default=True
+                ),
+                "track_whitespace": ConfigSchema(
+                    field="metrics_config.structure_analysis.track_whitespace",
+                    type=bool,
+                    default=True
+                ),
+                "min_section_length": ConfigSchema(
+                    field="metrics_config.structure_analysis.min_section_length",
+                    type=int,
+                    default=10,
+                    range=(1, None)
+                ),
+                "max_section_length": ConfigSchema(
+                    field="metrics_config.structure_analysis.max_section_length",
+                    type=int,
+                    default=1000,
+                    range=(1, None)
+                ),
+                "whitespace_ratio_threshold": ConfigSchema(
+                    field="metrics_config.structure_analysis.whitespace_ratio_threshold",
+                    type=float,
+                    default=0.3,
+                    range=(0.0, 1.0)
+                )
+            },
+            "relationship_context": {
+                "enabled": ConfigSchema(
+                    field="metrics_config.relationship_context.enabled",
+                    type=bool,
+                    default=True
+                ),
+                "max_context_history": ConfigSchema(
+                    field="metrics_config.relationship_context.max_context_history",
+                    type=int,
+                    default=100,
+                    range=(1, None)
+                ),
+                "reference_decay_rate": ConfigSchema(
+                    field="metrics_config.relationship_context.reference_decay_rate",
+                    type=float,
+                    default=0.95,
+                    range=(0.0, 1.0)
+                ),
+                "temporal_window_size": ConfigSchema(
+                    field="metrics_config.relationship_context.temporal_window_size",
+                    type=int,
+                    default=10,
+                    range=(1, None)
+                ),
+                "min_relationship_strength": ConfigSchema(
+                    field="metrics_config.relationship_context.min_relationship_strength",
+                    type=float,
+                    default=0.1,
+                    range=(0.0, 1.0)
+                )
+            },
+            "helper_methods": {
+                "indentation_analysis": {
+                    "enabled": ConfigSchema(
+                        field="metrics_config.helper_methods.indentation_analysis.enabled",
+                        type=bool,
+                        default=True
+                    ),
+                    "max_indent_level": ConfigSchema(
+                        field="metrics_config.helper_methods.indentation_analysis.max_indent_level",
+                        type=int,
+                        default=8,
+                        range=(1, None)
+                    ),
+                    "tab_size": ConfigSchema(
+                        field="metrics_config.helper_methods.indentation_analysis.tab_size",
+                        type=int,
+                        default=4,
+                        range=(1, None)
+                    ),
+                    "mixed_indent_warning": ConfigSchema(
+                        field="metrics_config.helper_methods.indentation_analysis.mixed_indent_warning",
+                        type=bool,
+                        default=True
+                    )
+                },
+                "optimization_analysis": {
+                    "enabled": ConfigSchema(
+                        field="metrics_config.helper_methods.optimization_analysis.enabled",
+                        type=bool,
+                        default=True
+                    ),
+                    "performance_threshold": ConfigSchema(
+                        field="metrics_config.helper_methods.optimization_analysis.performance_threshold",
+                        type=float,
+                        default=0.8,
+                        range=(0.0, 1.0)
+                    ),
+                    "memory_threshold": ConfigSchema(
+                        field="metrics_config.helper_methods.optimization_analysis.memory_threshold",
+                        type=float,
+                        default=0.9,
+                        range=(0.0, 1.0)
+                    ),
+                    "optimization_levels": ConfigSchema(
+                        field="metrics_config.helper_methods.optimization_analysis.optimization_levels",
+                        type=list,
+                        default=["basic", "moderate", "aggressive"],
+                        validator=lambda x: all(isinstance(level, str) and level in ["basic", "moderate", "aggressive"] for level in x)
+                    )
+                }
+            }
         }

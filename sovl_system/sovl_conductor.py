@@ -10,7 +10,7 @@ from threading import Lock
 from sovl_config import ConfigManager
 from sovl_cli import run_cli
 from sovl_logger import Logger
-from sovl_state import SOVLState, StateManager, StateTracker
+from sovl_state import StateManager, StateTracker
 from sovl_error import ErrorManager
 from sovl_utils import  detect_repetitions
 from collections import deque
