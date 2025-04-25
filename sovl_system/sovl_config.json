@@ -458,5 +458,11 @@
     "output_path": "scribe/sovl_scribe.jsonl",
     "max_file_size_mb": 50,
     "buffer_size": 10
+  },
+  "metadata_weighting": {
+    "internal_error_reflection": 0.2,
+    "user_message": 1.0,
+    "system_message": 0.5,
+    "dream_memory": 0.3
   }
 }

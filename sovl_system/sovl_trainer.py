@@ -1059,41 +1059,49 @@ class ContentType(Enum):
 class MetadataInterpreter:
     """Interprets metadata to inform training parameters and sample importance."""
     
-    def __init__(self, config: Optional[InterpretationConfig] = None):
+    def __init__(self, config: Optional[InterpretationConfig] = None, config_manager: Optional[object] = None, logger: Optional[object] = None):
         """Initialize the metadata interpreter.
-        
         Args:
             config: Configuration for interpretation rules
+            config_manager: Optional ConfigManager for dynamic config access
+            logger: Optional Logger for debug/info logging
         """
         self.config = config or InterpretationConfig()
         self.config.validate()
-        
+        self.config_manager = config_manager
+        self.logger = logger
         # Track interpretation history
         self._interpretation_history = defaultdict(list)
         self._sample_stats = defaultdict(float)
-        
+        # Load event type weights from config_manager if available
+        if config_manager is not None:
+            self.event_type_weights = config_manager.get_section("metadata_weighting") or {}
+            if self.logger:
+                self.logger.log_info(
+                    f"Loaded event_type_weights: {self.event_type_weights}",
+                    event_type="metadata_weighting_init"
+                )
+        else:
+            self.event_type_weights = {}
+            
     def interpret_metadata(
         self, 
         metadata: Dict[str, Any],
         current_time: Optional[float] = None
     ) -> Dict[str, Any]:
         """Interpret metadata and return training parameters.
-        
         Args:
             metadata: The metadata to interpret
             current_time: Current timestamp (defaults to time.time())
-            
         Returns:
             Dictionary of interpreted parameters
         """
         current_time = current_time or time.time()
-        
         # Extract core metrics
         content_metrics = self._extract_content_metrics(metadata)
         quality_score = self._calculate_quality_score(metadata)
         temporal_factor = self._calculate_temporal_factor(metadata, current_time)
         novelty_score = self._assess_novelty(metadata)
-        
         # Calculate importance weight
         importance_weight = self._calculate_importance_weight(
             content_metrics["complexity"],
@@ -1101,23 +1109,40 @@ class MetadataInterpreter:
             temporal_factor,
             novelty_score
         )
-        
+        # Apply event_type weighting if available
+        event_type = metadata.get("event_type")
+        event_type_weight = 1.0
+        if event_type and self.event_type_weights:
+            pre_weight = importance_weight
+            event_type_weight = self.event_type_weights.get(event_type, 1.0)
+            importance_weight *= event_type_weight
+            if self.logger:
+                self.logger.log_debug(
+                    f"Applied event_type_weight={event_type_weight:.3f} to importance: {pre_weight:.3f} -> {importance_weight:.3f}",
+                    event_type="event_type_weight_application"
+                )
+        # Debug log of interpretation input/output
+        if self.logger:
+            self.logger.log_debug(
+                f"Interpreting metadata for event_type={event_type} | "
+                f"complexity={content_metrics['complexity']:.3f}, quality={quality_score:.3f}, "
+                f"temporal={temporal_factor:.3f}, novelty={novelty_score:.3f} | "
+                f"event_type_weight={event_type_weight:.3f}, importance={importance_weight:.3f}",
+                event_type="metadata_interpretation"
+            )
         # Determine learning parameter adjustments
         learning_params = self._determine_learning_parameters(
             content_metrics,
             quality_score,
             importance_weight
         )
-        
         # Calculate attention focus
         attention_params = self._calculate_attention_parameters(
             content_metrics,
             metadata
         )
-        
         # Update interpretation history
         self._update_history(metadata, importance_weight, quality_score)
-        
         return {
             "sample_importance": importance_weight,
             "learning_params": learning_params,
@@ -1127,9 +1152,11 @@ class MetadataInterpreter:
                 "novelty": novelty_score,
                 "temporal_relevance": temporal_factor
             },
-            "content_metrics": content_metrics
+            "content_metrics": content_metrics,
+            "event_type_weight": event_type_weight,
+            "event_type": event_type
         }
-
+        
     def _extract_content_metrics(self, metadata: Dict[str, Any]) -> Dict[str, float]:
         """Extract and normalize content-related metrics."""
         # Get content metrics from metadata
@@ -1252,13 +1279,28 @@ class MetadataInterpreter:
             temporal_factor * self.config.temporal_weight +
             novelty * self.config.novelty_weight
         )
-        
+        # Log calculation breakdown
+        if self.logger:
+            self.logger.log_debug(
+                f"Importance calculation: complexity={complexity:.3f}*{self.config.complexity_weight} + "
+                f"quality={quality:.3f}*{self.config.quality_weight} + "
+                f"temporal={temporal_factor:.3f}*{self.config.temporal_weight} + "
+                f"novelty={novelty:.3f}*{self.config.novelty_weight} = {importance:.3f}",
+                event_type="importance_weight_calc"
+            )
         # Apply bounds
+        clipped = False
+        if importance < self.config.min_importance or importance > self.config.max_importance:
+            clipped = True
         importance = max(
             self.config.min_importance,
             min(self.config.max_importance, importance)
         )
-        
+        if clipped and self.logger:
+            self.logger.log_warning(
+                f"Importance weight clipped to bounds: {importance:.3f}",
+                event_type="importance_weight_clipped"
+            )
         return importance
 
     def _determine_learning_parameters(

@@ -33,6 +33,7 @@ class ValidationSchema:
             "scribed_config": ValidationSchema._get_scribed_config_schema(),
             "io_config": ValidationSchema._get_io_config_schema(),
             "metrics_config": ValidationSchema._get_metrics_config_schema(),
+            "metadata_weighting": ValidationSchema._get_metadata_weighting_schema(),
         }
 
     @staticmethod
@@ -601,6 +602,17 @@ class ValidationSchema:
                 }
             }
     
+        }
+
+    @staticmethod
+    def _get_metadata_weighting_schema() -> Dict[str, ConfigSchema]:
+        """Return the metadata_weighting schema (event_type weights)."""
+        # This schema allows arbitrary event_type keys, but documents common defaults
+        return {
+            "internal_error_reflection": ConfigSchema(field="metadata_weighting.internal_error_reflection", type=float, default=0.2, range=(0.0, 3.0)),
+            "user_message": ConfigSchema(field="metadata_weighting.user_message", type=float, default=1.0, range=(0.0, 3.0)),
+            "system_message": ConfigSchema(field="metadata_weighting.system_message", type=float, default=0.5, range=(0.0, 3.0)),
+            "dream_memory": ConfigSchema(field="metadata_weighting.dream_memory", type=float, default=0.3, range=(0.0, 3.0)),
         }
 
     @staticmethod
