@@ -467,3 +467,40 @@ class ErrorManager(IErrorHandler):
                 level="error",
                 stack_trace=traceback.format_exc()
             )
+
+class ScaffoldError(Exception):
+    """
+    Exception raised for errors related to scaffold operations.
+
+    Args:
+        message (str): Human-readable error message.
+        operation (str): The scaffold operation being performed when the error occurred.
+        context (Optional[Dict[str, Any]]): Additional context for debugging.
+    """
+    def __init__(
+        self,
+        message: str,
+        operation: str = "unknown",
+        context: Optional[Dict[str, Any]] = None
+    ):
+        super().__init__(message)
+        self.message = message
+        self.operation = operation
+        self.context = context or {}
+        self.timestamp = datetime.now()
+
+    def __str__(self):
+        base = f"[{self.operation}] {self.message}"
+        if self.context:
+            base += f" | Context: {self.context}"
+        base += f" | Timestamp: {self.timestamp.isoformat()}"
+        return base
+
+    def to_dict(self):
+        return {
+            "message": self.message,
+            "operation": self.operation,
+            "context": self.context,
+            "timestamp": self.timestamp.isoformat(),
+            "type": self.__class__.__name__
+        }

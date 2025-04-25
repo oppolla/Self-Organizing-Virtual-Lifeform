@@ -9,8 +9,7 @@ from threading import Lock
 import math
 from sovl_logger import Logger
 from sovl_config import ConfigManager
-from sovl_utils import NumericalGuard, safe_divide, validate_layer_indices
-from sovl_error import ErrorManager
+from sovl_error import ErrorManager, ScaffoldError
 from sovl_confidence import ConfidenceCalculator
 from sovl_io import ConfigurationError
 from sovl_curiosity import CuriosityManager
@@ -18,17 +17,11 @@ from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 import contextlib
 import functools
+from sovl_engram import LoraAdapterManager
 
 # File-level: Core scaffold module for SOVL.
 # - Manages error handling, token mapping, sparse attention utilities,
 #   cross-attention injection, and scaffold state management.
-class ScaffoldError(Exception):
-    """Base exception for scaffold-related errors."""
-    def __init__(self, message: str, operation: str, context: Optional[Dict[str, Any]] = None):
-        super().__init__(message)
-        self.operation = operation
-        self.context = context or {}
-        self.timestamp = time.time()
 
 # Centralized handler for scaffold errors and recovery.
 class ScaffoldErrorManager:
@@ -406,7 +399,7 @@ class AttentionUtils:
     ) -> torch.Tensor:
         """Create a sparse attention mask based on the specified pattern."""
         try:
-            with NumericalGuard():
+            with torch.no_grad():
                 if sparse_pattern == 'window':
                     mask = torch.zeros(seq_len, seq_len, device=device)
                     for i in range(seq_len):
@@ -448,7 +441,7 @@ class AttentionUtils:
     ) -> torch.Tensor:
         """Prepare attention mask for multi-head attention."""
         try:
-            with NumericalGuard():
+            with torch.no_grad():
                 if attention_mask is None:
                     return None
                     
@@ -996,10 +989,7 @@ class CrossAttentionInjector:
         """Inject cross-attention into a single layer."""
         try:
             layers, _ = self.find_model_layers(model)
-            if layer_idx >= len(layers):
-                raise ValueError(f"Layer index {layer_idx} out of bounds")
-                
-            original_layer = layers[layer_idx]
+            layer = layers[layer_idx]
             cross_attn_layer = CrossAttentionLayer(
                 config=self._config_manager.get_section("core_config"),
                 logger=self._logger,
@@ -1007,7 +997,7 @@ class CrossAttentionInjector:
             )
             
             layers[layer_idx] = self._create_wrapped_layer(
-                original_layer=original_layer,
+                original_layer=layer,
                 cross_attn_layer=cross_attn_layer,
                 scaffold_model=scaffold_model,
                 token_map=token_map,
@@ -1312,7 +1302,7 @@ class ScaffoldProvider:
     def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorManager):
         self.config_manager = config_manager
         self.logger = logger
-        self._error_handler = ScaffoldErrorManager(logger, error_handler)
+        self._error_handler = error_handler
         self._scaffold_state = None
         self._lock = Lock()
         
@@ -1389,3 +1379,19 @@ class ScaffoldProvider:
                 operation="get_scaffold_state"
             )
         return self._scaffold_state.copy()
+
+# Utility function to create a scaffold model with LoRA integration
+def create_scaffold_with_lora(config_manager, logger, error_manager):
+    """
+    Factory for creating a scaffold model wrapped with LoRA adapters (if enabled).
+    Returns the LoRA-wrapped model and the LoraAdapterManager instance.
+    """
+    # --- Build the base scaffold model ---
+    scaffold_model = ScaffoldModel(config_manager, logger, error_manager)  # Replace with your actual scaffold model class/init
+    # --- Build and apply LoRA ---
+    lora_manager = LoraAdapterManager(config_manager, logger, error_manager)
+    scaffold_model = lora_manager.apply_to(scaffold_model)
+    return scaffold_model, lora_manager
+
+# Example usage elsewhere in the system:
+# model, lora_mgr = create_scaffold_with_lora(config_manager, logger, error_manager)

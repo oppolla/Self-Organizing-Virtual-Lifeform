@@ -395,6 +395,100 @@ class ModelManager:
             self._log_event("scaffold_cleanup", "Cleared scaffold model/tokenizer resources", level="debug")
 
     def _load_scaffold_model(self, model_name: str):
+        """
+        Load a single scaffold model, apply scaffold wrapping, and attach LoRA adapters if enabled.
+        """
+        try:
+            # 1. Load the raw scaffold model (implementation-specific)
+            scaffold_model = self._load_raw_scaffold_model(model_name)
+            
+            # 2. Wrap with scaffold logic if enabled in config
+            from sovl_scaffold import ScaffoldProvider
+            scaffold_provider = ScaffoldProvider(self._config_manager, self._logger, self._error_manager)
+            scaffold_model = scaffold_provider.wrap_model(scaffold_model, self._config_manager.get_section("scaffold_config"))
+            
+            # 3. Apply LoRA if enabled
+            from sovl_engram import LoraAdapterManager
+            lora_manager = LoraAdapterManager(self._config_manager, self._logger, self._error_manager)
+            if lora_manager.enabled:
+                scaffold_model = lora_manager.apply_to(scaffold_model)
+                self._logger.record_event(
+                    event_type="lora_applied",
+                    message=f"LoRA adapters applied to scaffold model {model_name}",
+                    level="info"
+                )
+            else:
+                self._logger.record_event(
+                    event_type="lora_skipped",
+                    message=f"LoRA not enabled for scaffold model {model_name}",
+                    level="info"
+                )
+            self.scaffold_models.append(scaffold_model)
+            
+            self._log_event(
+                "scaffold_model_loading",
+                f"Successfully loaded scaffold model: {model_name}",
+                level="info",
+                additional_info={
+                    "model": model_name,
+                    "quantization": self.quantization_mode,
+                    "loaded_index": len(self.scaffold_models) - 1,
+                    "total_scaffolds": len(self.scaffold_models)
+                }
+            )
+        except Exception as e:
+            self._log_error(
+                f"Failed to load scaffold model {model_name}: {str(e)}",
+                error_type="scaffold_model_loading_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"model_name": model_name}
+            )
+            raise
+
+    def _load_base_model(self):
+        """
+        Load the base model and apply LoRA if enabled.
+        """
+        try:
+            # 1. Load the raw base model (implementation-specific)
+            base_model = self._load_raw_base_model()
+            
+            # 2. Apply LoRA if enabled
+            from sovl_engram import LoraAdapterManager
+            lora_manager = LoraAdapterManager(self._config_manager, self._logger, self._error_manager)
+            if lora_manager.enabled:
+                base_model = lora_manager.apply_to(base_model)
+                self._logger.record_event(
+                    event_type="lora_applied",
+                    message=f"LoRA adapters applied to base model",
+                    level="info"
+                )
+            else:
+                self._logger.record_event(
+                    event_type="lora_skipped",
+                    message=f"LoRA not enabled for base model",
+                    level="info"
+                )
+            self.base_model = base_model
+            
+            self._log_event(
+                "base_model_loading",
+                "Successfully loaded base model",
+                level="info",
+                additional_info={
+                    "model": self.base_model_name,
+                    "quantization": self.quantization_mode
+                }
+            )
+        except Exception as e:
+            self._log_error(
+                f"Failed to load base model: {str(e)}",
+                error_type="base_model_loading_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+
+    def _load_raw_scaffold_model(self, model_name: str):
         """Load a single scaffold model with appropriate quantization."""
         try:
             with self._memory_lock:
@@ -427,33 +521,17 @@ class ModelManager:
                     )
                 
                 model.eval()
-                self.scaffold_models.append(model)
-                
-                self._log_event(
-                    "scaffold_model_loading",
-                    f"Successfully loaded scaffold model: {model_name}",
-                    level="info",
-                    additional_info={
-                        "model": model_name,
-                        "quantization": self.quantization_mode,
-                        "loaded_index": len(self.scaffold_models) - 1,
-                        "total_scaffolds": len(self.scaffold_models)
-                    }
-                )
+                return model
         except Exception as e:
-            self.error_manager.handle_error(
-                error=e,
-                error_type="model_loading_error",
-                severity=2,
-                additional_info={
-                    "model": model_name,
-                    "quantization": self.quantization_mode,
-                    "stage": "scaffold_model_loading"
-                }
+            self._log_error(
+                f"Failed to load raw scaffold model {model_name}: {str(e)}",
+                error_type="scaffold_model_loading_error",
+                stack_trace=traceback.format_exc(),
+                additional_info={"model_name": model_name}
             )
             raise
 
-    def _load_base_model(self):
+    def _load_raw_base_model(self):
         """Load the base model with appropriate quantization."""
         try:
             with self._memory_lock:
@@ -485,26 +563,12 @@ class ModelManager:
                     )
                 
                 self.base_model.eval()
-                
-                self._log_event(
-                    "base_model_loading",
-                    "Successfully loaded base model",
-                    level="info",
-                    additional_info={
-                        "model": self.base_model_name,
-                        "quantization": self.quantization_mode
-                    }
-                )
+                return self.base_model
         except Exception as e:
-            self.error_manager.handle_error(
-                error=e,
-                error_type="model_loading_error",
-                severity=2,
-                additional_info={
-                    "model": self.base_model_name,
-                    "quantization": self.quantization_mode,
-                    "stage": "base_model_loading"
-                }
+            self._log_error(
+                f"Failed to load raw base model: {str(e)}",
+                error_type="base_model_loading_error",
+                stack_trace=traceback.format_exc()
             )
             raise
 

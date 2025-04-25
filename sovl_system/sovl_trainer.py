@@ -12,6 +12,7 @@ from sovl_processor import MetadataProcessor
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 from transformers import get_linear_schedule_with_warmup
+from sovl_engram import LoraAdapterManager
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -266,35 +267,61 @@ class TrainingConfig:
 class TrainingManager:
     """Manages core training operations."""
     
-    def __init__(self, config: TrainingConfig, model: torch.nn.Module, device: torch.device):
-        """Initialize training manager."""
+    def __init__(
+        self,
+        config: TrainingConfig,
+        model: torch.nn.Module,
+        device: torch.device,
+        config_manager: Optional[ConfigManager] = None,
+        logger: Optional[Logger] = None,
+        error_manager: Optional[ErrorManager] = None
+    ):
+        """
+        Initialize training manager.
+        Args:
+            config: TrainingConfig instance
+            model: torch.nn.Module (MUST be pre-wrapped/adapted by ModelManager)
+            device: torch.device
+            config_manager: ConfigManager instance
+            logger: Logger instance
+            error_manager: ErrorManager instance
+        """
         self.config = config
         self.model = model
         self.device = device
-        # Ensure model is on the correct device
-        self.model.to(self.device)
-        self.optimizer = self._create_optimizer()
+        self.config_manager = config_manager
+        self.logger = logger
+        self.error_manager = error_manager
+        # LoRA manager is used ONLY for checkpointing and optimizer param selection
+        self.lora_manager = None
+        if self.config_manager and self.logger and self.error_manager:
+            self.lora_manager = LoraAdapterManager(self.config_manager, self.logger, self.error_manager)
+        # Use only LoRA parameters if LoRA is enabled, else all parameters
+        if self.lora_manager and self.lora_manager.enabled:
+            params = self.lora_manager.lora_parameters(self.model)
+        else:
+            params = self.model.parameters()
+        self.optimizer = self._create_optimizer(params)
         self.scheduler = self._create_scheduler()
-        # Only create scaler if AMP is enabled and CUDA is available
         self.scaler = torch.cuda.amp.GradScaler() if self.config.memory.use_amp and torch.cuda.is_available() else None
         self.step_count = 0
         self.epoch_count = 0
-        self.optimizer_step_count = 0  # Track actual optimizer steps taken
+        self.optimizer_step_count = 0
         self.best_metrics = {}
         self.metrics_history = defaultdict(list)
         
-    def _create_optimizer(self) -> torch.optim.Optimizer:
+    def _create_optimizer(self, params: List[torch.nn.Parameter]) -> torch.optim.Optimizer:
         """Create optimizer based on configuration."""
         optimizer_type = self.config.optimizer.type.lower()
         if optimizer_type == "adamw":
             return torch.optim.AdamW(
-                self.model.parameters(),
+                params,
                 lr=self.config.optimizer.learning_rate,
                 weight_decay=self.config.optimizer.weight_decay
             )
         elif optimizer_type == "adam":
             return torch.optim.Adam(
-                self.model.parameters(),
+                params,
                 lr=self.config.optimizer.learning_rate,
                 weight_decay=self.config.optimizer.weight_decay
             )
@@ -512,7 +539,7 @@ class TrainingManager:
             "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
             "scaler_state": self.scaler.state_dict() if self.scaler else None,
             "step_count": self.step_count,
-            "optimizer_step_count": self.optimizer_step_count,  # Save optimizer step count
+            "optimizer_step_count": self.optimizer_step_count,
             "epoch_count": self.epoch_count,
             "best_metrics": self.best_metrics,
             "metrics_history": dict(self.metrics_history),
@@ -563,13 +590,21 @@ class TrainingManager:
                     
             # Load training state
             self.step_count = checkpoint["step_count"]
-            self.optimizer_step_count = checkpoint.get("optimizer_step_count", 0)  # Load optimizer step count
+            self.optimizer_step_count = checkpoint.get("optimizer_step_count", 0)
             self.epoch_count = checkpoint["epoch_count"]
             self.best_metrics = checkpoint.get("best_metrics", {})
             self.metrics_history = defaultdict(list, checkpoint.get("metrics_history", {}))
             
         except Exception as e:
             raise RuntimeError(f"Failed to load checkpoint from {path}: {e}")
+            
+    def save_lora_checkpoint(self, path: str):
+        if self.lora_manager:
+            self.lora_manager.save_lora_weights(self.model, path)
+            
+    def load_lora_checkpoint(self, path: str):
+        if self.lora_manager:
+            self.model = self.lora_manager.load_lora_weights(self.model, path)
 
 # TrainingWorkflowManager: orchestrates full multi-phase training cycles (train, sleep, gestation, dream).
 class TrainingWorkflowManager:
@@ -712,11 +747,11 @@ class SOVLTrainer:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        ram_manager: RAMManager,          # For RAM memory management
-        gpu_manager: GPUMemoryManager,    # For GPU memory management
-        model: torch.nn.Module,           # Added: Model instance
-        device: torch.device,             # Added: Device
-        tokenizer: Optional[Any] = None   # Added: Tokenizer
+        ram_manager: RAMManager,
+        gpu_manager: GPUMemoryManager,
+        model: torch.nn.Module,
+        device: torch.device,
+        tokenizer: Optional[Any] = None
     ):
         """
         Initialize trainer.
@@ -726,7 +761,7 @@ class SOVLTrainer:
             logger: Logger instance for logging events
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
-            model: The PyTorch model to be trained
+            model: The PyTorch model to be trained (MUST be pre-wrapped/adapted by ModelManager)
             device: The torch.device to run training on
             tokenizer: The tokenizer associated with the model
         """
@@ -763,7 +798,7 @@ class SOVLTrainer:
         self.metadata_processor = TrainingSampleEnricher(config_manager, logger)
         
         # Initialize TrainingManager
-        self.training_manager = TrainingManager(self.config, self.model, self.device)
+        self.training_manager = TrainingManager(self.config, self.model, self.device, config_manager, logger, None)
         
         # Initialize training state tracking
         self._training_state = {
