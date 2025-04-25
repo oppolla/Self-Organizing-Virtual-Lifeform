@@ -26,7 +26,6 @@ class ValidationSchema:
             "memory_config": ValidationSchema._get_memory_config_schema(),
             "state_config": ValidationSchema._get_state_config_schema(),
             "confidence_config": ValidationSchema._get_confidence_config_schema(),
-            "dream_memory_config": ValidationSchema._get_dream_memory_config_schema(),
             "lifecycle_config": ValidationSchema._get_lifecycle_config_schema(),
             "gestation_weighting": ValidationSchema._get_gestation_weighting_schema(),
             "monitoring": ValidationSchema._get_monitoring_schema(),
@@ -34,6 +33,7 @@ class ValidationSchema:
             "io_config": ValidationSchema._get_io_config_schema(),
             "metrics_config": ValidationSchema._get_metrics_config_schema(),
             "metadata_weighting": ValidationSchema._get_metadata_weighting_schema(),
+            "dreamer_config": ValidationSchema._get_dreamer_config_schema(),
         }
 
     @staticmethod
@@ -377,12 +377,8 @@ class ValidationSchema:
 
     @staticmethod
     def _get_dream_memory_config_schema() -> Dict[str, ConfigSchema]:
-        """Return the dream_memory_config schema."""
-        return {
-            "max_memories": ConfigSchema(field="dream_memory_config.max_memories", type=int, default=100, range=(1, None)),
-            "base_weight": ConfigSchema(field="dream_memory_config.base_weight", type=float, default=0.1, range=(0.0, 1.0)),
-            "max_weight": ConfigSchema(field="dream_memory_config.max_weight", type=float, default=1.5, range=(0.0, None)),
-        }
+        """Deprecated: Dream memory config is no longer used. Kept for backward compatibility."""
+        return {}
 
     @staticmethod
     def _get_lifecycle_config_schema() -> Dict[str, ConfigSchema]:
@@ -874,4 +870,15 @@ class ValidationSchema:
                     )
                 }
             }
+        }
+
+    @staticmethod
+    def _get_dreamer_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the dreamer_config schema for the Dreamer class."""
+        return {
+            "dream_max_events_per_cycle": ConfigSchema(field="dreamer_config.dream_max_events_per_cycle", type=int, default=5, range=(1, 100)),
+            "dream_novelty_weight": ConfigSchema(field="dreamer_config.dream_novelty_weight", type=float, default=1.0, range=(0.0, 10.0)),
+            "dream_confidence_weight": ConfigSchema(field="dreamer_config.dream_confidence_weight", type=float, default=0.0, range=(0.0, 10.0)),
+            "dream_selection_strategy": ConfigSchema(field="dreamer_config.dream_selection_strategy", type=str, default="top", validator=lambda x: x in ["top", "random"]),
+            "dream_noise_level": ConfigSchema(field="dreamer_config.dream_noise_level", type=float, default=0.2, range=(0.0, 1.0)),
         }

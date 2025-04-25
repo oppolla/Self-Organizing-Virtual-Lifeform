@@ -13,6 +13,11 @@ from sovl_config import ConfigManager
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 from sovl_generation import GenerationManager
 import gc
+import numpy as np
+import sqlite3
+import faiss
+from threading import Lock
+from typing import List, Dict, Optional, Callable
 
 class MemoriaManager:
     """Manages the core remembering system for SOVL."""
@@ -423,6 +428,167 @@ class MemoriaManager:
     # transcript_logger.close()
 
 
-    
+class ConversationMemoryManager:
+    """
+    Unified manager for short-term (RAM) and long-term (persistent, vector-searchable) conversation memory.
+    Supports adding, retrieving, and clearing conversation messages with embeddings.
+    """
+    def __init__(
+        self,
+        embedding_dim: int = 128,
+        max_short_term: int = 50,
+        db_path: str = "conversations.db",
+        embedding_fn: Optional[Callable[[str], np.ndarray]] = None,
+        logger: Optional[object] = None
+    ):
+        self.embedding_dim = embedding_dim
+        self.max_short_term = max_short_term
+        self.db_path = db_path
+        self.logger = logger
+        self._lock = Lock()
+        self.short_term_memory: List[Dict] = []
+        self.embedding_fn = embedding_fn or self._default_embedding_fn
+        self._init_database()
+        self.faiss_index = faiss.IndexFlatL2(embedding_dim)
+        self.message_ids = []
 
+    def _init_database(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT,
+                    content TEXT,
+                    timestamp REAL,
+                    user_id TEXT
+                )
+            """)
+            conn.commit()
 
+    def _default_embedding_fn(self, content: str) -> np.ndarray:
+        # Simple random embedding for demonstration; replace with real model as needed
+        np.random.seed(abs(hash(content)) % (2**32))
+        return np.random.rand(self.embedding_dim).astype(np.float32)
+
+    def add_message(self, role: str, content: str, user_id: str = "default") -> None:
+        """Add a message to both short-term and long-term memory."""
+        embedding = self.embedding_fn(content)
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": time.time(),
+            "user_id": user_id,
+            "embedding": embedding
+        }
+        with self._lock:
+            # Short-term memory
+            self.short_term_memory.append(message)
+            if len(self.short_term_memory) > self.max_short_term:
+                self.short_term_memory.pop(0)
+            # Long-term memory (SQLite)
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO conversations (role, content, timestamp, user_id) VALUES (?, ?, ?, ?)",
+                    (role, content, message["timestamp"], user_id)
+                )
+                message_id = cursor.lastrowid
+                conn.commit()
+            # Long-term memory (FAISS)
+            self.faiss_index.add(embedding.reshape(1, -1))
+            self.message_ids.append(message_id)
+
+    def get_short_term_context(self, max_messages: Optional[int] = None) -> List[Dict]:
+        """Retrieve short-term conversation history."""
+        with self._lock:
+            if max_messages is None:
+                return list(self.short_term_memory)
+            return self.short_term_memory[-max_messages:]
+
+    def get_long_term_context(self, user_id: str, query_embedding: Optional[np.ndarray] = None, top_k: int = 5) -> List[Dict]:
+        """Retrieve relevant long-term context using FAISS or user ID."""
+        with self._lock:
+            if query_embedding is not None and len(self.message_ids) > 0:
+                distances, indices = self.faiss_index.search(query_embedding.reshape(1, -1), top_k)
+                message_ids = [self.message_ids[i] for i in indices[0] if i < len(self.message_ids)]
+            else:
+                message_ids = []
+            results = []
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                if message_ids:
+                    placeholders = ",".join("?" for _ in message_ids)
+                    cursor.execute(
+                        f"SELECT id, role, content, timestamp, user_id FROM conversations WHERE id IN ({placeholders})",
+                        message_ids
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, role, content, timestamp, user_id FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+                        (user_id, top_k)
+                    )
+                for row in cursor.fetchall():
+                    results.append({
+                        "id": row[0],
+                        "role": row[1],
+                        "content": row[2],
+                        "timestamp": row[3],
+                        "user_id": row[4]
+                    })
+            return results
+
+    def clear_short_term_memory(self) -> None:
+        """Clear short-term memory."""
+        with self._lock:
+            self.short_term_memory = []
+
+    def clear_long_term_memory(self, user_id: Optional[str] = None) -> None:
+        """Clear long-term memory for a specific user or all."""
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                if user_id:
+                    cursor.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
+                else:
+                    cursor.execute("DELETE FROM conversations")
+                conn.commit()
+            self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+            self.message_ids = []
+
+    def forward(self, input_message: str, role: str = "user", user_id: str = "default") -> np.ndarray:
+        """Process a new message and return combined context embeddings."""
+        self.add_message(role, input_message, user_id)
+        with self._lock:
+            short_term_emb = np.stack([msg["embedding"] for msg in self.short_term_memory]) if self.short_term_memory else np.empty((0, self.embedding_dim), dtype=np.float32)
+            query_emb = short_term_emb[-1] if short_term_emb.shape[0] > 0 else self._default_embedding_fn(input_message)
+            long_term_msgs = self.get_long_term_context(user_id, query_emb)
+            long_term_emb = np.stack([query_emb for _ in long_term_msgs]) if long_term_msgs else np.empty((0, self.embedding_dim), dtype=np.float32)
+            if short_term_emb.shape[0] > 0 and long_term_emb.shape[0] > 0:
+                combined = np.concatenate([short_term_emb, long_term_emb], axis=0)
+            elif short_term_emb.shape[0] > 0:
+                combined = short_term_emb
+            elif long_term_emb.shape[0] > 0:
+                combined = long_term_emb
+            else:
+                combined = np.empty((0, self.embedding_dim), dtype=np.float32)
+            return combined
+
+# Example usage (for testing)
+if __name__ == "__main__":
+    memory_module = ConversationMemoryManager(embedding_dim=128, max_short_term=50, db_path="convo.db")
+    memory_module.add_message("user", "I love sci-fi books!", user_id="user1")
+    memory_module.add_message("assistant", "Cool! What's your favorite?", user_id="user1")
+    memory_module.add_message("user", "Dune is epic!", user_id="user1")
+    print("Short-Term Context:")
+    for msg in memory_module.get_short_term_context():
+        print(f"{msg['role']}: {msg['content']}")
+    print("\nLong-Term Context (user1):")
+    long_term = memory_module.get_long_term_context(user_id="user1", top_k=2)
+    for msg in long_term:
+        print(f"{msg['role']}: {msg['content']}")
+    embeddings = memory_module.forward("What's another good book?", user_id="user1")
+    print("\nCombined Embeddings Shape:", embeddings.shape)
+    memory_module.clear_long_term_memory()
+    import os
+    os.remove("convo.db")

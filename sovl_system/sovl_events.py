@@ -42,8 +42,6 @@ class MemoryEventTypes:
     MEMORY_HEALTH_CHECK = "memory_health_check"
     MEMORY_STATS_UPDATED = "memory_stats_updated"
     TOKEN_MAP_UPDATED = "token_map_updated"
-    DREAM_MEMORY_APPENDED = "dream_memory_appended"
-    DREAM_MEMORY_PRUNED = "dream_memory_pruned"
     SCAFFOLD_CONTEXT_UPDATED = "scaffold_context_updated"
     CONVERSATION_STARTED = "conversation_started"
     MEMORY_ERROR = "memory_error"
@@ -220,10 +218,9 @@ class MemoryEventDispatcher(EventDispatcher):
         self.subscribe(MemoryEventTypes.MEMORY_CONFIG_UPDATED, self._handle_config_update, priority=10)
         self.subscribe(MemoryEventTypes.MEMORY_THRESHOLD_REACHED, self._handle_memory_threshold, priority=20)
         self.subscribe(MemoryEventTypes.MEMORY_ERROR, self._handle_memory_error, priority=30)
-        self.subscribe(MemoryEventTypes.DREAM_MEMORY_APPENDED, self._handle_dream_memory_append, priority=15)
-        self.subscribe(MemoryEventTypes.DREAM_MEMORY_PRUNED, self._handle_dream_memory_prune, priority=15)
         self.subscribe(MemoryEventTypes.TOKEN_MAP_UPDATED, self._handle_token_map_update, priority=15)
         self.subscribe(MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED, self._handle_scaffold_context_update, priority=15)
+        self.subscribe(MemoryEventTypes.CONVERSATION_STARTED, self._handle_conversation_started, priority=15)
 
     async def _handle_memory_threshold(self, event: MemoryEvent) -> None:
         """Handle memory threshold events with error management."""
@@ -253,48 +250,6 @@ class MemoryEventDispatcher(EventDispatcher):
                     "event": event.__dict__
                 }
             )
-
-    async def _handle_dream_memory_append(self, event_data: Dict[str, Any]) -> None:
-        """Handle dream memory append events with error management."""
-        try:
-            memory = event_data.get('memory')
-            if not memory:
-                raise ValueError("No memory provided for append")
-                
-            # Record memory event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.DREAM_MEMORY_APPENDED,
-                'memory_id': memory.id if hasattr(memory, 'id') else None
-            })
-            
-            # Append memory
-            await self.memoria_manager.append_dream_memory(memory)
-            
-        except Exception as e:
-            self.error_manager.record_error(
-                error=e,
-                error_type="memory_event_error",
-                context={
-                    "event_type": MemoryEventTypes.DREAM_MEMORY_APPENDED,
-                    "event_data": event_data
-                }
-            )
-
-    async def _handle_dream_memory_prune(self, event_data: Dict[str, Any]) -> None:
-        """Handle dream memory prune events."""
-        try:
-            # Record prune event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.DREAM_MEMORY_PRUNED
-            })
-            
-            # Prune dream memory
-            self.memoria_manager.prune_dream_memory()
-            
-        except Exception as e:
-            self.logger.error(f"Error handling dream memory prune: {str(e)}", exc_info=True)
 
     async def _handle_token_map_update(self, event_data: Dict[str, Any]) -> None:
         """Handle token map update events."""
@@ -340,6 +295,24 @@ class MemoryEventDispatcher(EventDispatcher):
             
         except Exception as e:
             self.logger.error(f"Error handling scaffold context update: {str(e)}", exc_info=True)
+
+    async def _handle_conversation_started(self, event_data: Dict[str, Any]) -> None:
+        """Handle conversation started events."""
+        try:
+            conversation_id = event_data.get('conversation_id')
+            
+            if conversation_id is None:
+                raise ValueError("No conversation ID provided")
+                
+            # Record conversation started event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.CONVERSATION_STARTED,
+                'conversation_id': conversation_id
+            })
+            
+        except Exception as e:
+            self.logger.error(f"Error handling conversation started event: {str(e)}", exc_info=True)
 
     def get_memory_events_history(self) -> List[Dict[str, Any]]:
         """Get recent memory events history."""
