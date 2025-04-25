@@ -57,8 +57,7 @@ def validate_quantization_mode(mode: str, config_manager: ConfigManager) -> str:
         The normalized quantization mode
 
     Raises:
-        ValueError: If the mode is invalid
-        ConfigurationError: If configuration related to valid modes is incorrect
+        ValueError: If the mode is invalid or if there are configuration issues
     """
     try:
         # Get valid modes and default mode from config
@@ -76,13 +75,11 @@ def validate_quantization_mode(mode: str, config_manager: ConfigManager) -> str:
         # Ensure default_mode is one of the valid_modes
         if default_mode not in valid_modes:
             if not valid_modes:
-                raise ConfigurationError("No valid quantization modes defined in configuration.")
+                raise ValueError("No valid quantization modes defined in configuration.")
             # Fallback to the first valid mode if default is invalid
             default_mode = valid_modes[0]
-            raise ConfigurationError(
-                f"Default quantization mode '{default_mode}' is not in the list of valid modes: {valid_modes}. "
-                f"Falling back to '{default_mode}'."
-            )
+            print(f"Warning: Default quantization mode '{default_mode}' is not in the list of valid modes: {valid_modes}. "
+                  f"Falling back to '{default_mode}'.")
 
         normalized_mode = mode.lower()
 
@@ -91,11 +88,8 @@ def validate_quantization_mode(mode: str, config_manager: ConfigManager) -> str:
 
         return normalized_mode
 
-    except ConfigurationError as e:
-        # Re-raise configuration errors
-        raise e
     except Exception as e:
-        # Wrap other exceptions in ValueError
+        # Wrap all exceptions in ValueError
         raise ValueError(f"Failed to validate quantization mode: {str(e)}")
 
 def log_memory_usage(label: str = "", device: torch.device = None, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None) -> None:
