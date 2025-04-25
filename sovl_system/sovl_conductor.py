@@ -111,13 +111,6 @@ class SOVLOrchestrator(OrchestratorInterface):
             # Initialize system early to ensure state consistency
             self._system: Optional[SystemInterface] = None
             
-            # Initialize plugin manager
-            self.plugin_manager = PluginManager(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                state=self.state
-            )
-            
             # Initialize training cycle manager with lifecycle support
             self.training_cycle_manager = TrainingCycleManager(
                 config_manager=self.config_manager,
