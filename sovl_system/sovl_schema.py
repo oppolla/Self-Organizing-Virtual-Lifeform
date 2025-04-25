@@ -607,7 +607,7 @@ class ValidationSchema:
     def _get_scribed_config_schema() -> Dict[str, ConfigSchema]:
         """Return the scribed_config schema."""
         return {
-            "log_path": ConfigSchema(field="scribed_config.log_path", type=str, default="logs/sovl_scribed.jsonl"),
+            "output_path": ConfigSchema(field="scribed_config.output_path", type=str, default="scribe/sovl_scribe.jsonl"),
             "max_file_size_mb": ConfigSchema(field="scribed_config.max_file_size_mb", type=int, default=50, range=(1, None)),
             "buffer_size": ConfigSchema(field="scribed_config.buffer_size", type=int, default=10, range=(1, None)),
         }
