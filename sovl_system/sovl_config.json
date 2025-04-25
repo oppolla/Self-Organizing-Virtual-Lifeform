@@ -453,5 +453,10 @@
         "optimization_levels": ["basic", "moderate", "aggressive"]
       }
     }
+  },
+  "scribed_config": {
+    "output_path": "scribe/sovl_scribe.jsonl",
+    "max_file_size_mb": 50,
+    "buffer_size": 10
   }
 }
