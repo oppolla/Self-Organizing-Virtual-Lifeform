@@ -7,13 +7,14 @@ import json
 from sovl_utils import memory_usage, log_memory_usage
 from sovl_logger import Logger
 from sovl_memory import GPUMemoryManager
+from sovl_tuner import SOVLTuner
 
 class AutonomyManager:
     """
     A lightweight decision-making framework for autonomous system optimization in the SOVL System.
     Processes system metrics and uses LLM-based reasoning to make decisions, initially for memory health.
     """
-    def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref):
+    def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref, tuner: Optional[SOVLTuner] = None):
         """
         Initialize the AutonomyManager.
 
@@ -22,11 +23,13 @@ class AutonomyManager:
             logger: Logger instance for recording events and errors.
             device: Torch device (cuda/cpu) for tensor operations.
             system_ref: Reference to SOVLSystem instance for triggering actions.
+            tuner: SOVLTuner instance for dynamic parameter tuning (optional).
         """
         self.config_manager = config_manager
         self.logger = logger
         self.device = device
         self.system_ref = system_ref
+        self.tuner = tuner  # Link to SOVLTuner for dynamic parameter tuning
         self.memory_lock = Lock()
         
         # Cache configuration
@@ -319,6 +322,16 @@ class AutonomyManager:
                                 "new_length": len(self.system_ref.state.dream_memory),
                                 "timestamp": time.time()
                             })
+                
+                # Tuning action
+                if self.tuner:
+                    metrics = self.collect_metrics()
+                    self.tuner.tune_parameters(metrics)
+                    self.logger.record({
+                        "event": "autonomy_tuning_triggered",
+                        "metrics": metrics,
+                        "timestamp": time.time()
+                    })
                 
                 # Timeout check
                 if time.time() - start_time > self.autonomy_config["action_timeout"]:
