@@ -14,17 +14,10 @@ import traceback
 from sovl_scaffold import ScaffoldProvider
 from sovl_error import ErrorManager, ConfigurationError
 from sovl_config import ConfigManager
-from sovl_confidence import ConfidenceCalculator
 from sovl_processor import MetadataProcessor
-from sovl_temperament import TemperamentSystem
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 from torch.utils.data import DataLoader
-
-# File-level: Core training module for SOVL.
-# - Manages loading of training configuration, setting up optimizers and schedulers,
-#   executing training and validation loops, handling checkpoints, and orchestrating
-#   complex multi-phase workflows (gestation, dreaming, sleep sessions).
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -1377,3 +1370,385 @@ class SOVLTrainer:
                     complex_examples.append(ex)
                     
             return complex_examples if complex_examples else all_examples[:min(len(all_examples), 20)]
+        
+@dataclass
+class InterpretationConfig:
+    """Configuration for metadata interpretation rules."""
+    # Content weighting
+    complexity_weight: float = 0.3
+    novelty_weight: float = 0.2
+    quality_weight: float = 0.3
+    temporal_weight: float = 0.2
+    
+    # Learning rate adjustments
+    base_learning_rate: float = 2e-5
+    min_learning_rate: float = 1e-6
+    max_learning_rate: float = 1e-4
+    complexity_lr_factor: float = 0.8
+    
+    # Sample importance thresholds
+    min_importance: float = 0.1
+    max_importance: float = 5.0
+    importance_decay: float = 0.95
+    
+    # Quality thresholds
+    min_quality_score: float = 0.3
+    confidence_threshold: float = 0.7
+    token_diversity_threshold: float = 0.4
+    
+    # Temporal factors
+    recency_half_life: float = 86400  # 24 hours in seconds
+    max_age_factor: float = 0.5
+    
+    # Attention mechanisms
+    attention_scale: float = 1.0
+    max_attention_boost: float = 2.0
+    
+    def validate(self) -> None:
+        """Validate configuration parameters."""
+        assert 0 <= self.complexity_weight <= 1
+        assert 0 <= self.novelty_weight <= 1
+        assert 0 <= self.quality_weight <= 1
+        assert 0 <= self.temporal_weight <= 1
+        assert math.isclose(
+            sum([self.complexity_weight, self.novelty_weight, 
+                 self.quality_weight, self.temporal_weight]), 
+            1.0, 
+            rel_tol=1e-9
+        )
+        assert self.min_learning_rate <= self.base_learning_rate <= self.max_learning_rate
+        assert 0 < self.importance_decay <= 1
+        assert 0 <= self.min_quality_score <= 1
+        assert 0 <= self.confidence_threshold <= 1
+
+class ContentType(Enum):
+    """Enumeration of content types for specialized handling."""
+    NATURAL_LANGUAGE = "natural_language"
+    CODE = "code"
+    MIXED = "mixed"
+    CONVERSATION = "conversation"
+    SYSTEM = "system"
+
+class MetadataInterpreter:
+    """Interprets metadata to inform training parameters and sample importance."""
+    
+    def __init__(self, config: Optional[InterpretationConfig] = None):
+        """Initialize the metadata interpreter.
+        
+        Args:
+            config: Configuration for interpretation rules
+        """
+        self.config = config or InterpretationConfig()
+        self.config.validate()
+        
+        # Track interpretation history
+        self._interpretation_history = defaultdict(list)
+        self._sample_stats = defaultdict(float)
+        
+    def interpret_metadata(
+        self, 
+        metadata: Dict[str, Any],
+        current_time: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Interpret metadata and return training parameters.
+        
+        Args:
+            metadata: The metadata to interpret
+            current_time: Current timestamp (defaults to time.time())
+            
+        Returns:
+            Dictionary of interpreted parameters
+        """
+        current_time = current_time or time.time()
+        
+        # Extract core metrics
+        content_metrics = self._extract_content_metrics(metadata)
+        quality_score = self._calculate_quality_score(metadata)
+        temporal_factor = self._calculate_temporal_factor(metadata, current_time)
+        novelty_score = self._assess_novelty(metadata)
+        
+        # Calculate importance weight
+        importance_weight = self._calculate_importance_weight(
+            content_metrics["complexity"],
+            quality_score,
+            temporal_factor,
+            novelty_score
+        )
+        
+        # Determine learning parameter adjustments
+        learning_params = self._determine_learning_parameters(
+            content_metrics,
+            quality_score,
+            importance_weight
+        )
+        
+        # Calculate attention focus
+        attention_params = self._calculate_attention_parameters(
+            content_metrics,
+            metadata
+        )
+        
+        # Update interpretation history
+        self._update_history(metadata, importance_weight, quality_score)
+        
+        return {
+            "sample_importance": importance_weight,
+            "learning_params": learning_params,
+            "attention_params": attention_params,
+            "quality_metrics": {
+                "overall_quality": quality_score,
+                "novelty": novelty_score,
+                "temporal_relevance": temporal_factor
+            },
+            "content_metrics": content_metrics
+        }
+
+    def _extract_content_metrics(self, metadata: Dict[str, Any]) -> Dict[str, float]:
+        """Extract and normalize content-related metrics."""
+        # Get content metrics from metadata
+        metrics = metadata.get("content_metrics", {})
+        token_stats = metadata.get("token_stats", {})
+        
+        # Calculate complexity score
+        word_count = metrics.get("word_count", 0)
+        sentence_count = metrics.get("sentence_count", 0)
+        avg_word_length = metrics.get("avg_word_length", 0)
+        token_diversity = token_stats.get("token_diversity", 0)
+        
+        complexity = min(1.0, (
+            (math.log2(word_count + 1) / 10) * 0.3 +
+            (avg_word_length / 10) * 0.3 +
+            token_diversity * 0.4
+        ))
+        
+        # Determine content type
+        content_type = self._determine_content_type(metadata)
+        
+        # Calculate structure score
+        structure_metrics = metadata.get("structure_metrics", {})
+        structure_score = self._calculate_structure_score(structure_metrics)
+        
+        return {
+            "complexity": complexity,
+            "token_diversity": token_diversity,
+            "structure_score": structure_score,
+            "content_type": content_type,
+            "size_factor": min(1.0, math.log2(word_count + 1) / 10)
+        }
+
+    def _determine_content_type(self, metadata: Dict[str, Any]) -> ContentType:
+        """Determine the type of content from metadata."""
+        quality_metrics = metadata.get("quality_metrics", {})
+        
+        has_code = quality_metrics.get("has_code", False)
+        has_conversation = quality_metrics.get("has_conversation", False)
+        is_system = metadata.get("is_system_message", False)
+        
+        if is_system:
+            return ContentType.SYSTEM
+        elif has_code and not has_conversation:
+            return ContentType.CODE
+        elif has_conversation and not has_code:
+            return ContentType.CONVERSATION
+        elif has_code and has_conversation:
+            return ContentType.MIXED
+        else:
+            return ContentType.NATURAL_LANGUAGE
+
+    def _calculate_quality_score(self, metadata: Dict[str, Any]) -> float:
+        """Calculate overall quality score from metadata metrics."""
+        quality_metrics = metadata.get("quality_metrics", {})
+        performance_metrics = metadata.get("performance_metrics", {})
+        
+        # Get base metrics
+        confidence = metadata.get("confidence_score", 0.0)
+        token_quality = quality_metrics.get("token_quality", 0.0)
+        error_rate = quality_metrics.get("error_rate", 0.0)
+        
+        # Performance factors
+        efficiency = performance_metrics.get("efficiency", {})
+        performance_score = float(efficiency.get("optimization_level", "low") == "high")
+        
+        # Calculate weighted quality score
+        quality_score = (
+            confidence * 0.4 +
+            token_quality * 0.3 +
+            (1 - error_rate) * 0.2 +
+            performance_score * 0.1
+        )
+        
+        return max(self.config.min_quality_score, min(1.0, quality_score))
+
+    def _calculate_temporal_factor(
+        self, 
+        metadata: Dict[str, Any],
+        current_time: float
+    ) -> float:
+        """Calculate temporal relevance factor."""
+        timestamp = metadata.get("timestamp_unix", current_time)
+        age = current_time - timestamp
+        
+        # Apply exponential decay based on age
+        temporal_factor = math.exp(-age / self.config.recency_half_life)
+        
+        # Ensure minimum temporal factor
+        return max(self.config.max_age_factor, temporal_factor)
+
+    def _assess_novelty(self, metadata: Dict[str, Any]) -> float:
+        """Assess content novelty based on metadata."""
+        content_metrics = metadata.get("content_metrics", {})
+        token_stats = metadata.get("token_stats", {})
+        
+        # Get novelty indicators
+        token_diversity = token_stats.get("token_diversity", 0.0)
+        pattern_uniqueness = token_stats.get("pattern_stats", {}).get("bigram_diversity", 0.0)
+        
+        # Calculate novelty score
+        novelty_score = (
+            token_diversity * 0.6 +
+            pattern_uniqueness * 0.4
+        )
+        
+        return min(1.0, novelty_score)
+
+    def _calculate_importance_weight(
+        self,
+        complexity: float,
+        quality: float,
+        temporal_factor: float,
+        novelty: float
+    ) -> float:
+        """Calculate overall sample importance weight."""
+        importance = (
+            complexity * self.config.complexity_weight +
+            quality * self.config.quality_weight +
+            temporal_factor * self.config.temporal_weight +
+            novelty * self.config.novelty_weight
+        )
+        
+        # Apply bounds
+        importance = max(
+            self.config.min_importance,
+            min(self.config.max_importance, importance)
+        )
+        
+        return importance
+
+    def _determine_learning_parameters(
+        self,
+        content_metrics: Dict[str, float],
+        quality_score: float,
+        importance_weight: float
+    ) -> Dict[str, float]:
+        """Determine learning rate and related parameters."""
+        # Base learning rate adjustment
+        complexity_factor = math.pow(
+            self.config.complexity_lr_factor,
+            content_metrics["complexity"]
+        )
+        
+        learning_rate = self.config.base_learning_rate * complexity_factor
+        
+        # Bound learning rate
+        learning_rate = max(
+            self.config.min_learning_rate,
+            min(self.config.max_learning_rate, learning_rate)
+        )
+        
+        # Additional training parameters
+        return {
+            "learning_rate": learning_rate,
+            "weight_decay": 0.01 * quality_score,  # Adjust regularization based on quality
+            "dropout": 0.1 + (1 - quality_score) * 0.2,  # More dropout for lower quality
+            "gradient_scale": importance_weight
+        }
+
+    def _calculate_attention_parameters(
+        self,
+        content_metrics: Dict[str, float],
+        metadata: Dict[str, Any]
+    ) -> Dict[str, float]:
+        """Calculate attention mechanism parameters."""
+        structure_metrics = metadata.get("structure_metrics", {})
+        
+        # Base attention scale
+        attention_scale = self.config.attention_scale
+        
+        # Boost attention for complex content
+        if content_metrics["complexity"] > 0.7:
+            attention_scale *= min(
+                self.config.max_attention_boost,
+                1 + content_metrics["complexity"]
+            )
+            
+        # Adjust for content type
+        content_type = content_metrics["content_type"]
+        if content_type == ContentType.CODE:
+            attention_scale *= 1.2  # Boost attention for code
+        elif content_type == ContentType.MIXED:
+            attention_scale *= 1.1  # Slight boost for mixed content
+            
+        return {
+            "scale": attention_scale,
+            "dropout": 0.1,  # Base attention dropout
+            "head_importance": [1.0] * 12  # Per-head importance (if applicable)
+        }
+
+    def _calculate_structure_score(
+        self,
+        structure_metrics: Dict[str, Any]
+    ) -> float:
+        """Calculate structural quality score."""
+        if not structure_metrics:
+            return 0.5
+            
+        # Extract metrics
+        length_metrics = structure_metrics.get("length_metrics", {})
+        whitespace_metrics = structure_metrics.get("whitespace_metrics", {})
+        
+        # Calculate structure score components
+        length_score = min(1.0, length_metrics.get("avg_line_length", 0) / 100)
+        whitespace_ratio = whitespace_metrics.get("whitespace_ratio", 0)
+        indentation_score = min(1.0, whitespace_metrics.get("indentation_levels", 0) / 5)
+        
+        # Combine scores
+        return (length_score * 0.4 + 
+                whitespace_ratio * 0.3 +
+                indentation_score * 0.3)
+
+    def _update_history(
+        self,
+        metadata: Dict[str, Any],
+        importance: float,
+        quality: float
+    ) -> None:
+        """Update interpretation history for tracking."""
+        sample_id = metadata.get("sample_id", str(time.time()))
+        
+        self._interpretation_history[sample_id].append({
+            "timestamp": time.time(),
+            "importance": importance,
+            "quality": quality
+        })
+        
+        # Update running statistics
+        self._sample_stats["total_samples"] += 1
+        self._sample_stats["avg_importance"] = (
+            (self._sample_stats["avg_importance"] * 
+             (self._sample_stats["total_samples"] - 1) +
+             importance) / self._sample_stats["total_samples"]
+        )
+        self._sample_stats["avg_quality"] = (
+            (self._sample_stats["avg_quality"] * 
+             (self._sample_stats["total_samples"] - 1) +
+             quality) / self._sample_stats["total_samples"]
+        )
+
+    def get_interpretation_stats(self) -> Dict[str, Any]:
+        """Get current interpretation statistics."""
+        return {
+            "total_samples": self._sample_stats["total_samples"],
+            "average_importance": self._sample_stats["avg_importance"],
+            "average_quality": self._sample_stats["avg_quality"],
+            "history_size": sum(len(h) for h in self._interpretation_history.values())
+        }
