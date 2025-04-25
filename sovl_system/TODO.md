@@ -8,6 +8,8 @@ Complete finals for all modules
 3. integrate sovl_bonder
 4. further develop initialization and startup feel
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
+6. Give system ability to "watch" content and derive joy and knowledge from it
+
 
 
 
