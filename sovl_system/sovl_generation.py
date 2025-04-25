@@ -1083,7 +1083,6 @@ class GenerationManager:
     def generate_text(self, prompt: str, num_return_sequences: int = 1, **kwargs) -> List[str]:
         """Generate text with state-driven error handling, recovery, and scribe logging."""
         request_time = time.time()
-        user_id = kwargs.get("user_id")
 
         try:
             # Validate parameters
@@ -1104,23 +1103,22 @@ class GenerationManager:
             }
             
             # Assemble capture data
-            input_log, output_log, metadata_log = GenerationLogAssembler.assemble_log_data(
+            event_data, source_metadata = ScribeAssembler.assemble_scribe_data(
                 manager=self,
                 prompt=prompt,
                 initial_kwargs=kwargs,
                 generation_result=generation_result,
                 request_time=request_time,
                 session_id=self.session_id,
-                user_id=user_id
             )
-            # Capture successful generation
+
+            # Log the event
             capture_scribe_event(
                 origin="sovl_generation",
-                event_type="text_generated",
-                event_data={**input_log, **output_log},
-                source_metadata=metadata_log,
-                session_id=self.session_id,
-                timestamp=datetime.fromtimestamp(request_time)
+                event_type="base_generation",
+                event_data=event_data,
+                source_metadata=source_metadata,
+                session_id=self.session_id
             )
             
             return generated_texts
@@ -1138,7 +1136,6 @@ class GenerationManager:
                 },
                 source_metadata={
                     "session_id": self.session_id,
-                    "user_id": user_id,
                     "request_timestamp_unix": request_time,
                     "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
                     "device": str(self.device)
@@ -1244,7 +1241,6 @@ class GenerationManager:
     ) -> Union[str, Dict[str, Any]]:
         """Backchannel communication method to directly prompt the scaffold model."""
         request_time = time.time()
-        user_id = kwargs.get("user_id")
 
         try:
             # Memory optimization: Check memory health before proceeding
@@ -1339,7 +1335,7 @@ class GenerationManager:
                     source_metadata={
                         **result['metadata'],
                         "session_id": self.session_id,
-                        "user_id": user_id,
+
                         "request_timestamp_unix": request_time
                     },
                     session_id=self.session_id,
@@ -1373,7 +1369,6 @@ class GenerationManager:
                         "memory_usage": self.memory_manager.get_memory_usage(),
                         "generation_time": time.time() - request_time,
                         "session_id": self.session_id,
-                        "user_id": user_id,
                         "request_timestamp_unix": request_time
                     },
                     session_id=self.session_id,
@@ -1402,7 +1397,6 @@ class GenerationManager:
                     "scaffold_index": scaffold_index,
                     "model_name": getattr(self.scaffold_tokenizer, "name_or_path", "unknown"),
                     "session_id": self.session_id,
-                    "user_id": user_id,
                     "request_timestamp_unix": request_time,
                     "memory_usage": self.memory_manager.get_memory_usage()
                 },
@@ -1759,22 +1753,20 @@ class GenerationManager:
                 raise
         return wrapper
     
-class GenerationLogAssembler:
-    """Assembles the data required for logging to ChatTranscript."""
+class ScribeAssembler:
+    """Assembles the data required for logging generation events."""
 
     @staticmethod
-    def assemble_log_data(
+    def assemble_scribe_data(
         manager: 'GenerationManager', # Pass the manager instance for context
         prompt: str,
         initial_kwargs: Dict[str, Any],
         generation_result: Dict[str, Any],
         request_time: float,
         session_id: Optional[str],
-        user_id: Optional[str]
-        # Add other external context args as needed
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Assembles the input, output, and metadata dictionaries for logging.
+        Assembles the event_data and source_metadata dictionaries for logging.
 
         Args:
             manager: The GenerationManager instance.
@@ -1783,54 +1775,47 @@ class GenerationLogAssembler:
             generation_result: The dictionary returned by _generate_with_state_context.
             request_time: The timestamp when the generation request was received.
             session_id: External session identifier.
-            user_id: External user identifier.
 
         Returns:
-            A tuple containing: (generation_input_log, generation_output_log, metadata_log)
+            A tuple containing: (event_data, source_metadata)
         """
 
-        # --- Assemble generation_input_log ---
-        generation_input_log = {
-            "prompt": prompt,
-            "num_return_sequences": initial_kwargs.get("num_return_sequences", 1), # Get from original kwargs
-            "initial_kwargs": initial_kwargs,
-            # Optionally add tokenized input if needed from generation_result
-            # "tokenized_input_batch": generation_result.get("input_batch"),
-        }
-
-        # --- Assemble generation_output_log ---
+        # Retrieve calculated scores from generation_result
         generated_texts = generation_result.get("generated_texts", [])
-        generation_output_log = {
+        calculated_confidence = generation_result.get("calculated_confidence")
+        calculated_novelty = generation_result.get("calculated_novelty")
+
+        # Retrieve state-based scores/info from manager
+        current_temperament = getattr(manager.state, "temperament_score", None)
+        current_lifecycle_stage = manager.lifecycle_manager.get_lifecycle_stage() if hasattr(manager, 'lifecycle_manager') and manager.lifecycle_manager else None
+        current_memory_mb = manager.memory_manager.get_memory_usage().get("total_mb") if hasattr(manager, 'memory_manager') and manager.memory_manager else None
+
+        # --- Assemble event_data (Data directly related to the event's core action) ---
+        event_data = {
+            "prompt": prompt,
             "texts": generated_texts,
-            # Calculate or retrieve confidence if available
-            # "confidence": manager.calculate_confidence_score(...) # Example
+            "confidence_score": calculated_confidence,
+            "num_return_sequences": initial_kwargs.get("num_return_sequences", 1),
         }
-        # Optionally include parts of raw_hf_outputs if desired
-        # raw_outputs = generation_result.get("raw_hf_outputs")
-        # if raw_outputs and hasattr(raw_outputs, 'scores'):
-        #     generation_output_log["output_scores_summary"] = ... # Summarize scores
 
-
-        # --- Assemble metadata_log ---
-        metadata_log = {
+        # --- Assemble source_metadata (Contextual info about the event) ---
+        source_metadata = {
             # External Context
             "session_id": session_id,
-            "user_id": user_id,
             # Request Info
             "request_timestamp_unix": request_time,
+            "initial_kwargs": initial_kwargs,
             # Config Used
             "generation_config_used": generation_result.get("generation_config_used"),
-            # System State from GenerationManager
+            # System State Snapshot
             "model_name": getattr(manager.base_model.config, "_name_or_path", "unknown"),
             "device": str(manager.device),
-            "temperament_score": getattr(manager.state, "temperament_score", None),
-            "lifecycle_stage": manager.lifecycle_manager.get_lifecycle_stage() if hasattr(manager, 'lifecycle_manager') and manager.lifecycle_manager else None,
-            "memory_usage_mb": manager.memory_manager.get_memory_usage().get("total_mb") if hasattr(manager, 'memory_manager') and manager.memory_manager else None,
+            "temperament_score": current_temperament,
+            "lifecycle_stage": current_lifecycle_stage,
+            "novelty_score": calculated_novelty,
+            "memory_usage_mb": current_memory_mb,
             # Performance
             "processing_time_ms": generation_result.get("processing_time_ms"),
-            # Add token counts if desired (requires access to tokenizer potentially or data from result)
-            # "input_token_count": len(generation_result.get("input_batch", {}).get("input_ids", [[]])[0]),
-            # "output_token_count": len(generation_result.get("raw_hf_outputs", {}).sequences[0]) # Example
         }
 
-        return generation_input_log, generation_output_log, metadata_log
+        return event_data, source_metadata
