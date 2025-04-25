@@ -13,6 +13,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 from transformers import get_linear_schedule_with_warmup
 from sovl_engram import LoraAdapterManager
+from sovl_io import JSONLLoader
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -726,6 +727,18 @@ class TrainingWorkflowManager:
             if logger:
                 logger.log_error(f"Error saving LoRA weights after gestation: {str(e)}", error_type="gestation_lora_save_error", stack_trace=traceback.format_exc())
             return
+
+        # === DREAMER INTEGRATION ===
+        # At the end of gestation, run the Dreamer cycle if available
+        dreamer = getattr(self.trainer, 'dreamer', None)
+        if dreamer is not None:
+            try:
+                dreamer.run_dream_cycle()
+                if logger:
+                    logger.log_info("Dreamer cycle completed after gestation.", event_type="gestation_dreamer")
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"Error during Dreamer cycle: {str(e)}", error_type="gestation_dreamer_error", stack_trace=traceback.format_exc())
 
     def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Run dream cycle."""
@@ -1459,8 +1472,6 @@ class MetadataInterpreter:
             "history_size": sum(len(h) for h in self._interpretation_history.values())
         }
 
-# ================== BATCH & TENSOR HELPERS (for modular pipeline) ==================
-
 def collate_tensor_batch(batch: list, device: "torch.device") -> dict:
     """
     Collate a list of dicts (with tensor values) into a batch dict of stacked tensors, moved to device.
@@ -1569,9 +1580,6 @@ class BatchPreparer:
             batch.append(encoded)
         return collate_tensor_batch(batch, self.device)
 
-# ================== END MODULAR DATA PIPELINE INTERFACES ==================
-
-# ================== DREAMER (Dream System) ==================
 import json
 from datetime import datetime
 import random
@@ -1581,12 +1589,13 @@ class Dreamer:
     Dream system for SOVL: selects, generates, and logs dream events from the last active period.
     Each dream is a surreal narration, with optional dream noise for creativity.
     """
-    def __init__(self, config_manager, scribe_path, logger, metadata_processor, scribe_event_fn):
+    def __init__(self, config_manager, scribe_path, logger, metadata_processor, scribe_event_fn, error_manager=None):
         self.config_manager = config_manager
         self.scribe_path = scribe_path
         self.logger = logger
         self.metadata_processor = metadata_processor
         self.scribe_event_fn = scribe_event_fn  # Function to log a scribe event (e.g., capture_scribe_event)
+        self.error_manager = error_manager
         # Configurable dream parameters
         self.max_dreams = config_manager.get("dream_max_events_per_cycle", 5)
         self.novelty_weight = config_manager.get("dream_novelty_weight", 1.0)
@@ -1601,25 +1610,21 @@ class Dreamer:
         """
         events = []
         try:
-            with open(self.scribe_path, "r") as f:
-                lines = f.readlines()
+            loader = JSONLLoader(self.config_manager, self.logger, self.error_manager) if self.error_manager else JSONLLoader(self.config_manager, self.logger, None)
+            lines = list(loader.stream_jsonl(self.scribe_path))
             # Find the last 'wake' event (or session start)
             last_wake_idx = None
             for i in range(len(lines)-1, -1, -1):
-                entry = json.loads(lines[i])
+                entry = lines[i]
                 if entry.get("event_type") == "wake":
                     last_wake_idx = i
                     break
             # If no wake found, use all events
             start_idx = last_wake_idx + 1 if last_wake_idx is not None else 0
-            for line in lines[start_idx:]:
-                try:
-                    entry = json.loads(line)
-                    events.append(entry)
-                except Exception as e:
-                    self.logger.log_warning(f"Failed to parse scribe log line: {e}")
+            events = lines[start_idx:]
         except Exception as e:
-            self.logger.log_error(f"Failed to read scribe log: {e}")
+            if self.logger:
+                self.logger.log_error(f"Failed to read scribe log with JSONLLoader: {e}")
         return events
 
     def score_and_select_dreams(self, events):
@@ -1720,4 +1725,3 @@ class Dreamer:
         dreams = self.generate_dream_events(dream_candidates)
         self.log_dreams(dreams)
 
-# ================== END DREAMER ==================
