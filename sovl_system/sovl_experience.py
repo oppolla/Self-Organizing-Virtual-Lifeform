@@ -1,437 +1,262 @@
 import torch
 import json
 import os
-from collections import deque, defaultdict
+from collections import deque
 from threading import Lock
 import time
-import traceback
-from typing import Optional, Dict, List, Tuple, Any, Union
-from sovl_logger import Logger
-from sovl_state import SOVLState, ConversationHistory
-from sovl_utils import memory_usage, safe_divide
-from sovl_config import ConfigManager
-from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
-from sovl_generation import GenerationManager
-import gc
 import numpy as np
 import sqlite3
 import faiss
-from threading import Lock
-from typing import List, Dict, Optional, Callable
+from typing import Optional, Dict, List, Any, Callable
+from sovl_memory import RAMManager
+from sovl_logger import Logger
+from sovl_error import ErrorManager, ConfigurationError
+from sovl_config import ConfigManager
 
-class MemoriaManager:
-    """Manages the core remembering system for SOVL."""
-    
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
-        """Initialize MemoriaManager with configuration and logger."""
-        self._config_manager = config_manager
-        self._logger = logger
-        self._memory_lock = Lock()
-        self._state = None
-        self._conversation_history = None
-        
-        # Initialize error manager
-        self._error_manager = ErrorManager(
-            context=None,  # Will be set by system
-            state_tracker=None,  # Will be set by system
-            config_manager=config_manager
-        )
-        
-        # Set up error thresholds
-        self._error_manager.set_error_threshold("storage_error", 3)
-        self._error_manager.set_error_threshold("save_error", 3)
-        self._error_manager.set_error_threshold("load_error", 3)
-        
-        # Register recovery strategies
-        self._error_manager.register_recovery_strategy("storage_error", self._recover_storage)
-        self._error_manager.register_recovery_strategy("save_error", self._recover_save)
-        self._error_manager.register_recovery_strategy("load_error", self._recover_load)
-        
-        # Initialize storage
-        self._initialize_storage()
-        
-        # Log initialization
-        self._logger.record_event(
-            event_type="memoria_manager_initialized",
-            message="Memoria manager initialized",
-            level="info"
-        )
-
-    def _initialize_storage(self) -> None:
-        """Initialize memory storage systems."""
-        with self._memory_lock:
-            try:
-                # Initialize conversation history
-                self._conversation_history = ConversationHistory()
-                
-                # Initialize state
-                self._state = SOVLState()
-                
-                # Log successful initialization
-                self._logger.record_event(
-                    event_type="memoria_storage_initialized",
-                    message="Memoria storage initialized successfully",
-                    level="info"
-                )
-                
-            except Exception as e:
-                error_record = ErrorRecord(
-                    error_type="storage_error",
-                    error_message=str(e),
-                    stack_trace=traceback.format_exc(),
-                    severity=2,
-                    context={
-                        "operation": "storage_initialization",
-                        "state": self._state.get_state() if self._state else None
-                    }
-                )
-                self._error_manager.record_error(error_record)
-                raise
-
-    def _recover_storage(self, error_record: ErrorRecord) -> None:
-        """Recovery strategy for storage initialization errors."""
-        try:
-            # Clear existing state
-            self._state = None
-            self._conversation_history = None
-            
-            # Force garbage collection
-            gc.collect()
-            
-            # Retry initialization
-            self._initialize_storage()
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to recover from storage error: {str(e)}",
-                error_type="storage_recovery_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    def save_state(self, path_prefix: str) -> None:
-        """Save current state to disk."""
-        try:
-            state = {
-                "conversation_history": self._conversation_history.get_state(),
-                "state": self._state.get_state()
-            }
-            
-            os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
-            with open(f"{path_prefix}_memoria.json", 'w') as f:
-                json.dump(state, f)
-                
-            self._logger.record_event(
-                event_type="memoria_state_saved",
-                message="Memoria state saved successfully",
-                level="info"
-            )
-            
-        except Exception as e:
-            error_record = ErrorRecord(
-                error_type="save_error",
-                error_message=str(e),
-                stack_trace=traceback.format_exc(),
-                severity=2,
-                context={
-                    "operation": "state_save",
-                    "path_prefix": path_prefix,
-                    "state": self._state.get_state() if self._state else None
-                }
-            )
-            self._error_manager.record_error(error_record)
-            raise
-
-    def _recover_save(self, error_record: ErrorRecord) -> None:
-        """Recovery strategy for save errors."""
-        try:
-            # Create backup directory
-            backup_dir = os.path.join(os.path.dirname(error_record.context["path_prefix"]), "backup")
-            os.makedirs(backup_dir, exist_ok=True)
-            
-            # Save to backup location
-            backup_path = os.path.join(backup_dir, f"memoria_backup_{int(time.time())}.json")
-            self.save_state(backup_path)
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to recover from save error: {str(e)}",
-                error_type="save_recovery_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    def load_state(self, path_prefix: str) -> None:
-        """Load state from disk."""
-        try:
-            with open(f"{path_prefix}_memoria.json", 'r') as f:
-                state = json.load(f)
-                
-            self._conversation_history.load_state(state["conversation_history"])
-            self._state.load_state(state["state"])
-            
-            self._logger.record_event(
-                event_type="memoria_state_loaded",
-                message="Memoria state loaded successfully",
-                level="info"
-            )
-            
-        except Exception as e:
-            error_record = ErrorRecord(
-                error_type="load_error",
-                error_message=str(e),
-                stack_trace=traceback.format_exc(),
-                severity=2,
-                context={
-                    "operation": "state_load",
-                    "path_prefix": path_prefix
-                }
-            )
-            self._error_manager.record_error(error_record)
-            raise
-
-    def _recover_load(self, error_record: ErrorRecord) -> None:
-        """Recovery strategy for load errors."""
-        try:
-            # Try loading from backup
-            backup_dir = os.path.join(os.path.dirname(error_record.context["path_prefix"]), "backup")
-            if os.path.exists(backup_dir):
-                backup_files = sorted(os.listdir(backup_dir), reverse=True)
-                for backup_file in backup_files:
-                    try:
-                        backup_path = os.path.join(backup_dir, backup_file)
-                        self.load_state(backup_path)
-                        return
-                    except Exception:
-                        continue
-            
-            # If no backup works, reset to default state
-            self._initialize_storage()
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to recover from load error: {str(e)}",
-                error_type="load_recovery_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    class ChatTranscript:
-        """
-        Logs chat interactions (inputs and outputs) to a JSONL file,
-        enriched with metadata. Designed to capture data originating
-        from the generation process.
-        """
-
-        def __init__(
-            self,
-            log_file_path: str,
-            logger: Logger,
-            # metadata_generator: MetadataGenerator # Optional: Or pass metadata directly
-            max_file_size_mb: int = 50, # Example: Configurable file size limit
-            write_buffer_size: int = 10 # Example: Write every N entries
-        ):
-            """
-            Initializes the ChatTranscript logger.
-
-            Args:
-                log_file_path: The path to the JSONL file for storing transcripts.
-                logger: The main system logger for internal logging.
-                max_file_size_mb: Maximum size in MB before considering rotation (logic TBD).
-                write_buffer_size: Number of entries to buffer before writing to disk.
-            """
-            self.log_file_path = log_file_path
-            self.logger = logger
-            # self.metadata_generator = metadata_generator
-            self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
-            self.write_buffer_size = max(1, write_buffer_size) # Ensure at least 1
-            self._buffer: List[Dict[str, Any]] = []
-            self._file_handle = None
-
-            # Ensure log directory exists
-            try:
-                os.makedirs(os.path.dirname(self.log_file_path), exist_ok=True)
-                # Open in append mode, create if doesn't exist
-                self._open_file()
-            except OSError as e:
-                self.logger.log_error(
-                    f"Failed to create directory or open chat transcript log: {self.log_file_path}",
-                    error_type="file_io_error",
-                    stack_trace=str(e)
-                )
-                # Consider raising or handling more gracefully
-                raise
-
-        def _open_file(self):
-            """Opens the log file in append mode."""
-            try:
-                # Close existing handle if necessary (e.g., during rotation)
-                if self._file_handle and not self._file_handle.closed:
-                    self._file_handle.close()
-                self._file_handle = open(self.log_file_path, 'a', encoding='utf-8')
-                self.logger.log_event(
-                    "chat_transcript_opened",
-                    f"Chat transcript log opened: {self.log_file_path}",
-                    "info"
-                )
-            except IOError as e:
-                self.logger.log_error(
-                    f"Failed to open chat transcript file handle: {self.log_file_path}",
-                    error_type="file_io_error",
-                    stack_trace=str(e)
-                )
-                self._file_handle = None # Ensure handle is None on failure
-
-        def log_interaction(
-            self,
-            generation_input: Dict[str, Any], # Input structure from sovl_generation
-            generation_output: Dict[str, Any], # Output structure from sovl_generation
-            metadata: Dict[str, Any] # Metadata associated with this interaction
-        ) -> None:
-            """
-            Logs a single input/output interaction from the generation process.
-
-            Args:
-                generation_input: The data provided as input to the generation module.
-                generation_output: The data produced by the generation module.
-                metadata: Additional metadata relevant to this interaction (e.g.,
-                          timestamps, confidence scores, system state, model config).
-            """
-            if not self._file_handle or self._file_handle.closed:
-                self.logger.log_warning(
-                    "Attempted to log chat interaction, but file handle is not open.",
-                    event_type="chat_transcript_write_error"
-                )
-                # Optionally try to reopen
-                # self._open_file()
-                # if not self._file_handle: return # Exit if reopen failed
-                return
-
-            try:
-                entry = self._format_entry(generation_input, generation_output, metadata)
-                self._buffer.append(entry)
-
-                if len(self._buffer) >= self.write_buffer_size:
-                    self._flush_buffer()
-
-            except Exception as e:
-                self.logger.log_error(
-                    "Failed to format or buffer chat transcript entry",
-                    error_type="transcript_formatting_error",
-                    stack_trace=str(e),
-                    additional_info={
-                        "input_keys": list(generation_input.keys()),
-                        "output_keys": list(generation_output.keys()),
-                        "metadata_keys": list(metadata.keys()),
-                    }
-                )
-
-        def _format_entry(
-            self,
-            gen_input: Dict[str, Any],
-            gen_output: Dict[str, Any],
-            metadata: Dict[str, Any]
-        ) -> Dict[str, Any]:
-            """Formats the log entry dictionary."""
-            # Basic structure, can be customized extensively
-            return {
-                "timestamp_unix": time.time(),
-                "session_id": metadata.get("session_id", None), # Example metadata field
-                "input_data": gen_input,
-                "output_data": gen_output,
-                "metadata": metadata, # Include all provided metadata
-            }
-
-        def _write_entry(self, entry: Dict[str, Any]) -> None:
-            """Writes a single formatted entry to the JSONL file."""
-            if self._file_handle and not self._file_handle.closed:
-                try:
-                    json_string = json.dumps(entry, ensure_ascii=False)
-                    self._file_handle.write(json_string + '\n')
-                except (TypeError, IOError) as e:
-                    self.logger.log_error(
-                        f"Failed to write entry to chat transcript log: {self.log_file_path}",
-                        error_type="file_io_error",
-                        stack_trace=str(e),
-                        additional_info={"entry_keys": list(entry.keys())}
-                    )
-                    # Consider closing/reopening the file or other recovery
-            else:
-                 self.logger.log_warning(
-                    "Attempted to write chat entry, but file handle is not open.",
-                    event_type="chat_transcript_write_error"
-                )
-
-        def _flush_buffer(self) -> None:
-            """Writes all buffered entries to the file."""
-            if not self._buffer:
-                return
-
-            if not self._file_handle or self._file_handle.closed:
-                self.logger.log_warning(
-                    "Attempted to flush chat transcript buffer, but file handle is not open.",
-                    event_type="chat_transcript_flush_error"
-                )
-                # Optionally try to reopen
-                return
-
-            try:
-                for entry in self._buffer:
-                    self._write_entry(entry)
-                self._file_handle.flush() # Ensure data is written to OS
-                self._buffer = [] # Clear buffer
-                # Check file size for rotation (simplified check)
-                # current_size = self._file_handle.tell()
-                # if current_size > self.max_file_size_bytes:
-                #    self._rotate_log() # Implement rotation logic if needed
-            except Exception as e:
-                self.logger.log_error(
-                    f"Failed during chat transcript buffer flush: {self.log_file_path}",
-                    error_type="file_io_error",
-                    stack_trace=str(e)
-                )
-                # Decide how to handle buffer on error (clear? retry?)
-
-        def close(self) -> None:
-            """Flushes buffer and closes the log file."""
-            self.logger.log_event(
-                "chat_transcript_closing",
-                f"Closing chat transcript log: {self.log_file_path}",
-                "info"
-            )
-            try:
-                self._flush_buffer() # Ensure all data is written
-                if self._file_handle and not self._file_handle.closed:
-                    self._file_handle.close()
-                    self._file_handle = None
-            except Exception as e:
-                 self.logger.log_error(
-                    f"Error closing chat transcript log: {self.log_file_path}",
-                    error_type="file_io_error",
-                    stack_trace=str(e)
-                )
-
-        def __del__(self):
-            """Ensure file is closed when object is destroyed."""
-            self.close()
-
-    # Example Usage (Conceptual - would happen elsewhere, e.g., in sovl_main or generation coordinator)
-    # Assuming 'logger' is an initialized Logger instance
-    # Assuming 'get_current_metadata' is a function that gathers relevant metadata
-
-    # transcript_logger = ChatTranscript("logs/chat_transcripts.jsonl", logger)
-
-    # ... inside the generation loop ...
-    # generation_input = {"prompt": "Hello there!", "config": {...}}
-    # generation_output = {"response": "General Kenobi!", "metrics": {...}}
-
-    # transcript_logger.log_interaction(generation_input, generation_output, current_metadata)
-
-    # ... later, on shutdown ...
-    # transcript_logger.close()
-
-
-class ConversationMemoryManager:
+class ShortTermMemory:
     """
-    Unified manager for short-term (RAM) and long-term (persistent, vector-searchable) conversation memory.
-    Supports adding, retrieving, and clearing conversation messages with embeddings.
+    Handles in-memory, per-session short-term conversation history.
+    """
+    def __init__(self, max_short_term: int = 50, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, expiry_seconds: Optional[int] = None, logging_level: str = "info"):
+        # Use config_manager for max_short_term, expiry_seconds, and logging_level if provided
+        if config_manager is not None:
+            try:
+                max_short_term = config_manager.get("memory.max_short_term", max_short_term)
+                expiry_seconds = config_manager.get("memory.short_term_expiry_seconds", expiry_seconds)
+                logging_level = config_manager.get("memory.memory_logging_level", logging_level)
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"ShortTermMemory failed to get config values: {e}", error_type="ShortTermMemoryError")
+        self.max_short_term = max_short_term
+        self.expiry_seconds = expiry_seconds
+        self.memory = []  # List of dicts, each with a timestamp
+        self._lock = Lock()
+        self.logger = logger or Logger.get_instance()
+        self.logging_level = logging_level
+        try:
+            self.logger.record_event(
+                event_type="short_term_memory_init",
+                message=f"ShortTermMemory initialized with max_short_term={max_short_term}, expiry_seconds={expiry_seconds}",
+                level=logging_level
+            )
+        except Exception as e:
+            self.logger.log_error(f"ShortTermMemory.__init__ failed: {e}", error_type="ShortTermMemoryError")
+
+    def add(self, msg: Dict[str, Any]):
+        try:
+            with self._lock:
+                msg_with_time = dict(msg)
+                msg_with_time["_timestamp"] = time.time()
+                self.memory.append(msg_with_time)
+                # Prune by count
+                if len(self.memory) > self.max_short_term:
+                    removed = self.memory.pop(0)
+                    self.logger.record_event(
+                        event_type="short_term_memory_prune",
+                        message="ShortTermMemory pruned oldest message due to max size.",
+                        level=self.logging_level,
+                        additional_info={"removed": removed}
+                    )
+                # Prune by expiry
+                if self.expiry_seconds is not None:
+                    now = time.time()
+                    before = len(self.memory)
+                    self.memory = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
+                    after = len(self.memory)
+                    if before != after:
+                        self.logger.record_event(
+                            event_type="short_term_memory_expiry_prune",
+                            message=f"ShortTermMemory pruned {before - after} expired messages.",
+                            level=self.logging_level
+                        )
+                self.logger.record_event(
+                    event_type="short_term_memory_add",
+                    message="Message added to ShortTermMemory.",
+                    level=self.logging_level,
+                    additional_info={"msg": msg}
+                )
+        except Exception as e:
+            self.logger.log_error(f"ShortTermMemory.add failed: {e}", error_type="ShortTermMemoryError")
+
+    def get(self) -> List[Dict[str, Any]]:
+        try:
+            with self._lock:
+                now = time.time()
+                # Filter expired messages
+                if self.expiry_seconds is not None:
+                    filtered = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
+                else:
+                    filtered = list(self.memory)
+                self.logger.record_event(
+                    event_type="short_term_memory_get",
+                    message="ShortTermMemory context retrieved.",
+                    level=self.logging_level,
+                    additional_info={"size": len(filtered)}
+                )
+                # Remove _timestamp before returning
+                return [{k: v for k, v in m.items() if k != "_timestamp"} for m in filtered]
+        except Exception as e:
+            self.logger.log_error(f"ShortTermMemory.get failed: {e}", error_type="ShortTermMemoryError")
+            return []
+
+    def clear(self):
+        try:
+            with self._lock:
+                self.memory = []
+                self.logger.record_event(
+                    event_type="short_term_memory_clear",
+                    message="ShortTermMemory cleared.",
+                    level=self.logging_level
+                )
+        except Exception as e:
+            self.logger.log_error(f"ShortTermMemory.clear failed: {e}", error_type="ShortTermMemoryError")
+
+class LongTermMemory:
+    """
+    Handles persistent, vector-searchable conversation storage using SQLite and FAISS.
+    """
+    def __init__(self, db_path: str, embedding_dim: int, session_id: str, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, retention_days: Optional[int] = None, top_k: int = 5, logging_level: str = "info"):
+        # Use config_manager for db_path, embedding_dim, retention_days, top_k, logging_level if provided
+        if config_manager is not None:
+            try:
+                db_path = config_manager.get("memory.db_path", db_path)
+                embedding_dim = config_manager.get("memory.embedding_dim", embedding_dim)
+                retention_days = config_manager.get("memory.long_term_retention_days", retention_days)
+                top_k = config_manager.get("memory.long_term_top_k", top_k)
+                logging_level = config_manager.get("memory.memory_logging_level", logging_level)
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"LongTermMemory failed to get config values: {e}", error_type="LongTermMemoryError")
+        self.db_path = db_path
+        self.embedding_dim = embedding_dim
+        self.session_id = session_id
+        self.retention_days = retention_days
+        self.top_k = top_k
+        self._lock = Lock()
+        self.logger = logger or Logger.get_instance()
+        self.logging_level = logging_level
+        try:
+            self._init_database()
+            self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+            self.message_ids = []
+            self.logger.record_event(
+                event_type="long_term_memory_init",
+                message=f"LongTermMemory initialized with db_path={db_path}, embedding_dim={embedding_dim}, session_id={session_id}, retention_days={retention_days}, top_k={top_k}",
+                level=logging_level
+            )
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory.__init__ failed: {e}", error_type="LongTermMemoryError")
+
+    # Example: prune old records by retention_days (to be called after add or periodically)
+    def prune_expired(self):
+        if self.retention_days is not None:
+            try:
+                cutoff = time.time() - self.retention_days * 86400
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM conversations WHERE timestamp < ?", (cutoff,))
+                    conn.commit()
+                self.logger.record_event(
+                    event_type="long_term_memory_prune",
+                    message="Pruned expired long-term memory records.",
+                    level=self.logging_level
+                )
+            except Exception as e:
+                self.logger.log_error(f"LongTermMemory.prune_expired failed: {e}", error_type="LongTermMemoryError")
+
+    # You may want to call this inside add() or as a periodic maintenance task
+
+    def add(self, msg: Dict[str, Any]):
+        try:
+            with self._lock:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "INSERT INTO conversations (role, content, embedding, timestamp, user_id, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        (msg["role"], msg["content"], msg["embedding"].tobytes(), msg["timestamp"], msg["user_id"], self.session_id)
+                    )
+                    msg_id = cursor.lastrowid
+                    conn.commit()
+                self.faiss_index.add(msg["embedding"].reshape(1, -1))
+                self.message_ids.append(msg_id)
+                self.logger.record_event(
+                    event_type="long_term_memory_add",
+                    message="Message added to LongTermMemory.",
+                    level=self.logging_level,
+                    additional_info={"msg": msg, "msg_id": msg_id}
+                )
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory.add failed: {e}", error_type="LongTermMemoryError")
+
+    def query(self, query_embedding: np.ndarray, user_id: Optional[str] = None, top_k: int = 5, short_term_memory: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        try:
+            with self._lock:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    where = "WHERE session_id = ?"
+                    params = [self.session_id]
+                    if user_id:
+                        where += " AND user_id = ?"
+                        params.append(user_id)
+                    cursor.execute(f"SELECT id, role, content, embedding, timestamp, user_id FROM conversations {where}", params)
+                    rows = cursor.fetchall()
+                    if not rows:
+                        self.logger.record_event(
+                            event_type="long_term_memory_query_empty",
+                            message="No rows found for LongTermMemory query.",
+                            level=self.logging_level
+                        )
+                        return []
+                    embeddings = np.stack([np.frombuffer(row[3], dtype=np.float32) for row in rows])
+                    faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+                    faiss_index.add(embeddings)
+                    D, I = faiss_index.search(query_embedding.reshape(1, -1), min(top_k, len(rows)))
+                    results = [
+                        {
+                            "id": rows[i][0],
+                            "role": rows[i][1],
+                            "content": rows[i][2],
+                            "timestamp": rows[i][4],
+                            "user_id": rows[i][5],
+                            "session_id": self.session_id
+                        }
+                        for i in I[0]
+                    ]
+                    self.logger.record_event(
+                        event_type="long_term_memory_query",
+                        message="LongTermMemory query executed.",
+                        level=self.logging_level,
+                        additional_info={"num_results": len(results)}
+                    )
+                    return results
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory.query failed: {e}", error_type="LongTermMemoryError")
+            return []
+
+    def clear(self, user_id: Optional[str] = None):
+        try:
+            with self._lock:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    if user_id:
+                        cursor.execute("DELETE FROM conversations WHERE user_id = ? AND session_id = ?", (user_id, self.session_id))
+                    else:
+                        cursor.execute("DELETE FROM conversations WHERE session_id = ?", (self.session_id,))
+                    conn.commit()
+                self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+                self.message_ids = []
+                self.logger.record_event(
+                    event_type="long_term_memory_clear",
+                    message="LongTermMemory cleared.",
+                    level=self.logging_level,
+                    additional_info={"user_id": user_id}
+                )
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory.clear failed: {e}", error_type="LongTermMemoryError")
+
+class DialogueContextManager:
+    """
+    Orchestrates short-term and long-term memory for a session, with optional RAM health checks.
     """
     def __init__(
         self,
@@ -439,128 +264,149 @@ class ConversationMemoryManager:
         max_short_term: int = 50,
         db_path: str = "conversations.db",
         embedding_fn: Optional[Callable[[str], np.ndarray]] = None,
-        logger: Optional[object] = None
+        logger: Optional[object] = None,
+        session_id: str = "default",
+        config_manager: Optional[object] = None,
+        short_term_expiry_seconds: Optional[int] = None,
+        long_term_retention_days: Optional[int] = None,
+        long_term_top_k: int = 5,
+        memory_logging_level: str = "info"
     ):
+        self.config_manager = config_manager
+        # Use config_manager for all memory parameters if provided
+        if config_manager is not None:
+            try:
+                embedding_dim = config_manager.get("memory.embedding_dim", embedding_dim)
+                max_short_term = config_manager.get("memory.max_short_term", max_short_term)
+                db_path = config_manager.get("memory.db_path", db_path)
+                short_term_expiry_seconds = config_manager.get("memory.short_term_expiry_seconds", short_term_expiry_seconds)
+                long_term_retention_days = config_manager.get("memory.long_term_retention_days", long_term_retention_days)
+                long_term_top_k = config_manager.get("memory.long_term_top_k", long_term_top_k)
+                memory_logging_level = config_manager.get("memory.memory_logging_level", memory_logging_level)
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"DialogueContextManager failed to get config values: {e}", error_type="DialogueContextManagerError")
         self.embedding_dim = embedding_dim
         self.max_short_term = max_short_term
         self.db_path = db_path
-        self.logger = logger
-        self._lock = Lock()
-        self.short_term_memory: List[Dict] = []
+        self.logger = logger or Logger.get_instance()
+        self.session_id = session_id
+        self.error_manager = ErrorManager.get_instance() if hasattr(ErrorManager, 'get_instance') else ErrorManager()
+        self.short_term = ShortTermMemory(
+            max_short_term=self.max_short_term,
+            logger=self.logger,
+            config_manager=config_manager,
+            expiry_seconds=short_term_expiry_seconds,
+            logging_level=memory_logging_level
+        )
+        self.long_term = LongTermMemory(
+            db_path=self.db_path,
+            embedding_dim=self.embedding_dim,
+            session_id=self.session_id,
+            logger=self.logger,
+            config_manager=config_manager,
+            retention_days=long_term_retention_days,
+            top_k=long_term_top_k,
+            logging_level=memory_logging_level
+        )
         self.embedding_fn = embedding_fn or self._default_embedding_fn
-        self._init_database()
-        self.faiss_index = faiss.IndexFlatL2(embedding_dim)
-        self.message_ids = []
-
-    def _init_database(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    role TEXT,
-                    content TEXT,
-                    timestamp REAL,
-                    user_id TEXT
-                )
-            """)
-            conn.commit()
+        self.ram_manager = None
+        if config_manager is not None and hasattr(RAMManager, 'check_memory_health'):
+            try:
+                self.ram_manager = RAMManager(config_manager, self.logger)
+            except Exception as e:
+                self.logger.log_error(f"DialogueContextManager: RAMManager init failed: {e}", error_type="RAMManagerInitError")
 
     def _default_embedding_fn(self, content: str) -> np.ndarray:
-        # Simple random embedding for demonstration; replace with real model as needed
-        np.random.seed(abs(hash(content)) % (2**32))
         return np.random.rand(self.embedding_dim).astype(np.float32)
 
-    def add_message(self, role: str, content: str, user_id: str = "default") -> None:
-        """Add a message to both short-term and long-term memory."""
-        embedding = self.embedding_fn(content)
-        message = {
-            "role": role,
-            "content": content,
-            "timestamp": time.time(),
-            "user_id": user_id,
-            "embedding": embedding
-        }
-        with self._lock:
-            # Short-term memory
-            self.short_term_memory.append(message)
-            if len(self.short_term_memory) > self.max_short_term:
-                self.short_term_memory.pop(0)
-            # Long-term memory (SQLite)
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO conversations (role, content, timestamp, user_id) VALUES (?, ?, ?, ?)",
-                    (role, content, message["timestamp"], user_id)
-                )
-                message_id = cursor.lastrowid
-                conn.commit()
-            # Long-term memory (FAISS)
-            self.faiss_index.add(embedding.reshape(1, -1))
-            self.message_ids.append(message_id)
+    def add_message(self, role: str, content: str, user_id: str = "default"):
+        try:
+            if self.ram_manager:
+                try:
+                    ram_health = self.ram_manager.check_memory_health()
+                    if ram_health.get('usage_percentage', 0) > 0.90:
+                        if self.logger:
+                            self.logger.record_event(
+                                event_type="ram_usage_high",
+                                message=f"RAM usage high ({ram_health['usage_percentage']*100:.1f}%), skipping add_message.",
+                                level="warning"
+                            )
+                        return  # Skip adding message if RAM is critically high
+                except Exception as e:
+                    if self.logger:
+                        self.logger.record_event(
+                            event_type="ram_health_check_failed",
+                            message=f"RAM health check failed: {e}",
+                            level="warning"
+                        )
+            embedding = self.embedding_fn(content)
+            timestamp = time.time()
+            msg = {
+                "role": role,
+                "content": content,
+                "embedding": embedding,
+                "timestamp": timestamp,
+                "user_id": user_id,
+                "session_id": self.session_id
+            }
+            self.short_term.add(msg)
+            self.long_term.add(msg)
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"DialogueContextManager.add_message failed: {e}", error_type="DialogueContextManagerError")
+            if self.error_manager:
+                self.error_manager.record_error(e, error_type="DialogueContextManagerError")
 
-    def get_short_term_context(self, max_messages: Optional[int] = None) -> List[Dict]:
-        """Retrieve short-term conversation history."""
-        with self._lock:
-            if max_messages is None:
-                return list(self.short_term_memory)
-            return self.short_term_memory[-max_messages:]
+    def get_short_term_context(self) -> List[Dict[str, Any]]:
+        try:
+            return self.short_term.get()
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"DialogueContextManager.get_short_term_context failed: {e}", error_type="DialogueContextManagerError")
+            if self.error_manager:
+                self.error_manager.record_error(e, error_type="DialogueContextManagerError")
+            return []
 
-    def get_long_term_context(self, user_id: str, query_embedding: Optional[np.ndarray] = None, top_k: int = 5) -> List[Dict]:
-        """Retrieve relevant long-term context using FAISS or user ID."""
-        with self._lock:
-            if query_embedding is not None and len(self.message_ids) > 0:
-                distances, indices = self.faiss_index.search(query_embedding.reshape(1, -1), top_k)
-                message_ids = [self.message_ids[i] for i in indices[0] if i < len(self.message_ids)]
-            else:
-                message_ids = []
-            results = []
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                if message_ids:
-                    placeholders = ",".join("?" for _ in message_ids)
-                    cursor.execute(
-                        f"SELECT id, role, content, timestamp, user_id FROM conversations WHERE id IN ({placeholders})",
-                        message_ids
-                    )
+    def get_long_term_context(self, user_id: Optional[str] = None, query_embedding: Optional[np.ndarray] = None, top_k: int = 5) -> List[Dict[str, Any]]:
+        try:
+            if query_embedding is None:
+                stm = self.short_term.get()
+                if stm:
+                    query_embedding = stm[-1]["embedding"]
                 else:
-                    cursor.execute(
-                        "SELECT id, role, content, timestamp, user_id FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-                        (user_id, top_k)
-                    )
-                for row in cursor.fetchall():
-                    results.append({
-                        "id": row[0],
-                        "role": row[1],
-                        "content": row[2],
-                        "timestamp": row[3],
-                        "user_id": row[4]
-                    })
-            return results
+                    return []
+            return self.long_term.query(query_embedding, user_id=user_id, top_k=top_k)
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"DialogueContextManager.get_long_term_context failed: {e}", error_type="DialogueContextManagerError")
+            if self.error_manager:
+                self.error_manager.record_error(e, error_type="DialogueContextManagerError")
+            return []
 
-    def clear_short_term_memory(self) -> None:
-        """Clear short-term memory."""
-        with self._lock:
-            self.short_term_memory = []
+    def clear_short_term_memory(self):
+        try:
+            self.short_term.clear()
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"DialogueContextManager.clear_short_term_memory failed: {e}", error_type="DialogueContextManagerError")
+            if self.error_manager:
+                self.error_manager.record_error(e, error_type="DialogueContextManagerError")
 
-    def clear_long_term_memory(self, user_id: Optional[str] = None) -> None:
-        """Clear long-term memory for a specific user or all."""
-        with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                if user_id:
-                    cursor.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,))
-                else:
-                    cursor.execute("DELETE FROM conversations")
-                conn.commit()
-            self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
-            self.message_ids = []
+    def clear_long_term_memory(self, user_id: Optional[str] = None):
+        try:
+            self.long_term.clear(user_id=user_id)
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"DialogueContextManager.clear_long_term_memory failed: {e}", error_type="DialogueContextManagerError")
+            if self.error_manager:
+                self.error_manager.record_error(e, error_type="DialogueContextManagerError")
 
     def forward(self, input_message: str, role: str = "user", user_id: str = "default") -> np.ndarray:
-        """Process a new message and return combined context embeddings."""
-        self.add_message(role, input_message, user_id)
-        with self._lock:
-            short_term_emb = np.stack([msg["embedding"] for msg in self.short_term_memory]) if self.short_term_memory else np.empty((0, self.embedding_dim), dtype=np.float32)
+        try:
+            self.add_message(role, input_message, user_id)
+            stm = self.short_term.get()
+            short_term_emb = np.stack([msg["embedding"] for msg in stm]) if stm else np.empty((0, self.embedding_dim), dtype=np.float32)
             query_emb = short_term_emb[-1] if short_term_emb.shape[0] > 0 else self._default_embedding_fn(input_message)
             long_term_msgs = self.get_long_term_context(user_id, query_emb)
             long_term_emb = np.stack([query_emb for _ in long_term_msgs]) if long_term_msgs else np.empty((0, self.embedding_dim), dtype=np.float32)
@@ -573,10 +419,16 @@ class ConversationMemoryManager:
             else:
                 combined = np.empty((0, self.embedding_dim), dtype=np.float32)
             return combined
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"DialogueContextManager.forward failed: {e}", error_type="DialogueContextManagerError")
+            if self.error_manager:
+                self.error_manager.record_error(e, error_type="DialogueContextManagerError")
+            return np.empty((0, self.embedding_dim), dtype=np.float32)
 
 # Example usage (for testing)
 if __name__ == "__main__":
-    memory_module = ConversationMemoryManager(embedding_dim=128, max_short_term=50, db_path="convo.db")
+    memory_module = DialogueContextManager(embedding_dim=128, max_short_term=50, db_path="convo.db", session_id="test_session")
     memory_module.add_message("user", "I love sci-fi books!", user_id="user1")
     memory_module.add_message("assistant", "Cool! What's your favorite?", user_id="user1")
     memory_module.add_message("user", "Dune is epic!", user_id="user1")

@@ -595,7 +595,53 @@ class ValidationSchema:
                         "min": {"type": "number", "minimum": 0.1, "default": 0.1},
                         "max": {"type": "number", "minimum": 0.1, "default": 3.0}
                     }
-                }
+                },
+
+                "experience_memory": {
+                    "max_short_term": ConfigSchema(
+                        field="experience_memory.max_short_term",
+                        type=int,
+                        default=50,
+                        range=(1, 1000),
+                        required=False
+                    ),
+                    "short_term_expiry_seconds": ConfigSchema(
+                        field="experience_memory.short_term_expiry_seconds",
+                        type=int,
+                        default=3600,
+                        range=(1, None),
+                        required=False
+                    ),
+                    "embedding_dim": ConfigSchema(
+                        field="experience_memory.embedding_dim",
+                        type=int,
+                        default=128,
+                        range=(1, None),
+                        required=False
+                    ),
+                    "long_term_top_k": ConfigSchema(
+                        field="experience_memory.long_term_top_k",
+                        type=int,
+                        default=5,
+                        range=(1, 100),
+                        required=False
+                    ),
+                    "long_term_retention_days": ConfigSchema(
+                        field="experience_memory.long_term_retention_days",
+                        type=int,
+                        default=30,
+                        range=(1, 3650),
+                        required=False
+                    ),
+                    "memory_logging_level": ConfigSchema(
+                        field="experience_memory.memory_logging_level",
+                        type=str,
+                        default="info",
+                        validator=lambda x: x in ["debug", "info", "warning", "error", "critical"],
+                        required=False
+                    ),
+                },
+
             }
     
         }

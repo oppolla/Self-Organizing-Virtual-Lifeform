@@ -454,6 +454,14 @@
       }
     }
   },
+  "experience_memory": {
+    "max_short_term": 50,
+    "short_term_expiry_seconds": 3600,
+    "embedding_dim": 128,
+    "long_term_top_k": 5,
+    "long_term_retention_days": 30,
+    "memory_logging_level": "info"
+  },
   "scribed_config": {
     "output_path": "scribe/sovl_scribe.jsonl",
     "max_file_size_mb": 50,
