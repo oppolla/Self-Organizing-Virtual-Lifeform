@@ -24,6 +24,7 @@ from sovl_scaffold import GenerationScaffoldProvider
 import threading
 from functools import wraps
 from datetime import datetime
+from sovl_bonder import BondCalculator, BondModulator
 
 # Add confidence-related constants at the top of the file
 DEFAULT_CONFIDENCE = 0.5
@@ -147,6 +148,10 @@ class GenerationManager:
 
         # Validate and initialize curiosity state
         self._validate_curiosity_state()
+
+        # BondModulator integration
+        self.bond_calculator = BondCalculator(config_manager, logger, state)
+        self.bond_modulator = BondModulator(self.bond_calculator)
 
     def _with_lock(self, lock_name: str):
         """Context manager for thread-safe operations."""
@@ -973,8 +978,10 @@ class GenerationManager:
             
             # Log curiosity update
             self.logger.log_event(
-                "curiosity_update",
-                {
+                event_type="curiosity_update",
+                message="Curiosity updated",
+                level="info",
+                additional_info={
                     "text": text[:200],  # Log first 200 chars
                     "confidence": confidence,
                     "embedding_shape": text_embedding.shape,
@@ -1080,7 +1087,7 @@ class GenerationManager:
         return decorator
 
     @state_managed_operation("generate_text")
-    def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", **kwargs) -> List[str]:
+    def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", metadata_entries: list = None, **kwargs) -> List[str]:
         """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration."""
         request_time = time.time()
 
@@ -1097,26 +1104,50 @@ class GenerationManager:
             else:
                 memory_context = None
 
-            # --- Compose prompt with memory context ---
+            # --- BondModulator: Retrieve bond context ---
+            bond_context = None
+            bond_score = None
+            if metadata_entries is not None:
+                bond_context, bond_score = self.bond_modulator.get_bond_modulation(metadata_entries)
+
+            # --- Compose prompt with memory and bond context ---
+            composite_prompt = prompt
             if memory_context:
-                full_prompt = f"[CONTEXT]\n{memory_context}\n[USER PROMPT]\n{prompt}"
-            else:
-                full_prompt = prompt
+                composite_prompt = f"{memory_context}\n\n{composite_prompt}"
+            if bond_context:
+                composite_prompt = f"[{bond_context}]\n\n{composite_prompt}"
 
-            # Validate parameters
-            self._validate_generation_params(full_prompt, num_return_sequences=num_return_sequences)
-            if not full_prompt or not isinstance(full_prompt, str):
-                raise ValueError("Invalid prompt provided")
+            # --- Prepare input batch ---
+            inputs = self.base_tokenizer(
+                composite_prompt,
+                return_tensors='pt',
+                padding=True,
+                truncation=True,
+                max_length=self._get_config_value("controls_config.max_seq_length", 512)
+            )
+            model_device = next(self.base_model.parameters()).device
+            inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
-            # Prepare and execute generation
-            batch = self._prepare_generation_batch(full_prompt, num_return_sequences)
-            generated_texts = self._generate_with_state_context(batch)
+            # --- Add generation parameters ---
+            gen_kwargs = {"num_return_sequences": num_return_sequences}
+            gen_kwargs.update(kwargs)
 
-            # --- Always-on Memory: Store prompt and response ---
-            if system_context and hasattr(system_context, "add_message_to_memory"):
-                system_context.add_message_to_memory("user", prompt, user_id)
-                for response in generated_texts:
-                    system_context.add_message_to_memory("assistant", response, user_id)
+            # --- Generate text ---
+            output_sequences = self.base_model.generate(**inputs, **gen_kwargs)
+            generated_texts = [self.base_tokenizer.decode(seq, skip_special_tokens=True) for seq in output_sequences]
+
+            # --- Optionally: log bond score/context for this generation ---
+            self.logger.record_event(
+                event_type="bond_modulation_applied",
+                message="Bond context applied to generation",
+                level="info",
+                additional_info={
+                    "bond_score": bond_score,
+                    "bond_context": bond_context,
+                    "user_id": user_id,
+                    "metadata_entries": metadata_entries
+                }
+            )
 
             # Prepare generation result data for logging
             generation_result = {
@@ -1652,7 +1683,7 @@ class GenerationManager:
             )
             
             # Generate with higher temperature for more creative/expressive output
-            response = self.generate_text(
+            response = self.generate(
                 prompt,  # Use the passed or default prompt
                 num_return_sequences=1,
                 temperature=self.controls_config.get("base_temperature", 0.7) + 0.3,
@@ -1730,9 +1761,7 @@ class GenerationManager:
         try:
             filtered = [i for i in token_ids if i not in special_ids]
             for i in range(len(filtered) - 2 * min_rep_length + 1):
-                window = filtered[i:i + min_rep_length]
-                next_window = filtered[i + min_rep_length:i + 2 * min_rep_length]
-                if window == next_window:
+                if filtered[i:i + min_rep_length] == filtered[i + min_rep_length:i + 2 * min_rep_length]:
                     return (i, i + min_rep_length)
             return None
         except Exception as e:

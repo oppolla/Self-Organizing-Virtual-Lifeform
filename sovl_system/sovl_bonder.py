@@ -15,10 +15,12 @@ import re
 
 class BondCalculator:
     """Calculates bonding score based on user wordprint and duration of knowing.
-    Now also generates and tracks behavioral signatures for user/session identification."""
+    Now also generates and tracks behavioral signatures for user/session identification.
+    Future-proof: accepts extra modalities via kwargs in key methods."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger, state: Optional[object] = None):
-        """Initialize bond calculator with configuration and logging. Optionally sync with SOVLState."""
+        """Initialize bond calculator with configuration and logging. Optionally sync with SOVLState.
+        Future-proof: accepts extra modalities via kwargs in key methods."""
         if not config_manager or not logger:
             raise ValueError("config_manager and logger cannot be None")
         self.config_manager = config_manager
@@ -67,8 +69,16 @@ class BondCalculator:
             )
             raise
 
-    def _generate_signature(self, metadata_entries):
-        """Create a behavioral signature from recent metadata entries."""
+    def _generate_signature(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs) -> dict:
+        """
+        Generate a user signature from behavioral metadata and optional extra modalities.
+        Args:
+            metadata_entries: list of behavioral metadata dicts
+            extra_data: dict of additional modality data (future-proof)
+            kwargs: reserved for future extensions
+        Returns:
+            signature: dict
+        """
         if not metadata_entries:
             return None
         # Extract features
@@ -88,6 +98,9 @@ class BondCalculator:
             'avg_word_count': avg_word_count,
             'avg_sentiment': avg_sentiment
         }
+        # Optionally, add extra modalities to signature (future)
+        if extra_data:
+            signature['extra'] = extra_data
         return signature
 
     def _hash_signature(self, signature):
@@ -95,9 +108,9 @@ class BondCalculator:
         sig_str = json.dumps(signature, sort_keys=True)
         return hashlib.sha256(sig_str.encode('utf-8')).hexdigest()
 
-    def register_user_signature(self, metadata_entries):
+    def register_user_signature(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs):
         """Register or update a user signature/profile from recent metadata, sync with central state if available."""
-        signature = self._generate_signature(metadata_entries)
+        signature = self._generate_signature(metadata_entries, extra_data=extra_data, **kwargs)
         if not signature:
             return None
         sig_hash = self._hash_signature(signature)
@@ -128,9 +141,17 @@ class BondCalculator:
                     self.state.add_identified_user(sig_hash, self.identified_users[sig_hash])
         return sig_hash
 
-    def calculate_bond(self, metadata_entries):
-        """Calculate bond value using accessible metadata and update registry, sync with central state if available."""
-        signature = self._generate_signature(metadata_entries)
+    def calculate_bond(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs) -> float:
+        """
+        Calculate bond value using accessible metadata and optional extra modalities (e.g., facial recognition, voice).
+        Args:
+            metadata_entries: list of behavioral metadata dicts
+            extra_data: dict of additional modality data (future-proof)
+            kwargs: reserved for future extensions
+        Returns:
+            bond_score: float
+        """
+        signature = self._generate_signature(metadata_entries, extra_data=extra_data, **kwargs)
         if not signature:
             return self.default_bond_score
         sig_hash = self._hash_signature(signature)
@@ -169,6 +190,22 @@ class BondCalculator:
                 # Sync with central state
                 if self.state and hasattr(self.state, 'add_identified_user'):
                     self.state.add_identified_user(sig_hash, profile)
+        # Optionally, fuse extra modalities
+        bond_score = self._fuse_modalities(signature, extra_data=extra_data, bond_score=bond_score, **kwargs)
+        return bond_score
+
+    def _fuse_modalities(self, signature: dict, extra_data: Optional[dict] = None, bond_score: float = 0.5, **kwargs) -> float:
+        """
+        Placeholder for future feature fusion (e.g., facial, voice, device).
+        Args:
+            signature: user signature dict
+            extra_data: dict of additional modality data
+            bond_score: current bond score
+            kwargs: reserved for future extensions
+        Returns:
+            bond_score: float (possibly modified)
+        """
+        # For now, does nothing. In future, could adjust bond_score based on extra_data.
         return bond_score
 
     def get_all_signatures(self):
@@ -233,7 +270,9 @@ class BondCalculator:
         state: SOVLState,
         error_manager: ErrorManager,
         context: SystemContext,
-        curiosity_manager: Optional[CuriosityManager] = None
+        curiosity_manager: Optional[CuriosityManager] = None,
+        extra_data: Optional[dict] = None,
+        **kwargs
     ) -> float:
         """
         Calculate bonding score using curiosity, stability, coherence, and personalized components.
@@ -244,6 +283,8 @@ class BondCalculator:
             error_manager: Error manager instance
             context: System context
             curiosity_manager: Optional curiosity manager for novelty score
+            extra_data: dict of additional modality data (future-proof)
+            kwargs: reserved for future extensions
         
         Returns:
             Bonding score in [min_bond_score, max_bond_score]
@@ -291,6 +332,8 @@ class BondCalculator:
                     "conversation_id": conversation_id
                 }
             )
+            # Optionally, fuse extra modalities
+            bond_score = self._fuse_modalities(profile, extra_data=extra_data, bond_score=bond_score, **kwargs)
             return bond_score
 
         except Exception as e:
@@ -310,8 +353,8 @@ class BondModulator:
     def __init__(self, bond_calculator):
         self.bond_calculator = bond_calculator
 
-    def get_bond_modulation(self, metadata_entries):
-        sig_hash = self.bond_calculator.register_user_signature(metadata_entries)
+    def get_bond_modulation(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs):
+        sig_hash = self.bond_calculator.register_user_signature(metadata_entries, extra_data=extra_data, **kwargs)
         bond_score = self.bond_calculator.get_bond_score(sig_hash)
         if bond_score is None:
             bond_score = self.bond_calculator.default_bond_score
