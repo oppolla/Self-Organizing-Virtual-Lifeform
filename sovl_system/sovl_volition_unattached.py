@@ -4,23 +4,23 @@ import time
 from threading import Lock
 from collections import deque
 import json
-from sovl_utils import memory_usage, log_memory_usage
+from sovl_utils import memory_usage, log_memory_usage, total_memory
 from sovl_logger import Logger
-from sovl_memory import GPUMemoryManager
+from sovl_memory import GPUMemoryManager, RAMManager
 from sovl_tuner import SOVLTuner
 import traceback
 from typing import Callable
 from abc import ABC, abstractmethod
 
-class SOVLSenseModule(ABC):
+class SensationNode(ABC):
     """
-    Abstract base class for SOVL sense modules (e.g., vision, audio, etc.).
-    All sense modules must implement this interface to integrate with volition.
+    Abstract base class for SOVL sensation nodes (e.g., vision, audio, etc.).
+    All sensation nodes must implement this interface to integrate with volition.
     """
     @abstractmethod
     def get_status(self) -> dict:
         """
-        Return a summary of the module's current status (health, readiness, etc.).
+        Return a summary of the node's current status (health, readiness, etc.).
         Returns:
             A dictionary with status information.
         """
@@ -29,7 +29,7 @@ class SOVLSenseModule(ABC):
     @abstractmethod
     def get_latest_observation(self) -> dict:
         """
-        Return the most recent observation/data from the sense module.
+        Return the most recent observation/data from the sensation node.
         Returns:
             A dictionary containing the latest observation.
         """
@@ -38,7 +38,7 @@ class SOVLSenseModule(ABC):
     @abstractmethod
     def reset(self) -> None:
         """
-        Reset the module's state if applicable.
+        Reset the node's state if applicable.
         """
         pass
 
@@ -92,7 +92,8 @@ class AutonomyManager:
             "max_prompt_len": 500,  # New: Limit prompt/response length
             "action_timeout": 10.0,  # New: Timeout for actions
             "fallback_decision_limit": 3,  # New: Fallback after repeated LLM failures
-            "strict_mode": False  # Added: strict vs best-effort mode
+            "strict_mode": False,  # Added: strict vs best-effort mode
+            "enable_autosys_control": False  # New: Automated system control (LLM-driven throttle/pause/shutdown)
         })
         
         # State tracking
@@ -108,9 +109,14 @@ class AutonomyManager:
         self.last_diagnostics = None
         self.last_action_result = None
         self.action_registry = {}
+        self.pending_shutdown = False
         
-        # Sense modules registry: name -> SOVLSenseModule
-        self.sense_modules: dict = {}
+        # Sense nodes registry: name -> SensationNode
+        self.sense_nodes: dict = {}
+
+        # RAM and GPU managers
+        self.ram_manager = RAMManager()  # For advanced RAM stats
+        self.gpu_manager = GPUMemoryManager()  # Already present
 
         self.logger.record_event(
             event_type="autonomy_manager_initialized",
@@ -461,85 +467,258 @@ class AutonomyManager:
             additional_info={"timestamp": time.time()}
         )
 
+    def aggregate_sensory_context(self) -> dict:
+        """
+        Collect the latest observation from each registered sense node and system/system resource state.
+        Returns:
+            Dictionary summarizing all sensory, core system, and resource state.
+        """
+        context = {}
+        # Aggregate sensory nodes
+        for name, node in self.sense_nodes.items():
+            try:
+                context[name] = node.get_latest_observation()
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="sense_observation_failed",
+                    message=f"Failed to get observation from '{name}': {str(e)}",
+                    level="warning",
+                    additional_info={"timestamp": time.time()}
+                )
+        # Add system state (battery, error, etc.)
+        if hasattr(self.system_ref, 'get_battery_level'):
+            try:
+                context["battery"] = self.system_ref.get_battery_level()
+            except Exception:
+                context["battery"] = None
+        error_state = None
+        if hasattr(self.system_ref, 'get_last_error'):
+            try:
+                error_state = self.system_ref.get_last_error()
+            except Exception:
+                error_state = None
+        context["error"] = error_state
+        if hasattr(self, 'error_counts') and self.error_counts:
+            context["error_rate"] = sum(self.error_counts) / len(self.error_counts)
+            context["error_count"] = len(self.error_counts)
+        else:
+            context["error_rate"] = 0.0
+            context["error_count"] = 0
+        context["throttle_level"] = getattr(self, "throttle_level", 0)
+        # Add system resource metrics (RAM, GPU)
+        try:
+            from sovl_utils import memory_usage, total_memory
+            ram_used = memory_usage()
+            ram_total = total_memory() if callable(total_memory) else None
+            context["ram_usage"] = ram_used
+            context["ram_total"] = ram_total
+            context["ram_usage_pct"] = ram_used / ram_total if ram_total else None
+            # Add advanced RAM stats from RAMManager if available
+            if hasattr(self, "ram_manager") and self.ram_manager is not None:
+                ram_stats = self.ram_manager.get_stats() if hasattr(self.ram_manager, "get_stats") else {}
+                for k, v in ram_stats.items():
+                    context[f"rammgr_{k}"] = v
+        except Exception:
+            context["ram_usage"] = None
+            context["ram_total"] = None
+            context["ram_usage_pct"] = None
+        # GPU memory (if available)
+        try:
+            if hasattr(self, "device") and self.device and "cuda" in str(self.device):
+                import torch
+                if torch.cuda.is_available():
+                    gpu_used = torch.cuda.memory_allocated(self.device)
+                    gpu_total = torch.cuda.get_device_properties(self.device).total_memory
+                    context["gpu_mem_used"] = gpu_used
+                    context["gpu_mem_total"] = gpu_total
+                    context["gpu_mem_used_pct"] = gpu_used / gpu_total if gpu_total else None
+                else:
+                    context["gpu_mem_used"] = None
+                    context["gpu_mem_total"] = None
+                    context["gpu_mem_used_pct"] = None
+            else:
+                context["gpu_mem_used"] = None
+                context["gpu_mem_total"] = None
+                context["gpu_mem_used_pct"] = None
+        except Exception:
+            context["gpu_mem_used"] = None
+            context["gpu_mem_total"] = None
+            context["gpu_mem_used_pct"] = None
+        return context
+
+    def build_structured_prompt(self, context: dict) -> str:
+        """
+        Convert the aggregated context into a structured prompt for the LLM.
+        Args:
+            context: Aggregated sensory/system context dict.
+        Returns:
+            Formatted prompt string.
+        """
+        prompt_lines = ["System Context:"]
+        for key, value in context.items():
+            if key.endswith("_pct") and value is not None:
+                prompt_lines.append(f"  - {key.replace('_', ' ').capitalize()}: {value:.2%}")
+            else:
+                prompt_lines.append(f"  - {key.replace('_', ' ').capitalize()}: {value}")
+        # Expanded action space for throttling, pausing, shutdown, with explanations
+        action_space = [
+            "continue: normal operation",
+            "throttle: slow down processing to reduce load/errors",
+            "pause: temporarily halt all actions to recover",
+            "soft_shutdown: enter safe idle mode, await confirmation",
+            "shutdown: fully power down (requires confirmation)"
+        ]
+        prompt_lines.append("Choose action (see explanations):")
+        for action in action_space:
+            prompt_lines.append(f"  - {action}")
+        prompt_lines.append(
+            "If errors or resource usage are high, choose throttle, pause, or soft_shutdown. Only choose shutdown if instructed or if the system is unsafe."
+        )
+        return "\n".join(prompt_lines)
+
+    def llm_decide(self, prompt: str) -> str:
+        """
+        Query the LLM with the prompt and parse the response into an action string.
+        Args:
+            prompt: The structured prompt string.
+        Returns:
+            Action string chosen by the LLM.
+        """
+        # Log the prompt and LLM output for audit trail
+        self.logger.record_event(
+            event_type="llm_prompt_sent",
+            message="Prompt sent to LLM",
+            level="debug",
+            additional_info={"prompt": prompt, "timestamp": time.time()}
+        )
+        # TODO: Integrate with local LLM inference engine
+        # Example stub:
+        llm_output = "continue"  # Replace with actual LLM call and output
+        self.logger.record_event(
+            event_type="llm_decision_output",
+            message="LLM decision output",
+            level="debug",
+            additional_info={"llm_output": llm_output, "timestamp": time.time()}
+        )
+        # Fallback: if output is invalid, default to continue
+        valid_actions = {"continue", "throttle", "pause", "soft_shutdown", "shutdown"}
+        if llm_output not in valid_actions:
+            self.logger.record_event(
+                event_type="llm_decision_invalid",
+                message=f"Invalid LLM action '{llm_output}', falling back to 'continue'",
+                level="warning",
+                additional_info={"timestamp": time.time()}
+            )
+            return "continue"
+        return llm_output
+
+    def execute_action(self, action: str) -> None:
+        """
+        Map the chosen action string to actuator commands or system behaviors.
+        Args:
+            action: Action string from LLM.
+        """
+        # Soft shutdown confirmation logic
+        if action == "soft_shutdown":
+            self.pending_shutdown = True
+            self.logger.record_event(
+                event_type="soft_shutdown_initiated",
+                message="System entering safe idle mode. Awaiting confirmation for full shutdown.",
+                level="critical",
+                additional_info={"timestamp": time.time()}
+            )
+            # Enter idle loop or minimal operation mode here
+            return
+        if action == "shutdown":
+            if getattr(self, "pending_shutdown", False):
+                self.logger.record_event(
+                    event_type="system_shutdown_confirmed",
+                    message="System shutdown confirmed. Powering down.",
+                    level="critical",
+                    additional_info={"timestamp": time.time()}
+                )
+                raise SystemExit("Shutdown triggered by LLM decision.")
+            else:
+                self.logger.record_event(
+                    event_type="shutdown_without_confirmation",
+                    message="Shutdown requested without prior soft shutdown. Ignoring for safety.",
+                    level="warning",
+                    additional_info={"timestamp": time.time()}
+                )
+                return
+        if action == "throttle":
+            prev = getattr(self, "throttle_level", 0)
+            self.throttle_level = min(prev + 1, 5)
+            self.logger.record_event(
+                event_type="throttle_engaged",
+                message=f"Throttling system. New throttle level: {self.throttle_level}",
+                level="warning",
+                additional_info={"timestamp": time.time()}
+            )
+            time.sleep(self.throttle_level)
+            return
+        if action == "pause":
+            self.logger.record_event(
+                event_type="system_paused",
+                message="System paused due to error state.",
+                level="warning",
+                additional_info={"timestamp": time.time()}
+            )
+            time.sleep(10)
+            return
+        if action == "continue":
+            self.throttle_level = 0
+            self.logger.record_event(
+                event_type="system_continue",
+                message="System continuing normal operation.",
+                level="info",
+                additional_info={"timestamp": time.time()}
+            )
+            return
+        # Default: try action registry as before
+        if hasattr(self, "action_registry") and action in self.action_registry:
+            try:
+                self.action_registry[action]()
+                self.logger.record_event(
+                    event_type="action_executed",
+                    message=f"Executed action '{action}'",
+                    level="info",
+                    additional_info={"timestamp": time.time()}
+                )
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="action_execution_failed",
+                    message=f"Failed to execute action '{action}': {str(e)}",
+                    level="error",
+                    additional_info={"timestamp": time.time()}
+                )
+        else:
+            self.logger.record_event(
+                event_type="action_unknown",
+                message=f"Unknown or unregistered action '{action}'",
+                level="warning",
+                additional_info={"timestamp": time.time()}
+            )
+
     def check_and_act(self) -> None:
         """
-        Main loop to check metrics and make autonomous decisions.
-        Polls all registered sense modules and aggregates their outputs into the decision context.
+        Main loop to aggregate context, prompt the LLM, and execute the chosen action.
         """
         if not self.autonomy_config["enable_autonomy"]:
             return
+        if not getattr(self, "enable_autosys_control", False):
+            # Autosys control is off, skip LLM-based system self-regulation
+            return
         try:
             with self.memory_lock:  # Ensure thread safety
-                # Poll all sense modules for latest observations
-                sense_context = {}
-                for name, module in self.sense_modules.items():
-                    try:
-                        observation = module.get_latest_observation()
-                        status = module.get_status()
-                        sense_context[name] = {
-                            "observation": observation,
-                            "status": status
-                        }
-                    except Exception as e:
-                        self.logger.record_event(
-                            event_type="sense_poll_failed",
-                            message=f"Polling sense module '{name}' failed: {str(e)}",
-                            level="warning",
-                            additional_info={"timestamp": time.time()}
-                        )
-                # Optionally log the aggregated sense context
-                self.logger.record_event(
-                    event_type="sense_context_aggregated",
-                    message="Aggregated sense context for decision-making",
-                    level="debug",
-                    additional_info={"sense_context": sense_context, "timestamp": time.time()}
-                )
-                diagnostics = self.run_self_diagnostic()
-                if diagnostics.get("status") == "failed":
-                    self.logger.record_event(
-                        event_type="autonomy_check_skipped",
-                        message="Skipping autonomy check due to diagnostic failure",
-                        level="warning",
-                        additional_info={"timestamp": time.time()}
-                    )
-                    return
-                metrics = self.collect_metrics()
-                # Merge sense_context into metrics for richer decision context
-                metrics["sense_context"] = sense_context
-                self.error_counts.append(metrics["error_rate"])
-                avg_error_rate = sum(self.error_counts) / len(self.error_counts) if self.error_counts else 0.0
-                if metrics["memory_usage"] < self.autonomy_config["memory_threshold"] and \
-                   avg_error_rate < self.autonomy_config["error_rate_threshold"]:
-                    self.logger.record_event(
-                        event_type="autonomy_check_stable",
-                        message="System stable, no action taken",
-                        level="info",
-                        additional_info={"metrics": {k: round(v, 4) if isinstance(v, float) else v for k, v in metrics.items()}, "timestamp": time.time()}
-                    )
-                    return
-                prompt = self.build_prompt(metrics)
-                decision = self.make_decision(prompt)
-                if decision is None:
-                    self.logger.record_event(
-                        event_type="decision_none",
-                        message="Decision-making returned None, skipping actions",
-                        level="warning",
-                        additional_info={"timestamp": time.time()}
-                    )
-                    return
-                success = self.execute_action(decision)
-                self.logger.record_event(
-                    event_type="autonomy_cycle_complete",
-                    message="Autonomy cycle complete",
-                    level="info",
-                    additional_info={
-                        "decision": decision,
-                        "actions_executed": success,
-                        "metrics": {k: round(v, 4) if isinstance(v, float) else v for k, v in metrics.items()},
-                        "diagnostics": {k: round(v, 4) if isinstance(v, float) else v for k, v in diagnostics.items()},
-                        "timestamp": time.time()
-                    }
-                )
+                # 1. Aggregate sensory input and system state
+                context = self.aggregate_sensory_context()
+                # 2. Build a structured prompt for the LLM
+                prompt = self.build_structured_prompt(context)
+                # 3. Query the LLM for the next action
+                action = self.llm_decide(prompt)
+                # 4. Execute the chosen action
+                self.execute_action(action)
         except Exception as e:
             self.logger.record_event(
                 event_type="autonomy_check_failed",
@@ -591,59 +770,59 @@ class AutonomyManager:
             additional_info={"args": args, "kwargs": kwargs, "timestamp": time.time()}
         )
 
-    def register_sense(self, name: str, module: SOVLSenseModule) -> None:
+    def register_sense(self, name: str, node: SensationNode) -> None:
         """
-        Register a new sense module (e.g., vision, audio) with the autonomy manager.
+        Register a new sense node (e.g., vision, audio) with the autonomy manager.
         Args:
-            name: Unique name for the module.
-            module: Instance of a class implementing SOVLSenseModule.
+            name: Unique name for the node.
+            node: Instance of a class implementing SensationNode.
         """
-        if name in self.sense_modules:
+        if name in self.sense_nodes:
             self.logger.record_event(
                 event_type="sense_registration_failed",
-                message=f"Sense module '{name}' already registered.",
+                message=f"Sense node '{name}' already registered.",
                 level="warning",
                 additional_info={"timestamp": time.time()}
             )
             return
-        self.sense_modules[name] = module
+        self.sense_nodes[name] = node
         self.logger.record_event(
             event_type="sense_registered",
-            message=f"Sense module '{name}' registered.",
+            message=f"Sense node '{name}' registered.",
             level="info",
             additional_info={"timestamp": time.time()}
         )
 
     def unregister_sense(self, name: str) -> None:
         """
-        Unregister a sense module by name.
+        Unregister a sense node by name.
         Args:
-            name: Name of the module to remove.
+            name: Name of the node to remove.
         """
-        if name not in self.sense_modules:
+        if name not in self.sense_nodes:
             self.logger.record_event(
                 event_type="sense_unregistration_failed",
-                message=f"Sense module '{name}' not found.",
+                message=f"Sense node '{name}' not found.",
                 level="warning",
                 additional_info={"timestamp": time.time()}
             )
             return
-        module = self.sense_modules.pop(name)
+        node = self.sense_nodes.pop(name)
         try:
-            module.close()
+            node.close()
         except Exception:
             pass
         self.logger.record_event(
             event_type="sense_unregistered",
-            message=f"Sense module '{name}' unregistered.",
+            message=f"Sense node '{name}' unregistered.",
             level="info",
             additional_info={"timestamp": time.time()}
         )
 
     def list_senses(self) -> dict:
         """
-        List all registered sense modules.
+        List all registered sense nodes.
         Returns:
-            Dict of sense module names and their class names.
+            Dict of sense node names and their class names.
         """
-        return {name: type(mod).__name__ for name, mod in self.sense_modules.items()}
+        return {name: type(node).__name__ for name, node in self.sense_nodes.items()}

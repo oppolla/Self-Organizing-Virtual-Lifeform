@@ -24,6 +24,7 @@ from sovl_events import EventDispatcher
 from sovl_interfaces import SystemInterface
 from sovl_queue import get_scribe_queue
 from sovl_scribe import Scriber
+from sovl_volition import AutonomyManager
 
 # Model and processing
 from sovl_manager import ModelManager
@@ -731,6 +732,18 @@ class SOVLSystem(SystemInterface):
                     "state_hash": self.state_tracker.get_state_hash() if hasattr(self.state_tracker, 'get_state_hash') else None
                 }
             )
+            
+            # --- Integrate AutonomyManager elegantly ---
+            self.autonomy_manager = AutonomyManager(
+                config_manager=context.config_manager if hasattr(context, 'config_manager') else None,
+                logger=context.logger if hasattr(context, 'logger') else None,
+                device=getattr(model_manager, 'device', None),
+                system_ref=self,
+                tuner=getattr(context, 'tuner', None) if hasattr(context, 'tuner') else None
+            )
+            # Optionally, attach to context for global access
+            if not hasattr(context, 'autonomy_manager'):
+                context.autonomy_manager = self.autonomy_manager
             
         except Exception as e:
             if hasattr(self, 'error_manager') and self.error_manager:
