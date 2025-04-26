@@ -5,16 +5,36 @@ import json
 import os
 from typing import Dict, Any, Optional
 from sovl_logger import Logger
-from sovl_error import ErrorHandler
+from sovl_error import ErrorManager
 from sovl_events import EventDispatcher
 from sovl_processor import SoulLogitsProcessor
 import traceback
 from collections import OrderedDict
 
+# --- FIELD CONSTRAINTS (mirrored from Soulprinter) ---
+FIELD_CONSTRAINTS = {
+    "Identity": {
+        "Name": {"max_length": 64, "regex": r"^[A-Za-z0-9\s\-_'`]{1,64}$"},
+        "Origin": {"max_length": 128},
+        "Essence": {"max_length": 256},
+    },
+    "Voice": {
+        "Description": {"max_length": 256},
+        "Summary": {"max_length": 128},
+        "Keywords": {"max_length": 128},
+    },
+    "Chronicle": {"Summary": {"max_length": 256}},
+    "Echoes": {"Summary": {"max_length": 256}},
+    "Threads": {"Summary": {"max_length": 256}},
+    "Reflection": {"Purpose": {"max_length": 200}},
+    # Add additional constraints as needed
+}
+DENYLIST = ["user", "IP", "password"]  # Should match Soulprinter
+
 class SoulParser(NodeVisitor):
     """Parse a .soul file into a structured dictionary with robust handling and strict compliance to the Soulprint spec."""
     
-    def __init__(self, logger: Logger, error_handler: ErrorHandler, event_dispatcher: Optional[EventDispatcher] = None):
+    def __init__(self, logger: Logger, error_handler: ErrorManager, event_dispatcher: Optional[EventDispatcher] = None):
         self.logger = logger
         self.error_handler = error_handler
         self.event_dispatcher = event_dispatcher
@@ -324,7 +344,7 @@ class SoulParser(NodeVisitor):
     def validate(self, strict_mode: bool = False) -> bool:
         """
         Perform post-parse semantic validation of the parsed soul data.
-        Checks required fields, regex constraints, repeat counts, and sets defaults for optional fields.
+        Checks required fields, regex constraints, max lengths, and sets defaults for optional fields.
         Returns True if valid, False otherwise. Logs all errors.
         """
         valid = True
@@ -365,6 +385,31 @@ class SoulParser(NodeVisitor):
                 message="PrivacyLevel set to private",
                 level="info"
             )
+        # Validate all field constraints for each section
+        for section, fields in sections.items():
+            constraints = FIELD_CONSTRAINTS.get(section, {})
+            for field, value in fields.items():
+                constraint = constraints.get(field, {})
+                max_length = constraint.get("max_length")
+                regex = constraint.get("regex")
+                if max_length and isinstance(value, str) and len(value) > max_length:
+                    self.error_handler.handle_data_error(
+                        ValueError(f"Field '{field}' in section '{section}' exceeds max length {max_length}"),
+                        {"section": section, "field": field, "value": value},
+                        "soul_field_validation"
+                    )
+                    valid = False
+                    if strict_mode:
+                        return False
+                if regex and isinstance(value, str) and not re.match(regex, value):
+                    self.error_handler.handle_data_error(
+                        ValueError(f"Field '{field}' in section '{section}' fails regex validation: {regex}"),
+                        {"section": section, "field": field, "value": value},
+                        "soul_field_validation"
+                    )
+                    valid = False
+                    if strict_mode:
+                        return False
         # Required sections and repeat counts
         required_sections = {
             "Identity": ["Name", "Origin", "Essence"],
@@ -419,23 +464,21 @@ class SoulParser(NodeVisitor):
 
     def redact_sensitive_terms(self, denylist=None, log_redactions=True):
         """
-        Scan narrative fields for sensitive terms and redact them, logging all changes.
-        Denylist can be customized; defaults to ["user", "IP", "password"].
+        Scan all fields for sensitive terms and redact them, logging all changes. (Mirrors Soulprinter logic)
+        Denylist can be customized; defaults to the global DENYLIST.
         Redactions are logged in self.data["redactions"] as a list of dicts.
         """
         if denylist is None:
-            denylist = ["user", "IP", "password"]
-        # Compile denylist regexes once for efficiency
+            denylist = DENYLIST
         denylist_patterns = [re.compile(re.escape(term), re.IGNORECASE) for term in denylist]
         redactions = []
-        def redact_in_obj(obj, section=None):
+        def redact_in_obj(obj, section=None, field=None):
             if isinstance(obj, dict):
                 for k, v in obj.items():
-                    if isinstance(v, (str, list, dict)):
-                        obj[k] = redact_in_obj(v, section=section)
+                    obj[k] = redact_in_obj(v, section=section, field=k)
             elif isinstance(obj, list):
                 for i, item in enumerate(obj):
-                    obj[i] = redact_in_obj(item, section=section)
+                    obj[i] = redact_in_obj(item, section=section, field=field)
             elif isinstance(obj, str):
                 redacted = obj
                 for pattern, term in zip(denylist_patterns, denylist):
@@ -444,6 +487,7 @@ class SoulParser(NodeVisitor):
                         if log_redactions:
                             redactions.append({
                                 "section": section,
+                                "field": field,
                                 "term": term,
                                 "original": obj if log_redactions else None,
                                 "redacted": redacted if log_redactions else None
@@ -458,9 +502,9 @@ class SoulParser(NodeVisitor):
                 for entry in redactions:
                     self.logger.record_event(
                         event_type="redaction",
-                        message=f"Redacted term '{entry['term']}' in section {entry['section']}",
+                        message=f"Redacted term '{entry['term']}' in section {entry['section']}, field {entry.get('field')}",
                         level="info",
-                        additional_info={k: v for k, v in entry.items() if k != 'original' and k != 'redacted'}
+                        additional_info={k: v for k, v in entry.items() if k not in ['original', 'redacted']}
                     )
         return len(redactions)
 
@@ -546,7 +590,7 @@ class SoulParser(NodeVisitor):
 def parse_soul_file(
     file_path: str,
     logger: Logger,
-    error_handler: ErrorHandler,
+    error_handler: ErrorManager,
     event_dispatcher: Optional[EventDispatcher] = None,
     cache_path: Optional[str] = None,
     strict_mode: bool = True
@@ -577,7 +621,7 @@ def parse_soul_file(
         },
         "sections": {
             "Identity": {
-                "Name": lambda x: re.match(r"^[A-Za-z0-9_-]{1,50}$", x),
+                "Name": lambda x: re.match(r"^[A-Za-z0-9\s_-]{1,50}$", x),
                 "Essence": lambda x: isinstance(x, str) and len(x) <= 200
             },
             "Voice": {
@@ -674,3 +718,5 @@ def parse_soul_file(
         additional_info={"file_path": file_path, "sections": list(parsed_data["sections"].keys())}
     )
     return parsed_data
+
+# NOTE: Narrative and keyword fields (Chronicle, Threads, Echoes, Voice, etc.) are now accepted as summaries, comma-separated keywords, or lists, matching Soulprinter's output. Parsing logic is forward-compatible with these formats.
