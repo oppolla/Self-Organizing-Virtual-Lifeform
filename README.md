@@ -5,6 +5,20 @@
 ## Overview
 SOVL is a complex, modular AI agent framework designed for autonomous learning, adaptation, and self-improvement. It leverages a unique dual-LLM (Large Language Model) architecture—combining a stable base model with a dynamic, scaffolded secondary model—to enable continuous, lifelong learning through biologically inspired mechanisms such as "sleep" and "dreaming."
 
+### Key Features
+
+- Dual-LLM Architecture:
+        Utilizes a robust base LLM for stable reasoning and a scaffolded secondary LLM for experimentation, rapid adaptation, and integration of new knowledge.
+  
+- Autonomous Learning Cycles:
+        Implements "sleep" and "dream" phases, allowing the agent to consolidate experiences, retrain, and update its internal models without human intervention.
+  
+- Curiosity-Driven Exploration:
+An intrinsic curiosity module motivates the agent to seek novelty, fill knowledge gaps, and autonomously generate new learning objectives.
+
+- Temperament and Confidence Systems:
+        Models affective states and self-assessment, influencing decision-making, risk-taking, and adaptive behaviors for more lifelike and context-sensitive responses.
+
 ## Console Commands
 
 ### `quit` or `exit`
