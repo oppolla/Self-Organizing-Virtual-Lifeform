@@ -91,10 +91,13 @@ def scaffold_operation(operation_name: str):
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
     
-    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any, config: Optional[Dict[str, Any]] = None, base_model: Any = None, scaffold_model: Any = None, mapping_strategy: str = None):
         self.base_tokenizer = base_tokenizer
         self.scaffold_tokenizer = scaffold_tokenizer
         self.logger = logger
+        self.base_model = base_model  # Optional: for embedding similarity
+        self.scaffold_model = scaffold_model  # Optional: for embedding similarity
+        self.mapping_strategy = mapping_strategy  # User-selectable, but defaults to None for now
         
         # Initialize mapping strategy parameters
         self.max_tokens_per_mapping = config.get('max_tokens_per_mapping', 3) if config else 3
@@ -110,7 +113,75 @@ class ScaffoldTokenMapper:
         self.conflict_resolution_strategy = config.get('conflict_resolution_strategy', 'keep_highest_conf') if config else 'keep_highest_conf'
         
         self.token_map = defaultdict(lambda: {'ids': [scaffold_tokenizer.unk_token_id], 'weight': 1.0})
+        # Check if embedding-based similarity is available
+        self.embedding_available = self._check_embedding_availability()
+        if self.embedding_available:
+            self.logger.info("Using embedding-based similarity for token mapping.")
+        else:
+            self.logger.warning("Falling back to character-based similarity for token mapping.")
         self._initialize_token_maps()
+        
+    def _check_embedding_availability(self):
+        # Check if both models and their input embeddings are available
+        try:
+            if self.base_model is not None and self.scaffold_model is not None:
+                base_emb = getattr(self.base_model, 'get_input_embeddings', None)
+                scaf_emb = getattr(self.scaffold_model, 'get_input_embeddings', None)
+                if callable(base_emb) and callable(scaf_emb):
+                    # Try to access weights
+                    base_weights = base_emb().weight
+                    scaf_weights = scaf_emb().weight
+                    return base_weights is not None and scaf_weights is not None
+        except Exception:
+            pass
+        return False
+
+    def _get_token_embedding(self, model, token_id):
+        try:
+            emb_layer = model.get_input_embeddings()
+            return emb_layer.weight[token_id].detach().cpu()
+        except Exception:
+            return None
+
+    def _embedding_similarity(self, token1, token2):
+        try:
+            id1 = self.base_tokenizer.convert_tokens_to_ids(token1)
+            id2 = self.scaffold_tokenizer.convert_tokens_to_ids(token2)
+            emb1 = self._get_token_embedding(self.base_model, id1)
+            emb2 = self._get_token_embedding(self.scaffold_model, id2)
+            if emb1 is not None and emb2 is not None:
+                import torch
+                sim = torch.nn.functional.cosine_similarity(emb1, emb2, dim=0)
+                return sim.item()
+        except Exception:
+            pass
+        return None
+
+    def _char_similarity(self, token1, token2):
+        set1 = set(token1)
+        set2 = set(token2)
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+        return intersection / union if union > 0 else 0.0
+
+    def _calculate_similarity(self, token1, token2):
+        # User can select, but default is None (current behavior: embedding if available, else char)
+        strategy = self.mapping_strategy
+        if strategy == "embedding":
+            sim = self._embedding_similarity(token1, token2)
+            if sim is not None:
+                return sim
+            # fallback
+            return self._char_similarity(token1, token2)
+        elif strategy == "char" or strategy is None:
+            if self.embedding_available:
+                sim = self._embedding_similarity(token1, token2)
+                if sim is not None:
+                    return sim
+            return self._char_similarity(token1, token2)
+        else:
+            # Future: add more strategies here
+            return self._char_similarity(token1, token2)
         
     def _normalize_token(self, token: str) -> str:
         """Normalize token based on configured level."""
@@ -171,15 +242,6 @@ class ScaffoldTokenMapper:
                 nearest_id = scaffold_id
                 
         return nearest_id if min_distance < self.mapping_similarity_threshold else None
-        
-    def _calculate_similarity(self, token1: str, token2: str) -> float:
-        """Calculate similarity between two tokens."""
-        # Simple character-based similarity
-        set1 = set(token1)
-        set2 = set(token2)
-        intersection = len(set1.intersection(set2))
-        union = len(set1.union(set2))
-        return intersection / union if union > 0 else 0.0
         
     def _validate_mapping_quality(self, base_token: str, scaffold_ids: List[int]) -> bool:
         """Validate mapping quality based on configured parameters."""
@@ -360,7 +422,10 @@ def build_scaffold_token_mapping(
     base_tokenizer: Any, 
     scaffold_tokenizer: Any, 
     logger: Logger,
-    config: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None,
+    base_model: Any = None,
+    scaffold_model: Any = None,
+    mapping_strategy: str = None
 ) -> ScaffoldTokenMapper:
     """
     Create a ScaffoldTokenMapper instance.
@@ -379,11 +444,14 @@ def build_scaffold_token_mapping(
             - max_meaning_drift: Maximum allowed semantic drift (default: 0.3)
             - enable_periodic_validation: Enable periodic mapping validation (default: True)
             - conflict_resolution_strategy: Strategy for resolving mapping conflicts (default: 'keep_highest_conf')
+        base_model: Optional base model for embedding-based similarity
+        scaffold_model: Optional scaffold model for embedding-based similarity
+        mapping_strategy: Optional mapping strategy ("embedding", "char", etc.)
     
     Returns:
         ScaffoldTokenMapper: Initialized token mapper instance
     """
-    return ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, logger, config)
+    return ScaffoldTokenMapper(base_tokenizer, scaffold_tokenizer, logger, config, base_model, scaffold_model, mapping_strategy)
 
 # Utilities for creating and combining sparse attention masks.
 class AttentionUtils:
