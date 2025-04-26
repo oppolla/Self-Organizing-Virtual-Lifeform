@@ -11,6 +11,7 @@ Complete finals for all modules
 6. Give system ability to "watch" content and derive joy and knowledge from it
 7. confirm token map is working
 8. confirm scaffold is working
+9. connect volition as hook point for future modules like vision
 
 
 
