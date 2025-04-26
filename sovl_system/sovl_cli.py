@@ -28,7 +28,8 @@ COMMAND_CATEGORIES = {
     "Debug": ["log", "config", "panic", "glitch", "scaffold"],
     "Advanced": ["tune", "rewind"],
     "History": ["history"],
-    "Fun": ["joke"]
+    "Fun": ["joke"],
+    "Rating": ["rate"]
 }
 
 class CommandHistory:
@@ -419,7 +420,6 @@ class CommandHandler(cmd.Cmd):
            "- Joke should be generally addressed not at a you\n"
            "- Do not include labels like Setup or Punchline\n"
            "- Avoid app topics\n"
-           "- Do not ever say techbro\n"
            "- Do not state stats like wordcount or add notes explaining the joke\n"
            "- Never ever explain the joke. Leave the joke as the only thing to be said\n"
             "Tone targets:\n"
@@ -537,6 +537,92 @@ Examples:
 The scaffold command allows direct interaction with any of the available
 scaffold models for debugging and development purposes.
 """)
+
+    def do_rate(self, arg):
+        """
+        Rate your bond with the system out of 10, and see what the system knows and thinks about you.
+        Shows:
+          - Bond score (out of 10)
+          - Number of interactions
+          - Last interaction time
+          - Top words used
+          - Sentiment analysis (if available)
+          - What the system likes/dislikes about you (blunt, factual)
+        Usage: rate
+        """
+        try:
+            # Get the key user/session/conversation id
+            conversation_id = None
+            if hasattr(self.sovl_system.state_tracker, 'get_active_conversation_id'):
+                conversation_id = self.sovl_system.state_tracker.get_active_conversation_id()
+            if not conversation_id and hasattr(self.sovl_system.state_tracker, 'state') and hasattr(self.sovl_system.state_tracker.state, 'history'):
+                conversation_id = getattr(self.sovl_system.state_tracker.state.history, 'conversation_id', None)
+            if not conversation_id:
+                print("Could not determine active user/session.")
+                return
+
+            # Get user profile
+            profile = self.sovl_system.state_tracker.state.user_profile_state.get(conversation_id)
+            bond_calculator = self.sovl_system.bond_calculator
+            bond_score = bond_calculator.get_bond_score_for_user(conversation_id)
+            if bond_score is None:
+                bond_score = bond_calculator.default_bond_score
+
+            # Prepare profile stats
+            interactions = profile.get("interactions", 0)
+            last_interaction = profile.get("last_interaction", None)
+            top_words = sorted(profile.get("lexicon", {}).items(), key=lambda x: x[1], reverse=True)[:10]
+            inputs = list(profile.get("inputs", []))
+            # Sentiment analysis placeholder (if available)
+            sentiment = None
+            if hasattr(self.sovl_system, 'sentiment_analyzer'):
+                sentiment = self.sovl_system.sentiment_analyzer.analyze(inputs) if inputs else None
+
+            # Likes/dislikes logic (blunt, factual)
+            likes = []
+            dislikes = []
+            if interactions > 20:
+                likes.append("Frequent engagement")
+            else:
+                dislikes.append("Low interaction count")
+            if top_words:
+                likes.append(f"Top words: {', '.join(w for w, _ in top_words)}")
+            if sentiment:
+                if sentiment.get("compound", 0) > 0.2:
+                    likes.append("Generally positive sentiment")
+                elif sentiment.get("compound", 0) < -0.2:
+                    dislikes.append("Generally negative sentiment")
+            if bond_score > 0.8 * 10:
+                likes.append("Strong bond score")
+            elif bond_score < 0.3 * 10:
+                dislikes.append("Weak bond score")
+
+            # Output
+            print("\n=== Bond Rating ===")
+            print(f"Bond Score: {bond_score:.2f} / 10")
+            print(f"Interactions: {interactions}")
+            if last_interaction:
+                import datetime
+                print(f"Last Interaction: {datetime.datetime.fromtimestamp(last_interaction).isoformat()}")
+            print(f"Top Words: {', '.join(w for w, _ in top_words)}")
+            if sentiment:
+                print(f"Sentiment: {sentiment}")
+            print("\nWhat the system likes about you:")
+            if likes:
+                for l in likes:
+                    print(f"  - {l}")
+            else:
+                print("  (Nothing in particular)")
+            print("\nWhat the system doesn't like:")
+            if dislikes:
+                for d in dislikes:
+                    print(f"  - {d}")
+            else:
+                print("  (Nothing in particular)")
+        except Exception as e:
+            print(f"Error in rate command: {e}")
+            if self.debug_mode:
+                traceback.print_exc()
 
     def default(self, line):
         """Handle unknown commands."""

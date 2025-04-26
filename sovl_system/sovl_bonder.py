@@ -247,6 +247,22 @@ class BondCalculator:
             profile = self.identified_users.get(signature_hash)
             return profile['bond_score'] if profile else None
 
+    def get_bond_score_for_user(self, user_id: str) -> float:
+        """
+        Return the latest bond score for the given user/session ID, or None if not found.
+        This is intended for polling by monitors/stats modules.
+        """
+        if not user_id:
+            return None
+        profile = self.identified_users.get(user_id)
+        if profile and "bond_score" in profile:
+            return profile["bond_score"]
+        # Optionally, try to compute or retrieve signature hash and use get_bond_score
+        sig_hash = user_id if user_id in self.identified_users else None
+        if sig_hash:
+            return self.get_bond_score(sig_hash)
+        return None
+
     def _compute_wordprint_score(self, user_input: str, profile: dict) -> float:
         """Calculate wordprint score based on lexical signature and style consistency."""
         # Lexical Signature
@@ -391,4 +407,5 @@ class BondModulator:
             context = self.bond_calculator.context_weak
         else:
             context = self.bond_calculator.context_neutral
+
         return context, bond_score

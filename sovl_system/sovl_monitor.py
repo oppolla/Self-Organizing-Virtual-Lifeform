@@ -10,6 +10,7 @@ from sovl_events import MemoryEventDispatcher, MemoryEventTypes
 from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorManager
 from sovl_queue import check_scribe_queue_health
+from sovl_bonder import BondCalculator, BondModulator  # Add import
 import time
 import traceback
 import curses
@@ -36,7 +37,8 @@ class SystemMonitor:
         logger: Logger,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager,
-        error_manager: ErrorManager
+        error_manager: ErrorManager,
+        bond_calculator: BondCalculator = None  # Add optional bond_calculator
     ):
         """
         Initialize system monitor.
@@ -47,12 +49,16 @@ class SystemMonitor:
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
             error_manager: ErrorManager instance for error handling
+            bond_calculator: BondCalculator instance for bond score calculation
         """
         self._config_manager = config_manager
         self._logger = logger
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         self._error_manager = error_manager
+        self.bond_calculator = bond_calculator
+        self._bond_score_history = {}  # user_id -> deque of bond scores
+        self._bond_history_maxlen = 100
         
         # Load thresholds from config
         self._ram_critical_threshold = self._config_manager.get_setting(
@@ -117,6 +123,42 @@ class SystemMonitor:
                 "gpu_stats": {"status": "error"},
                 "queue_stats": {"status": "error"}
             }
+
+    def record_bond_score(self, user_id, bond_score):
+        """Record a bond score for tracking (per user/session)."""
+        if user_id is None:
+            return
+        if user_id not in self._bond_score_history:
+            self._bond_score_history[user_id] = deque(maxlen=self._bond_history_maxlen)
+        self._bond_score_history[user_id].append((time.time(), bond_score))
+
+    def get_latest_bond_score(self, user_id):
+        """Get the latest bond score for a user/session."""
+        if user_id in self._bond_score_history and self._bond_score_history[user_id]:
+            return self._bond_score_history[user_id][-1][1]
+        if self.bond_calculator:
+            return self.bond_calculator.get_bond_score_for_user(user_id)
+        return None
+
+    def get_bond_stats(self, user_id=None):
+        """Return bond stats for a user, or all users if user_id is None."""
+        stats = {}
+        users = [user_id] if user_id else list(self._bond_score_history.keys())
+        for uid in users:
+            history = self._bond_score_history.get(uid, [])
+            scores = [score for ts, score in history]
+            if scores:
+                stats[uid] = {
+                    'latest': scores[-1],
+                    'mean': statistics.mean(scores),
+                    'min': min(scores),
+                    'max': max(scores),
+                    'stddev': statistics.stdev(scores) if len(scores) > 1 else 0.0,
+                    'count': len(scores),
+                }
+            else:
+                stats[uid] = {'latest': self.get_latest_bond_score(uid)}
+        return stats
 
 class MemoryMonitor:
     """Monitors system memory usage."""
@@ -195,6 +237,8 @@ class TraitsMonitor:
         curiosity_manager: CuriosityManager,
         training_manager: TrainingCycleManager,
         error_manager: ErrorManager,
+        bond_calculator: BondCalculator = None,
+        bond_modulator: BondModulator = None,
         update_interval: float = None  # Now optional, will be fetched from config
     ):
         """
@@ -207,6 +251,8 @@ class TraitsMonitor:
             curiosity_manager: CuriosityManager for curiosity metrics
             training_manager: TrainingCycleManager for lifecycle metrics
             error_manager: ErrorManager instance for error handling
+            bond_calculator: BondCalculator instance for bond score calculation
+            bond_modulator: BondModulator instance for bond score modulation
             update_interval: Optional override for update interval (defaults to config value)
         """
         self._config_manager = config_manager
@@ -215,6 +261,8 @@ class TraitsMonitor:
         self._curiosity_manager = curiosity_manager
         self._training_manager = training_manager
         self._error_manager = error_manager
+        self.bond_calculator = bond_calculator
+        self.bond_modulator = bond_modulator
         
         # Load update interval from config if not provided
         self._update_interval = update_interval or self._config_manager.get_setting(
@@ -237,12 +285,15 @@ class TraitsMonitor:
             'monitoring', 'min_samples_for_variance', default=10
         )
 
-        # Store history for each trait
-        self._curiosity_history = deque(maxlen=self._history_size)
-        self._confidence_history = deque(maxlen=self._history_size)
-        self._lifecycle_history = deque(maxlen=self._history_size)
-        self._temperament_history = deque(maxlen=self._history_size)
-        
+        # Use a unified trait history dict for all traits
+        self._trait_histories = {
+            'curiosity': deque(maxlen=self._history_size),
+            'confidence': deque(maxlen=self._history_size),
+            'lifecycle': deque(maxlen=self._history_size),
+            'temperament': deque(maxlen=self._history_size),
+            'bond_score': deque(maxlen=self._history_size),
+        }
+        self._latest_traits = {}
         self._stop_event = Event()
         self._monitor_thread = None
         self._display_lock = Lock()
@@ -345,79 +396,54 @@ class TraitsMonitor:
                 self._stop_event.wait(1.0)
 
     def _get_current_traits(self) -> Dict[str, float]:
-        """Collect current values for all monitored traits."""
+        """Collect current values for all monitored traits, including bond score."""
         try:
             # Core traits and states
             traits = {
                 'curiosity': self._curiosity_manager.get_curiosity_score(),
                 'confidence': self._state.get_confidence_level(),
                 'lifecycle': self._training_manager.get_lifecycle_phase(),
-                'temperament': self._state.get_temperament_score()
+                'temperament': self._state.get_temperament_score(),
             }
-            
             # Training state metrics
             training_state = self._state._training_state
             traits.update({
                 'data_exposure': training_state.data_exposure,
                 'sleep_confidence': safe_divide(
                     training_state.sleep_confidence_sum,
-                    training_state.sleep_confidence_count
+                    training_state.sleep_confidence_count,
+                    default=0.0
                 ),
-                'data_quality': training_state.data_quality_metrics['pair_completeness'],
-                'avg_input_length': training_state.data_quality_metrics['avg_input_length'],
-                'avg_output_length': training_state.data_quality_metrics['avg_output_length']
+                'data_quality': training_state.data_quality_metrics.get('avg_quality', 0.0),
+                'avg_input_length': training_state.data_quality_metrics.get('avg_input_length', 0.0),
+                'avg_output_length': training_state.data_quality_metrics.get('avg_output_length', 0.0),
+                'message_count': getattr(training_state, 'message_count', 0)
             })
-            
-            # Conversation metrics
-            conv_meta = self._state.get_conversation_metadata()
-            traits.update({
-                'message_count': conv_meta['message_count']
-            })
-            
-            # Update histories
-            self._curiosity_history.append(traits['curiosity'])
-            self._confidence_history.append(traits['confidence'])
-            self._lifecycle_history.append(traits['lifecycle'])
-            self._temperament_history.append(traits['temperament'])
-            
+            # Add bond score (for current user/session)
+            user_id = self._get_current_user_id() if hasattr(self, '_get_current_user_id') else None
+            bond_score = None
+            if self.bond_calculator and user_id:
+                bond_score = self.bond_calculator.get_bond_score_for_user(user_id)
+            elif self.bond_modulator and hasattr(self.bond_modulator, 'bond_calculator') and user_id:
+                bond_score = self.bond_modulator.bond_calculator.get_bond_score_for_user(user_id)
+            traits['bond_score'] = bond_score
+            # Update unified trait histories
+            for trait_name in self._trait_histories:
+                if trait_name in traits:
+                    self._trait_histories[trait_name].append(traits[trait_name])
+            self._latest_traits = traits.copy()
             # Check for erratic behavior
-            for trait_name, history in [
-                ('curiosity', self._curiosity_history),
-                ('confidence', self._confidence_history),
-                ('lifecycle', self._lifecycle_history),
-                ('temperament', self._temperament_history)
-            ]:
-                if self._is_trait_erratic(trait_name, history):
-                    self._error_manager.handle_error(
-                        error_type="traits",
-                        error_message=f"Erratic behavior detected in {trait_name}",
-                        context={
-                            "trait_name": trait_name,
-                            "current_value": traits[trait_name],
-                            "history": list(history)[-10:]
-                        }
-                    )
-            
+            for trait_name, history in self._trait_histories.items():
+                self._is_trait_erratic(trait_name, history)
             return traits
             
         except Exception as e:
             self._error_manager.handle_error(
                 error_type="traits",
-                error_message=f"Failed to collect trait values: {str(e)}",
+                error_message=f"Error collecting traits: {str(e)}",
                 context={"stack_trace": traceback.format_exc()}
             )
-            return {
-                'curiosity': 0.0,
-                'confidence': 0.0,
-                'lifecycle': 0.0,
-                'temperament': 0.0,
-                'data_exposure': 0.0,
-                'sleep_confidence': 0.0,
-                'data_quality': 0.0,
-                'avg_input_length': 0.0,
-                'avg_output_length': 0.0,
-                'message_count': 0
-            }
+            return {trait: float('nan') for trait in self._trait_histories}
     
     def _is_trait_erratic(self, trait_name: str, history: deque) -> bool:
         """Check if a trait is showing erratic behavior based on variance."""
@@ -469,7 +495,7 @@ class TraitsMonitor:
                 row += 1
                 for trait_name in ['curiosity', 'confidence', 'lifecycle', 'temperament']:
                     value = traits.get(trait_name, float('nan'))
-                    history = getattr(self, f"_{trait_name}_history", deque())
+                    history = self._trait_histories[trait_name]
                     is_erratic = self._is_trait_erratic(trait_name, history)
                     color_pair = 1 if is_erratic else 2
                     color_attr = curses.color_pair(color_pair) if curses.has_colors() else curses.A_NORMAL
@@ -505,6 +531,13 @@ class TraitsMonitor:
                 message_count = traits.get('message_count', 'N/A')
                 self._screen.addstr(row, 2, f"Messages: {message_count}")
                 
+                # Bond Score
+                row += 1
+                self._screen.addstr(row, 0, "Bond Score:", curses.A_BOLD)
+                row += 1
+                bond_score = traits.get('bond_score', 'N/A')
+                self._screen.addstr(row, 2, f"Bond Score: {bond_score}")
+                
                 # Display instructions
                 row += 2
                 max_y, max_x = self._screen.getmaxyx()
@@ -521,3 +554,11 @@ class TraitsMonitor:
                     error_type="display_error",
                     stack_trace=traceback.format_exc()
                 )
+
+    def get_latest_trait(self, trait_name: str):
+        """Get the latest value for a given trait."""
+        return self._latest_traits.get(trait_name)
+
+    def get_trait_history(self, trait_name: str):
+        """Get the history for a given trait."""
+        return list(self._trait_histories.get(trait_name, []))
