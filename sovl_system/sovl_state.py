@@ -138,6 +138,7 @@ class StateBase:
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
+        self.identified_users = {}  # key: signature_hash, value: user profile dict
         self._validate_config()
 
     def _validate_config(self) -> None:
@@ -192,6 +193,21 @@ class StateBase:
             raise ValueError(f"Invalid {name} type: {type(tensor)}")
         if tensor.shape[-1] != expected_dim:
             raise ValueError(f"{name} shape {tensor.shape} mismatches expected dimension {expected_dim}")
+
+    def add_identified_user(self, signature_hash: str, profile: dict):
+        """Add or update an identified user profile in the central registry."""
+        with self.lock:
+            self.identified_users[signature_hash] = profile
+
+    def get_identified_user(self, signature_hash: str):
+        """Retrieve a user profile by signature hash."""
+        with self.lock:
+            return self.identified_users.get(signature_hash)
+
+    def get_all_identified_users(self):
+        """Return all identified user profiles."""
+        with self.lock:
+            return dict(self.identified_users)
 
 class CuriosityState(StateBase):
     """Manages curiosity-related state and question prioritization."""

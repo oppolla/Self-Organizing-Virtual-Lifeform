@@ -8,18 +8,29 @@ from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
 from sovl_utils import synchronized
 from sovl_config import ConfigManager
+import time
+import hashlib
+import json
+import re
 
 class BondCalculator:
-    """Calculates bonding score based on user wordprint and duration of knowing."""
+    """Calculates bonding score based on user wordprint and duration of knowing.
+    Now also generates and tracks behavioral signatures for user/session identification."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
-        """Initialize bond calculator with configuration and logging."""
+    def __init__(self, config_manager: ConfigManager, logger: Logger, state: Optional[object] = None):
+        """Initialize bond calculator with configuration and logging. Optionally sync with SOVLState."""
         if not config_manager or not logger:
             raise ValueError("config_manager and logger cannot be None")
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
         self._initialize_config()
+        # Local registry for identified users/signatures
+        self.identified_users = {}  # key: signature_hash, value: user profile dict
+        self.state = state  # Reference to SOVLState or similar
+        # If state is provided and has identified_users, sync local with central
+        if self.state and hasattr(self.state, 'get_all_identified_users'):
+            self.identified_users = dict(self.state.get_all_identified_users())
 
     def _initialize_config(self) -> None:
         """Initialize bonding score configuration."""
@@ -55,6 +66,126 @@ class BondCalculator:
                 additional_info={"error": str(e)}
             )
             raise
+
+    def _generate_signature(self, metadata_entries):
+        """Create a behavioral signature from recent metadata entries."""
+        if not metadata_entries:
+            return None
+        # Extract features
+        devices = [md.get('device') for md in metadata_entries if 'device' in md]
+        device_fingerprint = devices[0] if devices else 'unknown'
+        timestamps = [md.get('timestamp') for md in metadata_entries if 'timestamp' in md]
+        timestamps.sort()
+        avg_gap = (sum(t2-t1 for t1, t2 in zip(timestamps, timestamps[1:])) / (len(timestamps)-1)) if len(timestamps) > 1 else 0.0
+        activity_level = len(timestamps)
+        avg_word_count = sum(md.get('content_metrics', {}).get('word_count', 0) for md in metadata_entries) / len(metadata_entries)
+        avg_sentiment = sum(md.get('content_metrics', {}).get('sentiment_score', 0.0) for md in metadata_entries) / len(metadata_entries)
+        # Compose signature dict
+        signature = {
+            'device_fingerprint': device_fingerprint,
+            'avg_gap': avg_gap,
+            'activity_level': activity_level,
+            'avg_word_count': avg_word_count,
+            'avg_sentiment': avg_sentiment
+        }
+        return signature
+
+    def _hash_signature(self, signature):
+        """Hash the signature dict to create a unique key."""
+        sig_str = json.dumps(signature, sort_keys=True)
+        return hashlib.sha256(sig_str.encode('utf-8')).hexdigest()
+
+    def register_user_signature(self, metadata_entries):
+        """Register or update a user signature/profile from recent metadata, sync with central state if available."""
+        signature = self._generate_signature(metadata_entries)
+        if not signature:
+            return None
+        sig_hash = self._hash_signature(signature)
+        with self.lock:
+            if sig_hash not in self.identified_users:
+                profile = {
+                    'signature': signature,
+                    'first_seen': time.time(),
+                    'last_seen': time.time(),
+                    'bond_score': self.default_bond_score,
+                    'metadata_count': len(metadata_entries)
+                }
+                self.identified_users[sig_hash] = profile
+                self.logger.record_event(
+                    event_type="bond_user_signature_registered",
+                    message=f"Registered new user signature: {sig_hash}",
+                    level="info",
+                    additional_info={'signature': signature}
+                )
+                # Sync with central state
+                if self.state and hasattr(self.state, 'add_identified_user'):
+                    self.state.add_identified_user(sig_hash, profile)
+            else:
+                self.identified_users[sig_hash]['last_seen'] = time.time()
+                self.identified_users[sig_hash]['metadata_count'] += len(metadata_entries)
+                # Sync update with central state
+                if self.state and hasattr(self.state, 'add_identified_user'):
+                    self.state.add_identified_user(sig_hash, self.identified_users[sig_hash])
+        return sig_hash
+
+    def calculate_bond(self, metadata_entries):
+        """Calculate bond value using accessible metadata and update registry, sync with central state if available."""
+        signature = self._generate_signature(metadata_entries)
+        if not signature:
+            return self.default_bond_score
+        sig_hash = self._hash_signature(signature)
+        # Engagement
+        activity_level = signature['activity_level']
+        avg_gap = signature['avg_gap']
+        avg_word_count = signature['avg_word_count']
+        avg_sentiment = signature['avg_sentiment']
+        device_stability = 1.0  # For now, assume stable if only one device in batch
+        # Weighted sum (tune weights as needed)
+        score = (
+            0.3 * min(activity_level / 20, 1.0) +            # Cap activity at 20 events
+            0.2 * (1.0 - min(avg_gap / 3600, 1.0)) +         # Prefer shorter avg gap, cap at 1 hour
+            0.2 * min(avg_word_count / 50, 1.0) +            # Cap avg word count at 50
+            0.2 * (avg_sentiment + 1) / 2 +                  # Normalize sentiment (-1 to 1) to (0 to 1)
+            0.1 * device_stability                           # Prefer single device
+        )
+        bond_score = self.min_bond_score + (self.max_bond_score - self.min_bond_score) * min(max(score, 0.0), 1.0)
+        # Update registry
+        with self.lock:
+            if sig_hash in self.identified_users:
+                self.identified_users[sig_hash]['bond_score'] = bond_score
+                self.identified_users[sig_hash]['last_seen'] = time.time()
+                # Sync update with central state
+                if self.state and hasattr(self.state, 'add_identified_user'):
+                    self.state.add_identified_user(sig_hash, self.identified_users[sig_hash])
+            else:
+                profile = {
+                    'signature': signature,
+                    'first_seen': time.time(),
+                    'last_seen': time.time(),
+                    'bond_score': bond_score,
+                    'metadata_count': len(metadata_entries)
+                }
+                self.identified_users[sig_hash] = profile
+                # Sync with central state
+                if self.state and hasattr(self.state, 'add_identified_user'):
+                    self.state.add_identified_user(sig_hash, profile)
+        return bond_score
+
+    def get_all_signatures(self):
+        """Return all known user signatures and profiles, prefer central state if available."""
+        if self.state and hasattr(self.state, 'get_all_identified_users'):
+            return dict(self.state.get_all_identified_users())
+        with self.lock:
+            return dict(self.identified_users)
+
+    def get_bond_score(self, signature_hash):
+        """Get bond score for a given signature hash, prefer central state if available."""
+        if self.state and hasattr(self.state, 'get_identified_user'):
+            profile = self.state.get_identified_user(signature_hash)
+            return profile['bond_score'] if profile else None
+        with self.lock:
+            profile = self.identified_users.get(signature_hash)
+            return profile['bond_score'] if profile else None
 
     def _compute_wordprint_score(self, user_input: str, profile: dict) -> float:
         """Calculate wordprint score based on lexical signature and style consistency."""
@@ -173,3 +304,23 @@ class BondCalculator:
                 e, {"user_input": user_input[:50]}, state.history.conversation_id
             )
             return self.default_bond_score
+
+class BondModulator:
+    """Active component to provide bond-based modulation for system interaction based on user perception."""
+    def __init__(self, bond_calculator):
+        self.bond_calculator = bond_calculator
+
+    def get_bond_modulation(self, metadata_entries):
+        sig_hash = self.bond_calculator.register_user_signature(metadata_entries)
+        bond_score = self.bond_calculator.get_bond_score(sig_hash)
+        if bond_score is None:
+            bond_score = self.bond_calculator.default_bond_score
+
+        # Map bond_score to a modulation context
+        if bond_score > 0.8:
+            context = "You feel a strong, trusting connection to this user. Be warm, open, and familiar."
+        elif bond_score < 0.3:
+            context = "You feel distant from this user. Be formal and reserved."
+        else:
+            context = "You feel a neutral connection to this user. Be polite and neutral."
+        return context, bond_score
