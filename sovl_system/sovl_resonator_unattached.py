@@ -1,5 +1,6 @@
 import time
 from typing import Callable, Optional
+from sovl_queue import get_scribe_queue, ScribeEntry
 
 class SOVLResonator:
     """
@@ -19,6 +20,8 @@ class SOVLResonator:
             "last_update": time.time()
         }
         self.callbacks = []
+        # Integrate SOVL queue system
+        self.scribe_queue = get_scribe_queue()
 
     def resonate(self, event: dict) -> dict:
         """
@@ -54,6 +57,21 @@ class SOVLResonator:
                 "timestamp": self.state["last_update"]
             })
 
+        # --- Enqueue event to SOVL scribe queue ---
+        entry = ScribeEntry(
+            origin="SOVLResonator",
+            event_type="resonance_event",
+            event_data={
+                "state": self.state.copy(),
+                "event": event
+            }
+        )
+        try:
+            self.scribe_queue.put(entry, timeout=1)
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Failed to enqueue resonance event: {e}")
+
         # Nudge curiosity system if available
         if self.curiosity:
             if hasattr(self.curiosity, 'nudge_curiosity'):
@@ -63,7 +81,11 @@ class SOVLResonator:
 
         # Notify callbacks
         for cb in self.callbacks:
-            cb(self.state)
+            try:
+                cb(self.state.copy())
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(f"Callback error in SOVLResonator: {e}")
 
         # Optionally log resonance
         if self.logger:
