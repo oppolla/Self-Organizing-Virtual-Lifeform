@@ -1080,28 +1080,51 @@ class GenerationManager:
         return decorator
 
     @state_managed_operation("generate_text")
-    def generate_text(self, prompt: str, num_return_sequences: int = 1, **kwargs) -> List[str]:
-        """Generate text with state-driven error handling, recovery, and scribe logging."""
+    def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", **kwargs) -> List[str]:
+        """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration."""
         request_time = time.time()
 
         try:
+            # --- Always-on Memory: Retrieve context ---
+            # Try to retrieve both short-term and long-term context from SystemContext if available
+            system_context = getattr(self, "system_context", None)
+            memory_context = None
+            if system_context and hasattr(system_context, "get_short_term_context"):
+                short_ctx = system_context.get_short_term_context()
+                long_ctx = system_context.get_long_term_context(user_id=user_id)
+                # Compose memory context as a string (customize as needed)
+                memory_context = self._compose_memory_context(short_ctx, long_ctx)
+            else:
+                memory_context = None
+
+            # --- Compose prompt with memory context ---
+            if memory_context:
+                full_prompt = f"[CONTEXT]\n{memory_context}\n[USER PROMPT]\n{prompt}"
+            else:
+                full_prompt = prompt
+
             # Validate parameters
-            self._validate_generation_params(prompt, num_return_sequences=num_return_sequences)
-            
-            if not prompt or not isinstance(prompt, str):
+            self._validate_generation_params(full_prompt, num_return_sequences=num_return_sequences)
+            if not full_prompt or not isinstance(full_prompt, str):
                 raise ValueError("Invalid prompt provided")
-            
+
             # Prepare and execute generation
-            batch = self._prepare_generation_batch(prompt, num_return_sequences)
+            batch = self._prepare_generation_batch(full_prompt, num_return_sequences)
             generated_texts = self._generate_with_state_context(batch)
-            
+
+            # --- Always-on Memory: Store prompt and response ---
+            if system_context and hasattr(system_context, "add_message_to_memory"):
+                system_context.add_message_to_memory("user", prompt, user_id)
+                for response in generated_texts:
+                    system_context.add_message_to_memory("assistant", response, user_id)
+
             # Prepare generation result data for logging
             generation_result = {
                 "generated_texts": generated_texts,
                 "generation_config_used": self._get_generation_config(),
                 "processing_time_ms": (time.time() - request_time) * 1000
             }
-            
+
             # Assemble capture data
             event_data, source_metadata = ScribeAssembler.assemble_scribe_data(
                 manager=self,
@@ -1120,9 +1143,9 @@ class GenerationManager:
                 source_metadata=source_metadata,
                 session_id=self.session_id
             )
-            
+
             return generated_texts
-            
+
         except Exception as e:
             # Log generation error
             capture_scribe_event(
@@ -1143,10 +1166,31 @@ class GenerationManager:
                 session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
-            
+
             # Handle error through existing mechanism
             self._handle_error("generate_text", e)
             return ["An error occurred during text generation"]
+
+    def set_system_context(self, system_context):
+        """Bind the system context for always-on memory integration."""
+        self.system_context = system_context
+
+    def _compose_memory_context(self, short_ctx, long_ctx):
+        """Compose a string from short-term and long-term memory context."""
+        context_lines = []
+        if short_ctx:
+            context_lines.append("Short-Term Memory:")
+            for msg in short_ctx:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                context_lines.append(f"{role.capitalize()}: {content}")
+        if long_ctx:
+            context_lines.append("Long-Term Memory:")
+            for msg in long_ctx:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                context_lines.append(f"{role.capitalize()}: {content}")
+        return "\n".join(context_lines) if context_lines else None
 
     def _prepare_generation_batch(self, prompt: str, num_return_sequences: int = 1) -> Dict[str, Any]:
         """Prepare input batch for text generation."""

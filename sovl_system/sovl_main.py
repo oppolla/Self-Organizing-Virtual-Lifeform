@@ -33,6 +33,7 @@ from sovl_tuner import SOVLTuner
 
 # Memory and state management
 from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_recaller import DialogueContextManager
 
 # AI components
 from sovl_curiosity import CuriosityManager
@@ -206,6 +207,29 @@ class SystemContext:
             
             # Complete initialization sequence
             self._complete_initialization()
+            
+            # --- Integrate DialogueContextManager for recall/memory ---
+            try:
+                config_manager = ConfigManager(config_path, Logger.get_instance())
+                self.memory_context = DialogueContextManager(
+                    embedding_dim=config_manager.memory_config.embedding_dim
+                        if hasattr(config_manager, 'memory_config') and hasattr(config_manager.memory_config, 'embedding_dim')
+                        else 128,
+                    max_short_term=config_manager.memory_config.max_short_term
+                        if hasattr(config_manager, 'memory_config') and hasattr(config_manager.memory_config, 'max_short_term')
+                        else 50,
+                    db_path=getattr(config_manager.memory_config, 'db_path', 'conversations.db'),
+                    session_id=self.get_session_id() if hasattr(self, 'get_session_id') else 'default',
+                    config_manager=config_manager,
+                    memory_logging_level=getattr(config_manager.memory_config, 'memory_logging_level', 'info'),
+                    long_term_retention_days=getattr(config_manager.memory_config, 'long_term_retention_days', None),
+                    long_term_top_k=getattr(config_manager.memory_config, 'long_term_top_k', 5),
+                    short_term_expiry_seconds=getattr(config_manager.memory_config, 'short_term_expiry_seconds', None)
+                )
+            except Exception as e:
+                self.memory_context = None
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.log_error(f"Failed to initialize DialogueContextManager: {e}", error_type="DialogueContextManagerInitError")
             
         except Exception as e:
             self._handle_initialization_error(e)
@@ -592,6 +616,35 @@ class SystemContext:
                     print(traceback.format_exc(), file=sys.stderr)
             except Exception:
                 print(f"Critical error in initialization completion exception handler: {str(e)}", file=sys.stderr)
+
+    def add_message_to_memory(self, role: str, content: str, user_id: str = "default"):
+        if self.memory_context:
+            self.memory_context.add_message(role, content, user_id)
+
+    def get_short_term_context(self):
+        if self.memory_context:
+            return self.memory_context.get_short_term_context()
+        return []
+
+    def get_long_term_context(self, user_id: str = "default", query_embedding=None, top_k: int = 5):
+        if self.memory_context:
+            return self.memory_context.get_long_term_context(user_id, query_embedding, top_k)
+        return []
+
+    def clear_short_term_memory(self):
+        if self.memory_context:
+            self.memory_context.clear_short_term_memory()
+
+    def clear_long_term_memory(self, user_id: str = "default"):
+        if self.memory_context:
+            self.memory_context.clear_long_term_memory(user_id)
+
+    def bind_generation_manager(self, generation_manager):
+        """Bind the GenerationManager to this SystemContext for always-on memory."""
+        self.generation_manager = generation_manager
+        # Provide self as system_context to generation_manager
+        if hasattr(generation_manager, "set_system_context"):
+            generation_manager.set_system_context(self)
 
 class SystemInitializationError(Exception):
     """Custom exception for system initialization failures."""
@@ -1073,4 +1126,3 @@ class SOVLSystem(SystemInterface):
 
         if self.context and self.context.logger:
             self.context.logger.log_info("SOVL main memory monitoring loop stopped.")
-
