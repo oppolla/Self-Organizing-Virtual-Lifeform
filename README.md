@@ -3,7 +3,7 @@
 # NOTE: This project is still under development 
 
 ## Overview
-An AI agent with autonomous learning capabilities, combining a base LLM with a scaffolded second dynamic LLM for continuous learning via sleep and dream mechanisms
+SOVL is a complex, modular AI agent framework designed for autonomous learning, adaptation, and self-improvement. It leverages a unique dual-LLM (Large Language Model) architecture—combining a stable base model with a dynamic, scaffolded secondary model—to enable continuous, lifelong learning through biologically inspired mechanisms such as "sleep" and "dreaming."
 
 ## Console Commands
 
