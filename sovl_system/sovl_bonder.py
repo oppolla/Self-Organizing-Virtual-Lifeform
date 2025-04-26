@@ -302,6 +302,40 @@ class BondCalculator:
         """Placeholder for coherence score (input-response alignment)."""
         return 0.5  # Neutral default
 
+    def assign_nickname_if_ready(self, conversation_id: str, user_profile_state) -> None:
+        """
+        Assign a minimalist nickname to the user if enough early interactions have been buffered and no nickname is set.
+        This uses Soulprinter.extract_name or extract_key_noun, and updates the profile in-place.
+        """
+        profile = user_profile_state.get(conversation_id)
+        if profile.get("nickname") or len(profile.get("early_interactions", [])) < user_profile_state.nickname_buffer_size:
+            return  # Nickname already set or not enough data
+        try:
+            from sovl_printer_unattached import Soulprinter
+            system = None
+            config_manager = self.config_manager
+            soulprinter = Soulprinter(system, config_manager)
+            early_text = " ".join(profile["early_interactions"])
+            nickname = soulprinter.extract_name(early_text, {})
+            if not nickname or nickname.strip() == early_text.strip():
+                nickname = soulprinter.extract_key_noun(early_text)
+            if nickname and nickname.strip() and nickname.strip() != '[UNKNOWN]':
+                profile["nickname"] = nickname.strip()
+                user_profile_state.profiles[conversation_id] = profile
+                self.logger.record_event(
+                    event_type="nickname_assigned",
+                    message="Nickname assigned to user",
+                    level="info",
+                    additional_info={"nickname": nickname, "conversation_id": conversation_id}
+                )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="nickname_assignment_failed",
+                message=f"Failed to assign nickname: {str(e)}",
+                level="error",
+                additional_info={"conversation_id": conversation_id}
+            )
+
     @synchronized()
     def calculate_bonding_score(
         self,
@@ -338,6 +372,9 @@ class BondCalculator:
             conversation_id = state.history.conversation_id
             profile = state.user_profile_state.get(conversation_id)
             state.user_profile_state.update(conversation_id, user_input, state.session_start)
+
+            # --- Nickname assignment logic moved here ---
+            self.assign_nickname_if_ready(conversation_id, state.user_profile_state)
 
             # Calculate component scores
             curiosity_score = (curiosity_manager.get_novelty_score(user_input)

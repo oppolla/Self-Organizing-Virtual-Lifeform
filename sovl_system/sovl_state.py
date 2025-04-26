@@ -1156,6 +1156,7 @@ class UserProfileState(StateBase):
         self.profiles: Dict[str, Dict[str, Any]] = {}
         self.max_inputs = self.config_manager.get("bond_config.max_recent_inputs", 10)
         self.max_lexicon = self.config_manager.get("bond_config.max_lexicon_size", 1000)
+        self.nickname_buffer_size = self.config_manager.get("bond_config.nickname_buffer_size", 5)
         self.log_event("user_profile_init", "User profile state initialized", max_inputs=self.max_inputs)
 
     @synchronized("lock")
@@ -1167,7 +1168,9 @@ class UserProfileState(StateBase):
                 "interactions": 0,
                 "session_time": 0.0,
                 "inputs": deque(maxlen=self.max_inputs),
-                "last_interaction": time.time()
+                "last_interaction": time.time(),
+                "nickname": "",
+                "early_interactions": []
             })
             for word in re.findall(r'\w+', user_input.lower()):
                 profile["lexicon"][word] += 1
@@ -1177,6 +1180,13 @@ class UserProfileState(StateBase):
             profile["interactions"] += 1
             profile["session_time"] += time.time() - session_start
             profile["last_interaction"] = time.time()
+            # --- Nickname and early interactions logic ---
+            if "nickname" not in profile:
+                profile["nickname"] = ""
+            if "early_interactions" not in profile:
+                profile["early_interactions"] = []
+            if not profile["nickname"]:
+                profile["early_interactions"].append(user_input)
             self.log_event("profile_updated", "Profile updated", conversation_id=conversation_id)
         except Exception as e:
             self.log_error(error_msg=f"Profile update failed: {str(e)}", conversation_id=conversation_id)
@@ -1190,7 +1200,9 @@ class UserProfileState(StateBase):
             "interactions": 0,
             "session_time": 0.0,
             "inputs": deque(maxlen=self.max_inputs),
-            "last_interaction": time.time()
+            "last_interaction": time.time(),
+            "nickname": "",
+            "early_interactions": []
         })
         self.log_event("profile_retrieved", "Profile retrieved", conversation_id=conversation_id, level="debug")
         return profile
@@ -1204,7 +1216,9 @@ class UserProfileState(StateBase):
                 "interactions": 0,
                 "session_time": 0.0,
                 "inputs": deque(maxlen=self.max_inputs),
-                "last_interaction": time.time()
+                "last_interaction": time.time(),
+                "nickname": "",
+                "early_interactions": []
             }
             self.log_event("profile_reset", "Profile reset", conversation_id=conversation_id)
         except Exception as e:
@@ -1222,7 +1236,9 @@ class UserProfileState(StateBase):
                             "interactions": p["interactions"],
                             "session_time": p["session_time"],
                             "inputs": list(p["inputs"]),
-                            "last_interaction": p["last_interaction"]
+                            "last_interaction": p["last_interaction"],
+                            "nickname": p.get("nickname", ""),
+                            "early_interactions": list(p.get("early_interactions", []))
                         } for cid, p in self.profiles.items()
                     },
                     "version": "1.0"
@@ -1242,7 +1258,9 @@ class UserProfileState(StateBase):
                         "interactions": int(p.get("interactions", 0)),
                         "session_time": float(p.get("session_time", 0.0)),
                         "inputs": deque(p.get("inputs", []), maxlen=self.max_inputs),
-                        "last_interaction": float(p.get("last_interaction", time.time()))
+                        "last_interaction": float(p.get("last_interaction", time.time())),
+                        "nickname": p.get("nickname", ""),
+                        "early_interactions": list(p.get("early_interactions", []))
                     }
                 self.log_event("profiles_loaded", "Profiles loaded", profile_count=len(self.profiles))
         except Exception as e:
