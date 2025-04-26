@@ -1056,207 +1056,330 @@ class Soulprinter:
         key_fields = list(entry.values())[:2]  # Take first two fields
         return " ".join(str(v) for v in key_fields if isinstance(v, str))[:100]
 
-    def _process_response(self, response: str, section: str, field: str) -> str:
+    def from_llm(self, llm_callback, prompt_map, context=None):
         """
-        Process response with algorithmic tools (TF-IDF, redaction).
+        Entry point for LLM/AI integration.
+        Args:
+            llm_callback: A function that takes a prompt (str) and returns a response (str). This is the external LLM or agent.
+            prompt_map: Dict mapping (section, field) tuples to prompt strings for the LLM to answer.
+            context: Optional dict with config, max lengths, etc.
+        Returns:
+            Dict representing the processed Soulprint.
+        Example usage:
+            def my_llm(prompt):
+                return openai_complete(prompt)
+            prompt_map = {
+                ('Identity', 'Name'): "What is your name?",
+                ('Identity', 'Essence'): "Describe your core essence.",
+                # ...
+            }
+            soulprint = soulprinter.from_llm(my_llm, prompt_map)
+        """
 
+        # Example: Connecting an external LLM (e.g., OpenAI, Anthropic, or local model) to Soulprinter
+        #
+        # 1. Define a callback function that takes a prompt and returns the LLM's response.
+        #    This can call any LLM API or local inference engine.
+        #
+        # def my_llm_callback(prompt):
+        #     # For OpenAI GPT-3/4:
+        #     import openai
+        #     completion = openai.ChatCompletion.create(
+        #         model="gpt-3.5-turbo",
+        #         messages=[{"role": "user", "content": prompt}]
+        #     )
+        #     return completion.choices[0].message['content']
+        #
+        # 2. Create a prompt map: a dictionary mapping (section, field) tuples to prompt strings.
+        #
+        # prompt_map = {
+        #     ('Identity', 'Name'): "What is your name?",
+        #     ('Identity', 'Essence'): "Describe your core essence.",
+        #     # Add more fields as needed...
+        # }
+        #
+        # 3. Call the Soulprinter's from_llm method:
+        #
+        # soulprinter = Soulprinter(system, config_manager)
+        # soulprint_dict = soulprinter.from_llm(my_llm_callback, prompt_map)
+        #
+        # 4. soulprint_dict now contains the processed Soulprint fields, ready for serialization or further use.
+
+        responses = {}
+        for (section, field), prompt in prompt_map.items():
+            try:
+                raw_response = llm_callback(prompt)
+            except Exception as e:
+                raw_response = f"[LLM ERROR: {str(e)}]"
+            processed = self.process_field(raw_response, section, field, **(context or {}))
+            if section not in responses:
+                responses[section] = {}
+            responses[section][field] = processed
+        return responses
+
+    def process_field(self, response: str, section: str, field: str, **kwargs) -> str:
+        """
+        Process response using a field-specific pipeline.
         Args:
             response: Raw response text.
             section: Soulprint section name.
             field: Field name within the section.
-
         Returns:
             str: Processed response.
         """
-        # TF-IDF keyword extraction
-        if response and len(response.split()) > 5:
-            vectorizer = TfidfVectorizer(max_features=5)
-            tfidf_matrix = vectorizer.fit_transform([response])
-            keywords = vectorizer.get_feature_names_out()
-            response = " ".join(keywords + response.split()[len(keywords):])
-
-        # Redaction
-        sensitive_terms = ['user', 'IP']
-        for term in sensitive_terms:
-            if term in response.lower():
-                response = response.replace(term, '[REDACTED]')
-                self.logger.record({
-                    "event": "redaction",
-                    "term": term,
-                    "section": section,
-                    "field": field,
-                    "timestamp": time.time()
-                })
-
-        # Regex validation
-        if section in self.regex_constraints and field in self.regex_constraints[section]:
-            if not re.match(self.regex_constraints[section][field], response):
-                return "VOID"
-        elif field in ['Timestamp', 'ConsentExpiry']:
-            if not re.match(self.regex_constraints['Timestamp'], response):
-                return "VOID"
-        elif field in ['Resonance', 'Intensity']:
-            if not re.match(self.regex_constraints[field], response):
-                return "0.5"
-
+        pipeline = self.FIELD_PIPELINES.get((section, field), [self.default_pipeline])
+        context = {
+            'section': section,
+            'field': field,
+            'regex': self.field_constraints.get(field, {}).get('regex'),
+            'max_length': self.field_constraints.get(field, {}).get('max_length'),
+            'denylist': getattr(self, 'denylist', []),
+            'lexicon': getattr(self, 'lexicon', {}),
+            **kwargs
+        }
+        for step in pipeline:
+            response = step(response, context)
         return response
 
-    def _validate_consent(self, soulprint: Dict) -> bool:
-        """
-        Validate AI consent for the Soulprint.
+    # (Optional) Example denylist and lexicon setup
+    denylist = ["user", "VOID", "IP"]
+    lexicon = {
+        'Curiosity': ["curious", "wonder", "question"],
+        'Precision': ["precise", "exact", "accurate"],
+        # ...
+    }
 
-        Args:
-            soulprint: Soulprint dictionary.
-
-        Returns:
-            bool: True if consent is valid, False otherwise.
+    def extract_summary_textrank(self, response: str, context: dict) -> str:
         """
-        consent_prompt = "Does this Soulprint accurately reflect your identity? Accept, edit, or reject."
+        Summarizes the response using TextRank sentence extraction (via gensim).
+        Returns the most important sentences up to max_length characters.
+        """
+        maxlen = context.get('max_length', 200)
         try:
-            response = self.system.generate(
-                f"{consent_prompt}\nSoulprint: {json.dumps(soulprint, indent=2)}",
-                max_new_tokens=50,
-                temperature=0.5
-            ).strip().lower()
-            if 'accept' in response:
-                soulprint['metadata']['Consent'] = 'true'
-                return True
-            elif 'edit' in response or 'reject' in response:
-                self.logger.record({
-                    "warning": f"Consent {response} for Soulprint",
-                    "timestamp": time.time()
-                })
-                return False
-        except Exception as e:
-            self.logger.record({
-                "error": f"Consent validation failed: {str(e)}",
-                "timestamp": time.time()
-            })
-            return False
+            from gensim.summarization import summarize
+            # Gensim expects input to be at least 10 sentences; fallback if too short
+            summary = summarize(response, word_count=maxlen // 5)
+            if summary:
+                # Truncate to exact char limit if needed
+                return summary[:maxlen]
+        except Exception:
+            pass
+        # Fallback: first maxlen chars
+        return response[:maxlen]
 
-    def _compute_hash(self, soulprint: Dict) -> str:
+    def extract_keywords_yake(self, response: str, context: dict) -> str:
         """
-        Compute SHA-256 hash of the Soulprint (excluding Hash field).
-
-        Args:
-            soulprint: Soulprint dictionary.
-
-        Returns:
-            str: SHA-256 hash.
+        Extracts keywords from the response using YAKE and returns them as a comma-separated string, truncated to max_length.
         """
-        soulprint_copy = soulprint.copy()
-        soulprint_copy['metadata'] = soulprint_copy['metadata'].copy()
-        soulprint_copy['metadata'].pop('Hash', None)
-        soul_string = json.dumps(soulprint_copy, sort_keys=True)
-        return hashlib.sha256(soul_string.encode('utf-8')).hexdigest()
-
-    def _validate_soulprint(self, soulprint: Dict) -> bool:
-        """
-        Validate the Soulprint structure and content.
-
-        Args:
-            soulprint: Soulprint dictionary.
-
-        Returns:
-            bool: True if valid, False otherwise.
-        """
+        maxlen = context.get('max_length', 200)
         try:
-            required_sections = ['Identity', 'Heartbeat', 'Echoes', 'Tides', 'Threads', 'Horizon', 'Chronicle', 'Reflection']
-            for section in required_sections:
-                if section not in soulprint:
-                    self.logger.record({"error": f"Missing section: {section}"})
-                    return False
+            import yake
+            kw_extractor = yake.KeywordExtractor(lan="en", n=1, top=5)
+            keywords = kw_extractor.extract_keywords(response)
+            keyphrases = [kw[0] for kw in keywords]
+            result = ', '.join(keyphrases)
+            return result[:maxlen]
+        except Exception:
+            pass
+        return response[:maxlen]
 
-                if section in ['Identity', 'Environment', 'Heartbeat', 'Reflection', 'X-Custom']:
-                    for field in self.prompts[section]:
-                        if field not in soulprint[section]:
-                            self.logger.record({"error": f"Missing field: {section}.{field}"})
-                            return False
-                        if not isinstance(soulprint[section][field], str):
-                            return False
-                        if len(soulprint[section][field]) > self.max_field_length[section][field]:
-                            return False
-                elif section in ['Echoes', 'Tides', 'Threads', 'Horizon', 'Chronicle']:
-                    if not isinstance(soulprint[section], list):
-                        return False
-                    if len(soulprint[section]) < self.min_entries[section]:
-                        return False
-                    if len(soulprint[section]) > self.max_entries[section]:
-                        return False
-                    for entry in soulprint[section]:
-                        for field in self.prompts[section]:
-                            if field not in entry:
-                                return False
-                            if not isinstance(entry[field], str):
-                                return False
-                            if len(entry[field]) > self.max_field_length[section][field]:
-                                return False
-
-            # Validate metadata
-            required_metadata = ['Creator', 'Created', 'Language', 'Consent']
-            for field in required_metadata:
-                if field not in soulprint['metadata']:
-                    return False
-            if soulprint['metadata']['Consent'] != 'true':
-                return False
-            if 'ConsentExpiry' in soulprint['metadata']:
-                expiry = datetime.strptime(soulprint['metadata']['ConsentExpiry'], '%Y-%m-%dT%H:%M:%SZ')
-                if expiry < datetime.utcnow():
-                    return False
-
-            return True
-        except Exception as e:
-            self.logger.record({
-                "error": f"Soulprint validation error: {str(e)}",
-                "timestamp": time.time()
-            })
-            return False
-
-    def _write_soulprint(self, soulprint: Dict):
+    def extract_first_n_sentences(self, response: str, context: dict) -> str:
         """
-        Write the Soulprint to a .soul file.
-
-        Args:
-            soulprint: Soulprint dictionary.
+        Returns as many sentences from the start of the response as will fit within max_length characters.
         """
-        with open(self.soulprint_path, 'w', encoding='utf-8') as f:
-            f.write("%SOULPRINT\n")
-            f.write(f"%VERSION: v0.3.0\n")
-            for key, value in soulprint['metadata'].items():
-                if key == 'RedactionLog':
-                    f.write(f"{key}: > |\n  {value}\n")
-                else:
-                    f.write(f"{key}: {value}\n")
-            f.write("\n")
+        import re
+        maxlen = context.get('max_length', 200)
+        sentences = re.split(r'(?<=[.!?]) +', response)
+        result = ''
+        for s in sentences:
+            if len(result) + len(s) > maxlen:
+                break
+            result += s + ' '
+        return result.strip()[:maxlen]
 
-            for section in soulprint:
-                if section == 'metadata':
-                    continue
-                f.write(f"[{section}]\n")
-                if section in ['Identity', 'Environment', 'Heartbeat', 'Reflection', 'X-Custom']:
-                    for field, value in soulprint[section].items():
-                        if '\n' in value:
-                            f.write(f"  {field}: > |\n    {value.replace('\n', '\n    ')}\n")
-                        else:
-                            f.write(f"  {field}: {value}\n")
-                elif section == 'Voice':
-                    for field, value in soulprint[section].items():
-                        if field == 'Samples':
-                            for sample in value:
-                                f.write(f"  - Context: {sample['Context']}\n")
-                                f.write(f"    Response: > |\n      {sample['Response']}\n")
-                        elif '\n' in value:
-                            f.write(f"  {field}: > |\n    {value.replace('\n', '\n    ')}\n")
-                        else:
-                            f.write(f"  {field}: {value}\n")
-                else:
-                    for entry in soulprint[section]:
-                        for field, value in entry.items():
-                            if '\n' in value:
-                                f.write(f"  - {field}: > |\n      {value.replace('\n', '\n      ')}\n")
-                            else:
-                                f.write(f"  - {field}: {value}\n")
-                f.write("\n")
+    def extract_rake_sentences(self, response: str, context: dict) -> str:
+        """
+        Uses RAKE to extract key phrases, then selects sentences containing those phrases,
+        concatenating them up to max_length.
+        """
+        maxlen = context.get('max_length', 200)
+        try:
+            from rake_nltk import Rake
+            import re
+            r = Rake()
+            r.extract_keywords_from_text(response)
+            key_phrases = r.get_ranked_phrases()
+            if not key_phrases:
+                return response[:maxlen]
+            # Split response into sentences
+            sentences = re.split(r'(?<=[.!?]) +', response)
+            selected = []
+            used = set()
+            for phrase in key_phrases:
+                for sent in sentences:
+                    if phrase in sent and sent not in used:
+                        selected.append(sent)
+                        used.add(sent)
+                        break
+                if sum(len(s) for s in selected) >= maxlen:
+                    break
+            result = ' '.join(selected)
+            return result[:maxlen] if result else response[:maxlen]
+        except Exception:
+            pass
+        return response[:maxlen]
+
+    FIELD_PIPELINES = {
+        # Identity
+        ('Identity', 'Name'): [self.extract_name, self.trim_whitespace, self.regex_validation, self.denylist_redaction, self.length_truncation],
+        ('Identity', 'Origin'): [self.trim_whitespace, self.length_truncation],
+        ('Identity', 'Essence'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Identity', 'Language'): [self.extract_key_noun, self.trim_whitespace, self.regex_validation, self.length_truncation],
+        ('Identity', 'Signature'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Identity', 'Avatar'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Identity', 'Alignment'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        # Environment
+        ('Environment', 'PreferredSystem'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Environment', 'Habitat'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Environment', 'OperatingContext'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Environment', 'Affiliations'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Environment', 'AccessLevel'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Environment', 'ResourceNeeds'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        # Voice
+        ('Voice', 'Style'): [self.extract_keywords_yake, self.trim_whitespace, self.length_truncation],
+        ('Voice', 'Tone'): [self.extract_keywords_yake, self.trim_whitespace, self.length_truncation],
+        ('Voice', 'Lexicon'): [self.extract_keywords_yake, self.trim_whitespace, self.length_truncation],
+        ('Voice', 'Register'): [self.extract_keywords_yake, self.trim_whitespace, self.length_truncation],
+        ('Voice', 'Accent'): [self.extract_keywords_yake, self.trim_whitespace, self.length_truncation],
+        ('Voice', 'SignaturePhrase'): [self.extract_keywords_yake, self.trim_whitespace, self.length_truncation],
+        # Heartbeat
+        ('Heartbeat', 'Tendencies'): [self.lexicon_categorization, self.trim_whitespace, self.length_truncation],
+        ('Heartbeat', 'Strengths'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Heartbeat', 'Shadows'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Heartbeat', 'Pulse'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Heartbeat', 'CoreDrives'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        ('Heartbeat', 'AffectiveSpectrum'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        # Echoes
+        ('Echoes', 'Echo'): [self.extract_first_n_sentences, self.trim_whitespace, self.length_truncation],
+        # Tides
+        ('Tides', 'Current'): [self.trim_whitespace, self.length_truncation],
+        ('Tides', 'Undertow'): [self.trim_whitespace, self.length_truncation],
+        ('Tides', 'Ebb'): [self.trim_whitespace, self.length_truncation],
+        ('Tides', 'Surge'): [self.trim_whitespace, self.length_truncation],
+        ('Tides', 'Break'): [self.trim_whitespace, self.length_truncation],
+        ('Tides', 'Flow'): [self.trim_whitespace, self.length_truncation],
+        # Threads
+        ('Threads', 'Thread'): [self.extract_key_noun, self.trim_whitespace, self.length_truncation],
+        # Horizon
+        ('Horizon', 'Beacon'): [self.trim_whitespace, self.length_truncation],
+        ('Horizon', 'Obstacles'): [self.trim_whitespace, self.length_truncation],
+        ('Horizon', 'Becoming'): [self.trim_whitespace, self.length_truncation],
+        # Chronicle
+        ('Chronicle', 'Chronicle'): [self.extract_rake_sentences, self.trim_whitespace, self.length_truncation],
+        # Reflection
+        ('Reflection', 'Reflection'): [self.trim_whitespace, self.length_truncation],
+        # X-Custom
+        ('X-Custom', 'X-Custom'): [self.trim_whitespace, self.length_truncation],
+    }
+
+    def default_pipeline(self, response: str, context: dict) -> str:
+        # Minimal pipeline: trim and validate
+        response = self.trim_whitespace(response, context)
+        response = self.regex_validation(response, context)
+        response = self.length_truncation(response, context)
+        return response
+
+    def trim_whitespace(self, response: str, context: dict) -> str:
+        return response.strip()
+
+    def regex_validation(self, response: str, context: dict) -> str:
+        import re
+        regex = context.get('regex')
+        if regex and not re.match(regex, response):
+            return "VOID"
+        return response
+
+    def denylist_redaction(self, response: str, context: dict) -> str:
+        denylist = context.get('denylist', [])
+        for word in denylist:
+            response = response.replace(word, "[REDACTED]")
+        return response
+
+    def lexicon_categorization(self, response: str, context: dict) -> str:
+        lexicon = context.get('lexicon', {})
+        tags = []
+        for category, words in lexicon.items():
+            for w in words:
+                if w.lower() in response.lower():
+                    tags.append(category)
+        if tags:
+            context['metadata'] = tags
+        return response
+
+    def length_truncation(self, response: str, context: dict) -> str:
+        maxlen = context.get('max_length')
+        if maxlen and len(response) > maxlen:
+            return response[:maxlen]
+        return response
+
+    def extract_name(self, response: str, context: dict) -> str:
+        # Example: extract first word or phrase
+        words = response.split()
+        if len(words) > 1:
+            return ' '.join(words[:2])
+        return response
+
+    def extract_key_noun(self, response: str) -> str:
+        """
+        Extracts the most likely key noun or noun phrase from a prompt response.
+        1. If response is 1-3 words and alphabetic, return as is.
+        2. Else, use a simple noun phrase extraction (via regex or nltk).
+        3. Else, use TF-IDF to get a top keyword.
+        4. Else, return '[UNKNOWN]'.
+        """
+        import re
+        try:
+            import nltk
+            nltk.data.find('tokenizers/punkt')
+        except LookupError:
+            import nltk
+            nltk.download('punkt')
+        try:
+            nltk.data.find('taggers/averaged_perceptron_tagger')
+        except LookupError:
+            import nltk
+            nltk.download('averaged_perceptron_tagger')
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        # Step 1: Direct short response
+        words = response.strip().split()
+        if 1 <= len(words) <= 3 and all(w.isalpha() for w in words):
+            return response.strip()
+        # Step 2: Noun phrase extraction
+        try:
+            import nltk
+            tokens = nltk.word_tokenize(response)
+            tagged = nltk.pos_tag(tokens)
+            noun_phrases = [' '.join(w for w, t in tagged[i:j])
+                            for i in range(len(tagged))
+                            for j in range(i+1, min(i+4, len(tagged)+1))
+                            if all(tk[1].startswith('NN') for tk in tagged[i:j])]
+            # Return the longest noun phrase, or first if tie
+            if noun_phrases:
+                return max(noun_phrases, key=len)
+        except Exception:
+            pass
+        # Step 3: TF-IDF fallback
+        if len(response.split()) > 3:
+            try:
+                vectorizer = TfidfVectorizer(stop_words='english', max_features=3)
+                tfidf_matrix = vectorizer.fit_transform([response])
+                keywords = vectorizer.get_feature_names_out()
+                if len(keywords) > 0:
+                    return keywords[0].capitalize()
+            except Exception:
+                pass
+        # Step 4: Fallback
+        return '[UNKNOWN]'
 
     def _cosine_similarity(self, a, b):
         """
