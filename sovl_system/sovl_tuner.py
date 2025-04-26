@@ -680,3 +680,56 @@ class SOVLTuner:
             self.trainer = trainer
         if cross_attention_injector is not None:
             self.cross_attention_injector = cross_attention_injector
+
+    # --- BEGIN: Integration API for AutonomyManager (sovl_volition) ---
+    def get_current_parameters(self) -> Dict[str, Any]:
+        """
+        Return a dictionary of all tunable parameters relevant to system autonomy.
+        """
+        params = {}
+        # Example: Add all relevant config keys here
+        try:
+            params["temperature"] = self.config_manager.get("generation_config.temperature")
+            params["top_p"] = self.config_manager.get("generation_config.top_p")
+            params["batch_size"] = self.config_manager.get("data_config.batch_size")
+            params["error_threshold"] = self.config_manager.get("error_config.error_threshold")
+            params["warning_threshold"] = self.config_manager.get("error_config.warning_threshold")
+            params["critical_threshold"] = self.config_manager.get("error_config.critical_threshold")
+            # Add more as needed
+        except Exception as e:
+            self.logger.log_training_event(
+                event_type="tuner_param_query_failed",
+                message=f"Failed to query parameters: {str(e)}",
+                level="error",
+                additional_info={"timestamp": time.time()}
+            )
+        return params
+
+    def update_parameters(self, params: Dict[str, Any]) -> None:
+        """
+        Update multiple parameters at once, with validation and logging.
+        Args:
+            params: Dict of parameter names (dot notation) to new values.
+        """
+        updates = {}
+        for k, v in params.items():
+            try:
+                self.validate_param(k, v)
+                self.config_manager.update(k, v)
+                updates[k] = v
+            except Exception as e:
+                self.logger.log_training_event(
+                    event_type="tuner_param_update_failed",
+                    message=f"Failed to update parameter {k}: {str(e)}",
+                    level="error",
+                    additional_info={"param": k, "value": v, "timestamp": time.time()}
+                )
+        if updates:
+            self.config_manager.save_config()
+            self.logger.log_training_event(
+                event_type="tuner_param_update",
+                message=f"Parameters updated: {updates}",
+                level="info",
+                additional_info={"updates": updates, "timestamp": time.time()}
+            )
+    # --- END: Integration API for AutonomyManager (sovl_volition) ---

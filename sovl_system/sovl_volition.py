@@ -713,12 +713,27 @@ class AutonomyManager:
             with self.memory_lock:  # Ensure thread safety
                 # 1. Aggregate sensory input and system state
                 context = self.aggregate_sensory_context()
-                # 2. Build a structured prompt for the LLM
+                # 2. Optionally add current tunable parameters to context
+                if self.tuner:
+                    context["tunable_parameters"] = self.tuner.get_current_parameters()
+                # 3. Build a structured prompt for the LLM
                 prompt = self.build_structured_prompt(context)
-                # 3. Query the LLM for the next action
+                # 4. Query the LLM for the next action
                 action = self.llm_decide(prompt)
-                # 4. Execute the chosen action
+                # 5. Execute the chosen action
                 self.execute_action(action)
+                # 6. Example: If LLM action is 'throttle', update parameters via tuner
+                if self.tuner and action == "throttle":
+                    # For demonstration, reduce batch size and temperature
+                    self.tuner.update_parameters({
+                        "data_config.batch_size": 1,
+                        "generation_config.temperature": 0.6
+                    })
+                    self.logger.record_event(
+                        event_type="autotune_applied",
+                        message="Batch size and temperature reduced due to throttle action",
+                        additional_info={"timestamp": time.time()}
+                    )
         except Exception as e:
             self.logger.record_event(
                 event_type="autonomy_check_failed",
