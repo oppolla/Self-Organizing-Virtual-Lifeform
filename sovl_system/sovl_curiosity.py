@@ -45,6 +45,7 @@ class Curiosity:
         self.metrics = deque(maxlen=self.metrics_maxlen)
         self.embedding_cache = {}
         self.lock = threading.Lock()
+        self.curiosity_score = 0.0  # For external nudges
         
     def _validate_weights(self, ignorance: float, novelty: float) -> None:
         """Validate weight parameters."""
@@ -226,6 +227,18 @@ class Curiosity:
                 error_type="curiosity_error",
                 stack_trace=traceback.format_exc(),
                 **kwargs
+            )
+
+    def nudge_curiosity(self, amount: float):
+        """
+        Nudge the curiosity score by the given amount (from external modules like SOVLResonator).
+        """
+        self.curiosity_score = min(max(self.curiosity_score + amount, 0.0), 1.0)
+        if self.logger:
+            self.logger.record_event(
+                event_type="curiosity_nudged",
+                message=f"Curiosity nudged by {amount}",
+                additional_info={"curiosity_score": self.curiosity_score}
             )
 
 class CuriosityPressure:

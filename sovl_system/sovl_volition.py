@@ -1,5 +1,5 @@
 import torch
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 import time
 from threading import Lock
 from collections import deque
@@ -8,8 +8,9 @@ from sovl_utils import memory_usage, log_memory_usage, total_memory
 from sovl_logger import Logger
 from sovl_memory import GPUMemoryManager, RAMManager
 from sovl_tuner import SOVLTuner
+from sovl_resonator_unattached import SOVLResonator
+from sovl_curiosity import Curiosity
 import traceback
-from typing import Callable
 from abc import ABC, abstractmethod
 
 class SensationNode(ABC):
@@ -716,13 +717,16 @@ class AutonomyManager:
                 # 2. Optionally add current tunable parameters to context
                 if self.tuner:
                     context["tunable_parameters"] = self.tuner.get_current_parameters()
-                # 3. Build a structured prompt for the LLM
+                # 3. Optionally add curiosity state to context
+                if hasattr(self, "curiosity") and self.curiosity:
+                    context["curiosity_level"] = getattr(self.curiosity, "curiosity_score", 0.0)
+                # 4. Build a structured prompt for the LLM
                 prompt = self.build_structured_prompt(context)
-                # 4. Query the LLM for the next action
+                # 5. Query the LLM for the next action
                 action = self.llm_decide(prompt)
-                # 5. Execute the chosen action
+                # 6. Execute the chosen action
                 self.execute_action(action)
-                # 6. Example: If LLM action is 'throttle', update parameters via tuner
+                # 7. Example: If LLM action is 'throttle', update parameters via tuner
                 if self.tuner and action == "throttle":
                     # For demonstration, reduce batch size and temperature
                     self.tuner.update_parameters({
@@ -734,6 +738,26 @@ class AutonomyManager:
                         message="Batch size and temperature reduced due to throttle action",
                         additional_info={"timestamp": time.time()}
                     )
+                # 8. Example: If curiosity is very high, take an exploratory action
+                if hasattr(self, "curiosity") and self.curiosity:
+                    curiosity_level = getattr(self.curiosity, "curiosity_score", 0.0)
+                    if curiosity_level > 0.7:
+                        self.logger.record_event(
+                            event_type="curiosity_driven_action",
+                            message="Curiosity is high, initiating exploratory behavior.",
+                            additional_info={"curiosity_level": curiosity_level, "timestamp": time.time()}
+                        )
+                        # Example: register or execute an 'explore' action if available
+                        if hasattr(self, "action_registry") and "explore" in self.action_registry:
+                            try:
+                                self.action_registry["explore"]()
+                            except Exception as e:
+                                self.logger.record_event(
+                                    event_type="explore_action_failed",
+                                    message=f"Failed to execute explore action: {str(e)}",
+                                    level="error",
+                                    additional_info={"timestamp": time.time()}
+                                )
         except Exception as e:
             self.logger.record_event(
                 event_type="autonomy_check_failed",
