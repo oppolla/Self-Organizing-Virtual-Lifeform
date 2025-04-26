@@ -34,13 +34,36 @@ class BondCalculator:
         if self.state and hasattr(self.state, 'get_all_identified_users'):
             self.identified_users = dict(self.state.get_all_identified_users())
 
+        # --- New: Bonding config parameters exposed ---
+        bonding_config = self.config_manager.get_section("bonding_config", {})
+        self.strong_bond_threshold = float(bonding_config.get("strong_bond_threshold", 0.8))
+        self.weak_bond_threshold = float(bonding_config.get("weak_bond_threshold", 0.3))
+        self.default_bond_score = float(bonding_config.get("default_bond_score", 0.5))
+        self.bond_decay_rate = float(bonding_config.get("bond_decay_rate", 0.01))
+        self.bond_memory_window = int(bonding_config.get("bond_memory_window", 100))
+        self.interaction_weight = float(bonding_config.get("interaction_weight", 1.0))
+        self.modality_weights = bonding_config.get("modality_weights", {"text": 1.0, "face": 0.5, "voice": 0.5})
+        self.context_strong = bonding_config.get(
+            "context_strong",
+            "You feel a strong, trusting connection to this user. Be warm, open, and familiar."
+        )
+        self.context_weak = bonding_config.get(
+            "context_weak",
+            "You feel distant from this user. Be formal and reserved."
+        )
+        self.context_neutral = bonding_config.get(
+            "context_neutral",
+            "You feel a neutral connection to this user. Be polite and neutral."
+        )
+        self.bond_sensitivity = float(bonding_config.get("bond_sensitivity", 1.0))
+        self.enable_bonding = bool(bonding_config.get("enable_bonding", True))
+
     def _initialize_config(self) -> None:
         """Initialize bonding score configuration."""
         try:
             bond_config = self.config_manager.get_section("bond_config", {})
             self.min_bond_score = float(bond_config.get("min_bond_score", 0.0))
             self.max_bond_score = float(bond_config.get("max_bond_score", 1.0))
-            self.default_bond_score = float(bond_config.get("default_bond_score", 0.5))
             self.max_interactions = int(bond_config.get("max_interactions", 100))
             self.max_session_time = float(bond_config.get("max_session_time", 3600.0))
             self.decay_rate = float(bond_config.get("decay_rate", 0.95))
@@ -354,16 +377,18 @@ class BondModulator:
         self.bond_calculator = bond_calculator
 
     def get_bond_modulation(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs):
+        if not self.bond_calculator.enable_bonding:
+            return self.bond_calculator.context_neutral, self.bond_calculator.default_bond_score
         sig_hash = self.bond_calculator.register_user_signature(metadata_entries, extra_data=extra_data, **kwargs)
         bond_score = self.bond_calculator.get_bond_score(sig_hash)
         if bond_score is None:
             bond_score = self.bond_calculator.default_bond_score
 
-        # Map bond_score to a modulation context
-        if bond_score > 0.8:
-            context = "You feel a strong, trusting connection to this user. Be warm, open, and familiar."
-        elif bond_score < 0.3:
-            context = "You feel distant from this user. Be formal and reserved."
+        # Map bond_score to a modulation context using configurable thresholds and contexts
+        if bond_score > self.bond_calculator.strong_bond_threshold:
+            context = self.bond_calculator.context_strong
+        elif bond_score < self.bond_calculator.weak_bond_threshold:
+            context = self.bond_calculator.context_weak
         else:
-            context = "You feel a neutral connection to this user. Be polite and neutral."
+            context = self.bond_calculator.context_neutral
         return context, bond_score

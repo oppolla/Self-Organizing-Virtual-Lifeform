@@ -472,5 +472,30 @@
     "user_message": 1.0,
     "system_message": 0.5,
     "dream_memory": 0.3
+  },
+  "generation_hooks": {
+    "curiosity": true,
+    "temperament": true,
+    "confidence": true,
+    "bonding": true
+  },
+  "bonding_config": {
+      "strong_bond_threshold": 0.8,
+      "weak_bond_threshold": 0.3,
+      "default_bond_score": 0.5,
+      "bond_decay_rate": 0.01,
+      "bond_memory_window": 100,
+      "interaction_weight": 1.0,
+      "modality_weights": {
+          "text": 1.0,
+          "face": 0.5,
+          "voice": 0.5
+      },
+      "context_strong": "You feel a strong, trusting connection to this user. Be warm, open, and familiar.",
+      "context_weak": "You feel distant from this user. Be formal and reserved.",
+      "context_neutral": "You feel a neutral connection to this user. Be polite and neutral.",
+      "bond_sensitivity": 1.0,
+      "enable_bonding": true
   }
+
 }

@@ -85,6 +85,34 @@ class ValidationSchema:
         }
 
     @staticmethod
+    def _get_generation_hooks_schema() -> Dict[str, ConfigSchema]:
+        """Return the generation_hooks schema."""
+        return {
+            "curiosity":    ConfigSchema(field="generation_hooks.curiosity", type=bool, default=True),
+            "temperament":  ConfigSchema(field="generation_hooks.temperament", type=bool, default=True),
+            "confidence":   ConfigSchema(field="generation_hooks.confidence", type=bool, default=True),
+            "bonding":      ConfigSchema(field="generation_hooks.bonding", type=bool, default=True),
+        }
+
+    @staticmethod
+    def _get_bonding_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the bonding_config schema."""
+        return {
+            "strong_bond_threshold": ConfigSchema(field="bonding_config.strong_bond_threshold", type=float, default=0.8, range=(0.0, 1.0)),
+            "weak_bond_threshold": ConfigSchema(field="bonding_config.weak_bond_threshold", type=float, default=0.3, range=(0.0, 1.0)),
+            "default_bond_score": ConfigSchema(field="bonding_config.default_bond_score", type=float, default=0.5, range=(0.0, 1.0)),
+            "bond_decay_rate": ConfigSchema(field="bonding_config.bond_decay_rate", type=float, default=0.01, range=(0.0, 1.0)),
+            "bond_memory_window": ConfigSchema(field="bonding_config.bond_memory_window", type=int, default=100, range=(1, None)),
+            "interaction_weight": ConfigSchema(field="bonding_config.interaction_weight", type=float, default=1.0, range=(0.0, None)),
+            "modality_weights": ConfigSchema(field="bonding_config.modality_weights", type=dict, default={"text": 1.0, "face": 0.5, "voice": 0.5}),
+            "context_strong": ConfigSchema(field="bonding_config.context_strong", type=str, default="You feel a strong, trusting connection to this user. Be warm, open, and familiar."),
+            "context_weak": ConfigSchema(field="bonding_config.context_weak", type=str, default="You feel distant from this user. Be formal and reserved."),
+            "context_neutral": ConfigSchema(field="bonding_config.context_neutral", type=str, default="You feel a neutral connection to this user. Be polite and neutral."),
+            "bond_sensitivity": ConfigSchema(field="bonding_config.bond_sensitivity", type=float, default=1.0, range=(0.0, None)),
+            "enable_bonding": ConfigSchema(field="bonding_config.enable_bonding", type=bool, default=True),
+        }    
+
+    @staticmethod
     def _get_controls_config_schema() -> Dict[str, ConfigSchema]:
         """Return the controls_config schema."""
         return {
