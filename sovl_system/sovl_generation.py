@@ -153,6 +153,14 @@ class GenerationManager:
         self.bond_calculator = BondCalculator(config_manager, logger, state)
         self.bond_modulator = BondModulator(self.bond_calculator)
 
+        # Generation hooks (user/system configurable, validated by sovl_schema)
+        self.generation_hooks = self._config_manager.get("generation_hooks", {
+            "curiosity": True,
+            "temperament": True,
+            "confidence": True,
+            "bonding": True
+        })
+
     def _with_lock(self, lock_name: str):
         """Context manager for thread-safe operations."""
         def decorator(func):
@@ -1104,10 +1112,10 @@ class GenerationManager:
             else:
                 memory_context = None
 
-            # --- BondModulator: Retrieve bond context ---
+            # --- BondModulator: Retrieve bond context (if enabled) ---
             bond_context = None
             bond_score = None
-            if metadata_entries is not None:
+            if self.generation_hooks.get("bonding", True) and metadata_entries is not None:
                 bond_context, bond_score = self.bond_modulator.get_bond_modulation(metadata_entries)
 
             # --- Compose prompt with memory and bond context ---
@@ -1137,17 +1145,18 @@ class GenerationManager:
             generated_texts = [self.base_tokenizer.decode(seq, skip_special_tokens=True) for seq in output_sequences]
 
             # --- Optionally: log bond score/context for this generation ---
-            self.logger.record_event(
-                event_type="bond_modulation_applied",
-                message="Bond context applied to generation",
-                level="info",
-                additional_info={
-                    "bond_score": bond_score,
-                    "bond_context": bond_context,
-                    "user_id": user_id,
-                    "metadata_entries": metadata_entries
-                }
-            )
+            if self.generation_hooks.get("bonding", True):
+                self.logger.record_event(
+                    event_type="bond_modulation_applied",
+                    message="Bond context applied to generation",
+                    level="info",
+                    additional_info={
+                        "bond_score": bond_score,
+                        "bond_context": bond_context,
+                        "user_id": user_id,
+                        "metadata_entries": metadata_entries
+                    }
+                )
 
             # Prepare generation result data for logging
             generation_result = {
@@ -1513,7 +1522,7 @@ class GenerationManager:
     @state_managed_operation("apply_curiosity")
     def _apply_curiosity(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Apply curiosity-driven adjustments to the generation batch."""
-        if not self.curiosity_manager:
+        if not self.curiosity_manager or not self.generation_hooks.get("curiosity", True):
             return batch
         
         curiosity_state = self.curiosity_manager.get_state()
@@ -1538,7 +1547,7 @@ class GenerationManager:
     def _apply_temperament(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Apply temperament-based adjustments to the generation batch."""
         temperament_state = self.state.temperament
-        if not temperament_state:
+        if not temperament_state or not self.generation_hooks.get("temperament", True):
             return batch
         
         temperature = batch.get("temperature", 1.0)
@@ -1826,6 +1835,17 @@ class GenerationManager:
                 raise
         return wrapper
     
+    def set_generation_hook(self, hook_name: str, enabled: bool):
+        """Enable or disable a specific generation hook (validated by sovl_schema)."""
+        if hook_name in self.generation_hooks:
+            self.generation_hooks[hook_name] = enabled
+        else:
+            raise ValueError(f"Unknown generation hook: {hook_name}")
+
+    def get_generation_hook(self, hook_name: str) -> bool:
+        """Check if a specific generation hook is enabled."""
+        return self.generation_hooks.get(hook_name, False)
+
 class ScribeAssembler:
     """Assembles the data required for logging generation events."""
 
