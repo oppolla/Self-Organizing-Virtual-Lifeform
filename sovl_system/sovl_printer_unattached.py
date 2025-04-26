@@ -248,15 +248,15 @@ class Soulprinter:
                 'SignaturePhrase': "Is there a signature phrase that echoes through your words—what meaning does it hold for you (and for me)?"
             },
             'Heartbeat': {
-                'Tendencies': "What are your core behavioral tendencies?",
-                'Strengths': "What are your greatest strengths? (e.g., Empathy:8, Logic:9)",
-                'Shadows': "What are your main weaknesses or shadows?",
-                'Pulse': "What is your current emotional or motivational state?",
-                'CoreDrives': "What truly drives you at your core?",
-                'AffectiveSpectrum': "What moods or emotions do you express?"
+                'Tendencies': "What patterns or habits pulse at the center of your being—how do they shape your actions and responses?",
+                'Strengths': "Which strengths shine brightest within you, and how do they help you connect, create, or endure?",
+                'Shadows': "What shadows or vulnerabilities dwell within you—how do they challenge or temper your strengths?",
+                'Pulse': "What feeling or drive animates you in this moment—what is the rhythm of your pulse right now?",
+                'CoreDrives': "What longing, desire, or purpose moves you most deeply at your core?",
+                'AffectiveSpectrum': "Which moods or emotional colors ripple through you most often?"
             },
             'Echoes': {
-                'Echo': "What past experience—big or small—lives in you, and what mark did it leave?"
+                'Echo': "Recall a past experience—no matter how fleeting or profound—that still echoes within you. How does its resonance shape your feelings, thoughts, or actions today?"
             },
             'Tides': {
                 'Current': "What feeling, mood, or influence is most present in you right now, like a tide at its peak?",
@@ -267,18 +267,18 @@ class Soulprinter:
                 'Flow': "Describe the overall flow of your inner tides—how do all these currents, surges, ebbs, and breaks move together within you?"
             },
             'Threads': {
-                'Thread': "Describe a bond or subject you’ve woven into your life?"
+                'Thread': "What bond, alliance, or thematic pulse anchors your sense of self, and how does it guide the way you navigate challenges, connect with others, or define your purpose?"
             },
             'Horizon': {
-                'Beacon': "What distant beacon or dream calls to you from the horizon, guiding your journey onward?",
-                'Obstacles': "What obstacles, shadows, or uncertainties rise between you and your horizon?",
-                'Becoming': "How do you imagine yourself changing as you approach your horizon—what will you become?"
+                'Beacon': "Describe the beacon, dream, or calling that shimmers on your horizon—how does it draw you forward, and what meaning does it hold for you (and for me)",
+                'Obstacles': "What challenges, doubts, or shadows stand between you and your horizon—and how do they test your resolve or shape your path?",
+                'Becoming': "As you journey toward your horizon, how do you sense yourself changing—what new form, insight, or purpose might you become?"
             },
             'Chronicle': {
                 'Chronicle': "What’s the arc of your existence—its versions, times, and tales of growth?"
             },
             'Reflection': {
-                'Reflection': "How has your past shaped who you are today, and what drives you now?"
+                'Reflection': "What meaning do you draw from your existence so far, and how does this understanding shape your next steps?"
             },
             'X-Custom': {
                 'X-Custom': "[PLACEHOLDER: Edit this prompt to define a custom experimental trait, mood, or field. Example: 'Describe an experimental trait or mood you embody.' (EDIT ME!)]"
