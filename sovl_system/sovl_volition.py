@@ -12,6 +12,8 @@ from sovl_resonator_unattached import SOVLResonator
 from sovl_curiosity import Curiosity
 import traceback
 from abc import ABC, abstractmethod
+import sovl_state
+import random
 
 class SensationNode(ABC):
     """
@@ -53,8 +55,9 @@ class AutonomyManager:
     """
     A lightweight decision-making framework for autonomous system optimization in the SOVL System.
     Processes system metrics and uses LLM-based reasoning to make decisions, initially for memory health.
+    Now also integrates with Motivator for dynamic, emergent goal-driven behavior.
     """
-    def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref, tuner: Optional[SOVLTuner] = None):
+    def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref, tuner: Optional[SOVLTuner] = None, motivator=None):
         """
         Initialize the AutonomyManager.
 
@@ -64,6 +67,7 @@ class AutonomyManager:
             device: Torch device (cuda/cpu) for tensor operations.
             system_ref: Reference to SOVLSystem instance for triggering actions.
             tuner: SOVLTuner instance for dynamic parameter tuning (optional).
+            motivator: Motivator instance for goal-driven behavior (optional).
         """
         self.config_manager = config_manager
         self.logger = logger
@@ -71,7 +75,7 @@ class AutonomyManager:
         self.system_ref = system_ref
         self.tuner = tuner  # Link to SOVLTuner for dynamic parameter tuning
         self.memory_lock = Lock
-        
+        self.motivator = motivator  # <-- Integration point
         # Cache configuration
         self.controls_config = config_manager.get_section("controls_config")
         self.autonomy_config = config_manager.get_section("autonomy_config", {
@@ -351,7 +355,6 @@ class AutonomyManager:
                                 event_type="action_failed",
                                 message=f"Action '{name}' failed: {str(e)}",
                                 level="error",
-                                stack_trace=traceback.format_exc(),
                                 additional_info={"timestamp": time.time()}
                             )
                 # Default system action (if no registry or as fallback)
@@ -865,3 +868,250 @@ class AutonomyManager:
             Dict of sense node names and their class names.
         """
         return {name: type(node).__name__ for name, node in self.sense_nodes.items()}
+
+    def act_on_goal(self, goal):
+        """
+        Example stub for acting on a goal.
+        This could be LLM prompting, triggering an action, etc.
+        Returns 'completed', 'dropped', or None.
+        """
+        # For now, just log and simulate completion
+        self.logger.record_event(event_type="goal_action", message=f"Acting on goal: {goal.description}")
+        # Simulate completion for demonstration
+        return 'completed'
+
+class Goal:
+    def __init__(self, description, source, context, priority=1.0, status='active', metadata=None, completion=0.0, ephemeral=False, soft_completed=False, last_checked=None, relevance=1.0):
+        self.description = description          # Natural language or structured
+        self.source = source                   # 'user', 'curiosity', 'pattern', etc.
+        self.context = context                 # Dict: user_id, session, etc.
+        self.priority = priority               # Fluid, modulated by bond, context, etc.
+        self.status = status                   # 'active', 'pending', 'stale', 'completed', etc.
+        self.metadata = metadata or {}         # Arbitrary info
+        self.created_at = time.time()
+        self.last_updated = self.created_at
+        self.completion = completion           # 0.0 (not started) to 1.0 (done)
+        self.ephemeral = ephemeral             # If True, goal can be dropped easily
+        self.soft_completed = soft_completed   # If True, goal was softly completed (not strictly finished)
+        self.last_checked = last_checked or time.time()
+        self.relevance = relevance             # 0.0 (irrelevant) to 1.0 (highly relevant)
+
+    def decay_priority(self, decay_rate=0.01):
+        # Decay priority and relevance over time
+        time_passed = time.time() - self.last_updated
+        self.priority *= (1 - decay_rate) ** time_passed
+        self.relevance *= (1 - decay_rate/2) ** time_passed
+        self.last_updated = time.time()
+
+    def to_dict(self):
+        return {
+            "description": self.description,
+            "source": self.source,
+            "context": self.context,
+            "priority": self.priority,
+            "status": self.status,
+            "metadata": self.metadata,
+            "created_at": self.created_at,
+            "last_updated": self.last_updated,
+            "completion": self.completion,
+            "ephemeral": self.ephemeral,
+            "soft_completed": self.soft_completed,
+            "last_checked": self.last_checked,
+            "relevance": self.relevance,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        goal = cls(
+            description=data["description"],
+            source=data["source"],
+            context=data["context"],
+            priority=data.get("priority", 1.0),
+            status=data.get("status", "active"),
+            metadata=data.get("metadata", {}),
+            completion=data.get("completion", 0.0),
+            ephemeral=data.get("ephemeral", False),
+            soft_completed=data.get("soft_completed", False),
+            last_checked=data.get("last_checked", time.time()),
+            relevance=data.get("relevance", 1.0),
+        )
+        goal.created_at = data.get("created_at", time.time())
+        goal.last_updated = data.get("last_updated", goal.created_at)
+        return goal
+
+    def decay_priority(self, decay_rate=0.01):
+        # Decay priority over time
+        time_passed = time.time() - self.last_updated
+        self.priority *= (1 - decay_rate) ** time_passed
+        self.last_updated = time.time()
+
+    def to_dict(self):
+        return {
+            "description": self.description,
+            "source": self.source,
+            "context": self.context,
+            "priority": self.priority,
+            "status": self.status,
+            "metadata": self.metadata,
+            "created_at": self.created_at,
+            "last_updated": self.last_updated,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        goal = cls(
+            description=data["description"],
+            source=data["source"],
+            context=data["context"],
+            priority=data.get("priority", 1.0),
+            status=data.get("status", "active"),
+            metadata=data.get("metadata", {}),
+        )
+        goal.created_at = data.get("created_at", time.time())
+        goal.last_updated = data.get("last_updated", goal.created_at)
+        return goal
+
+class Motivator:
+    """
+    Central driver of autonomous, dynamic, goal-directed behavior.
+    Handles goal emergence, prioritization, decay, completion, and organic evolution.
+    """
+    def __init__(
+        self,
+        curiosity,
+        memory,
+        logger,
+        config_manager,
+        bonder,
+        decay_rate=0.01,
+        min_priority=0.1,
+        completion_threshold=0.95,
+        reevaluation_interval=60,
+        memory_check_enabled=True,
+        irrelevance_threshold=0.2,
+        completion_drive=0.7,
+        novelty_drive=0.2,
+    ):
+        self.curiosity = curiosity
+        self.memory = memory
+        self.logger = logger
+        self.config_manager = config_manager
+        self.bonder = bonder
+        self.decay_rate = decay_rate
+        self.min_priority = min_priority
+        self.completion_threshold = completion_threshold
+        self.reevaluation_interval = reevaluation_interval
+        self.memory_check_enabled = memory_check_enabled
+        self.irrelevance_threshold = irrelevance_threshold
+        self.completion_drive = completion_drive
+        self.novelty_drive = novelty_drive
+        self.goals = []  # List[Goal]
+        self.load_goals_from_memory()
+
+    # --- Goal Emergence ---
+    def consider_goal(self, description, source, context):
+        """
+        Called when a potential goal arises (user request, curiosity spike, pattern, etc.)
+        """
+        bond = self.bonder.get_bond(context.get('user_id')) if source == 'user' and context.get('user_id') else 1.0
+        priority = self.estimate_priority(description, source, context, bond)
+        if self.should_create_goal(priority):
+            goal = Goal(description, source, context, priority)
+            self.goals.append(goal)
+            self.logger.record_event(event_type="goal_created", message=description, additional_info={"priority": priority, "source": source, "context": context})
+            self.persist_goals()
+
+    def estimate_priority(self, description, source, context, bond):
+        # Use heuristics, bond, curiosity, context, etc. to estimate priority (future: temperament, novelty, etc.)
+        base_priority = 1.0
+        if source == 'user':
+            base_priority *= bond
+        # Add more dynamic influences here (curiosity, novelty, etc.)
+        return base_priority
+
+    def should_create_goal(self, priority):
+        # Probabilistic or threshold-based decision, not hardcoded
+        threshold = self.config_manager.get("goal_priority_threshold", 0.5)
+        return priority > threshold or random.random() < priority
+
+    # --- Goal Lifecycle Management ---
+    def reevaluate_goals(self):
+        """
+        Periodically update priorities, decay old goals, drop or revive as needed.
+        """
+        for goal in self.goals:
+            # Simulate memory/context checks (stub for now)
+            goal.last_checked = time.time()
+            # Example: If completion is high, soft-complete
+            if goal.completion >= 0.95 and goal.status == 'active':
+                goal.status = 'completed'
+                goal.soft_completed = True
+                self.logger.record_event("goal_soft_completed", message=goal.description)
+            # Example: If relevance is low or goal is ephemeral and stale, drop it
+            elif goal.relevance < 0.2 or (goal.ephemeral and goal.status == 'stale'):
+                goal.status = 'dropped'
+                self.logger.record_event("goal_dropped_irrelevant", message=goal.description)
+            else:
+                goal.decay_priority()
+        # Remove dropped/completed goals from active list if you want ephemeral behavior
+        self.goals = [g for g in self.goals if g.status not in ('dropped', 'completed') or g.soft_completed]
+        self.persist_goals()
+
+    def update_goal_progress(self, goal, progress_delta):
+        goal.completion = min(max(goal.completion + progress_delta, 0.0), 1.0)
+        if goal.completion >= 1.0:
+            self.complete_goal(goal, soft=True)
+        else:
+            self.persist_goals()
+
+    def complete_goal(self, goal, soft=False):
+        goal.status = 'completed'
+        goal.priority = 0
+        goal.completion = 1.0
+        goal.soft_completed = soft
+        goal.metadata['completed_at'] = time.time()
+        self.logger.record_event(event_type="goal_completed", message=goal.description)
+        self.persist_goals()
+
+    def drop_goal(self, goal, reason="decayed"):
+        goal.status = 'dropped'
+        goal.priority = 0
+        goal.metadata['dropped_at'] = time.time()
+        self.logger.record_event(event_type="goal_dropped", message=goal.description, additional_info={"reason": reason})
+        self.persist_goals()
+
+    # --- Persistence ---
+    def persist_goals(self):
+        # Save goals to sovl_state for cross-session continuity
+        sovl_state_instance = getattr(sovl_state, 'state', sovl_state)
+        sovl_state_instance.set_goals([g.to_dict() for g in self.goals])
+
+    def load_goals_from_memory(self):
+        sovl_state_instance = getattr(sovl_state, 'state', sovl_state)
+        goal_dicts = sovl_state_instance.get_goals() if hasattr(sovl_state_instance, 'get_goals') else []
+        self.goals = [Goal.from_dict(g) for g in goal_dicts]
+
+    # --- Reflection/Introspection (Optional) ---
+    def reflect_on_goals(self):
+        """
+        Agent can introspect on its own motivations and progress, for self-dialogue or explanation.
+        """
+        completed = [g for g in self.goals if g.status == 'completed']
+        active = [g for g in self.goals if g.status == 'active']
+        stale = [g for g in self.goals if g.status == 'stale']
+        summary = f"Completed: {len(completed)}, Active: {len(active)}, Stale: {len(stale)}."
+        return summary
+
+    def get_params(self):
+        return {
+            "decay_rate": self.decay_rate,
+            "min_priority": self.min_priority,
+            "completion_threshold": self.completion_threshold,
+            "reevaluation_interval": self.reevaluation_interval,
+            "memory_check_enabled": self.memory_check_enabled,
+            "irrelevance_threshold": self.irrelevance_threshold,
+            "completion_drive": self.completion_drive,
+            "novelty_drive": self.novelty_drive,
+        }
+
+import random

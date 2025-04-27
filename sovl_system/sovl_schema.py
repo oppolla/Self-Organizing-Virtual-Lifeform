@@ -956,3 +956,56 @@ class ValidationSchema:
             "dream_selection_strategy": ConfigSchema(field="dreamer_config.dream_selection_strategy", type=str, default="top", validator=lambda x: x in ["top", "random"]),
             "dream_noise_level": ConfigSchema(field="dreamer_config.dream_noise_level", type=float, default=0.2, range=(0.0, 1.0)),
         }
+
+    @staticmethod
+    def _get_motivator_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the motivator_config schema for the Motivator class."""
+        return {
+            "decay_rate": ConfigSchema(
+                field="motivator_config.decay_rate",
+                type=float,
+                default=0.01,
+                range=(0.0, 1.0)
+            ),
+            "min_priority": ConfigSchema(
+                field="motivator_config.min_priority",
+                type=float,
+                default=0.1,
+                range=(0.0, 1.0)
+            ),
+            "completion_threshold": ConfigSchema(
+                field="motivator_config.completion_threshold",
+                type=float,
+                default=0.95,
+                range=(0.0, 1.0)
+            ),
+            "reevaluation_interval": ConfigSchema(
+                field="motivator_config.reevaluation_interval",
+                type=int,
+                default=60,
+                range=(1, 3600)
+            ),
+            "memory_check_enabled": ConfigSchema(
+                field="motivator_config.memory_check_enabled",
+                type=bool,
+                default=True
+            ),
+            "irrelevance_threshold": ConfigSchema(
+                field="motivator_config.irrelevance_threshold",
+                type=float,
+                default=0.2,
+                range=(0.0, 1.0)
+            ),
+            "completion_drive": ConfigSchema(
+                field="motivator_config.completion_drive",
+                type=float,
+                default=0.7,
+                range=(0.0, 1.0)
+            ),
+            "novelty_drive": ConfigSchema(
+                field="motivator_config.novelty_drive",
+                type=float,
+                default=0.2,
+                range=(0.0, 1.0)
+            ),
+        }

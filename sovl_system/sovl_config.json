@@ -496,6 +496,16 @@
       "context_neutral": "You feel a neutral connection to this user. Be polite and neutral.",
       "bond_sensitivity": 1.0,
       "enable_bonding": true
+  },
+  "motivator_config": {
+    "decay_rate": 0.01,
+    "min_priority": 0.1,
+    "completion_threshold": 0.95,
+    "reevaluation_interval": 60,
+    "memory_check_enabled": true,
+    "irrelevance_threshold": 0.2,
+    "completion_drive": 0.7,
+    "novelty_drive": 0.2
   }
 
 }

@@ -139,6 +139,7 @@ class StateBase:
         self.logger = logger
         self.lock = Lock()
         self.identified_users = {}  # key: signature_hash, value: user profile dict
+        self.goals = []  # Add goals list for persistence
         self._validate_config()
 
     def _validate_config(self) -> None:
@@ -208,6 +209,48 @@ class StateBase:
         """Return all identified user profiles."""
         with self.lock:
             return dict(self.identified_users)
+
+    def get_goals(self):
+        with self.lock:
+            return [goal.copy() for goal in self.goals]
+
+    def set_goals(self, goals):
+        with self.lock:
+            self.goals = [goal.copy() for goal in goals]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize state to dictionary for persistence."""
+        with self.lock:
+            try:
+                state_data = {
+                    "version": "1.0",
+                    "identified_users": self.identified_users,
+                    "goals": [goal.copy() for goal in self.goals]
+                }
+                return state_data
+            except Exception as e:
+                self.log_error(f"Failed to convert state to dict: {str(e)}")
+                raise StateError(f"State serialization failed: {str(e)}")
+
+    def from_dict(self, data: Dict[str, Any]) -> None:
+        """Load state from dictionary."""
+        try:
+            with self.lock:
+                version = data.get("version", "1.0")
+                if version not in ["1.0"]:
+                    self.log_event(
+                        "unsupported_version", f"Unsupported state version: {version}",
+                        level="warning", version=version
+                    )
+                self.identified_users = data.get("identified_users", {})
+                self.goals = [goal.copy() for goal in data.get("goals", [])]
+                self.log_event(
+                    "state_loaded", "State loaded from dictionary",
+                    version=version
+                )
+        except Exception as e:
+            self.log_error(f"Failed to load state: {str(e)}")
+            raise StateError(f"State loading failed: {str(e)}")
 
 class CuriosityState(StateBase):
     """Manages curiosity-related state and question prioritization."""
@@ -739,7 +782,8 @@ class SOVLState(StateBase):
                     "seen_prompts": list(self.seen_prompts),
                     "training_state": self._training_state.__dict__,
                     "conversation_history": self.history.to_dict(),
-                    "conversation_metadata": self._conversation_metadata
+                    "conversation_metadata": self._conversation_metadata,
+                    "goals": [goal.copy() for goal in self.goals]
                 }
                 if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
                     state_data['short_term_memory'] = self.short_term_memory.to_dict()
@@ -784,6 +828,9 @@ class SOVLState(StateBase):
             
             # Load conversation metadata
             self._conversation_metadata = data.get("conversation_metadata", {})
+            
+            # Load goals
+            self.goals = [goal.copy() for goal in data.get("goals", [])]
             
             # Load short term memory
             if 'short_term_memory' in data and hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'from_dict'):
@@ -867,7 +914,8 @@ class SOVLState(StateBase):
             ),
             "total_dream_memory_mb": self.total_dream_memory_mb,
             "training_state": self._training_state.__dict__,
-            "conversation_metadata": self._conversation_metadata
+            "conversation_metadata": self._conversation_metadata,
+            "goals": [goal.copy() for goal in self.goals]
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
@@ -1026,14 +1074,14 @@ class StateTracker(StateBase):
                 return
                 
             old_state = self._component_states.get(component_name, {})
-            self._component_states[component_name] = state
+            self._component_states[component_name] = state.copy()
                 
             # Record state change
             change = {
                 "type": "component_update",
                 "component": component_name,
                 "old_state": old_state,
-                "new_state": self._component_states[component_name],
+                "new_state": self._component_states[component_name].copy(),
                 "timestamp": time.time()
             }
             self._state_changes.append(change)
@@ -1049,7 +1097,7 @@ class StateTracker(StateBase):
                 additional_info={
                     "component": component_name,
                     "old_state": old_state,
-                    "new_state": self._component_states[component_name]
+                    "new_state": self._component_states[component_name].copy()
                 }
             )
             
@@ -1063,22 +1111,22 @@ class StateTracker(StateBase):
     def get_component_state(self, component_name: str) -> Dict[str, Any]:
         """Get current state of a specific component."""
         with self.lock:
-            return self._component_states.get(component_name, {})
+            return self._component_states.get(component_name, {}).copy()
             
     def get_component_states(self) -> Dict[str, Dict[str, Any]]:
         """Get states of all components."""
         with self.lock:
-            return self._component_states.copy()
+            return {k: v.copy() for k, v in self._component_states.items()}
             
     def get_state_history(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get recent state history."""
         with self.lock:
-            return list(self._state_history)[-limit:]
+            return [state.copy() for state in list(self._state_history)[-limit:]]
             
     def get_state_changes(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get recent state changes."""
         with self.lock:
-            return list(self._state_changes)[-limit:]
+            return [change.copy() for change in list(self._state_changes)[-limit:]]
             
     def get_state_stats(self) -> Dict[str, Any]:
         """Get state tracking statistics."""
@@ -1105,7 +1153,7 @@ class StateTracker(StateBase):
                 
             old_value = self._system_state.get(key, None)
             self._system_state[key] = value
-            
+                
             # Record state change
             change = {
                 "type": "state_update",
@@ -1205,7 +1253,7 @@ class UserProfileState(StateBase):
             "early_interactions": []
         })
         self.log_event("profile_retrieved", "Profile retrieved", conversation_id=conversation_id, level="debug")
-        return profile
+        return profile.copy()
 
     @synchronized("lock")
     def reset(self, conversation_id: str) -> None:
