@@ -4,12 +4,11 @@ from collections import deque, defaultdict
 from typing import Optional, Dict, Any, List, Union, Callable, Tuple, Set
 import contextlib
 import traceback
-import uuid
-import hashlib
+from functools import wraps
+from datetime import datetime
 from threading import Lock
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sovl_logger import Logger
-from sovl_io import JSONLLoader
 from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size, memory_usage
 from sovl_error import ErrorManager
@@ -17,31 +16,11 @@ from sovl_config import ConfigManager
 from sovl_curiosity import CuriosityManager
 from sovl_trainer import LifecycleManager, TrainingConfig
 from sovl_temperament import TemperamentSystem 
-from sovl_confidence import ConfidenceCalculator 
+from sovl_confidence import ConfidenceCalculator, calculate_confidence_score
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_scaffold import GenerationScaffoldProvider
-import threading
-from functools import wraps
-from datetime import datetime
 from sovl_bonder import BondCalculator, BondModulator
-
-# Add confidence-related constants at the top of the file
-DEFAULT_CONFIDENCE = 0.5
-MIN_CONFIDENCE = 0.0
-MAX_CONFIDENCE = 1.0
-
-# Simplified confidence calculation
-def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
-    """Calculate confidence score for generated tokens (mean softmax probability)."""
-    try:
-        probs = torch.softmax(logits, dim=-1)
-        token_probs = torch.gather(probs, -1, generated_ids.unsqueeze(-1)).squeeze(-1)
-        confidence = token_probs.mean().item()
-        return max(0.0, min(1.0, confidence))
-    except Exception as e:
-        # Fallback to neutral confidence on error
-        return 0.5
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
@@ -988,9 +967,9 @@ class GenerationManager:
             self._handle_error("curiosity_update", e)
 
     @synchronized()
-    def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
-        """Calculate confidence score for generated output (simple version)."""
-        return calculate_confidence(logits, generated_ids)
+    def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: torch.Tensor, state, error_manager, context, curiosity_manager=None) -> float:
+        """Calculate confidence score using the centralized confidence module."""
+        return calculate_confidence_score(logits, generated_ids, state, error_manager, context, curiosity_manager)
 
     def _initialize_lifecycle_manager(self) -> None:
         """Initialize the lifecycle manager with validated parameters."""
