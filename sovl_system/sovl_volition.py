@@ -4,7 +4,6 @@ import time
 from threading import Lock
 from collections import deque
 import json
-from sovl_utils import memory_usage, log_memory_usage, total_memory
 from sovl_logger import Logger
 from sovl_memory import GPUMemoryManager, RAMManager
 from sovl_tuner import SOVLTuner
@@ -148,27 +147,17 @@ class AutonomyManager:
             }
             # Memory usage with fallback
             try:
-                if torch.cuda.is_available():
-                    gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
-                    gpu_stats = gpu_manager.get_gpu_usage()
-                    if gpu_stats:
-                        current_mem = gpu_stats.get('gpu_usage', 0.0)
-                        total_mem = gpu_stats.get('total_memory', 0.0)
-                        metrics["memory_usage"] = current_mem / total_mem if total_mem > 0 else 0.0
-                    else:
-                        self.logger.record_event(
-                            event_type="memory_stats_unavailable",
-                            message="Memory stats unavailable, using fallback value",
-                            level="warning",
-                            additional_info={"timestamp": time.time()}
-                        )
+                # Use RAMManager for RAM usage
+                ram_manager = RAMManager(self.config_manager, self.logger)
+                ram_stats = ram_manager.check_memory_health()
+                current_mem = ram_stats.get('used', 0.0)
+                total_mem = ram_stats.get('total', 0.0)
+                metrics["memory_usage"] = current_mem / total_mem if total_mem > 0 else 0.0
             except Exception as e:
                 self.logger.record_event(
-                    event_type="gpu_stats_error",
-                    message=f"Failed to get GPU stats: {str(e)}",
-                    level="error",
-                    stack_trace=traceback.format_exc(),
-                    additional_info={"timestamp": time.time()}
+                    event_type="memory_stats_unavailable",
+                    message=f"Failed to get RAM memory stats: {str(e)}",
+                    level="warning"
                 )
             # Error rate with smoothing
             try:
@@ -511,9 +500,11 @@ class AutonomyManager:
         context["throttle_level"] = getattr(self, "throttle_level", 0)
         # Add system resource metrics (RAM, GPU)
         try:
-            from sovl_utils import memory_usage, total_memory
-            ram_used = memory_usage()
-            ram_total = total_memory() if callable(total_memory) else None
+            # Use RAMManager for RAM usage
+            ram_manager = RAMManager(self.config_manager, self.logger)
+            ram_stats = ram_manager.check_memory_health()
+            ram_used = ram_stats.get('used', 0.0)
+            ram_total = ram_stats.get('total', None)
             context["ram_usage"] = ram_used
             context["ram_total"] = ram_total
             context["ram_usage_pct"] = ram_used / ram_total if ram_total else None
@@ -1113,4 +1104,3 @@ class Motivator:
             "completion_drive": self.completion_drive,
             "novelty_drive": self.novelty_drive,
         }
-
