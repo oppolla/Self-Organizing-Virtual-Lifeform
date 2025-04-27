@@ -1114,4 +1114,3 @@ class Motivator:
             "novelty_drive": self.novelty_drive,
         }
 
-import random
