@@ -10,7 +10,7 @@ from threading import Lock
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sovl_logger import Logger
 from sovl_state import SOVLState, ConversationHistory
-from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size, memory_usage
+from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_curiosity import CuriosityManager
