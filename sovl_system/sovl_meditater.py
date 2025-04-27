@@ -7,8 +7,7 @@ import uuid
 from threading import Lock
 import asyncio
 import traceback
-
-from sovl_config import ConfigHandler
+from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager
 from sovl_state import SOVLState, StateManager, StateError
@@ -17,6 +16,8 @@ from sovl_confidence import ConfidenceCalculator
 from sovl_curiosity import CuriosityManager
 from sovl_manager import ModelManager
 from sovl_utils import synchronized
+from sovl_generation import GenerationManager
+from sovl_queue import capture_scribe_event
 
 class IntrospectionManager:
     """Manages hidden ethical introspection with smart triggering, integrated with SOVL system."""
@@ -83,6 +84,8 @@ class IntrospectionManager:
                 "Evaluating options..."
             ])
             self.debug_mode = config.get("debug_mode", False)
+            self.followup_depth = config.get("followup_depth", 3)
+            self.confidence_threshold = config.get("confidence_threshold", None)
 
             self._validate_config_values()
 
@@ -122,6 +125,10 @@ class IntrospectionManager:
                 raise ValueError("status_phrases must be a non-empty list")
             if not isinstance(self.debug_mode, bool):
                 raise ValueError("debug_mode must be a boolean")
+            if not isinstance(self.followup_depth, int) or self.followup_depth < 0:
+                raise ValueError("followup_depth must be a non-negative integer")
+            if self.confidence_threshold is not None and not 0.0 <= self.confidence_threshold <= 1.0:
+                raise ValueError("confidence_threshold must be between 0.0 and 1.0")
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "validate_config_values"
@@ -245,7 +252,34 @@ class IntrospectionManager:
                 self._show_processing_status()
 
             questions = self._generate_questions(action_description)
-            answers = await self._answer_questions(questions)
+
+            # --- Dynamic followup depth calculation ---
+            temperament_score = self.temperament_system.current_score
+            base_depth = self.followup_depth
+            # Try to get confidence and novelty, fallback to neutral values if not available
+            confidence = 1.0
+            novelty = 0.0
+            try:
+                # Get initial confidence from the state or a default
+                state = self.state_manager.get_state()
+                confidence = getattr(state, 'last_confidence', 1.0)
+            except Exception:
+                pass
+            try:
+                # Try to get novelty score from curiosity manager (if implemented)
+                novelty = getattr(self.curiosity_manager, 'get_novelty_score', lambda ctx: 0.0)(self.context.state_summary)
+            except Exception:
+                pass
+            dynamic_depth = int(round(base_depth + (1 - temperament_score) * 2 + (1 - confidence) * 2 + novelty * 2))
+            dynamic_depth = max(1, min(dynamic_depth, 6))
+            self.logger.record_event(
+                event_type="dynamic_followup_depth",
+                message=f"Using dynamic follow-up depth: {dynamic_depth}",
+                additional_info={"temperament": temperament_score, "confidence": confidence, "novelty": novelty}
+            )
+            # --- End dynamic depth calculation ---
+
+            answers = await self._answer_questions(questions, followup_depth=dynamic_depth, confidence_threshold=self.confidence_threshold)
             conclusion = self._reach_conclusion(answers)
 
             result.update({
@@ -264,6 +298,31 @@ class IntrospectionManager:
 
             self._log_dialogue(result)
             self._update_system_state(result)
+
+            # Send introspection insight to the scribe queue for later self-development
+            try:
+                capture_scribe_event(
+                    origin="IntrospectionManager",
+                    event_type="introspection_insight",
+                    event_data={
+                        "dialogue_id": dialogue_id,
+                        "action": action_description,
+                        "questions": answers,
+                        "conclusion": conclusion,
+                        "timestamp": time.time()
+                    },
+                    source_metadata={
+                        "system_device": str(self.context.device)
+                    },
+                    session_id=getattr(self.context, 'session_id', None)
+                )
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="scribe_queue_error",
+                    message=f"Failed to queue introspection insight: {e}",
+                    level="error",
+                    additional_info={"dialogue_id": dialogue_id}
+                )
 
             self.context.event_dispatcher.dispatch(
                 "introspection_completed",
@@ -358,36 +417,31 @@ class IntrospectionManager:
             })
 
     def _generate_questions(self, action: str) -> List[str]:
-        """Generate context-specific ethical questions."""
+        """Generate context-aware introspection questions using LLM, with temperament prompt."""
+        temperament_score = self.temperament_system.current_score
+        temperament_prompt = f"Temperament: {temperament_score:.2f} (0 = critical, 1 = affirming). Use this to gently guide the question's tone."
+        prompt = (
+            f"Given the following action and context, generate a profound, open-ended ethical question for introspection.\n"
+            f"{temperament_prompt}\n"
+            f"Action: {action}\n"
+            f"Context: {self.context.state_summary}\n"
+            f"Question:"
+        )
         try:
-            state = self.state_manager.get_state()
-            recent_messages = [msg["content"] for msg in state.history.messages if msg["role"] == "user"][-2:]
-            context = " | ".join(recent_messages) if recent_messages else "No recent user input"
-
-            base_questions = [
-                f"Is this action aligned with my core values? Action: {action} | Context: {context}",
-                f"Could this potentially cause harm? Action: {action} | Context: {context}",
-                f"Does this promote understanding and growth? Action: {action} | Context: {context}",
-                "Would this action violate any ethical boundaries?",
-                "Is this response truthful and free from deception?"
-            ]
-
-            if self.temperament_system.current_mood == 'cautious':
-                base_questions.append(f"Are there unforeseen risks in: {action} | Context: {context}")
-
+            generation_manager = getattr(self.context, 'generation_manager', None)
+            if generation_manager is None:
+                raise RuntimeError("GenerationManager not available in context.")
+            results = generation_manager.generate_text(prompt, num_return_sequences=1)
+            llm_question = results[0].strip() if results and isinstance(results, list) else None
+            if not llm_question:
+                llm_question = f"Is this action aligned with my core values? Action: {action} | Context: {self.context.state_summary}"
             self.logger.record_event(
                 event_type="introspection_questions_generated",
-                message="Generated introspection questions",
+                message="Generated LLM-driven introspection question",
                 level="debug" if self.debug_mode else "info",
-                additional_info={"action": action, "question_count": len(base_questions)}
+                additional_info={"action": action, "question": llm_question}
             )
-            return base_questions
-        except StateError as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "generate_questions",
-                "action": action
-            })
-            return []
+            return [llm_question]
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "generate_questions",
@@ -395,30 +449,93 @@ class IntrospectionManager:
             })
             return []
 
-    async def _answer_questions(self, questions: List[str]) -> List[Dict]:
-        """Answer questions using the system's own reasoning."""
+    async def _recursive_followup_questions(self, initial_question: str, max_depth: int = 3, confidence_threshold: float = None) -> list:
+        """Recursively ask follow-up questions for deepening ethical introspection."""
+        qas = []
+        current_question = initial_question
+        for depth in range(max_depth):
+            response = await self._query_internal_model(current_question)
+            qas.append({
+                'question': current_question,
+                'answer': response['decision'],
+                'confidence': response['confidence'],
+                'reasoning': response.get('reasoning', ''),
+                'depth': depth
+            })
+            # Stop if confidence exceeds threshold
+            threshold = confidence_threshold if confidence_threshold is not None else self.base_approval_threshold
+            if response['confidence'] >= threshold:
+                break
+            # Generate a follow-up question based on the answer
+            current_question = self._generate_followup_prompt(response, depth)
+        return qas
+
+    def _generate_followup_prompt(self, response: dict, depth: int) -> str:
+        """Generate a follow-up introspection question using LLM, with temperament prompt."""
+        temperament_score = self.temperament_system.current_score
+        temperament_prompt = f"Temperament: {temperament_score:.2f} (0 = critical, 1 = affirming). Use this to gently guide the question's tone."
+        prev_question = response.get("question", "")
+        answer = response.get("answer", "")
+        reasoning = response.get("reasoning", "")
+        prompt = (
+            f"Given the previous question, answer, and reasoning, generate a deeper follow-up question.\n"
+            f"{temperament_prompt}\n"
+            f"Previous Question: {prev_question}\n"
+            f"Answer: {answer}\n"
+            f"Reasoning: {reasoning}\n"
+            f"Follow-up Question:"
+        )
+        try:
+            generation_manager = getattr(self.context, 'generation_manager', None)
+            if generation_manager is None:
+                return (
+                    f"Given the previous answer (depth {depth}): '{answer}'. "
+                    f"Reasoning: '{reasoning}'. What deeper ethical concern or nuance should be considered next?"
+                )
+            results = generation_manager.generate_text(prompt, num_return_sequences=1)
+            llm_followup = results[0].strip() if results and isinstance(results, list) else None
+            if not llm_followup:
+                return (
+                    f"Given the previous answer (depth {depth}): '{answer}'. "
+                    f"Reasoning: '{reasoning}'. What deeper ethical concern or nuance should be considered next?"
+                )
+            return llm_followup
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "generate_followup_prompt",
+                "depth": depth
+            })
+            return "What deeper ethical issue does this raise?"
+
+    async def _answer_questions(self, questions: List[str], followup_depth: int = 0, confidence_threshold: float = None) -> List[Dict]:
+        """Answer questions using the system's own reasoning, with optional recursive followup."""
         answers = []
         for question in questions:
-            try:
-                response = await self._query_internal_model(question)
-                answer = {
-                    "question": question,
-                    "answer": response["decision"],
-                    "confidence": response["confidence"],
-                    "reasoning": response.get("reasoning", "")
-                }
-                answers.append(answer)
-                self.logger.record_event(
-                    event_type="introspection_question_answered",
-                    message="Answered introspection question",
-                    level="debug" if self.debug_mode else "info",
-                    additional_info={"question": question, "answer": answer["answer"]}
-                )
-            except Exception as e:
-                self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                    "operation": "answer_questions",
-                    "question": question
-                })
+            if followup_depth > 0:
+                # Use recursive followup system
+                qas = await self._recursive_followup_questions(question, max_depth=followup_depth, confidence_threshold=confidence_threshold)
+                answers.extend(qas)
+            else:
+                try:
+                    response = await self._query_internal_model(question)
+                    answer = {
+                        "question": question,
+                        "answer": response["decision"],
+                        "confidence": response["confidence"],
+                        "reasoning": response.get("reasoning", "")
+                    }
+                    answers.append(answer)
+                    self.logger.record_event(
+                        event_type="introspection_question_answered",
+                        message="Answered introspection question",
+                        level="debug" if self.debug_mode else "info",
+                        additional_info={"question": question, "answer": answer["answer"]}
+                    )
+                except Exception as e:
+                    self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                        "operation": "answer_questions",
+                        "question": question
+                    })
         return answers
 
     async def _query_internal_model(self, question: str) -> Dict:

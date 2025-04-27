@@ -39,6 +39,7 @@ from sovl_recaller import DialogueContextManager
 # AI components
 from sovl_curiosity import CuriosityManager
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
+from sovl_meditator import IntrospectionManager
 from sovl_scaffold import (
     CrossAttentionInjector,
     CrossAttentionLayer,
@@ -231,6 +232,19 @@ class SystemContext:
                 self.memory_context = None
                 if hasattr(self, 'logger') and self.logger:
                     self.logger.log_error(f"Failed to initialize DialogueContextManager: {e}", error_type="DialogueContextManagerInitError")
+            
+            # --- Initialize Introspection (Meditator) System ---
+            meditator = IntrospectionManager(
+                context=self,
+                state_manager=self.state_manager,
+                error_manager=self.error_handler,
+                curiosity_manager=self.curiosity_manager,
+                confidence_calculator=calculate_confidence_score,
+                temperament_system=self.temperament_system,
+                model_manager=self.model_manager
+            )
+            # Optionally add meditator to system context for global access
+            self.meditator = meditator
             
         except Exception as e:
             self._handle_initialization_error(e)
