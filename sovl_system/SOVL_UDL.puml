@@ -22,7 +22,6 @@ package "Orchestration" {
     class Conductor {
         +config_manager: ConfigManager
         +logger: Logger
-        +memoria_manager: MemoriaManager
         +ram_manager: RAMManager
         +gpu_manager: GPUMemoryManager
         +check_memory_health(): Dict[str, Any]
