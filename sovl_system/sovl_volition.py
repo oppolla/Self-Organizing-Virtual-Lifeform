@@ -122,6 +122,17 @@ class AutonomyManager:
         self.ram_manager = RAMManager()  # For advanced RAM stats
         self.gpu_manager = GPUMemoryManager()  # Already present
 
+        # --- LLM Decision Integration: Attach GenerationManager ---
+        # Attempt to get a generation_manager from system_ref, else raise error on first use
+        self.generation_manager = getattr(system_ref, 'generation_manager', None)
+        if self.generation_manager is None:
+            self.logger.record_event(
+                event_type="generation_manager_missing",
+                message="No generation_manager found on system_ref. LLM decisions will fail until attached.",
+                level="error",
+                additional_info={"timestamp": time.time()}
+            )
+
         self.logger.record_event(
             event_type="autonomy_manager_initialized",
             message="AutonomyManager initialized",
@@ -269,196 +280,149 @@ class AutonomyManager:
                 raise
             return ""
 
-    def make_decision(self, prompt: str) -> Optional[bool]:
+    def llm_decide(self, prompt: str, allowed_responses: list) -> str:
         """
-        Use the LLM to make a decision based on the prompt, with fallback for repeated failures.
-
+        Query the LLM with the prompt and parse the response into an allowed action string.
         Args:
-            prompt: Formatted prompt with metrics.
-
+            prompt: The structured prompt string.
+            allowed_responses: List of valid responses (e.g., ["continue", "pause", ...] or ["yes", "no"])
         Returns:
-            True if adjustments are needed, False if not, None if decision fails.
+            Action string chosen by the LLM.
         """
+        self.logger.record_event(
+            event_type="llm_prompt_sent",
+            message="Prompt sent to LLM",
+            level="debug",
+            additional_info={"prompt": prompt, "timestamp": time.time(), "allowed_responses": allowed_responses}
+        )
+        llm_output = None
         try:
-            # Placeholder: Replace with actual LLM call
-            # For now, random decision for demonstration
-            import random
-            result = random.choice([True, False])
-            self.last_decision = result
-            self.logger.record_event(
-                event_type="decision_made",
-                message="Decision made by LLM or agent",
-                level="info",
-                additional_info={"decision": result, "prompt": prompt, "timestamp": time.time()}
-            )
-            self.consecutive_llm_failures = 0
-            return result
+            if self.generation_manager is None:
+                raise RuntimeError("No generation_manager attached to AutonomyManager.")
+            result = self.generation_manager.generate_text(prompt, num_return_sequences=1, user_id="autonomy_manager")
+            if isinstance(result, list) and result:
+                llm_output = result[0].strip().lower()
+            else:
+                llm_output = None
         except Exception as e:
-            self.consecutive_llm_failures += 1
             self.logger.record_event(
-                event_type="decision_failed",
-                message=f"Decision-making failed: {str(e)}",
+                event_type="llm_decision_error",
+                message=f"LLM decision error: {str(e)}",
                 level="error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"prompt": prompt, "failures": self.consecutive_llm_failures, "timestamp": time.time()}
+                additional_info={"prompt": prompt, "timestamp": time.time()}
             )
-            if self.consecutive_llm_failures >= self.autonomy_config.get("fallback_decision_limit", 3):
+            llm_output = None
+        self.logger.record_event(
+            event_type="llm_decision_output",
+            message="LLM decision output",
+            level="debug",
+            additional_info={"llm_output": llm_output, "timestamp": time.time()}
+        )
+        # Validate output
+        allowed_set = set(map(str.lower, allowed_responses))
+        if llm_output not in allowed_set:
+            self.logger.record_event(
+                event_type="llm_decision_invalid",
+                message=f"Invalid LLM action '{llm_output}', falling back to '{allowed_responses[0]}'.",
+                level="warning",
+                additional_info={"timestamp": time.time()}
+            )
+            return allowed_responses[0]  # Safe fallback
+        return llm_output
+
+    def execute_action(self, action: str) -> None:
+        """
+        Execute system actions based on the string action name, with robust curiosity/explore fallback.
+        Args:
+            action: Action string (e.g., 'continue', 'throttle', 'pause', 'explore', etc.)
+        """
+        if action == "continue":
+            return  # No-op for normal operation
+        elif action == "throttle":
+            if self.tuner:
+                self.tuner.update_parameters({
+                    "data_config.batch_size": 1,
+                    "generation_config.temperature": 0.6
+                })
                 self.logger.record_event(
-                    event_type="decision_fallback_triggered",
-                    message="Fallback triggered after repeated LLM failures",
-                    level="warning",
+                    event_type="autotune_applied",
+                    message="Batch size and temperature reduced due to throttle action",
                     additional_info={"timestamp": time.time()}
                 )
-                self.consecutive_llm_failures = 0
-                return False  # Fallback: take safe action
-            if self.autonomy_config.get("strict_mode", False):
-                raise
-            return None
-
-    def execute_action(self, decision: bool) -> bool:
-        """
-        Execute system actions based on the decision with rollback on failure.
-
-        Args:
-            decision: True if adjustments are needed, False otherwise.
-
-        Returns:
-            True if actions were executed successfully, False otherwise.
-        """
-        try:
-            action_result = False
-            if decision:
-                # Use action registry if available
-                if self.action_registry:
-                    for name, func in self.action_registry.items():
-                        try:
-                            func_result = func()
-                            self.logger.record_event(
-                                event_type="action_executed",
-                                message=f"Action '{name}' executed",
-                                level="info",
-                                additional_info={"result": func_result, "timestamp": time.time()}
-                            )
-                        except Exception as e:
-                            self.logger.record_event(
-                                event_type="action_failed",
-                                message=f"Action '{name}' failed: {str(e)}",
-                                level="error",
-                                additional_info={"timestamp": time.time()}
-                            )
-                # Default system action (if no registry or as fallback)
-                if hasattr(self.system_ref, "reset_state"):
-                    self.system_ref.reset_state()
-                    action_result = True
+        elif action == "pause":
+            if hasattr(self.system_ref, "pause"):
+                self.system_ref.pause()
+                self.logger.record_event(event_type="system_paused", message="System paused by LLM decision.")
+        elif action == "soft_shutdown":
+            if hasattr(self.system_ref, "soft_shutdown"):
+                self.system_ref.soft_shutdown()
+                self.logger.record_event(event_type="soft_shutdown", message="System entered soft shutdown mode.")
+        elif action == "shutdown":
+            if hasattr(self.system_ref, "shutdown"):
+                self.system_ref.shutdown()
+                self.logger.record_event(event_type="shutdown", message="System shutdown initiated by LLM.")
+        elif action == "explore":
+            # Robust curiosity-driven question generation
+            if hasattr(self, "curiosity") and self.curiosity:
+                try:
+                    question = None
+                    if hasattr(self.curiosity, "generate_curiosity_question"):
+                        question = self.curiosity.generate_curiosity_question(context="explore", spontaneous=True)
                     self.logger.record_event(
-                        event_type="system_reset",
-                        message="System state reset as autonomous action",
-                        level="info",
+                        event_type="curiosity_question_generated",
+                        message=f"Curiosity-driven question: {question}",
                         additional_info={"timestamp": time.time()}
                     )
-                else:
+                    if question and hasattr(self, "motivator") and self.motivator:
+                        self.motivator.consider_goal(description=question, source="curiosity")
+                except Exception as e:
                     self.logger.record_event(
-                        event_type="no_reset_method",
-                        message="No reset_state method on system_ref",
-                        level="warning",
+                        event_type="curiosity_question_failed",
+                        message=f"Failed to generate curiosity question: {str(e)}",
+                        level="error",
                         additional_info={"timestamp": time.time()}
                     )
             else:
-                action_result = True  # No action needed is still success
-            self.last_action_result = action_result
-            return action_result
-        except Exception as e:
-            self.logger.record_event(
-                event_type="action_execution_failed",
-                message=f"Action execution failed: {str(e)}",
-                level="error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"timestamp": time.time()}
-            )
-            if self.autonomy_config.get("strict_mode", False):
-                raise
-            self.last_action_result = False
-            return False
+                self.logger.record_event(
+                    event_type="explore_action_skipped",
+                    message="Curiosity module not available; skipping explore action.",
+                    level="warning",
+                    additional_info={"timestamp": time.time()}
+                )
+        else:
+            # Try action registry if present
+            if hasattr(self, "action_registry") and action in self.action_registry:
+                try:
+                    self.action_registry[action]()
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="action_failed",
+                        message=f"Failed to execute action '{action}': {str(e)}",
+                        level="error",
+                        additional_info={"timestamp": time.time()}
+                    )
+            else:
+                self.logger.record_event(
+                    event_type="unknown_action",
+                    message=f"Unknown action '{action}' received.",
+                    level="warning",
+                    additional_info={"timestamp": time.time()}
+                )
 
-    def run_self_diagnostic(self) -> Dict[str, Any]:
+    # Deprecated: Boolean-based decision logic (use string-based only)
+    def make_decision(self, prompt: str) -> Optional[bool]:
         """
-        Perform periodic self-diagnostic checks on system health.
-
-        Returns:
-            Dictionary of diagnostic results.
+        [DEPRECATED] Use llm_decide and string-based actions instead.
         """
-        try:
-            current_time = time.time()
-            if current_time - self.diagnostic_last_run < self.autonomy_config["diagnostic_interval"]:
-                return self.last_diagnostics or {"status": "skipped"}
-            # Example diagnostics: uptime, context memory, last metrics
-            diagnostics = {
-                "status": "ok",
-                "uptime": current_time - self.start_time,
-                "context_memory_len": len(self.context_memory),
-                "last_metrics": self.last_metrics,
-                "timestamp": current_time
-            }
-            self.last_diagnostics = diagnostics
-            self.diagnostic_last_run = current_time
-            self.logger.record_event(
-                event_type="self_diagnostic_ran",
-                message="Self-diagnostic completed",
-                level="info",
-                additional_info=diagnostics
-            )
-            return diagnostics
-        except Exception as e:
-            self.logger.record_event(
-                event_type="self_diagnostic_failed",
-                message=f"Self-diagnostic failed: {str(e)}",
-                level="error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"timestamp": time.time()}
-            )
-            return {"status": "failed", "error": str(e)}
-
-    def update_context(self, prompt: str, response: str) -> None:
-        """
-        Update contextual memory with recent interactions, with truncation.
-
-        Args:
-            prompt: Input prompt.
-            response: System response.
-        """
-        try:
-            max_len = self.autonomy_config["max_prompt_len"]
-            self.context_memory.append({
-                "prompt": prompt[:max_len],
-                "response": response[:max_len]
-            })
-            self.logger.record_event(
-                event_type="context_updated",
-                message="Context memory updated",
-                level="info",
-                additional_info={"context_length": len(self.context_memory), "timestamp": time.time()}
-            )
-        except Exception as e:
-            self.logger.record_event(
-                event_type="context_update_failed",
-                message=f"Context update failed: {str(e)}",
-                level="error",
-                stack_trace=traceback.format_exc(),
-                additional_info={"timestamp": time.time()}
-            )
-            self.reset_context()
-
-    def reset_context(self) -> None:
-        """
-        Reset contextual memory if corrupted or on error.
-        """
-        self.context_memory = deque(maxlen=self.autonomy_config["context_window"])
         self.logger.record_event(
-            event_type="context_reset",
-            message="Context memory reset",
-            level="info",
+            event_type="deprecated_method_called",
+            message="make_decision is deprecated; use llm_decide instead.",
+            level="warning",
             additional_info={"timestamp": time.time()}
         )
+        # For backward compatibility, still call llm_decide
+        action = self.llm_decide(prompt, ["continue", "throttle", "pause", "soft_shutdown", "shutdown"])
+        return action != "continue"
 
     def aggregate_sensory_context(self) -> dict:
         """
@@ -467,7 +431,6 @@ class AutonomyManager:
             Dictionary summarizing all sensory, core system, and resource state.
         """
         context = {}
-        # Aggregate sensory nodes
         for name, node in self.sense_nodes.items():
             try:
                 context[name] = node.get_latest_observation()
@@ -517,28 +480,59 @@ class AutonomyManager:
             context["ram_usage"] = None
             context["ram_total"] = None
             context["ram_usage_pct"] = None
-        # GPU memory (if available)
+        # GPU memory (use GPUMemoryManager for system standard)
         try:
-            if hasattr(self, "device") and self.device and "cuda" in str(self.device):
-                import torch
-                if torch.cuda.is_available():
-                    gpu_used = torch.cuda.memory_allocated(self.device)
-                    gpu_total = torch.cuda.get_device_properties(self.device).total_memory
-                    context["gpu_mem_used"] = gpu_used
-                    context["gpu_mem_total"] = gpu_total
-                    context["gpu_mem_used_pct"] = gpu_used / gpu_total if gpu_total else None
+            if hasattr(self, "gpu_manager") and self.gpu_manager is not None:
+                gpu_stats = self.gpu_manager.get_stats() if hasattr(self.gpu_manager, "get_stats") else {}
+                for k, v in gpu_stats.items():
+                    context[f"gpumgr_{k}"] = v
+                # For backward compatibility, also set top-level keys if present
+                if "used" in gpu_stats:
+                    context["gpu_mem_used"] = gpu_stats["used"]
+                if "total" in gpu_stats:
+                    context["gpu_mem_total"] = gpu_stats["total"]
+                if "used" in gpu_stats and "total" in gpu_stats and gpu_stats["total"]:
+                    context["gpu_mem_used_pct"] = gpu_stats["used"] / gpu_stats["total"]
+                else:
+                    context["gpu_mem_used_pct"] = None
+            else:
+                # Fallback to previous torch-based logic if no manager
+                torch_available = False
+                try:
+                    import torch
+                    torch_available = True
+                except ImportError:
+                    torch_available = False
+                device = getattr(self, "device", None)
+                if torch_available and isinstance(device, type(getattr(torch, "device", None) and torch.device("cpu"))):
+                    if device.type == "cuda" and torch.cuda.is_available():
+                        gpu_used = torch.cuda.memory_allocated(device)
+                        gpu_total = torch.cuda.get_device_properties(device).total_memory
+                        context["gpu_mem_used"] = gpu_used
+                        context["gpu_mem_total"] = gpu_total
+                        context["gpu_mem_used_pct"] = gpu_used / gpu_total if gpu_total else None
+                    else:
+                        context["gpu_mem_used"] = None
+                        context["gpu_mem_total"] = None
+                        context["gpu_mem_used_pct"] = None
                 else:
                     context["gpu_mem_used"] = None
                     context["gpu_mem_total"] = None
                     context["gpu_mem_used_pct"] = None
-            else:
-                context["gpu_mem_used"] = None
-                context["gpu_mem_total"] = None
-                context["gpu_mem_used_pct"] = None
         except Exception:
             context["gpu_mem_used"] = None
             context["gpu_mem_total"] = None
             context["gpu_mem_used_pct"] = None
+        # Centralize curiosity score/label logic here
+        if hasattr(self, "curiosity") and self.curiosity:
+            context["curiosity_level"] = getattr(self.curiosity, "curiosity_score", 0.0)
+            score = context["curiosity_level"]
+            if score > 0.7:
+                context["curiosity_label"] = "high"
+            elif score > 0.4:
+                context["curiosity_label"] = "medium"
+            else:
+                context["curiosity_label"] = "low"
         return context
 
     def build_structured_prompt(self, context: dict) -> str:
@@ -563,6 +557,8 @@ class AutonomyManager:
             "soft_shutdown: enter safe idle mode, await confirmation",
             "shutdown: fully power down (requires confirmation)"
         ]
+        if "curiosity_label" in context and context["curiosity_label"] == "high":
+            action_space = ["explore: seek new information or try something novel"] + action_space
         prompt_lines.append("Choose action (see explanations):")
         for action in action_space:
             prompt_lines.append(f"  - {action}")
@@ -571,130 +567,6 @@ class AutonomyManager:
         )
         return "\n".join(prompt_lines)
 
-    def llm_decide(self, prompt: str) -> str:
-        """
-        Query the LLM with the prompt and parse the response into an action string.
-        Args:
-            prompt: The structured prompt string.
-        Returns:
-            Action string chosen by the LLM.
-        """
-        # Log the prompt and LLM output for audit trail
-        self.logger.record_event(
-            event_type="llm_prompt_sent",
-            message="Prompt sent to LLM",
-            level="debug",
-            additional_info={"prompt": prompt, "timestamp": time.time()}
-        )
-        # TODO: Integrate with local LLM inference engine
-        # Example stub:
-        llm_output = "continue"  # Replace with actual LLM call and output
-        self.logger.record_event(
-            event_type="llm_decision_output",
-            message="LLM decision output",
-            level="debug",
-            additional_info={"llm_output": llm_output, "timestamp": time.time()}
-        )
-        # Fallback: if output is invalid, default to continue
-        valid_actions = {"continue", "throttle", "pause", "soft_shutdown", "shutdown"}
-        if llm_output not in valid_actions:
-            self.logger.record_event(
-                event_type="llm_decision_invalid",
-                message=f"Invalid LLM action '{llm_output}', falling back to 'continue'",
-                level="warning",
-                additional_info={"timestamp": time.time()}
-            )
-            return "continue"
-        return llm_output
-
-    def execute_action(self, action: str) -> None:
-        """
-        Map the chosen action string to actuator commands or system behaviors.
-        Args:
-            action: Action string from LLM.
-        """
-        # Soft shutdown confirmation logic
-        if action == "soft_shutdown":
-            self.pending_shutdown = True
-            self.logger.record_event(
-                event_type="soft_shutdown_initiated",
-                message="System entering safe idle mode. Awaiting confirmation for full shutdown.",
-                level="critical",
-                additional_info={"timestamp": time.time()}
-            )
-            # Enter idle loop or minimal operation mode here
-            return
-        if action == "shutdown":
-            if getattr(self, "pending_shutdown", False):
-                self.logger.record_event(
-                    event_type="system_shutdown_confirmed",
-                    message="System shutdown confirmed. Powering down.",
-                    level="critical",
-                    additional_info={"timestamp": time.time()}
-                )
-                raise SystemExit("Shutdown triggered by LLM decision.")
-            else:
-                self.logger.record_event(
-                    event_type="shutdown_without_confirmation",
-                    message="Shutdown requested without prior soft shutdown. Ignoring for safety.",
-                    level="warning",
-                    additional_info={"timestamp": time.time()}
-                )
-                return
-        if action == "throttle":
-            prev = getattr(self, "throttle_level", 0)
-            self.throttle_level = min(prev + 1, 5)
-            self.logger.record_event(
-                event_type="throttle_engaged",
-                message=f"Throttling system. New throttle level: {self.throttle_level}",
-                level="warning",
-                additional_info={"timestamp": time.time()}
-            )
-            time.sleep(self.throttle_level)
-            return
-        if action == "pause":
-            self.logger.record_event(
-                event_type="system_paused",
-                message="System paused due to error state.",
-                level="warning",
-                additional_info={"timestamp": time.time()}
-            )
-            time.sleep(10)
-            return
-        if action == "continue":
-            self.throttle_level = 0
-            self.logger.record_event(
-                event_type="system_continue",
-                message="System continuing normal operation.",
-                level="info",
-                additional_info={"timestamp": time.time()}
-            )
-            return
-        # Default: try action registry as before
-        if hasattr(self, "action_registry") and action in self.action_registry:
-            try:
-                self.action_registry[action]()
-                self.logger.record_event(
-                    event_type="action_executed",
-                    message=f"Executed action '{action}'",
-                    level="info",
-                    additional_info={"timestamp": time.time()}
-                )
-            except Exception as e:
-                self.logger.record_event(
-                    event_type="action_execution_failed",
-                    message=f"Failed to execute action '{action}': {str(e)}",
-                    level="error",
-                    additional_info={"timestamp": time.time()}
-                )
-        else:
-            self.logger.record_event(
-                event_type="action_unknown",
-                message=f"Unknown or unregistered action '{action}'",
-                level="warning",
-                additional_info={"timestamp": time.time()}
-            )
-
     def check_and_act(self) -> None:
         """
         Main loop to aggregate context, prompt the LLM, and execute the chosen action.
@@ -702,56 +574,23 @@ class AutonomyManager:
         if not self.autonomy_config["enable_autonomy"]:
             return
         if not getattr(self, "enable_autosys_control", False):
-            # Autosys control is off, skip LLM-based system self-regulation
             return
         try:
-            with self.memory_lock:  # Ensure thread safety
-                # 1. Aggregate sensory input and system state
+            with self.memory_lock:
                 context = self.aggregate_sensory_context()
-                # 2. Optionally add current tunable parameters to context
                 if self.tuner:
                     context["tunable_parameters"] = self.tuner.get_current_parameters()
-                # 3. Optionally add curiosity state to context
-                if hasattr(self, "curiosity") and self.curiosity:
-                    context["curiosity_level"] = getattr(self.curiosity, "curiosity_score", 0.0)
-                # 4. Build a structured prompt for the LLM
                 prompt = self.build_structured_prompt(context)
-                # 5. Query the LLM for the next action
-                action = self.llm_decide(prompt)
-                # 6. Execute the chosen action
-                self.execute_action(action)
-                # 7. Example: If LLM action is 'throttle', update parameters via tuner
-                if self.tuner and action == "throttle":
-                    # For demonstration, reduce batch size and temperature
-                    self.tuner.update_parameters({
-                        "data_config.batch_size": 1,
-                        "generation_config.temperature": 0.6
-                    })
+                allowed_actions = ["continue", "throttle", "pause", "soft_shutdown", "shutdown"]
+                if context.get("curiosity_label") == "high":
+                    allowed_actions = ["explore"] + allowed_actions
                     self.logger.record_event(
-                        event_type="autotune_applied",
-                        message="Batch size and temperature reduced due to throttle action",
-                        additional_info={"timestamp": time.time()}
+                        event_type="curiosity_action_space_expanded",
+                        message="Curiosity is high, adding 'explore' to allowed actions.",
+                        additional_info={"curiosity_level": context["curiosity_level"], "timestamp": time.time()}
                     )
-                # 8. Example: If curiosity is very high, take an exploratory action
-                if hasattr(self, "curiosity") and self.curiosity:
-                    curiosity_level = getattr(self.curiosity, "curiosity_score", 0.0)
-                    if curiosity_level > 0.7:
-                        self.logger.record_event(
-                            event_type="curiosity_driven_action",
-                            message="Curiosity is high, initiating exploratory behavior.",
-                            additional_info={"curiosity_level": curiosity_level, "timestamp": time.time()}
-                        )
-                        # Example: register or execute an 'explore' action if available
-                        if hasattr(self, "action_registry") and "explore" in self.action_registry:
-                            try:
-                                self.action_registry["explore"]()
-                            except Exception as e:
-                                self.logger.record_event(
-                                    event_type="explore_action_failed",
-                                    message=f"Failed to execute explore action: {str(e)}",
-                                    level="error",
-                                    additional_info={"timestamp": time.time()}
-                                )
+                action = self.llm_decide(prompt, allowed_actions)
+                self.execute_action(action)
         except Exception as e:
             self.logger.record_event(
                 event_type="autonomy_check_failed",
