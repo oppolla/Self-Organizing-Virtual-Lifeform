@@ -8,11 +8,7 @@ Complete finals for all modules
 3. integrate sovl_bonder
 4. further develop initialization and startup feel
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
-6. Give system ability to "watch" content and derive joy and knowledge from it
-7. confirm token map is working
-8. confirm scaffold is working
-9. connect volition as hook point for future modules like vision
-
+6. Look into adding a module in bewteem traits and generation. Core personality module that enforces a consistant point of view. Takes weight off sovl_generation
 
 
 
