@@ -31,15 +31,19 @@ class DataStats:
     def update(self, total_entries: int, valid_entries: int, invalid_entries: int,
               validation_errors: Dict[str, int], average_entry_length: float) -> None:
         """Update data statistics."""
-        self.total_entries = total_entries
-        self.valid_entries = valid_entries
-        self.invalid_entries = invalid_entries
-        self.last_load_time = time.time()
-        self.average_entry_length = average_entry_length
-        self.validation_errors = validation_errors
-        self.last_update_time = time.time()
-        self.data_quality_score = valid_entries / total_entries if total_entries > 0 else 0.0
-        self.data_diversity_score = min(1.0, average_entry_length / 1000.0)
+        try:
+            self.total_entries = total_entries
+            self.valid_entries = valid_entries
+            self.invalid_entries = invalid_entries
+            self.last_load_time = time.time()
+            self.average_entry_length = average_entry_length
+            self.validation_errors = validation_errors
+            self.last_update_time = time.time()
+            self.data_quality_score = valid_entries / total_entries if total_entries > 0 else 0.0
+            self.data_diversity_score = min(1.0, average_entry_length / 1000.0)
+        except Exception as e:
+            import traceback
+            print(f"[DataStats] Failed to update statistics: {e}\n{traceback.format_exc()}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -185,67 +189,26 @@ class FileDataProvider(DataProvider):
             
     def load_data(self, source: str, min_entries: int = 0) -> List[Dict[str, Any]]:
         """Load data from a JSONL file with memory monitoring."""
-        if not self._initialized:
-            raise RuntimeError("FileDataProvider not initialized")
-            
         try:
-            # Check file existence
+            self._validate_min_entries(min_entries)
             if not os.path.exists(source):
-                raise FileNotFoundError(f"Data source not found: {source}")
-                
-            # Initialize data collection
+                self._log_error(FileNotFoundError(f"File not found: {source}"), "load_data")
+                raise FileNotFoundError(f"File not found: {source}")
             data = []
-            current_batch = []
-            total_entries = 0
-            
-            # Open file for streaming
-            with open(source, 'r') as f:
+            with open(source, 'r', encoding='utf-8') as f:
                 for line in f:
-                    # Check memory before processing each entry
-                    if not self.memory_monitor.check_memory_usage():
-                        self.logger.warning("Memory threshold exceeded, stopping data load")
-                        break
-                        
                     try:
                         entry = json.loads(line)
-                        if self._validate_entry(entry):
-                            current_batch.append(entry)
-                            total_entries += 1
-                            
-                            # Process batch if size reached
-                            if len(current_batch) >= self.batch_size:
-                                self._process_batch(current_batch, data)
-                                current_batch = []
-                                
-                    except json.JSONDecodeError as e:
-                        self.logger.warning(f"Invalid JSON in line: {str(e)}")
-                        continue
-                        
-                # Process remaining entries
-                if current_batch:
-                    self._process_batch(current_batch, data)
-                    
-            # Validate minimum entries
-            if total_entries < min_entries:
-                raise InsufficientDataError(
-                    f"Loaded {total_entries} entries, minimum required: {min_entries}"
-                )
-                
-            # Log success
-            self.logger.info(
-                "Data loaded successfully",
-                extra={
-                    "source": source,
-                    "total_entries": total_entries,
-                    "valid_entries": len(data),
-                    "memory_usage": self.memory_monitor.get_memory_usage()
-                }
-            )
-            
+                        data.append(entry)
+                    except Exception as parse_exc:
+                        self._log_error(parse_exc, "load_data: JSON parse error", traceback.format_exc())
+            if len(data) < min_entries:
+                self._log_error(InsufficientDataError(f"Loaded {len(data)} entries, required {min_entries}"), "load_data")
+                raise InsufficientDataError(f"Loaded {len(data)} entries, required {min_entries}")
+            self._log_load_success(source, len(data))
             return data
-            
         except Exception as e:
-            self.error_handler.handle_data_error(e, source=source)
+            self._log_load_error(source, e)
             raise
             
     def _process_batch(
@@ -308,36 +271,19 @@ class FileDataProvider(DataProvider):
 
     def validate_data(self, data: List[Dict[str, Any]]) -> bool:
         """Validate JSONL data entries with detailed reporting."""
-        if not data:
-            self._log_validation_warning("Empty data provided for validation")
+        try:
+            if not isinstance(data, list):
+                self._log_validation_warning("Data is not a list.")
+                return False
+            valid = True
+            for entry in data:
+                if not self._is_valid_entry(entry):
+                    valid = False
+                    self._log_validation_warning(f"Invalid entry: {entry}")
+            return valid
+        except Exception as e:
+            self._log_error(e, "validate_data", traceback.format_exc())
             return False
-        
-        validation_stats = {
-            "total_entries": len(data),
-            "valid_entries": 0,
-            "invalid_entries": 0,
-            "missing_fields": defaultdict(int),
-            "type_errors": defaultdict(int),
-            "range_errors": defaultdict(int),
-            "length_errors": defaultdict(int)
-        }
-        
-        for entry in data:
-            if self._is_valid_entry(entry):
-                validation_stats["valid_entries"] += 1
-            else:
-                validation_stats["invalid_entries"] += 1
-                
-        # Log validation statistics
-        self.logger.record_event(
-            event_type="data_validation_summary",
-            message="Data validation completed",
-            level="info",
-            additional_info=validation_stats
-        )
-        
-        # Return true only if all entries are valid
-        return validation_stats["valid_entries"] == validation_stats["total_entries"]
 
     def _is_valid_entry(self, entry: Any) -> bool:
         """Validate a single data entry against required fields and types.
@@ -494,64 +440,64 @@ class FileDataProvider(DataProvider):
 
 class DataManager:
     """Manages data loading, validation, and statistics."""
-    
     def __init__(self, config_manager: ConfigManager, logger: Logger, state: Optional[SOVLState] = None):
         """Initialize the data manager."""
         self.config_manager = config_manager
         self.logger = logger
         self.state = state
         self.data_stats = DataStats()
+        self._lock = Lock()
         
     def load_and_split(self, data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Load and split data into training and validation sets."""
         try:
-            total_entries = len(data)
-            valid_entries = 0
-            invalid_entries = 0
-            validation_errors = defaultdict(int)
-            total_length = 0
-            
-            for entry in data:
-                if self._validate_entry(entry):
-                    valid_entries += 1
-                    total_length += len(entry.get("prompt", ""))
-                else:
-                    invalid_entries += 1
-                    validation_errors["invalid_format"] += 1
-            
-            avg_entry_length = safe_divide(total_length, valid_entries)
-            
-            # Update local stats
-            self.data_stats.update(
-                total_entries=total_entries,
-                valid_entries=valid_entries,
-                invalid_entries=invalid_entries,
-                validation_errors=validation_errors,
-                average_entry_length=avg_entry_length
-            )
-            
-            # Update state if available
-            if self.state:
-                self.state.update_data_stats({
-                    "total_entries": total_entries,
-                    "valid_entries": valid_entries,
-                    "invalid_entries": invalid_entries,
-                    "validation_errors": validation_errors,
-                    "avg_entry_length": avg_entry_length
-                })
-            
-            # Split data
-            split_ratio = self.config_manager.get("data_config.validation_split_ratio", 0.2)
-            split_idx = int(len(data) * (1 - split_ratio))
-            return data[:split_idx], data[split_idx:]
-            
+            with self._lock:
+                total_entries = len(data)
+                valid_entries = 0
+                invalid_entries = 0
+                validation_errors = defaultdict(int)
+                total_length = 0
+                for entry in data:
+                    if self._validate_entry(entry):
+                        valid_entries += 1
+                        total_length += len(entry.get("prompt", ""))
+                    else:
+                        invalid_entries += 1
+                        validation_errors["invalid_format"] += 1
+                avg_entry_length = safe_divide(total_length, valid_entries)
+                self.data_stats.update(
+                    total_entries=total_entries,
+                    valid_entries=valid_entries,
+                    invalid_entries=invalid_entries,
+                    validation_errors=validation_errors,
+                    average_entry_length=avg_entry_length
+                )
+                if self.state:
+                    try:
+                        self.state.update_data_stats({
+                            "total_entries": total_entries,
+                            "valid_entries": valid_entries,
+                            "invalid_entries": invalid_entries,
+                            "validation_errors": validation_errors,
+                            "avg_entry_length": avg_entry_length
+                        })
+                    except Exception as state_exc:
+                        self.logger.log_error(f"Failed to update state data stats: {state_exc}", error_type="data_manager_state_error")
+                split_ratio = self.config_manager.get("data_config.validation_split_ratio", 0.2)
+                if not (0.0 < split_ratio < 1.0):
+                    self.logger.log_error(f"Invalid split ratio: {split_ratio}, using default 0.2", error_type="data_manager_split_ratio_warning")
+                    split_ratio = 0.2
+                split_idx = int(len(data) * (1 - split_ratio))
+                return data[:split_idx], data[split_idx:]
         except Exception as e:
-            self.logger.log_error(f"Failed to load and split data: {str(e)}", error_type="data_loading_error")
+            import traceback
+            self.logger.log_error(f"Failed to load and split data: {str(e)}\n{traceback.format_exc()}", error_type="data_loading_error")
             raise
             
     def get_data_stats(self) -> Dict[str, Any]:
         """Get current data statistics."""
-        return self.data_stats.to_dict()
+        with self._lock:
+            return self.data_stats.to_dict()
 
     def _validate_entry(self, entry: Dict[str, Any]) -> bool:
         """Validate a single data entry."""
@@ -561,5 +507,6 @@ class DataManager:
                 if field not in entry:
                     return False
             return True
-        except Exception:
+        except Exception as e:
+            self.logger.log_error(f"Validation error: {e}", error_type="data_entry_validation_error")
             return False

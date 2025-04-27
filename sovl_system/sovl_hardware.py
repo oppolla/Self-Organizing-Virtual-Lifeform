@@ -37,6 +37,16 @@ class HardwareConfig:
             if self.mock_memory_total_mb <= 0:
                 raise HardwareError("mock_memory_total_mb must be positive")
         except HardwareError as e:
+            logger = getattr(self, 'logger', None)
+            if logger:
+                try:
+                    logger.log_error(f"HardwareConfig validation failed: {str(e)}", error_type="hardware_config_error", stack_trace=traceback.format_exc())
+                except Exception:
+                    print(f"[ERROR] HardwareConfig validation failed (logger error): {str(e)}")
+                    traceback.print_exc()
+            else:
+                print(f"[ERROR] HardwareConfig validation failed: {str(e)}")
+                traceback.print_exc()
             raise HardwareError(f"Configuration validation failed: {str(e)}")
 
     @classmethod
@@ -49,8 +59,24 @@ class HardwareConfig:
                 mock_memory_total_mb=config_manager.get("hardware.mock_memory_total_mb", 8192.0)
             )
             config.validate()
+            logger = getattr(config_manager, 'logger', None)
+            if logger:
+                try:
+                    logger.log_debug("HardwareConfig created successfully", event_type="hardware_config_success")
+                except Exception:
+                    pass
             return config
         except Exception as e:
+            logger = getattr(config_manager, 'logger', None)
+            if logger:
+                try:
+                    logger.log_error(f"Failed to create HardwareConfig: {str(e)}", error_type="hardware_config_error", stack_trace=traceback.format_exc())
+                except Exception:
+                    print(f"[ERROR] Failed to create HardwareConfig (logger error): {str(e)}")
+                    traceback.print_exc()
+            else:
+                print(f"[ERROR] Failed to create HardwareConfig: {str(e)}")
+                traceback.print_exc()
             raise HardwareError(f"Failed to create HardwareConfig: {str(e)}")
 
 class HardwareManager:
@@ -66,12 +92,35 @@ class HardwareManager:
         """
         self.config_manager = config_manager
         self.logger = logger
-        self._config = HardwareConfig.from_config_manager(config_manager)
+        try:
+            self._config = HardwareConfig.from_config_manager(config_manager)
+        except Exception as e:
+            if self.logger:
+                try:
+                    self.logger.log_error(f"HardwareManager failed to load config: {str(e)}", error_type="hardware_manager_error", stack_trace=traceback.format_exc())
+                except Exception:
+                    print(f"[ERROR] HardwareManager failed to log config error: {str(e)}")
+                    traceback.print_exc()
+            else:
+                print(f"[ERROR] HardwareManager failed to load config: {str(e)}")
+                traceback.print_exc()
+            raise
         self._lock = Lock()
         self._last_memory_query: float = 0.0
         self._cached_memory_stats: Optional[Dict[str, float]] = None
-        self._cuda_available = self._check_cuda_availability()
-        
+        try:
+            self._cuda_available = self._check_cuda_availability()
+        except Exception as e:
+            if self.logger:
+                try:
+                    self.logger.log_error(f"HardwareManager failed CUDA availability check: {str(e)}", error_type="hardware_manager_error", stack_trace=traceback.format_exc())
+                except Exception:
+                    print(f"[ERROR] HardwareManager failed to log CUDA check error: {str(e)}")
+                    traceback.print_exc()
+            else:
+                print(f"[ERROR] HardwareManager failed CUDA availability check: {str(e)}")
+                traceback.print_exc()
+            self._cuda_available = False
         # Initialize error manager
         self.error_manager = ErrorManager(
             context=self,  # Pass self as context
@@ -79,14 +128,17 @@ class HardwareManager:
             config_manager=config_manager,
             error_cooldown=1.0
         )
-        
         # Register hardware-specific recovery strategies
         self._register_recovery_strategies()
-        
-        self._log_training_event("hardware_initialized", {
-            "cuda_available": self._cuda_available,
-            "mock_memory_total_mb": self._config.mock_memory_total_mb
-        })
+        if self.logger:
+            try:
+                self._log_training_event("hardware_initialized", {
+                    "cuda_available": self._cuda_available,
+                    "mock_memory_total_mb": self._config.mock_memory_total_mb
+                })
+            except Exception:
+                print("[ERROR] Failed to log hardware initialization.")
+                traceback.print_exc()
 
     def _register_recovery_strategies(self) -> None:
         """Register hardware-specific error recovery strategies."""

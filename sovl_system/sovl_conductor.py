@@ -56,91 +56,105 @@ class SOVLOrchestrator(OrchestratorInterface):
         self._initialize_logger(log_file)
         self._log_event("orchestrator_init_start", {"config_path": config_path})
 
+        # Defensive: Check config file existence
+        if not os.path.isfile(config_path):
+            msg = f"Config file not found: {config_path}"
+            self._log_error(msg, FileNotFoundError(msg))
+            raise RuntimeError(msg)
+
         try:
             # Initialize ConfigManager with validation
-            self.config_manager = self._create_config_manager(config_path)
-            
+            try:
+                self.config_manager = self._create_config_manager(config_path)
+            except Exception as e:
+                self._log_error("Failed to initialize ConfigManager", e)
+                raise
             # Initialize configuration
-            self._initialize_config()
-            
+            try:
+                self._initialize_config()
+            except Exception as e:
+                self._log_error("Failed to initialize configuration", e)
+                raise
             # Initialize device
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self._log_event("device_initialized", {"device": str(self.device)})
-            
+            try:
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self._log_event("device_initialized", {"device": str(self.device)})
+            except Exception as e:
+                self._log_error("Failed to initialize device", e)
+                self.device = torch.device("cpu")
             # Initialize state manager
-            self.state_manager = StateManager(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                device=self.device
-            )
-            
+            try:
+                self.state_manager = StateManager(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    device=self.device
+                )
+            except Exception as e:
+                self._log_error("Failed to initialize StateManager", e)
+                self.state_manager = None
             # Initialize model manager early
-            self.model_manager = ModelManager(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                device=self.device
-            )
-            
+            try:
+                self.model_manager = ModelManager(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    device=self.device
+                )
+            except Exception as e:
+                self._log_error("Failed to initialize ModelManager", e)
+                self.model_manager = None
             # Initialize memory managers
-            self.ram_manager = RAMManager(self.config_manager, self.logger)
-            self.gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
-            
+            try:
+                self.ram_manager = RAMManager(self.config_manager, self.logger)
+            except Exception as e:
+                self._log_error("Failed to initialize RAMManager", e)
+                self.ram_manager = None
+            try:
+                self.gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
+            except Exception as e:
+                self._log_error("Failed to initialize GPUMemoryManager", e)
+                self.gpu_manager = None
             # Initialize error manager
-            self.error_manager = ErrorManager(self.state_manager, self.logger)
-            
+            try:
+                self.error_manager = ErrorManager(self.state_manager, self.logger)
+            except Exception as e:
+                self._log_error("Failed to initialize ErrorManager", e)
+                self.error_manager = None
             # Initialize monitors
-            self.system_monitor = SystemMonitor(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                ram_manager=self.ram_manager,
-                gpu_manager=self.gpu_manager,
-                error_manager=self.error_manager
-            )
-            
-            self.memory_monitor = MemoryMonitor(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                ram_manager=self.ram_manager,
-                gpu_manager=self.gpu_manager,
-                error_manager=self.error_manager
-            )
-            
-            # Load state from file if exists, otherwise initialize new state
-            self.state = self.state_manager.load_state()
-            
-            # Initialize system early to ensure state consistency
-            self._system: Optional[SystemInterface] = None
-            
-            # Initialize training cycle manager with lifecycle support
-            self.training_cycle_manager = TrainingCycleManager(
-                config_manager=self.config_manager,
-                logger=self.logger
-            )
-            
-            # Log initialization
-            self.logger.record_event(
-                event_type="training_cycle_manager_initialized",
-                message="Training cycle manager initialized with lifecycle support",
-                level="info",
-                additional_info={
-                    "current_stage": self.training_cycle_manager.get_lifecycle_stage(),
-                    "life_curve_weight": self.training_cycle_manager.get_life_curve_weight()
-                }
-            )
-            
-            self._lock = Lock()
-            self._log_event("orchestrator_init_success", {
-                "conversation_id": self.state.history.conversation_id,
-                "state_hash": self.state.state_hash
-            })
+            try:
+                self.system_monitor = SystemMonitor(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    ram_manager=self.ram_manager,
+                    gpu_manager=self.gpu_manager,
+                    error_manager=self.error_manager
+                )
+            except Exception as e:
+                self._log_error("Failed to initialize SystemMonitor", e)
+                self.system_monitor = None
+            try:
+                self.memory_monitor = MemoryMonitor(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    ram_manager=self.ram_manager,
+                    gpu_manager=self.gpu_manager,
+                    error_manager=self.error_manager
+                )
+            except Exception as e:
+                self._log_error("Failed to initialize MemoryMonitor", e)
+                self.memory_monitor = None
+            try:
+                self.traits_monitor = TraitsMonitor(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    state_tracker=getattr(self.state_manager, 'state_tracker', None),
+                    error_manager=self.error_manager
+                )
+            except Exception as e:
+                self._log_error("Failed to initialize TraitsMonitor", e)
+                self.traits_monitor = None
         except Exception as e:
             self._log_error("Orchestrator initialization failed", e)
-            self.error_handler.handle_generic_error(
-                error=e,
-                context="orchestrator_initialization",
-                fallback_action=lambda: self._cleanup_resources()
-            )
-            raise RuntimeError(f"Failed to initialize orchestrator: {str(e)}") from e
+            raise
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration from ConfigManager."""
@@ -583,80 +597,33 @@ class SOVLOrchestrator(OrchestratorInterface):
 
     def shutdown(self) -> None:
         """Shutdown the system, saving state and releasing resources."""
-        with self._lock:
+        self._log_event("orchestrator_shutdown_start", {})
+        try:
+            # Defensive: Attempt state save
             try:
-                # Log shutdown start
-                self.logger.record_event(
-                    event_type="system_shutdown_start",
-                    message="Starting system shutdown process",
-                    level="info"
-                )
-    
-                # Cleanup model manager
-                if hasattr(self, 'model_manager'):
-                    self.model_manager.cleanup()
-                    self.logger.record_event(
-                        event_type="model_manager_cleanup",
-                        message="Model manager cleaned up",
-                        level="info"
-                    )
-    
-                # Cleanup event dispatcher
-                self.context.event_dispatcher.cleanup()
-                self.logger.record_event(
-                    event_type="event_dispatcher_cleanup",
-                    message="Event dispatcher cleaned up",
-                    level="info"
-                )
-    
-                # Save final state
-                self.state_tracker.state.save_state()
-                self.logger.record_event(
-                    event_type="state_saved",
-                    message="Final state saved",
-                    level="info"
-                )
-    
-                # Clear state history
-                self.state_tracker.clear_history()
-                self.logger.record_event(
-                    event_type="state_history_cleared",
-                    message="State history cleared",
-                    level="info"
-                )
-    
-                # Clear error history using error handler
-                self.error_handler.clear_error_history()
-                self.logger.record_event(
-                    event_type="error_history_cleared",
-                    message="Error history cleared",
-                    level="info"
-                )
-    
-                # Release GPU memory if available
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    self.logger.record_event(
-                        event_type="gpu_memory_cleared",
-                        message="GPU memory cache cleared",
-                        level="info"
-                    )
-    
-                # Final cleanup of logger
-                self.logger.clear_queues()
-                self.logger.record_event(
-                    event_type="system_shutdown_complete",
-                    message="System shutdown completed successfully",
-                    level="info"
-                )
-    
+                if hasattr(self, 'state_manager') and self.state_manager:
+                    self.state_manager.save_state("system_state_final.json")
+                    self._log_event("state_saved", {"path": "system_state_final.json"})
             except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Failed to shutdown system: {str(e)}",
-                    error_type="shutdown_error",
-                    stack_trace=traceback.format_exc()
-                )
-                raise RuntimeError("Failed to shutdown system") from e
+                self._log_error("Failed to save state during shutdown", e)
+            # Defensive: Attempt resource cleanup
+            try:
+                self._cleanup_resources()
+            except Exception as e:
+                self._log_error("Resource cleanup failed during shutdown", e)
+            # Defensive: Attempt to close logger
+            try:
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.record_event(
+                        event_type="orchestrator_shutdown",
+                        message="Orchestrator shutdown completed successfully",
+                        level="info"
+                    )
+                    self.logger.close()
+            except Exception as e:
+                print(f"Logger close failed: {str(e)}")
+        except Exception as e:
+            self._log_error("Shutdown encountered an error", e)
 
     def _handle_execution_failure(self) -> None:
         """Handle system execution failure with recovery actions."""

@@ -343,224 +343,207 @@ class ConfidenceCalculator:
         context: SystemContext,
         curiosity_manager: Optional[CuriosityManager] = None
     ) -> float:
-        """Calculate confidence score with robust error recovery.
+        """Calculate confidence score with robust error recovery and thread safety."""
+        with self.lock:
+            try:
+                self.logger.record_event(
+                    event_type="confidence_calculation_start",
+                    message="Starting confidence calculation",
+                    level="info",
+                    additional_info={"state_id": getattr(state, 'id', None)}
+                )
+                # Validate inputs
+                self.__validate_inputs(logits, generated_ids)
+                # Calculate probabilities
+                probs = self.__calculate_probabilities(logits)
+                # Compute base confidence
+                base_confidence = self.__compute_base_confidence(probs)
+                # Apply adjustments
+                adjusted_confidence = self.__apply_adjustments(
+                    base_confidence, state, context, curiosity_manager
+                )
+                # Clamp to valid range
+                adjusted_confidence = max(self.min_confidence, min(self.max_confidence, adjusted_confidence))
+                # Finalize and update history
+                final_confidence = self.__finalize_confidence(adjusted_confidence, state)
+                self.logger.record_event(
+                    event_type="confidence_calculation_success",
+                    message="Confidence calculation completed",
+                    level="info",
+                    additional_info={"final_confidence": final_confidence}
+                )
+                return final_confidence
+            except Exception as e:
+                # Log error and attempt recovery
+                error_manager.record_error(
+                    error_type="confidence_calculation_error",
+                    message=str(e),
+                    stack_trace=traceback.format_exc(),
+                    context="calculate_confidence_score"
+                )
+                self.logger.record_event(
+                    event_type="confidence_calculation_failed",
+                    message="Confidence calculation failed, attempting recovery",
+                    level="error",
+                    additional_info={"error": str(e)}
+                )
+                # Attempt recovery
+                recovered_confidence = self.__recover_confidence(e, state, error_manager)
+                # Clamp recovered confidence
+                recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
+                return recovered_confidence
+
+    def __validate_inputs(self, logits: torch.Tensor, generated_ids: torch.Tensor) -> None:
+        """Validate input tensors for confidence calculation.
         
         Args:
             logits: Model output logits
             generated_ids: Generated token IDs
+        
+        Raises:
+            ValueError: If inputs are invalid
+        """
+        if not isinstance(logits, torch.Tensor) or not isinstance(generated_ids, torch.Tensor):
+            raise ValueError("logits and generated_ids must be torch.Tensor")
+        if logits.dim() != 2 or generated_ids.dim() != 1:
+            raise ValueError("logits must be 2D and generated_ids must be 1D")
+
+    def __calculate_probabilities(self, logits: torch.Tensor) -> torch.Tensor:
+        """Calculate softmax probabilities from logits.
+        
+        Args:
+            logits: Model output logits
+        
+        Returns:
+            torch.Tensor: Softmax probabilities
+        """
+        with NumericalGuard():
+            return torch.softmax(logits, dim=-1)
+
+    def __compute_base_confidence(self, probs: torch.Tensor) -> float:
+        """Compute base confidence from probabilities.
+        
+        Args:
+            probs: Softmax probabilities
+        
+        Returns:
+            float: Base confidence score
+        """
+        max_probs = probs.max(dim=-1).values
+        return max_probs.mean().item()
+
+    def __apply_adjustments(
+        self,
+        base_confidence: float,
+        state: SOVLState,
+        context: SystemContext,
+        curiosity_manager: Optional[CuriosityManager]
+    ) -> float:
+        """Apply curiosity and temperament adjustments to confidence.
+        
+        Args:
+            base_confidence: Initial confidence score
             state: Current SOVL state
-            error_manager: Error handling manager
             context: System context
             curiosity_manager: Optional curiosity manager
-            
+        
         Returns:
-            float: Confidence score between 0.0 and 1.0
+            float: Adjusted confidence score
         """
+        confidence = base_confidence
+        
+        # Apply curiosity pressure adjustment if available
+        if curiosity_manager is not None:
+            pressure = curiosity_manager.get_pressure()
+            confidence *= (1.0 - pressure * self.curiosity_pressure_factor)
+        
+        # Apply temperament influence
+        confidence *= (1.0 + state.temperament_score * self.temperament_influence)
+        
+        return confidence
+
+    def __finalize_confidence(self, confidence: float, state: SOVLState) -> float:
+        """Finalize confidence score and update history with thread safety and validation."""
+        with self.lock:
+            # Clamp confidence
+            confidence = max(self.min_confidence, min(self.max_confidence, confidence))
+            # Update confidence history
+            if hasattr(state, 'confidence_history') and isinstance(state.confidence_history, deque):
+                state.confidence_history.append(confidence)
+                # Keep history bounded
+                while len(state.confidence_history) > 100:
+                    state.confidence_history.popleft()
+            else:
+                # Defensive: create history if missing
+                state.confidence_history = deque([confidence], maxlen=100)
+            return confidence
+
+    def __recover_confidence(self, error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
+        """Attempt to recover confidence from history or use default, with defensive checks and logging."""
         try:
-            __validate_inputs(logits, generated_ids)
-            probs = __calculate_probabilities(logits)
-            base_confidence = __compute_base_confidence(probs)
-            
-            # Apply temperament adjustments
-            temperament_adjusted_confidence = self._apply_temperament_adjustments(base_confidence, state)
-            
-            # Apply lifecycle adjustments
-            lifecycle_adjusted_confidence = self._apply_lifecycle_adjustments(temperament_adjusted_confidence, state)
-            
-            # Apply other adjustments
-            adjusted_confidence = __apply_adjustments(
-                lifecycle_adjusted_confidence, state, context, curiosity_manager
-            )
-            
-            # Finalize confidence
-            final_confidence = __finalize_confidence(adjusted_confidence, state)
-            
-            # Log the complete confidence calculation
-            self.logger.record_event(
-                event_type="confidence_calculation_complete",
-                message="Confidence calculation completed with lifecycle integration",
-                level="info",
-                additional_info={
-                    "base_confidence": base_confidence,
-                    "temperament_adjusted_confidence": temperament_adjusted_confidence,
-                    "lifecycle_adjusted_confidence": lifecycle_adjusted_confidence,
-                    "final_confidence": final_confidence,
-                    "lifecycle_stage": self.lifecycle_manager.get_lifecycle_stage() if self.lifecycle_manager else None
-                }
-            )
-            
-            return final_confidence
-            
-        except Exception as e:
-            return __recover_confidence(e, state, error_manager)
-
-def __validate_inputs(logits: torch.Tensor, generated_ids: torch.Tensor) -> None:
-    """Validate input tensors for confidence calculation.
-    
-    Args:
-        logits: Model output logits
-        generated_ids: Generated token IDs
-        
-    Raises:
-        ValueError: If inputs are invalid
-    """
-    if not isinstance(logits, torch.Tensor) or not isinstance(generated_ids, torch.Tensor):
-        raise ValueError("logits and generated_ids must be torch.Tensor")
-    if logits.dim() != 2 or generated_ids.dim() != 1:
-        raise ValueError("logits must be 2D and generated_ids must be 1D")
-
-def __calculate_probabilities(logits: torch.Tensor) -> torch.Tensor:
-    """Calculate softmax probabilities from logits.
-    
-    Args:
-        logits: Model output logits
-        
-    Returns:
-        torch.Tensor: Softmax probabilities
-    """
-    with NumericalGuard():
-        return torch.softmax(logits, dim=-1)
-
-def __compute_base_confidence(probs: torch.Tensor) -> float:
-    """Compute base confidence from probabilities.
-    
-    Args:
-        probs: Softmax probabilities
-        
-    Returns:
-        float: Base confidence score
-    """
-    max_probs = probs.max(dim=-1).values
-    return max_probs.mean().item()
-
-def __apply_adjustments(
-    base_confidence: float,
-    state: SOVLState,
-    context: SystemContext,
-    curiosity_manager: Optional[CuriosityManager]
-) -> float:
-    """Apply curiosity and temperament adjustments to confidence.
-    
-    Args:
-        base_confidence: Initial confidence score
-        state: Current SOVL state
-        context: System context
-        curiosity_manager: Optional curiosity manager
-        
-    Returns:
-        float: Adjusted confidence score
-    """
-    confidence = base_confidence
-    
-    # Apply curiosity pressure adjustment if available
-    if curiosity_manager is not None:
-        pressure = curiosity_manager.get_pressure()
-        confidence *= (1.0 - pressure * self.curiosity_pressure_factor)
-        
-    # Apply temperament influence
-    confidence *= (1.0 + state.temperament_score * self.temperament_influence)
-    
-    return confidence
-
-def __finalize_confidence(confidence: float, state: SOVLState) -> float:
-    """Finalize confidence score and update history.
-    
-    Args:
-        confidence: Adjusted confidence score
-        state: Current SOVL state
-        
-    Returns:
-        float: Final confidence score
-    """
-    final_confidence = max(self.min_confidence, min(self.max_confidence, confidence))
-    state.confidence_history.append(final_confidence)
-    
-    state.logger.record_event(
-        event_type="confidence_finalized",
-        message="Confidence score finalized and history updated",
-        level="info",
-        additional_info={
-            "final_confidence": final_confidence,
-            "history_length": len(state.confidence_history)
-        }
-    )
-    
-    return final_confidence
-
-def __recover_confidence(error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
-    """Attempt to recover confidence from history or use default.
-    
-    Args:
-        error: Original exception
-        state: Current SOVL state
-        error_manager: Error handling manager
-        
-    Returns:
-        float: Recovered confidence score
-    """
-    try:
-        # Validate confidence history
-        if not hasattr(state, 'confidence_history') or not isinstance(state.confidence_history, deque):
-            error_manager.logger.record_event(
-                event_type="confidence_history_error",
-                message="Invalid confidence history structure",
-                level="error",
-                additional_info={"error": str(error)}
-            )
-            return self.default_confidence
-
-        if len(state.confidence_history) >= self.min_history_length:
-            # Use weighted average of recent confidences
-            recent_confidences = list(state.confidence_history)[-self.min_history_length:]
-            # Validate history values
-            if any(not isinstance(c, (int, float)) or c < self.min_confidence or c > self.max_confidence for c in recent_confidences):
+            # Validate confidence history
+            if not hasattr(state, 'confidence_history') or not isinstance(state.confidence_history, deque):
                 error_manager.logger.record_event(
-                    event_type="confidence_history_invalid",
-                    message="Invalid values in confidence history",
+                    event_type="confidence_history_error",
+                    message="Invalid confidence history structure",
                     level="error",
-                    additional_info={"history": recent_confidences}
+                    additional_info={"error": str(error)}
                 )
                 return self.default_confidence
-                
-            recovered_confidence = sum(c * w for c, w in zip(recent_confidences, self.recovery_weights))
-            
-            # Log recovery
+
+            if len(state.confidence_history) >= self.min_history_length:
+                # Use weighted average of recent confidences
+                recent_confidences = list(state.confidence_history)[-self.min_history_length:]
+                # Validate history values
+                if any(not isinstance(c, (int, float)) or c < self.min_confidence or c > self.max_confidence for c in recent_confidences):
+                    error_manager.logger.record_event(
+                        event_type="confidence_history_invalid",
+                        message="Invalid values in confidence history",
+                        level="error",
+                        additional_info={"history": recent_confidences}
+                    )
+                    return self.default_confidence
+                # Defensive: ensure recovery_weights length matches history
+                weights = self.recovery_weights
+                if len(weights) != len(recent_confidences):
+                    weights = [1.0 / len(recent_confidences)] * len(recent_confidences)
+                recovered_confidence = sum(c * w for c, w in zip(recent_confidences, weights))
+                # Clamp recovered confidence
+                recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
+                # Log recovery
+                error_manager.logger.record_event(
+                    event_type="confidence_recovered",
+                    message="Recovered confidence from history",
+                    level="warning",
+                    additional_info={
+                        "error": str(error),
+                        "recovered_confidence": recovered_confidence,
+                        "history_length": len(state.confidence_history)
+                    }
+                )
+                return recovered_confidence
+            # If recovery fails, use conservative default
             error_manager.logger.record_event(
-                event_type="confidence_recovered",
-                message="Recovered confidence from history",
+                event_type="confidence_default_used",
+                message="Using default confidence due to insufficient history",
                 level="warning",
                 additional_info={
                     "error": str(error),
-                    "recovered_confidence": recovered_confidence,
                     "history_length": len(state.confidence_history)
                 }
             )
-            
-            return recovered_confidence
-            
-        # If recovery fails, use conservative default
-        error_manager.logger.record_event(
-            event_type="confidence_default_used",
-            message="Using default confidence due to insufficient history",
-            level="warning",
-            additional_info={
-                "error": str(error),
-                "history_length": len(state.confidence_history)
-            }
-        )
-        return self.default_confidence
-        
-    except Exception as recovery_error:
-        error_manager.logger.record_event(
-            event_type="confidence_recovery_failed",
-            message="Failed to recover confidence",
-            level="critical",
-            additional_info={
-                "original_error": str(error),
-                "recovery_error": str(recovery_error)
-            }
-        )
-        return self.default_confidence
+            return self.default_confidence
+        except Exception as recovery_error:
+            error_manager.logger.record_event(
+                event_type="confidence_recovery_failed",
+                message="Failed to recover confidence",
+                level="critical",
+                additional_info={
+                    "original_error": str(error),
+                    "recovery_error": str(recovery_error)
+                }
+            )
+            return self.default_confidence
 
 # Singleton instance of ConfidenceCalculator
 _confidence_calculator = None

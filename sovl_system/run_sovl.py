@@ -291,14 +291,18 @@ class SOVLRunner:
             
             # Initialize config manager
             config_manager = ConfigManager(args.config, self.logger)
+            if config_manager is None:
+                raise ValueError("ConfigManager could not be instantiated")
             config_manager.subscribe(self._on_config_change)
             
             # Validate device
             if args.device == "cuda":
                 if not torch.cuda.is_available():
                     raise RuntimeError("CUDA is not available. Please use --device cpu")
-                # Check GPU memory
-                total_memory = torch.cuda.get_device_properties(0).total_memory
+                try:
+                    total_memory = torch.cuda.get_device_properties(0).total_memory
+                except Exception as e:
+                    raise RuntimeError(f"Unable to get CUDA device properties: {str(e)}")
                 required_memory = config_manager.get("memory_config.max_memory_mb", 1024) * 1024 * 1024
                 if required_memory > total_memory:
                     raise RuntimeError(f"Insufficient GPU memory. Required: {required_memory/1024/1024}MB, Available: {total_memory/1024/1024}MB")
@@ -481,45 +485,43 @@ class SOVLRunner:
             )
             
             # Unsubscribe from configuration changes
-            if self.context and self.context.config_manager:
+            if hasattr(self, "context") and self.context and hasattr(self.context, "config_manager") and self.context.config_manager:
                 self.context.config_manager.unsubscribe(self._on_config_change)
             
             # Cleanup model manager and model
-            if self.model_manager:
+            if hasattr(self, "model_manager") and self.model_manager:
                 self.model_manager.cleanup()
                 self.model = None
-                self.tokenizer = None
+                if hasattr(self, "tokenizer"):
+                    self.tokenizer = None
             
             # Cleanup optimizer and scheduler
-            if self.optimizer:
+            if hasattr(self, "optimizer") and self.optimizer:
                 self.optimizer = None
-            if self.scheduler:
+            if hasattr(self, "scheduler") and self.scheduler:
                 self.scheduler = None
             
             # Cleanup scaffold components
-            if self.scaffold_provider:
-                self.scaffold_provider = None
-            if self.scaffold_token_mapper:
-                self.scaffold_token_mapper = None
-            if self.cross_attention_injector:
-                self.cross_attention_injector = None
-            if self.scaffold_model:
-                self.scaffold_model = None
+            for attr in ["scaffold_provider", "scaffold_token_mapper", "cross_attention_injector", "scaffold_model"]:
+                if hasattr(self, attr):
+                    setattr(self, attr, None)
             
             # Cleanup context and components
-            if self.context:
-                self.context.cleanup()
+            if hasattr(self, "context") and self.context:
+                if hasattr(self.context, "cleanup"):
+                    self.context.cleanup()
                 self.context = None
-            if self.components:
+            if hasattr(self, "components") and self.components:
                 self.components = None
             
             # Clear CUDA cache if using GPU
-            if torch.cuda.is_available():
+            if hasattr(torch, "cuda") and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
             # Add traits monitor cleanup
-            if self.traits_monitor:
-                self.traits_monitor.stop()
+            if hasattr(self, "traits_monitor") and self.traits_monitor:
+                if hasattr(self.traits_monitor, "stop"):
+                    self.traits_monitor.stop()
                 self.traits_monitor = None
             
             self.logger.log_event(
@@ -532,7 +534,7 @@ class SOVLRunner:
                 error_msg=f"Error during cleanup: {str(e)}",
                 error_type="cleanup_error"
             )
-    
+
     def _run_system(self, args: argparse.Namespace):
         """Run the SOVL system with monitoring and error handling."""
         try:
@@ -953,11 +955,12 @@ class SOVLRunner:
         args = parser.parse_args()
         
         if args.verbose:
-            self.logger.setLevel(logging.DEBUG)
-            
+            # Set logger to debug level using SOVL logger config
+            self.logger.update_config(log_level="debug")
+        
         self.checkpoint_interval = args.checkpoint_interval
         self.max_patience = args.max_patience
-            
+        
         self._register_signal_handlers()
         atexit.register(self.cleanup)
         
@@ -966,7 +969,13 @@ class SOVLRunner:
         
         try:
             self.context = self._initialize_context(args)
+            if self.context is None:
+                self.logger.log_error(error_msg="Failed to initialize context", error_type="context_error")
+                return
             self.components = self._initialize_components(self.context)
+            if not self.components or len(self.components) < 2:
+                self.logger.log_error(error_msg="Component initialization failed or incomplete", error_type="component_error")
+                return
             self.model = self.components[1]
             
             # Initialize state manager
@@ -977,7 +986,6 @@ class SOVLRunner:
             )
             self.state_manager.initialize_state()
             
-            # Load checkpoint if specified
             optimizer = None  # Note: Optimizer should be initialized in SOVLOrchestrator or passed
             if args.resume_from_checkpoint:
                 if not self.load_checkpoint(args.resume_from_checkpoint, optimizer):
@@ -987,89 +995,100 @@ class SOVLRunner:
                     )
             
             # Initialize orchestrator
-            self.orchestrator = SOVLOrchestrator(
-                model=self.model,
-                components=self.components,
-                context=self.context
-            )
+            try:
+                self.orchestrator = SOVLOrchestrator(
+                    model=self.model,
+                    components=self.components,
+                    context=self.context
+                )
+            except Exception as e:
+                self.logger.log_error(error_msg=f"Failed to initialize orchestrator: {str(e)}", error_type="orchestrator_error")
+                return
+            if not self.orchestrator:
+                self.logger.log_error(error_msg="Orchestrator not initialized", error_type="orchestrator_error")
+                return
             
             # Run system
-            if args.mode == 'train':
-                self.logger.log_event(
-                    event_type="training",
-                    message="Starting gestation...",
-                    level="info"
-                )
-                
-                # Load training and validation data
-                formatted_training_data = load_training_data(args.train_data) if args.train_data else []
-                valid_data = load_training_data(args.valid_data) if args.valid_data else []
-                
-                if not formatted_training_data:
-                    self.logger.warning("No training data available")
-                    return
-                
-                # Training loop with validation
-                for epoch in range(args.epochs):
+            try:
+                if args.mode == 'train':
                     self.logger.log_event(
-                        event_type="epoch_start",
-                        message=f"Starting epoch {epoch + 1}/{args.epochs}",
+                        event_type="training",
+                        message="Starting gestation...",
                         level="info"
                     )
                     
-                    # Training phase
-                    train_loss = self.orchestrator.train(
-                        epochs=1,
-                        batch_size=args.batch_size,
-                        formatted_training_data=formatted_training_data,
-                        valid_data=valid_data,
-                        checkpoint_callback=lambda: self.save_checkpoint(optimizer=optimizer),
-                        validate_every=args.validate_every
-                    )
+                    # Load training and validation data
+                    formatted_training_data = load_training_data(args.train_data) if args.train_data else []
+                    valid_data = load_training_data(args.valid_data) if args.valid_data else []
                     
-                    # Validation phase
-                    if valid_data and (epoch + 1) % args.validate_every == 0:
-                        valid_loss, metrics = self.orchestrator.validate(valid_data)
-                        self._update_metrics_history(metrics, epoch + 1)
+                    if not formatted_training_data:
+                        self.logger.warning("No training data available")
+                        return
+                    
+                    # Training loop with validation
+                    for epoch in range(args.epochs):
                         self.logger.log_event(
-                            event_type="validation",
-                            message=f"Epoch {epoch + 1} validation results",
-                            level="info",
-                            additional_info={
-                                "train_loss": train_loss,
-                                "valid_loss": valid_loss,
-                                "metrics": metrics
-                            }
+                            event_type="epoch_start",
+                            message=f"Starting epoch {epoch + 1}/{args.epochs}",
+                            level="info"
                         )
-                        if self.patience >= self.max_patience:
+                        
+                        # Training phase
+                        train_loss = self.orchestrator.train(
+                            epochs=1,
+                            batch_size=args.batch_size,
+                            formatted_training_data=formatted_training_data,
+                            valid_data=valid_data,
+                            checkpoint_callback=lambda: self.save_checkpoint(optimizer=optimizer),
+                            validate_every=args.validate_every
+                        )
+                        
+                        # Validation phase
+                        if valid_data and (epoch + 1) % args.validate_every == 0:
+                            valid_loss, metrics = self.orchestrator.validate(valid_data)
+                            self._update_metrics_history(metrics, epoch + 1)
                             self.logger.log_event(
-                                event_type="early_stopping",
-                                message=f"Early stopping triggered after {self.patience} epochs without improvement",
-                                level="info"
+                                event_type="validation",
+                                message=f"Epoch {epoch + 1} validation results",
+                                level="info",
+                                additional_info={
+                                    "train_loss": train_loss,
+                                    "valid_loss": valid_loss,
+                                    "metrics": metrics
+                                }
                             )
-                            break
-                    
-                    # Save checkpoint and clean up old ones
-                    self.save_checkpoint(optimizer=optimizer)
-                    self.cleanup_old_checkpoints(args.max_checkpoints)
-                    
-            elif args.mode == 'generate':
-                self.logger.log_event(
-                    event_type="generation",
-                    message="Starting generation...",
-                    level="info"
+                            if self.patience >= self.max_patience:
+                                self.logger.log_event(
+                                    event_type="early_stopping",
+                                    message=f"Early stopping triggered after {self.patience} epochs without improvement",
+                                    level="info"
+                                )
+                                break
+                        # Save checkpoint and clean up old ones
+                        self.save_checkpoint(optimizer=optimizer)
+                        self.cleanup_old_checkpoints(args.max_checkpoints)
+                elif args.mode == 'generate':
+                    self.logger.log_event(
+                        event_type="generation",
+                        message="Starting generation...",
+                        level="info"
+                    )
+                    self.orchestrator.generate()
+                elif args.mode == 'dream':
+                    self.logger.log_event(
+                        event_type="dreaming",
+                        message="Starting dreaming...",
+                        level="info"
+                    )
+                    self.orchestrator.dream()
+                else:
+                    raise ValueError(f"Invalid mode: {args.mode}")
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"System error during operation: {str(e)}",
+                    error_type="system_error"
                 )
-                self.orchestrator.generate()
-            elif args.mode == 'dream':
-                self.logger.log_event(
-                    event_type="dreaming",
-                    message="Starting dreaming...",
-                    level="info"
-                )
-                self.orchestrator.dream()
-            else:
-                raise ValueError(f"Invalid mode: {args.mode}")
-                
+                raise
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"System error: {str(e)}",
@@ -1077,10 +1096,19 @@ class SOVLRunner:
             )
             raise
         finally:
-            # Save final checkpoint
-            self.save_checkpoint(force=True, optimizer=optimizer)
-            self.cleanup_old_checkpoints(args.max_checkpoints)
-            self.cleanup()
+            # Save final checkpoint and cleanup, but guard against errors in these methods
+            try:
+                self.save_checkpoint(force=True, optimizer=optimizer)
+            except Exception as e:
+                self.logger.log_error(error_msg=f"Error saving final checkpoint: {str(e)}", error_type="checkpoint_error")
+            try:
+                self.cleanup_old_checkpoints(args.max_checkpoints)
+            except Exception as e:
+                self.logger.log_error(error_msg=f"Error cleaning up old checkpoints: {str(e)}", error_type="checkpoint_error")
+            try:
+                self.cleanup()
+            except Exception as e:
+                self.logger.log_error(error_msg=f"Error during cleanup: {str(e)}", error_type="cleanup_error")
 
 def main():
     """Entry point for the SOVL system."""

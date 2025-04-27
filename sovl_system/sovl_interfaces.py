@@ -232,52 +232,33 @@ class SystemMediator:
         return hashlib.sha256(state_str.encode()).hexdigest()
     
     def _log_event(self, event_type: str, additional_info: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Log an event with standardized metadata.
-        
-        Args:
-            event_type: Type of the event.
-            additional_info: Additional event data.
-        """
         try:
-            metadata = {
-                "conversation_id": self.state_manager.load_state().history.conversation_id,
-                "timestamp": time.time(),
-                "device": str(self.device)
-            }
-            if additional_info:
-                metadata.update(additional_info)
-            self.logger.record_event(
-                event_type=f"mediator_{event_type}",
-                message=f"Mediator event: {event_type}",
-                level="info",
-                additional_info=metadata
-            )
+            if self.logger:
+                self.logger.record_event(
+                    event_type=event_type,
+                    message=f"SystemMediator event: {event_type}",
+                    level="info",
+                    additional_info=additional_info or {}
+                )
+            else:
+                print(f"[EVENT] {event_type}: {additional_info}")
         except Exception as e:
-            print(f"Failed to log event: {str(e)}")
-    
+            print(f"[ERROR] Failed to log event '{event_type}': {str(e)}")
+            traceback.print_exc()
+
     def _log_error(self, message: str, error: Exception) -> None:
-        """
-        Log an error with standardized metadata.
-        
-        Args:
-            message: Error message.
-            error: Exception instance.
-        """
         try:
-            metadata = {
-                "conversation_id": self.state_manager.load_state().history.conversation_id,
-                "error": str(error),
-                "stack_trace": traceback.format_exc()
-            }
-            self.logger.log_error(
-                error_msg=message,
-                error_type="mediator_error",
-                stack_trace=traceback.format_exc(),
-                additional_info=metadata
-            )
+            if self.logger:
+                self.logger.log_error(
+                    error_msg=message,
+                    error_type="mediator_error",
+                    stack_trace=traceback.format_exc()
+                )
+            else:
+                print(f"[ERROR] {message}: {str(error)}")
         except Exception as e:
-            print(f"Failed to log error: {str(e)}")
+            print(f"[ERROR] Failed to log mediator error: {str(e)}")
+            traceback.print_exc()
     
     def _emergency_shutdown(self) -> None:
         """
@@ -349,19 +330,49 @@ class SystemInterface:
     def check_memory_health(self) -> Dict[str, Any]:
         """Check memory health across all memory managers."""
         try:
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
-            
+            ram_manager = getattr(self, 'ram_manager', None)
+            gpu_manager = getattr(self, 'gpu_manager', None)
+            logger = getattr(self, '_logger', None)
+            if not ram_manager or not gpu_manager:
+                msg = "RAMManager or GPUMemoryManager missing in SystemInterface."
+                if logger:
+                    try:
+                        logger.log_error(
+                            error_msg=msg,
+                            error_type="memory_health_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                    except Exception:
+                        print(f"[ERROR] {msg}")
+                        traceback.print_exc()
+                else:
+                    print(f"[ERROR] {msg}")
+                    traceback.print_exc()
+                return {
+                    "ram_health": {"status": "error"},
+                    "gpu_health": {"status": "error"}
+                }
+            ram_health = ram_manager.check_memory_health()
+            gpu_health = gpu_manager.check_memory_health()
             return {
                 "ram_health": ram_health,
                 "gpu_health": gpu_health
             }
         except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to check memory health: {str(e)}",
-                error_type="memory_health_error",
-                stack_trace=traceback.format_exc()
-            )
+            logger = getattr(self, '_logger', None)
+            if logger:
+                try:
+                    logger.log_error(
+                        error_msg=f"Failed to check memory health: {str(e)}",
+                        error_type="memory_health_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                except Exception:
+                    print(f"[ERROR] Failed to log memory health error: {str(e)}")
+                    traceback.print_exc()
+            else:
+                print(f"[ERROR] Failed to check memory health: {str(e)}")
+                traceback.print_exc()
             return {
                 "ram_health": {"status": "error"},
                 "gpu_health": {"status": "error"}

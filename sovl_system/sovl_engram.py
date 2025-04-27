@@ -30,6 +30,7 @@ class LoraAdapterManager:
         self.logger = logger or Logger()
         self.error_handler = error_handler or ErrorManager(self.logger)
         # Fetch LoRA config from system config manager
+        lora_section = config_manager.get_section("lora") if hasattr(config_manager, 'get_section') else None
         self.enabled = config_manager.get("lora.enable", True)
         self.rank = config_manager.get("lora.rank", 8)
         self.alpha = config_manager.get("lora.alpha", 16)
@@ -42,21 +43,29 @@ class LoraAdapterManager:
         """
         Validate LoRA config values. Log warnings/errors for invalid settings.
         """
-        if not isinstance(self.rank, int) or self.rank <= 0:
-            self.logger.log_warning("LoRA rank should be a positive integer.", event_type="lora_config_warning")
-        if not isinstance(self.alpha, (int, float)) or self.alpha <= 0:
-            self.logger.log_warning("LoRA alpha should be a positive number.", event_type="lora_config_warning")
-        if not isinstance(self.dropout, (int, float)) or not (0.0 <= self.dropout <= 1.0):
-            self.logger.log_warning("LoRA dropout should be between 0.0 and 1.0.", event_type="lora_config_warning")
-        if not isinstance(self.target_modules, (list, tuple)) or not all(isinstance(m, str) for m in self.target_modules):
-            self.logger.log_warning("LoRA target_modules should be a list of strings.", event_type="lora_config_warning")
-        valid_task_types = {"CAUSAL_LM", "SEQ_CLS", "TOKEN_CLS", "SEQ_2_SEQ_LM"}
-        if self.task_type not in valid_task_types:
-            self.logger.log_warning(f"LoRA task_type '{self.task_type}' is not recognized. Using default 'CAUSAL_LM'.", event_type="lora_config_warning")
+        try:
+            if not isinstance(self.rank, int) or self.rank <= 0:
+                self.logger.log_warning("LoRA rank should be a positive integer.", event_type="lora_config_warning")
+            if not isinstance(self.alpha, (int, float)) or self.alpha <= 0:
+                self.logger.log_warning("LoRA alpha should be a positive number.", event_type="lora_config_warning")
+            if not isinstance(self.dropout, (int, float)) or not (0.0 <= self.dropout <= 1.0):
+                self.logger.log_warning("LoRA dropout should be between 0.0 and 1.0.", event_type="lora_config_warning")
+            if not isinstance(self.target_modules, (list, tuple)) or not all(isinstance(m, str) for m in self.target_modules):
+                self.logger.log_warning("LoRA target_modules should be a list of strings.", event_type="lora_config_warning")
+            valid_task_types = {"CAUSAL_LM", "SEQ_CLS", "TOKEN_CLS", "SEQ_2_SEQ_LM"}
+            if self.task_type not in valid_task_types:
+                self.logger.log_warning(f"LoRA task_type '{self.task_type}' is not recognized. Using default 'CAUSAL_LM'.", event_type="lora_config_warning")
+                self.task_type = "CAUSAL_LM"
+        except Exception as e:
+            import traceback
+            self.logger.log_error(f"LoRA config validation failed: {e}\n{traceback.format_exc()}", error_type="lora_config_error")
 
     def apply_to(self, model: torch.nn.Module) -> torch.nn.Module:
         if not self.enabled or LoraConfig is None or get_peft_model is None:
-            self.logger.log_debug("LoRA not enabled or PEFT not available; returning original model.", event_type="lora_adapter_skip")
+            try:
+                self.logger.log_debug("LoRA not enabled or PEFT not available; returning original model.", event_type="lora_adapter_skip")
+            except Exception:
+                pass
             return model
         try:
             lora_config = LoraConfig(
@@ -68,38 +77,66 @@ class LoraAdapterManager:
                 task_type=getattr(TaskType, self.task_type, TaskType.CAUSAL_LM)
             )
             model = get_peft_model(model, lora_config)
-            self.logger.log_info(f"LoRA adapters applied: rank={self.rank}, alpha={self.alpha}, modules={self.target_modules}", event_type="lora_adapter_applied")
+            try:
+                self.logger.log_info(f"LoRA adapters applied: rank={self.rank}, alpha={self.alpha}, modules={self.target_modules}", event_type="lora_adapter_applied")
+            except Exception:
+                pass
             return model
         except Exception as e:
-            self.error_handler.handle_error(e, operation="apply_lora_adapter", context={"config": self.config_manager.get_section("lora")})
+            import traceback
+            try:
+                self.error_handler.handle_error(e, operation="apply_lora_adapter", context={"config": self.config_manager.get_section("lora") if hasattr(self.config_manager, 'get_section') else {}})
+                self.logger.log_error(f"Failed to apply LoRA adapters: {e}\n{traceback.format_exc()}", error_type="lora_adapter_error")
+            except Exception:
+                pass
             raise ScaffoldError(f"Failed to apply LoRA adapters: {e}", operation="apply_lora_adapter")
 
     def save_lora_weights(self, model: torch.nn.Module, path: str):
         try:
             if PeftModel is not None and isinstance(model, PeftModel):
                 model.save_pretrained(path)
-                self.logger.log_info(f"LoRA weights saved to {path}", event_type="lora_weights_save")
+                try:
+                    self.logger.log_info(f"LoRA weights saved to {path}", event_type="lora_weights_save")
+                except Exception:
+                    pass
             else:
                 raise ScaffoldError("Model is not a PEFT/LoRA model; cannot save LoRA weights.", operation="save_lora_weights")
         except Exception as e:
-            self.error_handler.handle_error(e, operation="save_lora_weights", context={"path": path})
+            import traceback
+            try:
+                self.error_handler.handle_error(e, operation="save_lora_weights", context={"path": path})
+                self.logger.log_error(f"Failed to save LoRA weights: {e}\n{traceback.format_exc()}", error_type="lora_weights_save_error")
+            except Exception:
+                pass
             raise
 
     def load_lora_weights(self, model: torch.nn.Module, path: str) -> torch.nn.Module:
         try:
             if PeftModel is not None and hasattr(PeftModel, 'from_pretrained'):
                 loaded_model = PeftModel.from_pretrained(model, path)
-                self.logger.log_info(f"LoRA weights loaded from {path}", event_type="lora_weights_load")
+                try:
+                    self.logger.log_info(f"LoRA weights loaded from {path}", event_type="lora_weights_load")
+                except Exception:
+                    pass
                 return loaded_model
             else:
                 raise ScaffoldError("PEFT/LoRA not available or model incompatible.", operation="load_lora_weights")
         except Exception as e:
-            self.error_handler.handle_error(e, operation="load_lora_weights", context={"path": path})
+            import traceback
+            try:
+                self.error_handler.handle_error(e, operation="load_lora_weights", context={"path": path})
+                self.logger.log_error(f"Failed to load LoRA weights: {e}\n{traceback.format_exc()}", error_type="lora_weights_load_error")
+            except Exception:
+                pass
             raise
 
     @staticmethod
     def lora_parameters(model: torch.nn.Module):
         """Yield only LoRA parameters for optimizer."""
-        for n, p in model.named_parameters():
-            if p.requires_grad and ("lora" in n or "adapter" in n):
-                yield p
+        try:
+            for n, p in getattr(model, 'named_parameters', lambda: [])():
+                if p.requires_grad and ("lora" in n or "adapter" in n):
+                    yield p
+        except Exception as e:
+            import traceback
+            print(f"[LoraAdapterManager] Failed to yield LoRA parameters: {e}\n{traceback.format_exc()}")

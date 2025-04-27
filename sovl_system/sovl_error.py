@@ -70,21 +70,29 @@ class ErrorManager(IErrorHandler):
                 self._handle_warning(record)
                 
             # Log the error
-            self.logger.record_event(
-                event_type="error",
-                message=record.error_message,
-                level="error",
-                additional_info={
-                    "error_type": record.error_type,
-                    "stack_trace": record.stack_trace,
-                    **record.additional_info
-                }
-            )
-            
+            try:
+                self.logger.record_event(
+                    event_type="error",
+                    message=record.error_message,
+                    level="error",
+                    additional_info={
+                        "error_type": record.error_type,
+                        "stack_trace": record.stack_trace,
+                        **record.additional_info
+                    }
+                )
+            except Exception as log_exc:
+                print(f"[ERROR] Failed to log error event: {log_exc}")
+                traceback.print_exc()
+                
             # Apply recovery strategy if available
             if record.error_type in self.recovery_strategies:
-                self.recovery_strategies[record.error_type](record)
-                
+                try:
+                    self.recovery_strategies[record.error_type](record)
+                except Exception as rec_exc:
+                    print(f"[ERROR] Recovery strategy failed: {rec_exc}")
+                    traceback.print_exc()
+                    
         except Exception as e:
             print(f"[ERROR] Failed to handle error: {str(e)}")
             traceback.print_exc()
@@ -413,60 +421,80 @@ class ErrorManager(IErrorHandler):
             new_batch_size = max(1, current_batch_size // 2)
             self.config_manager.update("data_config.batch_size", new_batch_size)
             
-            self.logger.record_event(
-                event_type="data_recovery",
-                message="Reset data state and reduced batch size",
-                level="info",
-                additional_info={
-                    "error_type": record.error_type,
-                    "old_batch_size": current_batch_size,
-                    "new_batch_size": new_batch_size,
-                    **record.additional_info
-                }
-            )
-            
+            try:
+                self.logger.record_event(
+                    event_type="data_recovery",
+                    message="Reset data state and reduced batch size",
+                    level="info",
+                    additional_info={
+                        "error_type": record.error_type,
+                        "old_batch_size": current_batch_size,
+                        "new_batch_size": new_batch_size,
+                        **record.additional_info
+                    }
+                )
+            except Exception as log_exc:
+                print(f"[ERROR] Failed to log data recovery event: {log_exc}")
+                traceback.print_exc()
+                
         except Exception as e:
-            self.logger.record_event(
-                event_type="data_recovery_failed",
-                message=f"Failed to recover from data error: {str(e)}",
-                level="critical",
-                additional_info={
-                    "error_type": record.error_type,
-                    **record.additional_info
-                }
-            )
+            try:
+                self.logger.record_event(
+                    event_type="data_recovery_failed",
+                    message=f"Failed to recover from data error: {str(e)}",
+                    level="critical",
+                    additional_info={
+                        "error_type": record.error_type,
+                        **record.additional_info
+                    }
+                )
+            except Exception as log_exc:
+                print(f"[ERROR] Failed to log data recovery failure: {log_exc}")
+                traceback.print_exc()
 
     def _recover_model_loading(self, record: ErrorRecord) -> None:
         """Recovery strategy for model loading errors."""
         try:
-            self.logger.record_event(
-                event_type="model_loading_recovery_attempt",
-                message=f"Attempting model loading recovery for {record.error_type}",
-                level="info"
-            )
+            try:
+                self.logger.record_event(
+                    event_type="model_loading_recovery_attempt",
+                    message=f"Attempting model loading recovery for {record.error_type}",
+                    level="info"
+                )
+            except Exception as log_exc:
+                print(f"[ERROR] Failed to log model loading recovery attempt: {log_exc}")
+                traceback.print_exc()
             
             # Clear model cache and reload
             if hasattr(self.context, 'model_manager'):
                 self.context.model_manager.clear_model_cache()
                 self.context.model_manager.reload_model()
-                
+            
             # Reset model configuration
             if hasattr(self.context, 'config_manager'):
                 self.context.config_manager.reset_section("model_config")
-                
-            self.logger.record_event(
-                event_type="model_loading_recovery",
-                message="Model cache cleared and configuration reset",
-                level="info"
-            )
+            
+            try:
+                self.logger.record_event(
+                    event_type="model_loading_recovery",
+                    message="Model cache cleared and configuration reset",
+                    level="info"
+                )
+            except Exception as log_exc:
+                print(f"[ERROR] Failed to log model loading recovery: {log_exc}")
+                traceback.print_exc()
                 
         except Exception as e:
-            self.logger.record_event(
-                event_type="model_loading_recovery_failed",
-                message=f"Model loading recovery failed: {str(e)}",
-                level="error",
-                stack_trace=traceback.format_exc()
-            )
+            try:
+                self.logger.record_event(
+                    event_type="model_loading_recovery_failed",
+                    message=f"Model loading recovery failed: {str(e)}",
+                    level="error",
+                    stack_trace=traceback.format_exc()
+                )
+            except Exception as log_exc:
+                print(f"[ERROR] Failed to log model loading recovery failure: {log_exc}")
+                traceback.print_exc()
 
 class ScaffoldError(Exception):
     """
@@ -497,10 +525,21 @@ class ScaffoldError(Exception):
         return base
 
     def to_dict(self):
+        def safe_serialize(val):
+            try:
+                if isinstance(val, (str, int, float, bool, type(None))):
+                    return val
+                if isinstance(val, dict):
+                    return {k: safe_serialize(v) for k, v in val.items()}
+                if isinstance(val, (list, tuple, set)):
+                    return [safe_serialize(v) for v in val]
+                return str(val)
+            except Exception:
+                return "<unserializable>"
         return {
             "message": self.message,
             "operation": self.operation,
-            "context": self.context,
+            "context": safe_serialize(self.context),
             "timestamp": self.timestamp.isoformat(),
             "type": self.__class__.__name__
         }

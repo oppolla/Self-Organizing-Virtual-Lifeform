@@ -11,7 +11,8 @@ import rlcompleter
 from collections import deque
 import cmd
 import sys
-import logging
+from sovl_logger import Logger
+from sovl_error import ErrorManager
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -80,103 +81,131 @@ class CommandHandler(cmd.Cmd):
         self.history = deque(maxlen=100)
         self.current_index = -1
         self.debug_mode = False
+        # Integrate with sovl_logger.Logger singleton
+        self.logger = Logger.instance()
+        # Integrate with sovl_error.ErrorManager singleton
+        self.error_manager = ErrorManager.instance()
         
         # Initialize monitoring components
-        self.system_monitor = SystemMonitor(
-            config_manager=sovl_system.config_handler,
-            logger=sovl_system.logger,
-            error_manager=sovl_system.error_manager
-        )
+        try:
+            self.system_monitor = SystemMonitor(
+                config_manager=getattr(sovl_system, 'config_handler', None),
+                logger=self.logger,
+                error_manager=self.error_manager
+            )
+        except Exception as e:
+            print(f"Warning: Failed to initialize SystemMonitor: {e}")
+            self.logger.log_error(
+                error_msg=f"Failed to initialize SystemMonitor: {e}",
+                error_type="cli_init_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_init_error",
+                message=f"Failed to initialize SystemMonitor: {e}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.__init__"
+            )
+            self.system_monitor = None
         
-        self.memory_monitor = MemoryMonitor(
-            config_manager=sovl_system.config_handler,
-            logger=sovl_system.logger,
-            ram_manager=sovl_system.ram_manager,
-            gpu_manager=sovl_system.gpu_manager,
-            error_manager=sovl_system.error_manager
-        )
+        try:
+            self.memory_monitor = MemoryMonitor(
+                config_manager=getattr(sovl_system, 'config_handler', None),
+                logger=self.logger,
+                ram_manager=getattr(sovl_system, 'ram_manager', None),
+                gpu_manager=getattr(sovl_system, 'gpu_manager', None),
+                error_manager=self.error_manager
+            )
+        except Exception as e:
+            print(f"Warning: Failed to initialize MemoryMonitor: {e}")
+            self.logger.log_error(
+                error_msg=f"Failed to initialize MemoryMonitor: {e}",
+                error_type="cli_init_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_init_error",
+                message=f"Failed to initialize MemoryMonitor: {e}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.__init__"
+            )
+            self.memory_monitor = None
         
-        self.traits_monitor = TraitsMonitor(
-            config_manager=sovl_system.config_handler,
-            logger=sovl_system.logger,
-            state_tracker=sovl_system.state_tracker
-        )
+        try:
+            self.traits_monitor = TraitsMonitor(
+                config_manager=getattr(sovl_system, 'config_handler', None),
+                logger=self.logger,
+                state_tracker=getattr(sovl_system, 'state_tracker', None),
+                error_manager=self.error_manager
+            )
+        except Exception as e:
+            print(f"Warning: Failed to initialize TraitsMonitor: {e}")
+            self.logger.log_error(
+                error_msg=f"Failed to initialize TraitsMonitor: {e}",
+                error_type="cli_init_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_init_error",
+                message=f"Failed to initialize TraitsMonitor: {e}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.__init__"
+            )
+            self.traits_monitor = None
 
     def preloop(self):
         """Initialize the command handler."""
         print("SOVL Interactive CLI")
         print("Type 'help' for available commands")
+        self.logger.record_event(
+            event_type="cli_startup",
+            message="SOVL CLI started",
+            level="info"
+        )
         
     def do_help(self, arg):
         """Show help for commands."""
-        if arg:
-            # Show help for specific command
-            try:
-                func = getattr(self, 'help_' + arg)
-            except AttributeError:
-                try:
-                    doc = getattr(self, 'do_' + arg).__doc__
-                    if doc:
-                        print(doc)
-                        return
-                except AttributeError:
-                    pass
-                print(f"No help available for {arg}")
-            else:
-                func()
-        else:
-            # Show all commands
-            print("\nAvailable commands:")
-            print("------------------")
-            for category, commands in COMMAND_CATEGORIES.items():
-                print(f"{category}: {', '.join(commands)}")
-            print("Type 'help [command]' for more information on a specific command.")
-            
-    def do_status(self, arg):
-        """Display system status and metrics."""
         try:
-            # Get system health status
-            health_status = self.system_monitor.get_system_health()
-            
-            # Get memory metrics
-            memory_metrics = self.memory_monitor.get_memory_metrics()
-            
-            # Get trait metrics
-            trait_metrics = self.traits_monitor.get_trait_metrics()
-            
-            # Display system health
-            print("\n=== System Health ===")
-            print(f"Overall Status: {health_status['status']}")
-            print(f"CPU Usage: {health_status['cpu_usage']:.1f}%")
-            print(f"RAM Usage: {health_status['ram_usage']:.1f}%")
-            if health_status['gpu_available']:
-                print(f"GPU Usage: {health_status['gpu_usage']:.1f}%")
-            
-            # Display memory metrics
-            print("\n=== Memory Metrics ===")
-            print(f"RAM Usage: {memory_metrics['ram_usage']:.1f}%")
-            print(f"RAM Available: {memory_metrics['ram_available']:.1f} GB")
-            if memory_metrics['gpu_available']:
-                print(f"GPU Memory Usage: {memory_metrics['gpu_usage']:.1f}%")
-                print(f"GPU Memory Available: {memory_metrics['gpu_available']:.1f} GB")
-            
-            # Display trait metrics
-            print("\n=== Trait Metrics ===")
-            print(f"Curiosity: {trait_metrics['curiosity']:.2f}")
-            print(f"Confidence: {trait_metrics['confidence']:.2f}")
-            print(f"Stability: {trait_metrics['stability']:.2f}")
-            
-            # Display any active alerts
-            alerts = self.system_monitor.get_active_alerts()
-            if alerts:
-                print("\n=== Active Alerts ===")
-                for alert in alerts:
-                    print(f"- {alert['message']} (Severity: {alert['severity']})")
-            
+            if arg:
+                # Show help for specific command
+                try:
+                    func = getattr(self, 'help_' + arg)
+                except AttributeError:
+                    try:
+                        doc = getattr(self, 'do_' + arg).__doc__
+                        if doc:
+                            print(doc)
+                            return
+                    except AttributeError:
+                        pass
+                    print(f"No help available for {arg}")
+                else:
+                    func()
+            else:
+                # Show all commands
+                print("\nAvailable commands:")
+                print("------------------")
+                for category, commands in COMMAND_CATEGORIES.items():
+                    print(f"{category}: {', '.join(commands)}")
+                print("Type 'help [command]' for more information on a specific command.")
+            self.logger.record_event(
+                event_type="cli_help",
+                message=f"Help command invoked for: {arg if arg else 'all'}",
+                level="info"
+            )
         except Exception as e:
-            print(f"Error getting status: {str(e)}")
-            if self.debug_mode:
-                traceback.print_exc()
+            print(f"Error in help command: {e}")
+            self.logger.log_error(
+                error_msg=f"Help command failed: {str(e)}",
+                error_type="cli_help_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_help_error",
+                message=f"Help command failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.do_help"
+            )
             
     def do_pause(self, arg):
         """Pause the current operation."""
@@ -210,15 +239,54 @@ class CommandHandler(cmd.Cmd):
             
     def do_exit(self, arg):
         """Exit the CLI."""
-        print("Exiting CLI...")
-        return True
-        
+        try:
+            print("Exiting CLI...")
+            self.logger.record_event(
+                event_type="cli_exit",
+                message="CLI exited by user",
+                level="info"
+            )
+            return True
+        except Exception as e:
+            print(f"Error during exit: {e}")
+            self.logger.log_error(
+                error_msg=f"Exit command failed: {str(e)}",
+                error_type="cli_exit_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_exit_error",
+                message=f"Exit command failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.do_exit"
+            )
+            
     def do_history(self, arg):
         """Show command history."""
-        print("\nCommand History:")
-        print("---------------")
-        for i, cmd in enumerate(self.history, 1):
-            print(f"{i}: {cmd}")
+        try:
+            if hasattr(self, 'history'):
+                for cmd in self.history:
+                    print(cmd)
+                self.logger.record_event(
+                    event_type="cli_history",
+                    message="Displayed command history",
+                    level="info"
+                )
+            else:
+                print("No history available.")
+        except Exception as e:
+            print(f"Error displaying history: {e}")
+            self.logger.log_error(
+                error_msg=f"History command failed: {str(e)}",
+                error_type="cli_history_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_history_error",
+                message=f"History command failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.do_history"
+            )
             
     def do_search(self, arg):
         """Search command history."""
@@ -244,134 +312,73 @@ class CommandHandler(cmd.Cmd):
         debug memory - Show memory usage
         debug trace - Show execution trace
         """
-        if not arg:
-            print("Debug commands:")
-            print("  debug on/off - Enable/disable debug mode")
-            print("  debug state - Show internal state")
-            print("  debug components - List active components")
-            print("  debug errors - Show recent errors")
-            print("  debug memory - Show memory usage")
-            print("  debug trace - Show execution trace")
-            return
-
-        cmd = arg.lower().split()
-        if cmd[0] == "on":
-            self.debug_mode = True
-            print("Debug mode enabled")
-            self.sovl_system.logger.set_level(logging.DEBUG)
-        elif cmd[0] == "off":
-            self.debug_mode = False
-            print("Debug mode disabled")
-            self.sovl_system.logger.set_level(logging.INFO)
-        elif cmd[0] == "state":
-            self._show_debug_state()
-        elif cmd[0] == "components":
-            self._show_debug_components()
-        elif cmd[0] == "errors":
-            self._show_debug_errors()
-        elif cmd[0] == "memory":
-            self._show_debug_memory()
-        elif cmd[0] == "trace":
-            self._show_debug_trace()
-        else:
-            print(f"Unknown debug command: {cmd[0]}")
-            print("Type 'debug' for available debug commands")
-
-    def _show_debug_state(self):
-        """Show internal state of the system."""
         try:
-            state = self.sovl_system.state_tracker.get_state()
-            print("\nSystem State:")
-            print("-------------")
-            for key, value in state.items():
-                print(f"{key}: {value}")
-        except Exception as e:
-            print(f"Error getting system state: {e}")
-
-    def _show_debug_components(self):
-        """List all active components and their status."""
-        try:
-            components = {
-                "Model Loader": hasattr(self.sovl_system, "model_loader"),
-                "Curiosity Engine": hasattr(self.sovl_system, "curiosity_engine"),
-                "Memory Monitor": hasattr(self.sovl_system, "memory_monitor"),
-                "State Tracker": hasattr(self.sovl_system, "state_tracker"),
-                "Error Manager": hasattr(self.sovl_system, "error_manager"),
-                "Config Handler": hasattr(self.sovl_system, "config_handler")
-            }
-            print("\nActive Components:")
-            print("-----------------")
-            for component, active in components.items():
-                status = "Active" if active else "Inactive"
-                print(f"{component}: {status}")
-        except Exception as e:
-            print(f"Error listing components: {e}")
-
-    def _show_debug_errors(self):
-        """Show recent errors from the error manager."""
-        try:
-            if hasattr(self.sovl_system, "error_manager"):
-                errors = self.sovl_system.error_manager.get_recent_errors()
+            cmd = arg.split()
+            if not cmd:
+                print("Debug commands: on/off, state, components, errors, memory, trace")
+                return
+            elif cmd[0] == "on":
+                self.debug_mode = True
+                print("Debug mode enabled")
+            elif cmd[0] == "off":
+                self.debug_mode = False
+                print("Debug mode disabled")
+                if hasattr(self.logger, 'update_config'):
+                    self.logger.update_config(log_level="info")
+            elif cmd[0] == "state":
+                if hasattr(self, '_show_debug_state'):
+                    self._show_debug_state()
+                else:
+                    print("Debug state function not available.")
+            elif cmd[0] == "components":
+                if hasattr(self, '_show_debug_components'):
+                    self._show_debug_components()
+                else:
+                    print("Debug components function not available.")
+            elif cmd[0] == "errors":
+                # Show recent errors from ErrorManager
+                errors = self.error_manager.get_recent_errors() if hasattr(self.error_manager, 'get_recent_errors') else []
                 if errors:
-                    print("\nRecent Errors:")
-                    print("--------------")
+                    print("\nRecent CLI Errors:")
+                    print("-----------------")
                     for error in errors:
-                        print(f"Type: {error['type']}")
-                        print(f"Message: {error['message']}")
-                        print(f"Time: {error['timestamp']}")
+                        print(f"Type: {error.get('error_type','N/A')}")
+                        print(f"Message: {error.get('message','N/A')}")
+                        print(f"Time: {error.get('timestamp','N/A')}")
                         if 'stack_trace' in error:
                             print(f"Stack Trace:\n{error['stack_trace']}")
+                        if 'context' in error:
+                            print(f"Context: {error['context']}")
                         print("-" * 50)
                 else:
-                    print("No recent errors found")
-            else:
-                print("Error manager not available")
-        except Exception as e:
-            print(f"Error retrieving error history: {e}")
-
-    def _show_debug_memory(self):
-        """Show detailed memory usage statistics."""
-        try:
-            if hasattr(self.sovl_system, "memory_monitor"):
-                stats = self.sovl_system.get_memory_stats()
-                print("\nMemory Usage:")
-                print("-------------")
-                for key, value in stats.items():
-                    print(f"{key}: {value}")
-                if torch.cuda.is_available():
-                    print("\nGPU Memory:")
-                    print("-----------")
-                    print(f"Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
-                    print(f"Cached: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
-            else:
-                print("Memory monitor not available")
-        except Exception as e:
-            print(f"Error getting memory stats: {e}")
-
-    def _show_debug_trace(self):
-        """Show execution trace of recent operations."""
-        try:
-            if hasattr(self.sovl_system, "logger"):
-                trace = self.sovl_system.logger.get_recent_events()
-                if trace:
-                    print("\nExecution Trace:")
-                    print("----------------")
-                    for event in trace:
-                        print(f"Event: {event['event_type']}")
-                        print(f"Message: {event['message']}")
-                        print(f"Time: {event['timestamp']}")
-                        if 'additional_info' in event:
-                            print("Additional Info:")
-                            for key, value in event['additional_info'].items():
-                                print(f"  {key}: {value}")
-                        print("-" * 50)
+                    print("No recent CLI errors found.")
+            elif cmd[0] == "memory":
+                if hasattr(self, '_show_debug_memory'):
+                    self._show_debug_memory()
                 else:
-                    print("No recent events found")
+                    print("Debug memory function not available.")
+            elif cmd[0] == "trace":
+                if hasattr(self, '_show_debug_trace'):
+                    self._show_debug_trace()
+                else:
+                    print("Debug trace function not available.")
             else:
-                print("Logger not available")
+                print(f"Unknown debug command: {cmd[0]}")
+                print("Type 'debug' for available debug commands")
         except Exception as e:
-            print(f"Error retrieving execution trace: {e}")
-
+            print(f"Error in debug command: {e}")
+            self.logger.log_error(
+                error_msg=f"Debug command failed: {str(e)}",
+                error_type="cli_debug_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_debug_error",
+                message=f"Debug command failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.do_debug"
+            )
+            
     def help_debug(self):
         """Show help for debug command."""
         print("\nDebug Commands:")
@@ -578,6 +585,40 @@ scaffold models for debugging and development purposes.
             if self.debug_mode:
                 traceback.print_exc()
 
+    def do_status(self, arg):
+        """Display system status and metrics."""
+        try:
+            if self.system_monitor:
+                self.system_monitor.display_status()
+            else:
+                print("System monitor not available.")
+            if self.memory_monitor:
+                self.memory_monitor.display_metrics()
+            else:
+                print("Memory monitor not available.")
+            if self.traits_monitor:
+                self.traits_monitor.display_traits()
+            else:
+                print("Traits monitor not available.")
+            self.logger.record_event(
+                event_type="cli_status",
+                message="Status command invoked",
+                level="info"
+            )
+        except Exception as e:
+            print(f"Error displaying system status: {e}")
+            self.logger.log_error(
+                error_msg=f"Status command failed: {str(e)}",
+                error_type="cli_status_error",
+                stack_trace=traceback.format_exc()
+            )
+            self.error_manager.record_error(
+                error_type="cli_status_error",
+                message=f"Status command failed: {str(e)}",
+                stack_trace=traceback.format_exc(),
+                context="CommandHandler.do_status"
+            )
+
     def default(self, line):
         """Handle unknown commands."""
         print(f"Unknown command: {line}")
@@ -686,6 +727,12 @@ def run_cli(config_manager_instance: Optional[ConfigManager] = None):
                     stack_trace=traceback.format_exc(),
                     additional_info={"command": user_input}
                 )
+                sovl_system.error_manager.record_error(
+                    error_type="cli_command_error",
+                    message="Command execution failed",
+                    stack_trace=traceback.format_exc(),
+                    context="run_cli"
+                )
     except SystemInitializationError as e:
         print(f"System initialization failed: {e.message}")
         if e.stack_trace:
@@ -719,6 +766,12 @@ def shutdown_system(sovl_system: SOVLSystem):
             stack_trace=traceback.format_exc(),
             additional_info={"status": "error"}
         )
+        sovl_system.error_manager.record_error(
+            error_type="shutdown_error",
+            message="System shutdown failed",
+            stack_trace=traceback.format_exc(),
+            context="shutdown_system"
+        )
 
 def cleanup_resources(sovl_system: SOVLSystem):
     try:
@@ -738,6 +791,12 @@ def cleanup_resources(sovl_system: SOVLSystem):
             error_msg="CLI cleanup failed",
             error_type="cleanup_error",
             stack_trace=traceback.format_exc()
+        )
+        sovl_system.error_manager.record_error(
+            error_type="cleanup_error",
+            message="CLI cleanup failed",
+            stack_trace=traceback.format_exc(),
+            context="cleanup_resources"
         )
 
 if __name__ == "__main__":

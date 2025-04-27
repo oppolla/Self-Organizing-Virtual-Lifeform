@@ -79,31 +79,54 @@ class StateEventDispatcher(EventDispatcher):
     async def _handle_state_update(self, event_data: Dict[str, Any]) -> None:
         """Handle state update events with error management."""
         try:
+            if hasattr(self, 'logger') and self.logger:
+                try:
+                    self.logger.log_debug("Entering _handle_state_update", event_type="state_event_handler")
+                except Exception:
+                    pass
             state = event_data.get('state')
             if not isinstance(state, SOVLState):
                 raise ValueError("Invalid state object in event data")
-                
             # Record state change
-            self._state_change_history.append({
-                'timestamp': time.time(),
-                'event_type': StateEventTypes.STATE_UPDATED,
-                'state_hash': state.state_hash(),
-                'changes': event_data.get('changes', {})
-            })
-            
+            with self._state_cache_lock:
+                self._state_change_history.append({
+                    'timestamp': time.time(),
+                    'event_type': StateEventTypes.STATE_UPDATED,
+                    'state_hash': state.state_hash(),
+                    'changes': event_data.get('changes', {})
+                })
             # Update state through state manager
             self.state_manager.update_state(state)
-            
+            if hasattr(self, 'logger') and self.logger:
+                try:
+                    self.logger.log_debug("Exiting _handle_state_update", event_type="state_event_handler")
+                except Exception:
+                    pass
         except Exception as e:
-            self.error_manager.record_error(
-                error=e,
-                error_type="state_event_error",
-                context={
-                    "event_type": StateEventTypes.STATE_UPDATED,
-                    "event_data": event_data
-                }
-            )
-            
+            try:
+                self.error_manager.record_error(
+                    error=e,
+                    error_type="state_event_error",
+                    context={
+                        "event_type": StateEventTypes.STATE_UPDATED,
+                        "event_data": event_data
+                    }
+                )
+            except Exception as err2:
+                if hasattr(self, 'logger') and self.logger:
+                    try:
+                        self.logger.log_error(
+                            error_msg=f"Failed to record error in _handle_state_update: {str(err2)}",
+                            error_type="state_event_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                    except Exception:
+                        print(f"[ERROR] Failed to record error and log in _handle_state_update: {str(err2)}")
+                        traceback.print_exc()
+                else:
+                    print(f"[ERROR] Failed to record error in _handle_state_update: {str(err2)}")
+                    traceback.print_exc()
+                
     async def _handle_state_error(self, event_data: Dict[str, Any]) -> None:
         """Handle state error events with error management."""
         try:
