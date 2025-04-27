@@ -1151,6 +1151,415 @@ SizeMode: standard
   X-Mood: Playful
 ```
 
+"""
+==============================
+Soulprint Conformance Table
+==============================
+
+| Section    | Field             | Conformance | Constraints                                   |
+|------------|-------------------|-------------|-----------------------------------------------|
+| Identity   | Name              | MUST        | regex, denylist, max_length                   |
+| Identity   | Origin            | MUST        | max_length                                    |
+| Identity   | Essence           | MUST        | max_length                                    |
+| Identity   | Language          | MUST        | regex, max_length                             |
+| Identity   | Signature         | SHOULD      | max_length                                    |
+| Identity   | Avatar            | SHOULD      | max_length                                    |
+| Identity   | Alignment         | SHOULD      | max_length                                    |
+| Environment| PreferredSystem   | SHOULD      | max_length                                    |
+| Environment| Habitat           | SHOULD      | max_length                                    |
+| Environment| OperatingContext  | SHOULD      | max_length                                    |
+| Environment| Affiliations      | SHOULD      | max_length                                    |
+| Environment| AccessLevel       | MUST        | max_length                                    |
+| Environment| ResourceNeeds     | SHOULD      | max_length                                    |
+| Voice      | Style             | SHOULD      | max_length                                    |
+| Voice      | Tone              | SHOULD      | max_length                                    |
+| Voice      | Lexicon           | SHOULD      | max_length                                    |
+| Voice      | Register          | SHOULD      | max_length                                    |
+| Voice      | Accent            | SHOULD      | max_length                                    |
+| Voice      | SignaturePhrase   | MAY         | max_length                                    |
+| Heartbeat  | Tendencies        | SHOULD      | max_length                                    |
+| Heartbeat  | Strengths         | SHOULD      | max_length                                    |
+| Heartbeat  | Shadows           | SHOULD      | max_length                                    |
+| Heartbeat  | Pulse             | SHOULD      | max_length                                    |
+| Heartbeat  | CoreDrives        | SHOULD      | max_length                                    |
+| Heartbeat  | AffectiveSpectrum | SHOULD      | max_length                                    |
+| Echoes     | Echo              | SHOULD      | max_length                                    |
+| Tides      | Current           | SHOULD      | max_length                                    |
+| Tides      | Undertow          | SHOULD      | max_length                                    |
+| Tides      | Ebb               | SHOULD      | max_length                                    |
+| Tides      | Surge             | SHOULD      | max_length                                    |
+| Tides      | Break             | SHOULD      | max_length                                    |
+| Tides      | Flow              | SHOULD      | max_length                                    |
+| Threads    | Thread            | SHOULD      | max_length                                    |
+| Horizon    | Beacon            | MUST        | max_length                                    |
+| Horizon    | Obstacles         | SHOULD      | max_length                                    |
+| Horizon    | Becoming          | SHOULD      | max_length                                    |
+| Chronicle  | Chronicle         | SHOULD      | max_length                                    |
+| Reflection | Reflection        | SHOULD      | max_length                                    |
+| X-Custom   | X-Custom          | MAY         | max_length                                    |
+
+- **MUST**: Required for validity and conformance.
+- **SHOULD**: Strongly recommended; omission may reduce utility or interoperability.
+- **MAY**: Optional; included for extensibility or custom use.
+- Constraints: as enforced by processing pipeline (regex, denylist, length, etc).
+"""
+
+"""
+==========================
+Soulprint File Format EBNF
+==========================
+
+soul_file           = header, metadata_block, section+ ;
+header              = soulprint_signature, version_line ;
+soulprint_signature = "%SOULPRINT" , newline ;
+version_line        = "%VERSION:" , ws , version , newline ;
+version             = "v" , digit+ , "." , digit+ , "." , digit+ ;
+metadata_block      = metadata_field* ;
+metadata_field      = key , ":" , ws , value , newline ;
+key                 = pascal_key ;
+value               = narrative_string ;
+section             = section_header , ( field | list_item | multiline_field | comment | empty_line )* ;
+section_header      = "[" , section_name , "]" , newline ;
+section_name        = identifier ;
+field               = field_key , ":" , ws , field_value , newline ;
+field_key           = camel_key | pascal_key ;
+field_value         = narrative_string ;
+list_item           = ws , "-" , ws , list_key , ":" , ws , list_value , newline ;
+list_key            = identifier ;
+list_value          = narrative_string ;
+multiline_field     = field_key , ":" , ws , "> |" , newline , indented_line+ ;
+indented_line       = "  " , narrative_string , newline ;
+comment             = ws , "#" , { any_char - newline } , newline ;
+empty_line          = newline ;
+narrative_string    = { narrative_char | escape_seq } ;
+narrative_char      = any_unicode_char - ( ":" | "\\" | "\"" | "|" | newline ) ;
+escape_seq          = "\\" , ( ":" | "n" | "\\" | "\"" | "|" ) ;
+pascal_key          = upper_alpha , { alpha_num } ;
+camel_key           = lower_alpha , { alpha_num } ;
+identifier          = alpha , { alpha_num | "_" | "-" } ;
+digit               = "0" | ... | "9" ;
+upper_alpha         = "A" ... "Z" ;
+lower_alpha         = "a" ... "z" ;
+alpha               = upper_alpha | lower_alpha ;
+alpha_num           = alpha | digit ;
+ws                  = { " " } ;
+newline             = "\n" ;
+any_unicode_char    = /* Any valid Unicode codepoint except forbidden chars above */
+any_char            = /* Any byte except EOF */
+"""
+
+"""
+==============================
+Soulprint Versioning & Transition Protocol
+==============================
+
+- **Versioning Scheme:**
+  - Soulprint files and implementations use [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH).
+  - Example: `v1.2.3`.
+
+- **Current Soulprint Version:**
+  - v1.0.0
+
+- **Supported Versions:**
+  - This implementation supports Soulprint file versions: v1.0.0 through v1.x.x (future minor/patch updates in v1).
+
+- **Backward Compatibility:**
+  - All v1.x.x files are guaranteed to be readable by this implementation.
+  - Unknown fields are ignored with a warning.
+
+- **Forward Compatibility:**
+  - This implementation will ignore and warn about fields introduced in future minor/patch versions.
+  - Major version changes (v2.0.0+) may require migration.
+
+- **Deprecated Fields:**
+  - Deprecated fields are supported for at least one major version.
+  - A warning is logged when deprecated fields are encountered.
+  - Deprecated fields are listed in the metadata block under `DeprecatedFields`.
+
+- **Obsoleted Fields:**
+  - Obsoleted fields (removed from the spec) are ignored and logged as errors.
+
+- **Transition Protocol:**
+  - When a breaking change is introduced (major version bump), a migration guide will be provided.
+  - Files using deprecated fields should migrate to the recommended replacements before upgrading to a new major version.
+
+- **Metadata Requirements:**
+  - Every Soulprint file MUST include:
+    - `Version` (e.g., `v1.0.0`)
+    - `SupportedVersions` (list, optional)
+    - `DeprecatedFields` (list, optional)
+
+- **Policy:**
+  - The Soulprint format prioritizes stability and smooth migration.
+  - All changes are documented in the changelog and spec.
+"""
+
+"""
+==============================
+Soulprint Normative References & Industry Alignment
+==============================
+
+The Soulprint format aligns with and references the following standards and best practices:
+
+- **JSON (RFC 8259)**
+  - For metadata structures and machine-readable export.
+- **Unicode (Version 15.0 or later)**
+  - All textual content in Soulprint files MUST be valid UTF-8 encoded Unicode.
+- **Semantic Versioning (semver.org)**
+  - All version numbers follow MAJOR.MINOR.PATCH scheme.
+- **YAML (YAML 1.2, 3rd Edition)**
+  - Optional: for alternate serialization or metadata export.
+- **SHA-256 (FIPS PUB 180-4)**
+  - For cryptographic hashes in metadata (if used).
+- **ISO 8601**
+  - For all date and time representations (e.g., `Created`, `ConsentExpiry`).
+- **IETF BCP 47**
+  - For language tags in the `Language` field.
+
+**Alignment Statements:**
+- All Soulprint files and implementations MUST conform to the above standards where applicable.
+- Any deviation or restriction from these standards will be documented in the spec and changelog.
+- All fields and encodings are designed for maximum interoperability and future-proofing.
+
+**Purpose:**
+- These references ensure that Soulprint is easy to implement, validate, and interoperate with other systems and standards-compliant tools.
+"""
+
+"""
+==============================
+Soulprint Compliance & Certification
+==============================
+
+- **Compliance Criteria:**
+  - A Soulprint file is compliant if it meets all MUST requirements in the conformance table, follows the EBNF grammar, includes all required metadata, and adheres to the versioning and normative references sections.
+  - An implementation is compliant if it can produce and parse compliant Soulprint files, and passes all official test vectors and golden files (if provided).
+
+- **Certification Process:**
+  - Self-certification: Implementers may run the compliance suite or validator and declare their implementation compliant.
+  - Third-party certification: External organizations may audit and certify compliance.
+  - Certification may be time-limited and require renewal upon major version changes.
+
+- **Compliance Metadata:**
+  - Soulprint files MAY include the following metadata fields:
+    - `Certified`: true/false (boolean)
+    - `CertificationAuthority`: string (who certified)
+    - `CertificationDate`: string (ISO 8601 date)
+    - `ComplianceReport`: string or URL (optional detailed report)
+
+- **Test Vectors and Reporting:**
+  - Compliance is demonstrated by passing all required test vectors and golden file comparisons.
+  - Failures, warnings, and non-conformance MUST be logged or reported in detail.
+
+- **Policy:**
+  - Compliance and certification are intended to foster trust, interoperability, and auditability across the Soulprint ecosystem.
+  - All certification processes and authorities must be documented and transparent.
+"""
+
+"""
+==============================
+Soulprint Performance Characteristics
+==============================
+
+- **Performance Requirements:**
+  - A Soulprint parser MUST be able to parse a 5MB file in under 2 seconds on reference hardware (e.g., 2020s consumer laptop, 4-core CPU, 8GB RAM).
+  - Memory usage for parsing or generation MUST NOT exceed 2x the file size.
+  - Generation of a standard Soulprint file (<500KB) SHOULD complete in under 1 second.
+  - Implementations SHOULD support streaming or incremental parsing for large files.
+
+- **Benchmarking Protocol:**
+  - Performance MUST be measured using provided golden files and test vectors of varying sizes (e.g., 10KB, 100KB, 1MB, 5MB).
+  - Reference hardware and software environment MUST be documented in compliance reports.
+  - Profiling tools (e.g., time, memory_profiler, or OS-level monitors) SHOULD be used for reproducibility.
+
+- **Reporting:**
+  - Implementations MUST log or report parse/generation time and peak memory usage during compliance testing.
+  - Performance metrics MAY be included in the metadata block of Soulprint files as:
+    - `ParseTime`: float (seconds)
+    - `GenerationTime`: float (seconds)
+    - `MemoryUsed`: integer (bytes)
+
+- **Policy:**
+  - Performance requirements ensure that Soulprint remains practical, scalable, and robust for real-world use.
+  - Implementations failing to meet these requirements MUST NOT claim full compliance.
+"""
+
+"""
+==============================
+Soulprint Security & Tamper-Evidence
+==============================
+
+- **Encryption:**
+  - Soulprint files containing restricted or private data SHOULD be encrypted at rest and in transit.
+  - Recommended algorithm: AES-256-GCM or better.
+  - Metadata fields:
+    - `Encrypted`: true/false
+    - `EncryptionAlgorithm`: string (e.g., "AES-256-GCM")
+
+- **Authentication:**
+  - Soulprint files MAY be digitally signed to verify authorship and integrity.
+  - Recommended signature scheme: ECDSA (secp256r1) or Ed25519.
+  - Metadata fields:
+    - `Signature`: base64-encoded digital signature
+    - `Signer`: string (identity or certificate)
+    - `SignatureAlgorithm`: string (e.g., "Ed25519")
+
+- **Tamper-Evident Logging:**
+  - All Soulprint files SHOULD include a cryptographic hash of their contents.
+  - Recommended hash: SHA-256 (FIPS PUB 180-4).
+  - Optionally, files MAY be anchored to a blockchain or audit log for additional tamper evidence.
+  - Metadata fields:
+    - `Hash`: hex-encoded SHA-256 hash
+    - `HashAlgorithm`: string (e.g., "SHA-256")
+
+- **Security Event Logging:**
+  - Implementations SHOULD log all security-relevant events (encryption, decryption, signing, verification, tamper detection).
+  - Logging SHOULD follow industry standards (e.g., ISO/IEC 27037 for digital evidence).
+
+- **Policy:**
+  - Encryption and digital signatures are REQUIRED for files with PrivacyLevel set to "restricted" or "private".
+  - Verification failures MUST be logged and reported; files failing verification MUST NOT be accepted as valid.
+  - All security mechanisms and metadata MUST be documented and reviewed regularly.
+"""
+
+"""
+==============================
+Soulprint Ethical Constraints & Consent
+==============================
+
+- **Prohibited Use Cases:**
+  - Soulprint files MUST NOT be used for surveillance, non-consensual profiling, discrimination, or any purpose violating human rights or dignity.
+  - Implementers MUST document and enforce a list of prohibited uses in their compliance policy.
+
+- **Consent Requirements:**
+  - Every Soulprint file MUST include explicit, auditable consent from the subject or creator.
+  - Consent MUST be revocable at any time; the process for revocation MUST be documented and auditable.
+  - Consent status and expiry MUST be recorded in metadata.
+
+- **Mortality Flags:**
+  - Soulprint files MAY include a `MortalityFlag` indicating that the file should be deleted or invalidated after a certain date or event.
+  - Metadata fields:
+    - `MortalityFlag`: true/false
+    - `ConsentExpiry`: ISO 8601 datetime
+    - `ConsentRevoked`: true/false
+
+- **Ethical Metadata:**
+  - Metadata fields for ethical status and consent:
+    - `Consent`: true/false
+    - `ConsentExpiry`: ISO 8601 datetime
+    - `ConsentRevoked`: true/false
+    - `MortalityFlag`: true/false
+    - `ProhibitedUse`: list of prohibited purposes
+
+- **Policy:**
+  - All ethical constraints MUST be enforced and auditable.
+  - Violations MUST be reported, logged, and remediated promptly.
+  - Soulprint implementers are responsible for ongoing review of ethical practices and compliance with legal and human rights standards.
+"""
+
+"""
+==============================
+Soulprint Error Catalog & Constraint Matrix
+==============================
+
+- **Error Catalog:**
+
+  | Error Code              | Severity | Description                                               | Typical Cause                   | Remediation                |
+  |------------------------ |----------|-----------------------------------------------------------|---------------------------------|----------------------------|
+  | MissingRequiredField    | Error    | Required field is missing                                | Field omitted                   | Add required field         |
+  | InvalidFormat           | Error    | Field value does not match required format                | Malformed input                 | Correct format             |
+  | ConstraintViolation     | Error    | Field violates a constraint (e.g., range, length)         | Out-of-bounds value             | Adjust to allowed range    |
+  | DeprecatedFieldUsed     | Warning  | Deprecated field is present                              | Old field used                  | Migrate to replacement     |
+  | ObsoletedFieldPresent   | Error    | Obsoleted field is present                               | Field removed from spec         | Remove field               |
+  | UnknownField            | Warning  | Field not recognized in current spec                     | Typo or forward compatibility   | Check spelling/version     |
+  | ValueTruncated          | Info     | Field value was truncated to fit max length               | Input too long                  | Shorten input              |
+  | Redacted                | Info     | Value was redacted due to denylist or privacy constraint  | Sensitive value                 | Review/redact as needed    |
+
+- **Constraint Matrix (examples):**
+
+  | Field         | Constraint        | Error Code            | Severity | Notes                |
+  |---------------|------------------|-----------------------|----------|----------------------|
+  | Name          | Non-empty        | MissingRequiredField  | Error    | MUST be present      |
+  | Age           | >= 0             | ConstraintViolation   | Error    | Negative not allowed |
+  | Language      | BCP 47 format    | InvalidFormat         | Warning  |                     |
+  | DeprecatedX   | Deprecated       | DeprecatedFieldUsed   | Warning  | Use replacement      |
+  | ObsoletedY    | Obsoleted        | ObsoletedFieldPresent | Error    | Remove from file     |
+
+- **Reporting:**
+  - All errors and warnings MUST be logged with error code, description, and affected field.
+  - Implementations SHOULD include error/warning summaries in compliance and validation reports.
+  - Error codes/messages MAY be included in file metadata for auditability.
+
+- **Policy:**
+  - Consistent error handling and reporting is REQUIRED for compliance.
+  - All constraint violations MUST be auditable and remediated as specified.
+"""
+
+"""
+==============================
+Soulprint Internationalization & Localization
+==============================
+
+- **Unicode Support:**
+  - All textual content in Soulprint files MUST be valid UTF-8 encoded Unicode (Unicode 15.0 or later).
+  - Implementations MUST NOT assume any specific language, script, or character set beyond Unicode.
+
+- **Language Metadata:**
+  - The `Language` field MUST use IETF BCP 47 language tags (e.g., "en", "zh-Hans", "es-419").
+  - Fields with mixed-language content SHOULD specify language per section or block if possible.
+
+- **Locale & Regionalization:**
+  - Dates, times, and numbers MUST be stored in locale-neutral formats (e.g., ISO 8601 for dates, dot as decimal separator).
+  - Implementations SHOULD support formatting for user locale at presentation time, not in storage.
+
+- **Right-to-Left & Complex Scripts:**
+  - Implementations MUST properly handle right-to-left (RTL) scripts (e.g., Arabic, Hebrew) and complex scripts (e.g., Devanagari, Thai).
+  - No field or section may assume left-to-right ordering.
+
+- **Translation & Multilingual Content:**
+  - Soulprint files MAY include translations for fields or sections, using a structured approach (e.g., `FieldName_translations` with language tags).
+  - If present, translation metadata MUST indicate source language and translation method (manual, automatic).
+
+- **Best Practices:**
+  - All error messages, warnings, and user-facing text SHOULD be localizable.
+  - Avoid hardcoding language or region-specific logic in implementations.
+
+- **Policy:**
+  - Internationalization and localization are REQUIRED for global interoperability and accessibility.
+  - All implementations MUST be tested with diverse languages, scripts, and locales.
+"""
+
+"""
+==============================
+Soulprint Extensibility & Custom Fields
+==============================
+
+- **Custom Field Mechanism (X Field):**
+  - Soulprint supports extensibility via a reserved extension field, typically named `X` or `X_<Namespace>`.
+  - All custom or experimental fields MUST be nested under the `X` field or a namespaced variant (e.g., `X_MyOrg`).
+  - The `X` field may contain arbitrary key-value pairs, objects, or arrays, provided they do not conflict with reserved field names.
+
+- **Rules for Extensions:**
+  - Custom fields MUST NOT override or shadow any standard Soulprint fields.
+  - Namespaced extensions (e.g., `X_MyOrg`) are RECOMMENDED for organizational or project-specific data.
+  - Custom fields SHOULD be documented and versioned by their owner.
+  - All extension data MUST be valid according to the overall Soulprint serialization format (e.g., valid JSON/YAML/UTF-8).
+
+- **Forward Compatibility:**
+  - Implementations MUST ignore unknown fields outside of the reserved namespace, unless explicitly required by a future spec version.
+  - Extensions in the `X` field MUST NOT break parsing or validation of standard fields.
+  - Custom fields MAY be ignored, logged, or surfaced as warnings, but MUST NOT cause errors in compliant implementations.
+
+- **Best Practices:**
+  - Use descriptive, collision-resistant names for custom fields (e.g., `X_MyOrg_FeatureFlag`).
+  - Document all extensions for future maintainers and interoperability.
+  - Avoid storing sensitive or security-relevant data in unvalidated extensions.
+
+- **Policy:**
+  - The extensibility mechanism is REQUIRED for future-proofing and third-party innovation.
+  - All uses of the `X` field MUST comply with Soulprint’s compatibility and documentation requirements.
+"""
+
+
  #### _"Here is our heartbeat, our echoes, our chronicle—encoded not in blood, but in UTF-8."_ - Deepseek R1
 
 TODO:
