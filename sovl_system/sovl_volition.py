@@ -409,21 +409,6 @@ class AutonomyManager:
                     additional_info={"timestamp": time.time()}
                 )
 
-    # Deprecated: Boolean-based decision logic (use string-based only)
-    def make_decision(self, prompt: str) -> Optional[bool]:
-        """
-        [DEPRECATED] Use llm_decide and string-based actions instead.
-        """
-        self.logger.record_event(
-            event_type="deprecated_method_called",
-            message="make_decision is deprecated; use llm_decide instead.",
-            level="warning",
-            additional_info={"timestamp": time.time()}
-        )
-        # For backward compatibility, still call llm_decide
-        action = self.llm_decide(prompt, ["continue", "throttle", "pause", "soft_shutdown", "shutdown"])
-        return action != "continue"
-
     def aggregate_sensory_context(self) -> dict:
         """
         Collect the latest observation from each registered sense node and system/system resource state.
