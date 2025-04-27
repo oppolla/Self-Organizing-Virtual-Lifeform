@@ -1,86 +1,134 @@
-flowchart TD
-    UserPrompt([User Prompt]) --> BaseLLM([Base LLM])
-    UserPrompt --> ScaffoldLLM([Scaffold LLM])
-    BaseLLM -->|Token Mapping| TokenMap([Token Map Layer])
-    TokenMap --> ScaffoldLLM([Scaffold LLM])
-    ScaffoldLLM -->|Influence| BaseLLM
-    BaseLLM --> CrossAttention([Cross-Attention Layer])
-    ScaffoldLLM --> CrossAttention
-    CrossAttention --> TokenMap
-
-    %% Added Systems
-    TokenMap -->|Memory Decay & Updates| MemoryUpdates([Memory Updates])
-    MemoryUpdates --> LifecycleManagement([Lifecycle Management])
-    MemoryUpdates --> TemperamentSystem([Temperament System])
-    TemperamentSystem -->|Affects Curiosity| CuriositySystem([Curiosity System])
-    TemperamentSystem -->|Triggers Dreaming| Dreaming([Dream Mechanism])
-    LifecycleManagement -->|Exposure Weights| ScaffoldLLM
-
-    %% Dreaming Effects
-    Dreaming -->|Updates| MemoryUpdates
-    Dreaming -->|Generates| CuriositySystem
-    Dreaming -->|Optimizes| ScaffoldLLM
-
-    %% Auxiliary Systems
-    TokenMap --> SleepScheduler([Sleep Scheduler])
-    SleepScheduler -->|Conditionally Triggered| AuxSystem([Gestation & Sleep Training])
-    AuxSystem -->|Optimize| ScaffoldLLM
-    AuxSystem -->|Memory Updates| TokenMap
-    AuxSystem --> Dreaming
-    CuriositySystem --> AuxSystem
-
-
 graph TD
-    SysContext[SystemContext] -->|Logger, Config, Events| System[SOVLSystem]
-    System --> Engine[CuriosityEngine]
-    System --> MemMonitor[MemoryMonitor]
-    System --> StateMan[StateTracker]
-    System --> ModMan[ModelLoader]
-    System --> ConfMan[ConfigHandler]
-    System --> PlugMan[PluginManager]
-    System --> ErrMan[ErrorManager]
-    System -->|Dream Cycle| Engine
+    %% Neocortex
+    subgraph Neocortex
+        sovl_main
+        sovl_conductor
+    end
 
-    SysContext -->|Logger| Engine
-    SysContext -->|Logger| MemMonitor
-    SysContext -->|Logger| StateMan
-    SysContext -->|Logger| ModMan
-    SysContext -->|Logger| ErrMan
-    SysContext --> EventDisp[EventDispatcher]
-    EventDisp -->|Config Changes| ConfMan
+    %% Limbic System
+    subgraph Limbic_System
+        sovl_curiosity
+        sovl_temperament
+        sovl_confidence
+        sovl_bonder
+    end
 
-    Engine --> CurMan[CuriosityManager]
-    Engine --> TrainCycleMan[TrainingCycleManager]
-    CurMan --> StateMan
-    CurMan --> ScaffoldProv[ScaffoldProvider]
-    ScaffoldProv --> CrossAttn[CrossAttentionInjector]
-    ScaffoldProv --> TokenMapper[ScaffoldTokenMapper]
-    CrossAttn --> ModMan
-    TokenMapper --> MemMan[MemoryManager]
+    %% Hippocampus
+    subgraph Hippocampus
+        sovl_engram
+        sovl_queue
+        sovl_scribe
+        sovl_trainer
+    end
 
-    MemMonitor --> MemMan
-    MemMan --> Engine
-    MemMan --> DreamMem[DreamMemory]
-    DreamMem --> MemMan
+    %% Cerebellum
+    subgraph Cerebellum
+        sovl_scaffold
+    end
 
-    StateMan --> Engine
-    StateMan --> CurMan
-    StateMan --> ConfTrk[ConfidenceTracker]
-    StateMan --> TempMan[TemperamentManager]
-    ConfTrk --> CurMan
-    TempMan --> CurMan
+    %% Heart
+    subgraph Heart
+        sovl_generation
+    end
 
-    ModMan --> CurMan
-    ModMan --> ScaffoldProv
+    %% Vascular System
+    subgraph Vascular_System
+        sovl_events
+        sovl_state
+        sovl_data
+    end
 
-    ErrMan --> System
-    ErrMan --> Engine
-    ErrMan --> MemMonitor
-    ErrMan --> MemMan
+    %% Sensory System
+    subgraph Sensory_System
+        sovl_monitor
+    end
 
-    ConfMan --> System
-    ConfMan --> ModMan
-    ConfMan --> StateMan
-    ConfMan --> MemMan
-    ConfMan --> Engine
-    ConfMan --> ErrMan
+    %% Immune System
+    subgraph Immune_System
+        sovl_error
+    end
+
+    %% Metabolic System
+    subgraph Metabolic_System
+        sovl_hardware
+        sovl_memory
+    end
+
+    %% Genome
+    subgraph Genome
+        sovl_config
+    end
+
+    %% Glial Network
+    subgraph Glial_Network
+        sovl_manager
+        sovl_interfaces
+    end
+
+    %% Expressive System
+    subgraph Expressive_System
+        sovl_logger
+    end
+
+    %% Chronicle Artifact
+    chronicle["chronicle.json"]
+
+    %% Flows
+    sovl_main <--> sovl_conductor
+    sovl_main --> sovl_scaffold
+    sovl_main --> sovl_generation
+    sovl_conductor --> sovl_trainer
+    sovl_scaffold --> sovl_engram
+    sovl_scaffold --> sovl_queue
+    sovl_scaffold --> sovl_scribe
+
+    %% Limbic System flows into Heart
+    sovl_curiosity --> sovl_generation
+    sovl_temperament --> sovl_generation
+    sovl_confidence --> sovl_generation
+    sovl_bonder --> sovl_generation
+
+    %% Hippocampus supports Heart
+    sovl_engram --> sovl_generation
+    sovl_trainer --> sovl_generation
+
+    %% Chronicle data flow
+    sovl_scribe -- creates --> chronicle
+    chronicle -- used by --> sovl_trainer
+
+    %% Vascular System connects to Heart and Neocortex
+    sovl_generation --> sovl_events
+    sovl_generation --> sovl_state
+    sovl_generation --> sovl_data
+    sovl_main --> sovl_events
+    sovl_main --> sovl_state
+
+    %% Sensory System reports to Neocortex and Heart
+    sovl_monitor --> sovl_main
+    sovl_monitor --> sovl_generation
+
+    %% Immune System monitors all
+    sovl_error --> sovl_main
+    sovl_error --> sovl_generation
+    sovl_error --> sovl_manager
+
+    %% Metabolic System supports Heart and Neocortex
+    sovl_hardware --> sovl_generation
+    sovl_memory --> sovl_generation
+    sovl_hardware --> sovl_main
+
+    %% Genome configures all
+    sovl_config --> sovl_main
+    sovl_config --> sovl_generation
+    sovl_config --> sovl_manager
+
+    %% Glial Network ties together
+    sovl_manager --> sovl_main
+    sovl_manager --> sovl_generation
+    sovl_interfaces --> sovl_manager
+    sovl_interfaces --> sovl_main
+
+    %% Expressive System logs for all
+    sovl_logger --> sovl_main
+    sovl_logger --> sovl_generation
+    sovl_logger --> sovl_error
