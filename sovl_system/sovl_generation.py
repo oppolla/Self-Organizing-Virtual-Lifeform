@@ -11,7 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from sovl_logger import Logger
 from sovl_io import JSONLLoader
 from sovl_state import SOVLState, ConversationHistory
-from sovl_utils import calculate_confidence, detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size, memory_usage
+from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size, memory_usage
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_curiosity import CuriosityManager
@@ -30,25 +30,18 @@ from sovl_bonder import BondCalculator, BondModulator
 DEFAULT_CONFIDENCE = 0.5
 MIN_CONFIDENCE = 0.0
 MAX_CONFIDENCE = 1.0
-MIN_HISTORY_LENGTH = 3
-CURIOSITY_PRESSURE_FACTOR = 0.1
-DEFAULT_TEMPERAMENT_INFLUENCE = 0.3
-DEFAULT_LIFECYCLE_INFLUENCE = 0.2
 
-# Temperament-based confidence adjustments
-TEMPERAMENT_MOOD_MULTIPLIERS = {
-    "Cautious": 0.8,  # Reduce confidence in cautious mood
-    "Balanced": 1.0,  # No adjustment in balanced mood
-    "Curious": 1.2    # Increase confidence in curious mood
-}
-
-# Lifecycle stage adjustments
-LIFECYCLE_STAGE_MULTIPLIERS = {
-    "initialization": 0.9,    # More conservative during initialization
-    "exploration": 1.1,       # More confident during exploration
-    "consolidation": 1.0,     # Normal confidence during consolidation
-    "refinement": 0.95        # Slightly more conservative during refinement
-}
+# Simplified confidence calculation
+def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
+    """Calculate confidence score for generated tokens (mean softmax probability)."""
+    try:
+        probs = torch.softmax(logits, dim=-1)
+        token_probs = torch.gather(probs, -1, generated_ids.unsqueeze(-1)).squeeze(-1)
+        confidence = token_probs.mean().item()
+        return max(0.0, min(1.0, confidence))
+    except Exception as e:
+        # Fallback to neutral confidence on error
+        return 0.5
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
@@ -526,7 +519,7 @@ class GenerationManager:
         """Initialize and validate configuration parameters."""
         try:
             # Validate required configuration sections
-            required_sections = ["controls_config", "curiosity_config", "training_config"]
+            required_sections = ["controls_config", "training_config"]
             for section in required_sections:
                 if not self._config_manager.validate_section(section):
                     raise ValueError(f"Missing required configuration section: {section}")
@@ -554,11 +547,6 @@ class GenerationManager:
             base_temperature = self._get_config_value("controls_config.base_temperature", 0.7)
             if not 0.0 <= base_temperature <= 2.0:
                 raise ValueError(f"Invalid base_temperature: {base_temperature}")
-                
-            # Top-k validation
-            top_k = self._get_config_value("curiosity_config.top_k", 30)
-            if not isinstance(top_k, int) or top_k < 1:
-                raise ValueError(f"Invalid top_k: {top_k}")
                 
             # Validate other critical parameters
             self._validate_memory_config()
@@ -614,7 +602,6 @@ class GenerationManager:
     def _load_config_sections(self) -> None:
         """Load configuration sections from config manager."""
         self.controls_config = self._config_manager.get_section("controls_config")
-        self.curiosity_config = self._config_manager.get_section("curiosity_config")
         self.training_config = self._config_manager.get_section("training_config")
         
     def _log_initialization(self) -> None:
@@ -630,8 +617,8 @@ class GenerationManager:
                     "memory_decay_rate", "enable_repetition_check", "enable_confidence_tracking",
                     "enable_error_listening", "dream_memory_weight", "base_temperature"
                 ]},
-                "curiosity_config": {k: self.curiosity_config.get(k) for k in [
-                    "max_new_tokens", "top_k", "weight_ignorance", "weight_novelty"
+                "training_config": {k: self.training_config.get(k) for k in [
+                    "max_seq_length", "batch_size"
                 ]}
             }
         )
@@ -747,9 +734,9 @@ class GenerationManager:
             )
             response = self.generate(
                 f"System error detected: {error_msg} What happened?",
-                max_new_tokens=self.curiosity_config.get("max_new_tokens", 60),
+                max_new_tokens=self.controls_config.get("max_new_tokens", 60),
                 temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
-                top_k=self.curiosity_config.get("top_k", 50),
+                top_k=self.controls_config.get("top_k", 50),
                 do_sample=True
             )
             self.state.history = temp_history
@@ -765,9 +752,9 @@ class GenerationManager:
                 },
                 source_metadata={
                     "generation_config": {
-                        "max_new_tokens": self.curiosity_config.get("max_new_tokens", 60),
+                        "max_new_tokens": self.controls_config.get("max_new_tokens", 60),
                         "temperature": self.controls_config.get("base_temperature", 0.7) + 0.2,
-                        "top_k": self.curiosity_config.get("top_k", 50),
+                        "top_k": self.controls_config.get("top_k", 50),
                         "do_sample": True
                     },
                     "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
@@ -1001,31 +988,9 @@ class GenerationManager:
             self._handle_error("curiosity_update", e)
 
     @synchronized()
-    def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: List[int]) -> float:
-        """Calculate confidence score for generated output."""
-        try:
-            if not self.curiosity_manager:
-                return 0.5
-                
-            # Get base and scaffold confidences
-            base_conf = self.curiosity_manager.compute_curiosity(
-                base_conf=0.5,  # Default base confidence
-                scaf_conf=0.5,  # Default scaffold confidence
-                state=self.state,
-                query_embedding=self.curiosity_manager._generate_query_embedding(
-                    self.state,
-                    self.base_tokenizer,
-                    self.base_model,
-                    self.base_tokenizer.decode(generated_ids)
-                ),
-                device=self.device
-            )
-            
-            return base_conf
-            
-        except Exception as e:
-            self._handle_error("calculate_confidence_score", e)
-            return 0.5
+    def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
+        """Calculate confidence score for generated output (simple version)."""
+        return calculate_confidence(logits, generated_ids)
 
     def _initialize_lifecycle_manager(self) -> None:
         """Initialize the lifecycle manager with validated parameters."""
@@ -1264,7 +1229,7 @@ class GenerationManager:
                 'max_new_tokens': self._get_config_value("controls_config.max_new_tokens", 100),
                 'do_sample': True,
                 'temperature': self._get_config_value("controls_config.base_temperature", 0.7),
-                'top_k': self._get_config_value("curiosity_config.top_k", 50),
+                'top_k': self._get_config_value("controls_config.top_k", 50),
                 'pad_token_id': self.base_tokenizer.pad_token_id,
                 'eos_token_id': self.base_tokenizer.eos_token_id
             }
@@ -1501,6 +1466,27 @@ class GenerationManager:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    @state_managed_operation("apply_curiosity")
+    def _apply_curiosity(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Apply curiosity-driven adjustments to the generation batch (simple: direct score multiplier)."""
+        if not self.curiosity_manager or not self.generation_hooks.get("curiosity", True):
+            return batch
+        
+        curiosity_state = self.curiosity_manager.get_state()
+        if not curiosity_state:
+            return batch
+        
+        curiosity_score = curiosity_state.score  # Expect [0, 1]
+        # Use curiosity_score directly as a multiplier for max_length (preserve varying length)
+        base_max_length = batch.get("max_length", 100)
+        min_multiplier = 0.8
+        max_multiplier = 1.2
+        multiplier = min_multiplier + (max_multiplier - min_multiplier) * curiosity_score
+        batch["max_length"] = int(base_max_length * multiplier)
+        # Optionally, temperature could also be adjusted similarly if desired:
+        # batch["temperature"] = batch.get("temperature", 1.0) * multiplier
+        return batch
+
     @state_managed_operation("update_temperament")
     def update_temperament(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
         """Update the temperament system with new values."""
@@ -1513,35 +1499,10 @@ class GenerationManager:
     @state_managed_operation("apply_confidence_adjustments")
     def _apply_confidence_adjustments(self, base_confidence: float) -> float:
         """Apply confidence adjustments based on temperament and lifecycle."""
-        mood_label = self.mood_label
+        temperament_score = self.current_temperament_score
         lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage() if self.lifecycle_manager else "active"
-        mood_multiplier = TEMPERAMENT_MOOD_MULTIPLIERS.get(mood_label, 1.0)
-        lifecycle_multiplier = LIFECYCLE_STAGE_MULTIPLIERS.get(lifecycle_stage, 1.0)
-        return base_confidence * mood_multiplier * lifecycle_multiplier
-
-    @state_managed_operation("apply_curiosity")
-    def _apply_curiosity(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply curiosity-driven adjustments to the generation batch."""
-        if not self.curiosity_manager or not self.generation_hooks.get("curiosity", True):
-            return batch
-        
-        curiosity_state = self.curiosity_manager.get_state()
-        if not curiosity_state:
-            return batch
-        
-        temperature = batch.get("temperature", 1.0)
-        max_length = batch.get("max_length", 100)
-        
-        if curiosity_state.pressure > 0.5:
-            temperature *= 1.2
-            max_length = int(max_length * 1.1)
-        
-        if curiosity_state.score > 0.7:
-            temperature *= 1.1
-        
-        batch["temperature"] = temperature
-        batch["max_length"] = max_length
-        return batch
+        lifecycle_multiplier = 1.0  # Removed LIFECYCLE_STAGE_MULTIPLIERS
+        return base_confidence * temperament_score * lifecycle_multiplier
 
     @state_managed_operation("apply_temperament")
     def _apply_temperament(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -1568,27 +1529,18 @@ class GenerationManager:
 
     @state_managed_operation("apply_lifecycle_adjustments")
     def _apply_lifecycle_adjustments(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply lifecycle stage-based adjustments to the generation batch."""
-        lifecycle_state = self.state.lifecycle
-        if not lifecycle_state:
-            return batch
-        
-        temperature = batch.get("temperature", 1.0)
-        max_length = batch.get("max_length", 100)
-        
-        stage = lifecycle_state.current_stage
-        if stage == "exploration":
-            temperature *= 1.2
-            max_length = int(max_length * 1.2)
-        elif stage == "consolidation":
-            temperature *= 0.9
-            max_length = int(max_length * 0.9)
-        
-        if lifecycle_state.weight > 0.7:
-            temperature *= 1.1
-        
-        batch["temperature"] = temperature
-        batch["max_length"] = max_length
+        """Apply lifecycle adjustments fluidly based on data_exposure (conservative as exposure increases)."""
+        # Retrieve data_exposure from training state
+        data_exposure = getattr(getattr(self.state, 'training_state', None), 'data_exposure', 0.0)
+        data_exposure = max(0.0, min(1.0, data_exposure))  # Clamp to [0, 1]
+
+        # As data_exposure increases, become more conservative (lower multiplier)
+        min_mult = 0.8  # Most exploratory
+        max_mult = 1.2  # Most conservative
+        multiplier = max_mult - (max_mult - min_mult) * data_exposure  # Inverse mapping
+
+        batch["temperature"] = batch.get("temperature", 1.0) * multiplier
+        batch["max_length"] = int(batch.get("max_length", 100) * multiplier)
         return batch
 
     def _calculate_adaptive_threshold(self) -> float:
@@ -1719,10 +1671,8 @@ class GenerationManager:
                     },
                     "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
                     "device": str(self.device),
-                    "internal_call": True,
-                    "session_id": self.session_id
+                    "internal_call": True
                 },
-                session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
             
@@ -1739,112 +1689,11 @@ class GenerationManager:
                     "error_type": type(e).__name__
                 },
                 source_metadata={
-                    "internal_call": True,
-                    "session_id": self.session_id
+                    "internal_call": True
                 },
-                session_id=self.session_id,
                 timestamp=datetime.now()
             )
             return "..."
-
-    def calculate_confidence(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
-        """Calculate confidence score for generated tokens."""
-        try:
-            # Get probabilities for generated tokens
-            probs = torch.softmax(logits, dim=-1)
-            token_probs = torch.gather(probs, -1, generated_ids.unsqueeze(-1)).squeeze(-1)
-            
-            # Calculate average confidence
-            confidence = token_probs.mean().item()
-            return max(0.0, min(1.0, confidence))
-        except Exception as e:
-            logger.record({
-                "error": f"Confidence calculation failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            return 0.5
-    
-    def detect_repetitions(token_ids: List[int], special_ids: Set[int], min_rep_length: int = 3) -> Optional[Tuple[int, int]]:
-        """Detect repeating token sequences."""
-        try:
-            filtered = [i for i in token_ids if i not in special_ids]
-            for i in range(len(filtered) - 2 * min_rep_length + 1):
-                if filtered[i:i + min_rep_length] == filtered[i + min_rep_length:i + 2 * min_rep_length]:
-                    return (i, i + min_rep_length)
-            return None
-        except Exception as e:
-            logger.record({
-                "error": f"Repetition detection failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            return None
-    
-    def adjust_temperature(
-        base_temp: float,
-        temperament_score: float,
-        mood_influence: float = 0.3,
-        min_temp: float = 0.5,
-        max_temp: float = 1.5,
-        curiosity_pressure: Optional[float] = None
-    ) -> float:
-        """Adjust temperature based on temperament and curiosity."""
-        try:
-            # Clamp input values
-            base_temp = max(min_temp, min(max_temp, base_temp))
-            temperament_score = max(-1.0, min(1.0, temperament_score))
-            mood_influence = max(0.0, min(1.0, mood_influence))
-            
-            # Calculate temperature adjustment
-            temp_adjustment = mood_influence * 0.3 * temperament_score
-            
-            # Check if curiosity_pressure is valid before using it
-            if curiosity_pressure is not None:
-                curiosity_pressure = max(0.0, min(1.0, curiosity_pressure))
-                temp_adjustment += curiosity_pressure * 0.1
-            
-            # Apply adjustment
-            adjusted_temp = max(min_temp, min(max_temp, base_temp + temp_adjustment))
-            return adjusted_temp
-        except Exception as e:
-            logger.record({
-                "error": f"Temperature adjustment failed: {str(e)}",
-                "timestamp": time.time(),
-                "stack_trace": traceback.format_exc()
-            })
-            return base_temp
-    
-    def error_handler(func):
-        """Decorator for consistent error handling and logging."""
-        @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            try:
-                return func(self, *args, **kwargs)
-            except Exception as e:
-                context = f"{func.__name__}_error"
-                self.error_manager.handle_generation_error(
-                    error=e,
-                    context=context,
-                    additional_info={
-                        "args": str(args),
-                        "kwargs": str(kwargs),
-                        "timestamp": time.time()
-                    }
-                )
-                raise
-        return wrapper
-    
-    def set_generation_hook(self, hook_name: str, enabled: bool):
-        """Enable or disable a specific generation hook (validated by sovl_schema)."""
-        if hook_name in self.generation_hooks:
-            self.generation_hooks[hook_name] = enabled
-        else:
-            raise ValueError(f"Unknown generation hook: {hook_name}")
-
-    def get_generation_hook(self, hook_name: str) -> bool:
-        """Check if a specific generation hook is enabled."""
-        return self.generation_hooks.get(hook_name, False)
 
 class ScribeAssembler:
     """Assembles the data required for logging generation events."""
