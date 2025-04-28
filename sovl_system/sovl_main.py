@@ -194,7 +194,21 @@ class SystemContext:
             # Initialize model components
             self.model_manager = ModelManager()
             self.processor = SOVLProcessor()
-            self.generation_manager = GenerationManager()
+            self.generation_manager = GenerationManager(
+                config_manager=self.config_manager,
+                base_model=self.model_manager.base_model,
+                scaffolds=self.model_manager.scaffold_models,
+                base_tokenizer=self.model_manager.base_tokenizer,
+                scaffold_tokenizer=self.model_manager.scaffold_tokenizers[0] if self.model_manager.scaffold_tokenizers else None,
+                state=self.state_manager.state,
+                logger=self.logger,
+                error_manager=self.error_handler,
+                cross_attention_injector=self.model_manager.cross_attention_injector,
+                scaffold_manager=self.model_manager.scaffold_manager,
+                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                curiosity_manager=self.curiosity_manager,
+                dialogue_context_manager=self.memory_context  # Pass memory_context
+            )
             
             # Initialize training components
             self.trainer = SOVLTrainer()
@@ -571,7 +585,18 @@ class SystemContext:
             self.memory_context.clear_long_term_memory(user_id)
 
     def bind_generation_manager(self, generation_manager):
-        """Bind the GenerationManager to this SystemContext for always-on memory."""
+        """Bind the GenerationManager to this SystemContext for always-on memory.
+        
+        Note: This method is primarily for backward compatibility and testing.
+        The GenerationManager should be initialized with dialogue_context_manager
+        during SystemContext initialization.
+        """
+        if hasattr(self, 'generation_manager') and self.generation_manager is not None:
+            self.logger.log_warning(
+                "Attempting to bind GenerationManager after initialization. "
+                "This may lead to inconsistent state. Consider reinitializing SystemContext.",
+                error_type="late_generation_manager_binding"
+            )
         self.generation_manager = generation_manager
         # Provide self as system_context to generation_manager
         if hasattr(generation_manager, "set_system_context"):

@@ -44,7 +44,8 @@ class GenerationManager:
         scaffold_manager: Any,
         device: torch.device,
         curiosity_manager: Any = None,
-        generation_hooks: Dict[str, bool] = {}
+        generation_hooks: Dict[str, bool] = {},
+        dialogue_context_manager: Optional[Any] = None
     ):
         """Initialize GenerationManager with configuration and model components."""
         # Core components
@@ -60,6 +61,7 @@ class GenerationManager:
         self.scaffold_manager = scaffold_manager
         self.curiosity_manager = curiosity_manager
         self.device = device
+        self.dialogue_context_manager = dialogue_context_manager
 
         # Generation hooks setup
         self.generation_hooks = generation_hooks or {}
@@ -888,14 +890,22 @@ class GenerationManager:
 
         try:
             # --- Always-on Memory: Retrieve context ---
-            system_context = getattr(self, "system_context", None)
             memory_context = None
-            if system_context and hasattr(system_context, "get_short_term_context"):
-                short_ctx = system_context.get_short_term_context()
-                long_ctx = system_context.get_long_term_context(user_id=user_id)
-                memory_context = self._compose_memory_context(short_ctx, long_ctx)
+            if self.dialogue_context_manager:
+                try:
+                    short_ctx = self.dialogue_context_manager.get_short_term_context()
+                    long_ctx = self.dialogue_context_manager.get_long_term_context(user_id=user_id)
+                    memory_context = self._compose_memory_context(short_ctx, long_ctx)
+                except Exception as e:
+                    self.logger.log_warning(
+                        f"Failed to retrieve memory context: {str(e)}",
+                        error_type="memory_context_retrieval_error"
+                    )
             else:
-                memory_context = None
+                self.logger.log_warning(
+                    "No dialogue context manager available for memory retrieval",
+                    error_type="missing_dialogue_context"
+                )
 
             # --- Retrieve all trait values from GenerationPrimer ---
             traits = self.primer.prepare_for_generation(prompt, user_id=user_id, metadata_entries=metadata_entries, **kwargs)

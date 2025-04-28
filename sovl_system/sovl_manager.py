@@ -14,6 +14,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ErrorRecord
 from sovl_state import StateTracker, StateManager
+import gc
 
 # Decorator function (defined outside the class for clarity)
 def _prevent_immediate_retry(recovery_func):
@@ -638,12 +639,27 @@ class ModelManager:
             raise e
 
     def reload_models(self):
-        """Reload all models with current settings."""
+        """Reload all models with current settings. Ensures rollback and error safety on failure."""
         try:
             with self._memory_lock:
                 self.cleanup()
-                self.load_models()
-                
+                try:
+                    self.load_models()
+                except Exception as load_exc:
+                    # Rollback: ensure all model references are set to None and cleanup is called again
+                    self._log_event(
+                        "reload_rollback",
+                        f"load_models failed during reload: {str(load_exc)}. Rolling back to safe state.",
+                        level="warning"
+                    )
+                    with torch.no_grad():
+                        self.base_model = None
+                        self.scaffold_models = []
+                        self.base_tokenizer = None
+                        self.scaffold_tokenizers = []
+                        self.scaffold_unk_ids = []
+                    self.cleanup()
+                    raise  # Re-raise the original exception
                 self._log_event(
                     "model_reloading",
                     "Successfully reloaded all models",
@@ -652,6 +668,8 @@ class ModelManager:
                         "quantization": self.quantization_mode
                     }
                 )
+                # Log memory usage after reload
+                self.report_gpu_memory_usage()
         except Exception as e:
             self.error_manager.handle_error(
                 error=e,
@@ -665,20 +683,38 @@ class ModelManager:
             raise
 
     def cleanup(self):
-        """Clean up model resources."""
+        """Clean up model resources and ensure GPU memory is released."""
         try:
             with self._memory_lock:
-                if self.base_model is not None:
-                    del self.base_model
-                    self.base_model = None
-                
-                self._clear_scaffold_resources()
-                
+                gpu_mem_before = torch.cuda.memory_allocated() if torch.cuda.is_available() else None
                 self._log_event(
-                    "cleanup",
-                    "Successfully cleaned up model resources",
-                    level="info"
+                    "cleanup_start",
+                    f"Starting cleanup. GPU memory before: {gpu_mem_before}",
+                    level="debug"
                 )
+                with torch.no_grad():
+                    if self.base_model is not None:
+                        del self.base_model
+                        self.base_model = None
+                    self._clear_scaffold_resources()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gpu_mem_after = torch.cuda.memory_allocated() if torch.cuda.is_available() else None
+                self._log_event(
+                    "cleanup_end",
+                    f"Cleanup complete. GPU memory after: {gpu_mem_after}",
+                    level="debug",
+                    additional_info={"gpu_mem_before": gpu_mem_before, "gpu_mem_after": gpu_mem_after}
+                )
+                if gpu_mem_after is not None and gpu_mem_before is not None and gpu_mem_after > 0.5 * gpu_mem_before:
+                    self._log_event(
+                        "cleanup_warning",
+                        f"GPU memory not fully released after cleanup. Before: {gpu_mem_before}, After: {gpu_mem_after}",
+                        level="warning"
+                    )
+                # Log memory usage after cleanup
+                self.report_gpu_memory_usage()
         except Exception as e:
             self.error_manager.handle_error(
                 error=e,
@@ -949,3 +985,28 @@ class ModelManager:
             f"Active LoRA checkpoint set to {lora_checkpoint_path}",
             level="info"
         )
+
+    def report_gpu_memory_usage(self):
+        """Report current GPU memory usage for monitoring purposes."""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated()
+            reserved = torch.cuda.memory_reserved()
+            max_allocated = torch.cuda.max_memory_allocated()
+            self._log_event(
+                "gpu_memory_report",
+                f"GPU memory usage - Allocated: {allocated}, Reserved: {reserved}, Max Allocated: {max_allocated}",
+                level="info",
+                additional_info={
+                    "allocated": allocated,
+                    "reserved": reserved,
+                    "max_allocated": max_allocated
+                }
+            )
+            return {"allocated": allocated, "reserved": reserved, "max_allocated": max_allocated}
+        else:
+            self._log_event(
+                "gpu_memory_report",
+                "CUDA not available.",
+                level="info"
+            )
+            return None
