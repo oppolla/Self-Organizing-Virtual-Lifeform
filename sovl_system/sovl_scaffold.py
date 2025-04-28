@@ -18,6 +18,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 import contextlib
 import functools
 from sovl_engram import LoraAdapterManager
+import difflib
 
 # File-level: Core scaffold module for SOVL.
 # - Manages error handling, token mapping, sparse attention utilities,
@@ -266,32 +267,105 @@ class ScaffoldTokenMapper:
         # In practice, this could use embeddings or other semantic similarity measures
         return 1.0 - self._calculate_similarity(token1, token2)
         
+    def _levenshtein_distance(self, s1, s2):
+        # Simple Levenshtein distance implementation
+        if len(s1) < len(s2):
+            return self._levenshtein_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        return previous_row[-1]
+
+    def _find_levenshtein_match(self, token, threshold=0.3):
+        # Normalized Levenshtein distance
+        min_dist = float('inf')
+        best_id = None
+        for scaf_token, scaf_id in self.scaffold_tokenizer.get_vocab().items():
+            dist = self._levenshtein_distance(token, scaf_token) / max(len(token), len(scaf_token), 1)
+            if dist < min_dist:
+                min_dist = dist
+                best_id = scaf_id
+        if min_dist <= threshold:
+            return [best_id]
+        return None
+
+    def _subword_heuristic(self, token):
+        # Try prefix/suffix match for subword tokens
+        for scaf_token, scaf_id in self.scaffold_tokenizer.get_vocab().items():
+            if token.startswith(scaf_token) or token.endswith(scaf_token):
+                return [scaf_id]
+        return None
+
     def _build_token_map(self):
-        """Build main token mapping with enhanced strategies."""
+        """Build main token mapping with enhanced strategies and layered fallback."""
+        special_tokens = {
+            self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id,
+            self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id,
+            self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
+        }
         for base_token, base_id in self.base_tokenizer.get_vocab().items():
+            # 1. Special token strict mapping
+            if base_id in special_tokens and special_tokens[base_id] is not None:
+                self.token_map[base_id] = {'ids': [special_tokens[base_id]], 'weight': 1.0, 'confidence': 1.0}
+                continue
             normalized = self._normalize_token(base_token)
-            scaffold_ids = self.scaffold_tokenizer.encode(
-                normalized, 
-                add_special_tokens=False, 
-                max_length=self.max_tokens_per_mapping, 
-                truncation=True
+            # 2. Exact string match
+            if normalized in self.scaffold_tokenizer.get_vocab():
+                scaf_id = self.scaffold_tokenizer.get_vocab()[normalized]
+                self.token_map[base_id] = {'ids': [scaf_id], 'weight': 1.0, 'confidence': 1.0}
+                continue
+            # 3. Levenshtein distance
+            lev_match = self._find_levenshtein_match(normalized)
+            if lev_match:
+                self.logger.record_event(
+                    event_type="token_map_fallback",
+                    message=f"Levenshtein fallback for {base_token} -> {lev_match}",
+                    level="debug"
+                )
+                self.token_map[base_id] = {'ids': lev_match, 'weight': 0.8, 'confidence': 0.8}
+                continue
+            # 4. Subword heuristics
+            subword_match = self._subword_heuristic(normalized)
+            if subword_match:
+                self.logger.record_event(
+                    event_type="token_map_fallback",
+                    message=f"Subword heuristic fallback for {base_token} -> {subword_match}",
+                    level="debug"
+                )
+                self.token_map[base_id] = {'ids': subword_match, 'weight': 0.7, 'confidence': 0.7}
+                continue
+            # 5. Legacy char similarity fallback
+            best_score = 0.0
+            best_id = None
+            for scaf_token, scaf_id in self.scaffold_tokenizer.get_vocab().items():
+                score = self._char_similarity(normalized, scaf_token)
+                if score > best_score:
+                    best_score = score
+                    best_id = scaf_id
+            if best_score > 0.0:
+                self.logger.record_event(
+                    event_type="token_map_fallback",
+                    message=f"Legacy char similarity fallback for {base_token} -> {best_id}",
+                    level="debug"
+                )
+                self.token_map[base_id] = {'ids': [best_id], 'weight': 0.5, 'confidence': 0.5}
+                continue
+            # 6. Final fallback to unk_token_id
+            self.logger.record_event(
+                event_type="token_map_fallback",
+                message=f"Mapping {base_token} to unk_token_id as last resort.",
+                level="warning"
             )
-            
-            # Handle empty or invalid mappings
-            if not scaffold_ids or scaffold_ids == [self.scaffold_tokenizer.unk_token_id]:
-                scaffold_ids = self._handle_fallback(normalized, base_id)
-                
-            # Validate mapping quality
-            if not self._validate_mapping_quality(normalized, scaffold_ids):
-                scaffold_ids = self._handle_fallback(normalized, base_id)
-                
-            # Store mapping with initial weight
-            self.token_map[base_id] = {
-                'ids': scaffold_ids,
-                'weight': 1.0,
-                'confidence': 1.0
-            }
-            
+            self.token_map[base_id] = {'ids': [self.scaffold_tokenizer.unk_token_id], 'weight': 0.1, 'confidence': 0.1}
+
     def _resolve_conflict(self, base_id: int, new_mapping: Dict, existing_mapping: Dict) -> Dict:
         """Resolve mapping conflicts based on configured strategy."""
         if self.conflict_resolution_strategy == 'keep_first':
