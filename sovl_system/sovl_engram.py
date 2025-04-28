@@ -166,3 +166,14 @@ class LoraAdapterManager:
         except Exception as e:
             import traceback
             print(f"[LoraAdapterManager] Failed to yield LoRA parameters: {e}\n{traceback.format_exc()}")
+
+    def is_model_compatible(self, model: torch.nn.Module) -> bool:
+        """
+        Check if the model is compatible with LoRA (i.e., has the required target modules).
+        """
+        if not hasattr(model, "named_modules"):
+            return False
+        for name, module in model.named_modules():
+            if any(target in name for target in self.target_modules):
+                return True
+        return False

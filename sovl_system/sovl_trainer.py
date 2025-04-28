@@ -237,19 +237,16 @@ class TrainingConfig:
             try:
                 # Update in config manager
                 success = self.config_manager.update(f"training.{key}", value)
-                
-                if success:
-                    # Reload configuration to ensure consistency
-                    self._load_config()
-                    
-                return success
-                
             except Exception as e:
                 raise ConfigurationError(
                     f"Failed to update training configuration: {str(e)}",
                     traceback.format_exc()
                 )
-                
+        # Only reload config if update succeeded, and do it outside the lock
+        if success:
+            self._load_config()
+        return success
+        
     # Retrieve a training config parameter via ConfigManager.
     def get(self, key: str, default: Any = None) -> Any:
         """Get a configuration parameter."""
@@ -295,16 +292,6 @@ class TrainingManager:
         logger: Optional[Logger] = None,
         error_manager: Optional[ErrorManager] = None
     ):
-        """
-        Initialize training manager.
-        Args:
-            config: TrainingConfig instance
-            model: torch.nn.Module (MUST be pre-wrapped/adapted by ModelManager)
-            device: torch.device
-            config_manager: ConfigManager instance
-            logger: Logger instance
-            error_manager: ErrorManager instance
-        """
         self.config = config
         self.model = model
         self.device = device
@@ -313,13 +300,30 @@ class TrainingManager:
         self.error_manager = error_manager
         # LoRA manager is used ONLY for checkpointing and optimizer param selection
         self.lora_manager = None
+        lora_enabled = False
         if self.config_manager and self.logger and self.error_manager:
             self.lora_manager = LoraAdapterManager(self.config_manager, self.logger, self.error_manager)
-        # Use only LoRA parameters if LoRA is enabled, else all parameters
+            lora_enabled = self.lora_manager.enabled
+
+        # Require LoRA dependencies if LoRA is enabled in config
+        if lora_enabled and not (self.config_manager and self.logger and self.error_manager):
+            raise ValueError("LoRA requires config_manager, logger, and error_manager")
+
+        # Validate model compatibility for LoRA
         if self.lora_manager and self.lora_manager.enabled:
+            if not self.lora_manager.is_model_compatible(self.model):
+                raise ValueError("Model is not compatible with LoRA configuration")
             params = self.lora_manager.lora_parameters(self.model)
         else:
-            params = self.model.parameters()
+            # Validate model has trainable parameters
+            params = list(self.model.parameters())
+            if not params:
+                raise ValueError("Model has no trainable parameters")
+        # Validate model is on the correct device
+        for p in self.model.parameters():
+            if p.device != self.device:
+                raise ValueError(f"Model parameter not on device {self.device}: found {p.device}")
+
         self.optimizer = self._create_optimizer(params)
         self.scheduler = self._create_scheduler()
         self.scaler = torch.cuda.amp.GradScaler() if self.config.memory.use_amp and torch.cuda.is_available() else None
@@ -593,51 +597,66 @@ class TrainingManager:
         
     def load_checkpoint(self, path: str) -> None:
         """Load training checkpoint with validation."""
-        # Check if checkpoint file exists
+        import os
         if not os.path.exists(path):
             raise FileNotFoundError(f"Checkpoint file not found at {path}")
-            
-        # Determine map location based on CUDA availability
+
         map_location = self.device if torch.cuda.is_available() else torch.device('cpu')
-        
+
         try:
             checkpoint = torch.load(path, map_location=map_location)
-            
-            # Validate checkpoint structure
             required_keys = ["model_state", "optimizer_state", "step_count", "epoch_count"]
             if not all(key in checkpoint for key in required_keys):
                 raise ValueError(f"Checkpoint file at {path} is missing required keys.")
-                
-            # Load model state
-            self.model.load_state_dict(checkpoint["model_state"], strict=True)
-            
+
+            # Validate model state dict keys
+            checkpoint_model_state = checkpoint["model_state"]
+            current_model_state = self.model.state_dict()
+            if set(checkpoint_model_state.keys()) != set(current_model_state.keys()):
+                raise ValueError("Checkpoint model state keys do not match current model")
+
+            # Load model state (strict=False, log missing/unexpected keys)
+            load_result = self.model.load_state_dict(checkpoint_model_state, strict=False)
+            missing_keys, unexpected_keys = load_result.missing_keys, load_result.unexpected_keys
+            if missing_keys or unexpected_keys:
+                if hasattr(self, 'logger') and self.logger:
+                    self.logger.log_warning(
+                        f"Checkpoint loading issues: missing={missing_keys}, unexpected={unexpected_keys}",
+                        event_type="checkpoint_load_warning"
+                    )
+
+            # Validate optimizer param groups
+            optimizer_state = checkpoint["optimizer_state"]
+            if len(optimizer_state.get("param_groups", [])) != len(self.optimizer.param_groups):
+                raise ValueError("Optimizer parameter groups mismatch")
+
             # Load optimizer state
             try:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+                self.optimizer.load_state_dict(optimizer_state)
             except Exception as e:
                 raise RuntimeError(f"Could not load optimizer state: {e}")
-                
+
             # Load scheduler state if available
             if self.scheduler and checkpoint.get("scheduler_state"):
                 try:
                     self.scheduler.load_state_dict(checkpoint["scheduler_state"])
                 except Exception as e:
-                    pass  # Continue without scheduler state
-                    
+                    raise RuntimeError(f"Failed to load scheduler state: {e}")
+
             # Load scaler state if available
             if self.scaler and checkpoint.get("scaler_state"):
                 try:
                     self.scaler.load_state_dict(checkpoint["scaler_state"])
                 except Exception as e:
-                    pass  # Continue without scaler state
-                    
+                    raise RuntimeError(f"Failed to load scaler state: {e}")
+
             # Load training state
             self.step_count = checkpoint["step_count"]
             self.optimizer_step_count = checkpoint.get("optimizer_step_count", 0)
             self.epoch_count = checkpoint["epoch_count"]
             self.best_metrics = checkpoint.get("best_metrics", {})
             self.metrics_history = defaultdict(list, checkpoint.get("metrics_history", {}))
-            
+
         except Exception as e:
             raise RuntimeError(f"Failed to load checkpoint from {path}: {e}")
             
@@ -737,7 +756,12 @@ class TrainingWorkflowManager:
         return 0.0, {"status": "error", "error": str(last_exception) if last_exception else "unknown_error"}
         
     def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
-        """Run gestation cycle with metadata enrichment using the modular pipeline. Supports multiple scaffolds and robust validation."""
+        """Run gestation cycle with metadata enrichment using the modular pipeline. Supports multiple scaffolds and robust validation and error recovery."""
+        import time
+        import os
+        from datetime import datetime
+        import traceback
+
         # Use modular pipeline for metadata enrichment and batch preparation
         metadata_processor = getattr(self.trainer, 'metadata_processor', None)
         tokenizer = getattr(self.trainer, 'tokenizer', None)
@@ -748,13 +772,20 @@ class TrainingWorkflowManager:
         training_manager = getattr(self.trainer, 'training_manager', None)
         dreamer = getattr(self.trainer, 'dreamer', None)
         state = getattr(self, 'state', None)
-    
+
+        # Error handling config
+        error_handling_cfg = None
+        if hasattr(self, 'config') and self.config and hasattr(self.config, 'logging'):
+            error_handling_cfg = getattr(self.config.logging, 'error_handling_config', None)
+        retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
+        retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
+
         # Validate conversation history
         if not conversation_history or not isinstance(conversation_history, list) or not all(isinstance(s, dict) for s in conversation_history):
             if logger:
                 logger.log_error("Invalid or missing conversation history for gestation cycle.", event_type="gestation_invalid_conversation")
             return
-    
+
         # Validate model_manager and scaffold models
         scaffold_count = 0
         lora_count = 0
@@ -765,7 +796,7 @@ class TrainingWorkflowManager:
             if logger:
                 logger.log_error(f"No scaffold models ({scaffold_count}) or LoRA managers ({lora_count}) available for gestation cycle.", event_type="gestation_scaffold_lora_missing")
             return
-    
+
         # Validate scaffold and LoRA manager counts
         if scaffold_count != lora_count:
             if logger:
@@ -774,60 +805,76 @@ class TrainingWorkflowManager:
                     event_type="gestation_scaffold_lora_mismatch",
                     additional_info={"scaffold_count": scaffold_count, "lora_count": lora_count}
                 )
-    
-        # Iterate over all scaffold models/LoRA managers (future-proofing)
-        for idx in range(min(scaffold_count, lora_count)):
+
+        min_count = min(scaffold_count, lora_count)
+        successful_scaffolds = []
+
+        for idx in range(min_count):
             scaffold_model = model_manager.scaffold_models[idx]
             lora_manager = model_manager.lora_managers[idx]
-            try:
-                # Prepare training batch from conversation history
-                enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
-                batch = batch_preparer.prepare(enriched_samples)
-            except Exception as e:
-                if logger:
-                    logger.log_error(
-                        f"Error during gestation batch preparation (scaffold {idx}): {str(e)}",
-                        error_type="gestation_batch_error",
-                        stack_trace=traceback.format_exc(),
-                        additional_info={"scaffold_index": idx}
+
+            # Retry logic for batch preparation
+            last_exception = None
+            for attempt in range(retry_attempts):
+                try:
+                    enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
+                    batch = batch_preparer.prepare(enriched_samples)
+                    break
+                except Exception as e:
+                    last_exception = e
+                    if logger:
+                        logger.log_error(
+                            f"Error during gestation batch preparation (scaffold {idx}, attempt {attempt+1}): {str(e)}",
+                            error_type="gestation_batch_error",
+                            stack_trace=traceback.format_exc(),
+                            additional_info={"scaffold_index": idx, "attempt": attempt+1}
+                        )
+                    if attempt < retry_attempts - 1 and retry_delay > 0:
+                        time.sleep(retry_delay)
+            else:
+                raise RuntimeError(f"Gestation batch preparation failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
+
+            # Retry logic for training step
+            last_exception = None
+            for attempt in range(retry_attempts):
+                try:
+                    optimizer = torch.optim.AdamW(
+                        lora_manager.lora_parameters(scaffold_model),
+                        lr=self.config.optimizer.learning_rate
                     )
-                continue
-            
+                    scaffold_model.train()
+                    optimizer.zero_grad()
+                    outputs = scaffold_model(**batch)
+                    loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                    loss.backward()
+                    optimizer.step()
+                    if logger:
+                        logger.log_info(
+                            f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss.item()}",
+                            event_type="gestation_lora_train",
+                            additional_info={"scaffold_index": idx}
+                        )
+                    break
+                except Exception as e:
+                    last_exception = e
+                    if logger:
+                        logger.log_error(
+                            f"Error during gestation LoRA training step (scaffold {idx}, attempt {attempt+1}): {str(e)}",
+                            error_type="gestation_lora_training_error",
+                            stack_trace=traceback.format_exc(),
+                            additional_info={"scaffold_index": idx, "attempt": attempt+1}
+                        )
+                    if attempt < retry_attempts - 1 and retry_delay > 0:
+                        time.sleep(retry_delay)
+            else:
+                raise RuntimeError(f"Gestation LoRA training failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
+
+            # Save LoRA weights as long-term memory, with rollback on failure
+            lora_dir = "lora_checkpoints"
+            os.makedirs(lora_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            lora_path = os.path.join(lora_dir, f"lora_{idx}_{timestamp}.pt")
             try:
-                optimizer = torch.optim.AdamW(
-                    lora_manager.lora_parameters(scaffold_model),
-                    lr=self.config.optimizer.learning_rate  # Use configured learning rate
-                )
-                scaffold_model.train()
-                optimizer.zero_grad()
-                outputs = scaffold_model(**batch)
-                loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-                loss.backward()
-                optimizer.step()
-                if logger:
-                    logger.log_info(
-                        f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss.item()}",
-                        event_type="gestation_lora_train",
-                        additional_info={"scaffold_index": idx}
-                    )
-            except Exception as e:
-                if logger:
-                    logger.log_error(
-                        f"Error during gestation LoRA training step (scaffold {idx}): {str(e)}",
-                        error_type="gestation_lora_training_error",
-                        stack_trace=traceback.format_exc(),
-                        additional_info={"scaffold_index": idx}
-                    )
-                continue
-            
-            # Save LoRA weights as long-term memory
-            try:
-                import os
-                from datetime import datetime
-                lora_dir = "lora_checkpoints"
-                os.makedirs(lora_dir, exist_ok=True)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                lora_path = os.path.join(lora_dir, f"lora_{idx}_{timestamp}.pt")
                 lora_manager.save_lora_weights(scaffold_model, lora_path)
                 if model_manager:
                     model_manager.set_active_lora_checkpoint(lora_path)
@@ -838,6 +885,9 @@ class TrainingWorkflowManager:
                         additional_info={"scaffold_index": idx}
                     )
             except Exception as e:
+                # Rollback partial save
+                if os.path.exists(lora_path):
+                    os.remove(lora_path)
                 if logger:
                     logger.log_error(
                         f"Error saving LoRA weights after gestation (scaffold {idx}): {str(e)}",
@@ -845,8 +895,13 @@ class TrainingWorkflowManager:
                         stack_trace=traceback.format_exc(),
                         additional_info={"scaffold_index": idx}
                     )
-                continue
-            
+                raise RuntimeError(f"Failed to save LoRA weights for scaffold {idx}: {e}")
+
+            successful_scaffolds.append(idx)
+
+        if len(successful_scaffolds) != min_count:
+            raise RuntimeError("Not all scaffolds completed gestation training successfully")
+
         # Update SOVL state if available
         if state is not None and hasattr(state, 'update_after_gestation'):
             try:
@@ -860,7 +915,7 @@ class TrainingWorkflowManager:
                         error_type="gestation_state_update_error",
                         stack_trace=traceback.format_exc()
                     )
-    
+
         # DREAMER integration
         if dreamer is not None:
             try:
