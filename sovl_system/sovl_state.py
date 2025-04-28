@@ -495,6 +495,7 @@ class SOVLState(StateBase):
         self._device = device
         self._initialize_memory_managers()
         self.data_stats = DataStats()
+        self.state_version = 0  # Version for optimistic locking and concurrency control
         self._initialize_state()
 
     def _initialize_state(self) -> None:
@@ -535,6 +536,8 @@ class SOVLState(StateBase):
                 "SOVL state components initialized",
                 conversation_id=self.history.conversation_id
             )
+            
+            self.state_version = 1  # Initial version after state is initialized
             
         except Exception as e:
             self.log_error(f"Failed to initialize state components: {str(e)}")
@@ -941,6 +944,33 @@ class SOVLState(StateBase):
             "max_messages": self.history.max_messages
         }
 
+    def validate(self):
+        """
+        Validate state consistency. Raises ValueError if any invariant is violated.
+        Checks include: temperament_score and confidence in [0,1], dream memory size, etc.
+        """
+        errors = []
+        if not (0.0 <= getattr(self, 'temperament_score', 0.5) <= 1.0):
+            errors.append("temperament_score out of range")
+        if hasattr(self, 'confidence') and not (0.0 <= self.confidence <= 1.0):
+            errors.append("confidence out of range")
+        if hasattr(self, 'total_dream_memory_mb') and self.total_dream_memory_mb < 0:
+            errors.append("total_dream_memory_mb negative")
+        # Add more checks as needed
+        if errors:
+            raise ValueError(f"SOVLState validation failed: {errors}")
+
+    def clone(self):
+        """
+        Return a deep copy of the state for transactional/atomic updates.
+        """
+        import copy
+        return copy.deepcopy(self)
+
+    # Document the update protocol
+    # All updates to SOVLState should go through StateManager, use state_version for concurrency control,
+    # and call validate() after every update to ensure consistency.
+
 class StateManager:
     """Manages system state and memory operations."""
     
@@ -1074,119 +1104,34 @@ class StateManager:
                     )
                     raise StateError(f"StateManager load failed: {str(e)}")
                 
-    def save_state(self, state: SOVLState, path_prefix: str) -> None:
-        """Save system state using the SOVLState instance. Retries on transient errors."""
-        max_retries = 3
-        retry_delay = 0.5  # seconds
-        attempt = 0
-        while attempt < max_retries:
-            with self._lock:
-                try:
-                    state_dict = state.to_dict()
-                    with open(f"{path_prefix}_state.json", "w") as f:
-                        import json
-                        json.dump(state_dict, f)
-                    self._logger.record_event(
-                        event_type="state_saved_by_manager",
-                        message=f"System state saved via StateManager to {path_prefix}_state.json",
-                        level="info",
-                        additional_info={
-                            "state_size": len(str(state_dict)),
-                            "state_hash": state.state_hash()
-                        }
-                    )
-                    return
-                except (OSError, IOError) as e:
-                    attempt += 1
-                    if attempt >= max_retries:
-                        self._logger.log_error(
-                            error_msg=f"StateManager failed to save state after {max_retries} attempts: {str(e)}",
-                            error_type="state_save_error",
-                            stack_trace=traceback.format_exc()
-                        )
-                        raise StateError(f"StateManager save failed after {max_retries} attempts: {str(e)}")
-                    else:
-                        self._logger.log_event(
-                            "state_save_retry",
-                            f"Retrying save_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
-                            level="warning"
-                        )
-                    import time as _time
-                    _time.sleep(retry_delay)
-                except Exception as e:
-                    self._logger.log_error(
-                        error_msg=f"StateManager failed to save state: {str(e)}",
-                        error_type="state_save_error",
-                        stack_trace=traceback.format_exc()
-                    )
-                    raise StateError(f"StateManager save failed: {str(e)}")
+    def update_state_atomic(self, update_fn):
+        """
+        Atomically update the SOVLState using a provided update function.
+        The update_fn receives a clone of the current state, mutates it, and returns it.
+        The method validates the new state, increments state_version, and commits it if valid.
+        Raises ValueError if validation fails or state_version is not incremented.
+        """
+        with self._lock:
+            # Assume self._system_state is the canonical SOVLState instance
+            state = getattr(self, '_system_state', None)
+            if state is None:
+                raise StateError("No system state to update.")
+            old_version = state.state_version
+            new_state = state.clone()
+            update_fn(new_state)
+            new_state.state_version = old_version + 1
+            new_state.validate()
+            # Commit
+            self._system_state = new_state
+            self._logger.record_event(
+                event_type="state_atomic_update",
+                message="Atomic state update committed.",
+                level="info",
+                additional_info={"old_version": old_version, "new_version": new_state.state_version}
+            )
+            return new_state
 
-    def load_state(self, path_prefix: str) -> SOVLState:
-        """Load system state using the SOVLState instance. Retries on transient errors."""
-        max_retries = 3
-        retry_delay = 0.5  # seconds
-        attempt = 0
-        while attempt < max_retries:
-            with self._lock:
-                try:
-                    import os
-                    import json
-                    state_path = f"{path_prefix}_state.json"
-                    if not os.path.exists(state_path):
-                        self._logger.log_event(
-                            "state_load_empty_by_manager",
-                            f"No state data found by StateManager at {state_path}, creating new state.",
-                            level="warning"
-                        )
-                        return SOVLState(
-                            config_manager=self._config_manager,
-                            logger=self._logger,
-                            device=self._device
-                        )
-                    with open(state_path, "r") as f:
-                        state_dict = json.load(f)
-                    if not isinstance(state_dict, dict):
-                        raise StateError(f"StateManager loaded invalid state data type: {type(state_dict)}")
-                    loaded_state = SOVLState.from_dict(
-                        data=state_dict,
-                        config_manager=self._config_manager,
-                        logger=self._logger,
-                        device=self._device
-                    )
-                    self._logger.record_event(
-                        event_type="state_loaded_by_manager",
-                        message=f"System state loaded via StateManager from {path_prefix}_state.json",
-                        level="info",
-                        additional_info={
-                            "state_size": len(str(state_dict)),
-                            "state_hash": loaded_state.state_hash()
-                        }
-                    )
-                    return loaded_state
-                except (OSError, IOError) as e:
-                    attempt += 1
-                    if attempt >= max_retries:
-                        self._logger.log_error(
-                            error_msg=f"StateManager failed to load state after {max_retries} attempts: {str(e)}",
-                            error_type="state_load_error",
-                            stack_trace=traceback.format_exc()
-                        )
-                        raise StateError(f"StateManager load failed after {max_retries} attempts: {str(e)}")
-                    else:
-                        self._logger.log_event(
-                            "state_load_retry",
-                            f"Retrying load_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
-                            level="warning"
-                        )
-                    import time as _time
-                    _time.sleep(retry_delay)
-                except Exception as e:
-                    self._logger.log_error(
-                        error_msg=f"StateManager failed to load state: {str(e)}",
-                        error_type="state_load_error",
-                        stack_trace=traceback.format_exc()
-                    )
-                    raise StateError(f"StateManager load failed: {str(e)}")
+    # All state mutations should use update_state_atomic for consistency and safety.
 
 class StateTracker(StateBase):
     """Tracks component states and their changes."""

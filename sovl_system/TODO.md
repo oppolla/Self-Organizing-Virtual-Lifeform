@@ -2,8 +2,7 @@
 
 ## General Taks:
 
-1. Implement the learning log system with meta data. JSONL loader is part of process.
-Complete finals for all modules
+1. Update all modules to used improved sovl_state
 2. Disable that startup data sovl_seed part. Save it for Soulprint
 3. integrate sovl_bonder
 4. further develop initialization and startup feel
