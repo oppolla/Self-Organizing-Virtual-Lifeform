@@ -8,6 +8,7 @@ from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_state import SOVLState  # Import for type clarity and direct integration
 import traceback
+import threading
 
 class GenerationPrimer:
     """
@@ -86,6 +87,7 @@ class GenerationPrimer:
             level="info",
             component="GenerationPrimer"
         )
+        self._state_lock = threading.Lock()
 
     def set_generation_hook(self, trait: str, enabled: bool):
         """
@@ -141,67 +143,69 @@ class GenerationPrimer:
         """
         Aggregates trait values from all connected modules, respecting generation hooks.
         Returns a dictionary with all trait outputs.
+        Validates trait managers and state compatibility.
         """
-        # Always pass state to trait modules if they accept it
         traits = {}
         state_arg = kwargs.get("state", self.state)
-        if self.generation_hooks.get("curiosity", True) and self.curiosity_manager:
-            try:
-                traits["curiosity"] = self.curiosity_manager.compute_curiosity(state=state_arg, **kwargs)
-            except Exception as e:
+        # Validate state_arg type
+        if not isinstance(state_arg, SOVLState):
+            self.logger.log_error("Invalid state type for trait computation", error_type="primer_state_type_error")
+            return {}
+
+        # Curiosity
+        if self.generation_hooks.get("curiosity", True):
+            if not self.curiosity_manager or not hasattr(self.curiosity_manager, 'compute_curiosity'):
+                self.logger.log_error("Curiosity manager missing or invalid", error_type="primer_curiosity_manager_error")
                 traits["curiosity"] = None
-                self.logger.log_error(
-                    error_msg=f"Curiosity computation failed: {e}",
-                    error_type="primer_curiosity_error",
-                    component="GenerationPrimer"
-                )
-                if self.error_manager:
-                    self.error_manager.handle_data_error(
-                        e, {"trait": "curiosity", "kwargs": kwargs}, component="GenerationPrimer"
-                    )
-        if self.generation_hooks.get("temperament", True) and self.temperament_system:
-            try:
-                traits["temperament"] = self.temperament_system.current_score(state=state_arg) if hasattr(self.temperament_system, "current_score") else None
-            except Exception as e:
+            else:
+                try:
+                    traits["curiosity"] = self.curiosity_manager.compute_curiosity(state=state_arg, **kwargs)
+                except Exception as e:
+                    traits["curiosity"] = None
+                    self.handle_error("curiosity_computation", e, {"kwargs": kwargs})
+
+        # Temperament
+        if self.generation_hooks.get("temperament", True):
+            if not self.temperament_system or not hasattr(self.temperament_system, 'current_score'):
+                self.logger.log_error("Temperament system missing or invalid", error_type="primer_temperament_manager_error")
                 traits["temperament"] = None
-                self.logger.log_error(
-                    error_msg=f"Temperament computation failed: {e}",
-                    error_type="primer_temperament_error",
-                    component="GenerationPrimer"
-                )
-                if self.error_manager:
-                    self.error_manager.handle_data_error(
-                        e, {"trait": "temperament", "kwargs": kwargs}, component="GenerationPrimer"
-                    )
-        if self.generation_hooks.get("confidence", True) and self.confidence_calculator:
-            try:
-                traits["confidence"] = self.confidence_calculator.calculate_confidence_score(state=state_arg, **kwargs)
-            except Exception as e:
+            else:
+                try:
+                    traits["temperament"] = self.temperament_system.current_score(state=state_arg)
+                except Exception as e:
+                    traits["temperament"] = None
+                    self.handle_error("temperament_computation", e, {"kwargs": kwargs})
+
+        # Confidence
+        if self.generation_hooks.get("confidence", True):
+            if not self.confidence_calculator or not hasattr(self.confidence_calculator, 'calculate_confidence_score'):
+                self.logger.log_error("Confidence calculator missing or invalid", error_type="primer_confidence_manager_error")
                 traits["confidence"] = None
-                self.logger.log_error(
-                    error_msg=f"Confidence computation failed: {e}",
-                    error_type="primer_confidence_error",
-                    component="GenerationPrimer"
-                )
-                if self.error_manager:
-                    self.error_manager.handle_data_error(
-                        e, {"trait": "confidence", "kwargs": kwargs}, component="GenerationPrimer"
-                    )
-        if self.generation_hooks.get("bond", True) and self.bond_calculator:
-            try:
-                traits["bond"] = self.bond_calculator.calculate_bond(state=state_arg, **kwargs)
-            except Exception as e:
+            else:
+                try:
+                    traits["confidence"] = self.confidence_calculator.calculate_confidence_score(state=state_arg, **kwargs)
+                except Exception as e:
+                    traits["confidence"] = None
+                    self.handle_error("confidence_computation", e, {"kwargs": kwargs})
+
+        # Bond
+        if self.generation_hooks.get("bond", True):
+            if not self.bond_calculator or not hasattr(self.bond_calculator, 'calculate_bond'):
+                self.logger.log_error("Bond calculator missing or invalid", error_type="primer_bond_manager_error")
                 traits["bond"] = None
-                self.logger.log_error(
-                    error_msg=f"Bond computation failed: {e}",
-                    error_type="primer_bond_error",
-                    component="GenerationPrimer"
-                )
-                if self.error_manager:
-                    self.error_manager.handle_data_error(
-                        e, {"trait": "bond", "kwargs": kwargs}, component="GenerationPrimer"
-                    )
-        # ...add more traits here as needed
+            else:
+                try:
+                    traits["bond"] = self.bond_calculator.calculate_bond(state=state_arg, **kwargs)
+                except Exception as e:
+                    traits["bond"] = None
+                    self.handle_error("bond_computation", e, {"kwargs": kwargs})
+
+        # Fail fast if required traits are missing
+        required_traits = ["curiosity", "temperament"]
+        missing = [t for t in required_traits if traits.get(t) is None]
+        if missing:
+            raise RuntimeError(f"Failed to compute required traits: {missing}")
+
         return traits
 
     def get_traits_for_generation(self, prompt: str, **kwargs) -> Dict[str, Any]:
@@ -372,32 +376,48 @@ class GenerationPrimer:
     def update_state_after_error(self, error: Exception, context: str) -> None:
         """
         Update system state after an error occurs. Adjusts confidence and temperament as appropriate.
+        Thread-safe, validates attributes, and rolls back on failure.
         """
-        try:
-            # Adjust confidence based on error type
-            if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
-                self.state.confidence = max(0.1, self.state.confidence - 0.1)
-            elif isinstance(error, (ValueError, RuntimeError)):
-                self.state.confidence = max(0.2, self.state.confidence - 0.05)
-            # Update temperament if present
-            if hasattr(self.state, 'temperament_score'):
-                self.state.temperament_score = max(0.0, self.state.temperament_score - 0.05)
-            self.logger.record_event(
-                event_type="state_updated_after_error",
-                message=f"State updated after {context} error",
-                level="info",
-                additional_info={
-                    'error_type': type(error).__name__,
-                    'new_confidence': self.state.confidence,
-                    'new_temperament': getattr(self.state, 'temperament_score', None)
-                }
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to update state after error: {str(e)}",
-                error_type="state_update_error",
-                stack_trace=traceback.format_exc()
-            )
+        with self._state_lock:
+            original_confidence = getattr(self.state, 'confidence', None)
+            original_temperament = getattr(self.state, 'temperament_score', None)
+            try:
+                # Validate confidence
+                if not hasattr(self.state, 'confidence') or not isinstance(self.state.confidence, (int, float)):
+                    self.logger.log_error("Invalid or missing confidence attribute in SOVLState")
+                    return
+                # Adjust confidence based on error type
+                if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
+                    self.state.confidence = max(0.1, self.state.confidence - 0.1)
+                elif isinstance(error, (ValueError, RuntimeError)):
+                    self.state.confidence = max(0.2, self.state.confidence - 0.05)
+                # Validate and update temperament_score if present
+                if hasattr(self.state, 'temperament_score'):
+                    if not isinstance(self.state.temperament_score, (int, float)):
+                        self.logger.log_error("Invalid temperament_score type in SOVLState")
+                        return
+                    self.state.temperament_score = max(0.0, self.state.temperament_score - 0.05)
+                self.logger.record_event(
+                    event_type="state_updated_after_error",
+                    message=f"State updated after {context} error",
+                    level="info",
+                    additional_info={
+                        'error_type': type(error).__name__,
+                        'new_confidence': self.state.confidence,
+                        'new_temperament': getattr(self.state, 'temperament_score', None)
+                    }
+                )
+            except Exception as e:
+                # Rollback on failure
+                if original_confidence is not None:
+                    self.state.confidence = original_confidence
+                if original_temperament is not None and hasattr(self.state, 'temperament_score'):
+                    self.state.temperament_score = original_temperament
+                self.logger.log_error(
+                    error_msg=f"Failed to update state after error: {str(e)}",
+                    error_type="state_update_error",
+                    stack_trace=traceback.format_exc()
+                )
 
     def handle_state_driven_error(self, error: Exception, context: str, state_metrics: dict = None) -> None:
         """
