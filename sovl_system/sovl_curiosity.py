@@ -13,6 +13,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_queue import capture_scribe_event
 from sovl_memory import RAMManager, GPUMemoryManager
+import json
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""
@@ -107,15 +108,59 @@ class Curiosity:
                 self.embedding_cache.items(),
                 key=lambda x: x[1].get('last_access', 0)
             )
-            while len(self.embedding_cache) > 0 and usage_high and sorted_cache:
+            initial_cache_size = len(self.embedding_cache)
+            max_prune_fraction = 0.5
+            prune_limit = int(initial_cache_size * max_prune_fraction)
+            max_iterations = 1000
+            pruned_count = 0
+            iteration = 0
+
+            # Optional: backup pruned embeddings before deletion
+            try:
+                backup_path = "embedding_cache_backup.jsonl"
+                with open(backup_path, "a", encoding="utf-8") as f:
+                    for key, value in sorted_cache[:prune_limit]:
+                        json.dump({"key": key, "value": value}, f, default=str)
+                        f.write("\n")
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg=f"Failed to backup pruned embeddings: {str(e)}",
+                        error_type="curiosity_prune_backup_error",
+                        stack_trace=traceback.format_exc()
+                    )
+
+            while (
+                len(self.embedding_cache) > 0
+                and usage_high
+                and sorted_cache
+                and pruned_count < prune_limit
+                and iteration < max_iterations
+            ):
                 key, _ = sorted_cache.pop(0)
                 del self.embedding_cache[key]
+                pruned_count += 1
+                iteration += 1
                 # Optionally re-check memory after each prune
                 if self.ram_manager and self.gpu_manager:
-                    ram_stats = self.ram_manager.check_memory_health()
-                    gpu_stats = self.gpu_manager.get_gpu_usage()
-                    if ram_stats.get("usage_percentage", 0) < 0.7 and gpu_stats.get("usage_percentage", 0) < 0.7:
+                    try:
+                        ram_stats = self.ram_manager.check_memory_health()
+                        gpu_stats = self.gpu_manager.get_gpu_usage()
+                        if ram_stats.get("usage_percentage", 0) < 0.7 and gpu_stats.get("usage_percentage", 0) < 0.7:
+                            break
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.log_error(
+                                error_msg=f"Memory check failed during pruning: {str(e)}",
+                                error_type="curiosity_memory_error",
+                                stack_trace=traceback.format_exc()
+                            )
                         break
+            if iteration >= max_iterations and self.logger:
+                self.logger.log_error(
+                    error_msg="Pruning stopped due to iteration limit",
+                    error_type="curiosity_prune_limit_error"
+                )
 
     def _compress_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """Compress tensor to reduce memory usage, using GPU manager if available."""
@@ -956,34 +1001,60 @@ class CuriosityManager:
         generation_params: Optional[dict] = None
     ) -> Optional[str]:
         """Generate a curiosity-driven question using GenerationManager and capture scribe event."""
-        try:
-            self._record_event(
-                "curiosity_question_generation_started",
-                "Starting curiosity question generation",
-                level="info",
-                additional_info={
-                    "context": context,
-                    "spontaneous": spontaneous
-                }
-            )
+        max_retries = 3
+        question = None
+        last_exception = None
 
-            # Use GenerationManager for question generation
-            if not hasattr(self, 'generation_manager') or self.generation_manager is None:
-                raise RuntimeError("CuriosityManager requires a GenerationManager instance for question generation.")
-            if context is None:
-                raise ValueError("A context prompt must be provided for curiosity question generation.")
-            if generation_params is None:
-                generation_params = {}
-            
-            # Generate question (returns list, take first)
-            result = self.generation_manager.generate_text(
-                prompt=context,
-                num_return_sequences=1,
-                **generation_params
-            )
-            question = result[0] if result and isinstance(result, list) else None
+        self._record_event(
+            "curiosity_question_generation_started",
+            "Starting curiosity question generation",
+            level="info",
+            additional_info={
+                "context": context,
+                "spontaneous": spontaneous
+            }
+        )
 
-            # Capture scribe event for training
+        # Use GenerationManager for question generation
+        if not hasattr(self, 'generation_manager') or self.generation_manager is None:
+            self._record_error("CuriosityManager requires a GenerationManager instance for question generation.")
+            return None
+        if context is None:
+            self._record_error("A context prompt must be provided for curiosity question generation.")
+            return None
+        if generation_params is None:
+            generation_params = {}
+
+        for attempt in range(max_retries):
+            try:
+                result = self.generation_manager.generate_text(
+                    prompt=context,
+                    num_return_sequences=1,
+                    **generation_params
+                )
+                question = result[0] if result and isinstance(result, list) else None
+                if question:
+                    break
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    self.logger.log_warning(
+                        f"Curiosity question generation attempt {attempt + 1} failed: {e}"
+                    )
+                    time.sleep(1)
+                    continue
+                self.logger.log_error(
+                    f"Question generation failed after {max_retries} attempts: {e}"
+                )
+                question = None
+
+        # Fallback question if all attempts fail
+        if not question:
+            question = "What is an interesting aspect of this topic?"
+            self.logger.log_warning("Using fallback question due to generation failure")
+
+        # Only capture scribe event for successful (non-fallback) generations
+        if question and (last_exception is None or question != "What is an interesting aspect of this topic?"):
             from sovl_queue import capture_scribe_event
             capture_scribe_event(
                 origin="sovl_curiosity",
@@ -1001,28 +1072,25 @@ class CuriosityManager:
                 session_id=getattr(self, 'session_id', None)
             )
 
-            if question:
-                self._record_event(
-                    "curiosity_question_generated",
-                    "Successfully generated curiosity question",
-                    level="info",
-                    additional_info={
-                        "question": question,
-                        "context": context,
-                        "spontaneous": spontaneous
-                    }
-                )
-            else:
-                self._record_event(
-                    "curiosity_question_generation_failed",
-                    "Failed to generate curiosity question",
-                    level="warning",
-                    additional_info={
-                        "context": context,
-                        "spontaneous": spontaneous
-                    }
-                )
-            return question
-        except Exception as e:
-            self._record_error(f"Failed to generate curiosity question: {str(e)}")
-            return None
+        if question and (last_exception is None or question != "What is an interesting aspect of this topic?"):
+            self._record_event(
+                "curiosity_question_generated",
+                "Successfully generated curiosity question",
+                level="info",
+                additional_info={
+                    "question": question,
+                    "context": context,
+                    "spontaneous": spontaneous
+                }
+            )
+        else:
+            self._record_event(
+                "curiosity_question_generation_failed",
+                "Failed to generate curiosity question, using fallback",
+                level="warning",
+                additional_info={
+                    "context": context,
+                    "spontaneous": spontaneous
+                }
+            )
+        return question
