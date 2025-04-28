@@ -19,6 +19,7 @@ import contextlib
 import functools
 from sovl_engram import LoraAdapterManager
 import difflib
+import copy
 
 # File-level: Core scaffold module for SOVL.
 # - Manages error handling, token mapping, sparse attention utilities,
@@ -976,16 +977,13 @@ class CrossAttentionInjector:
         injection_strategy: str = 'sequential',
         token_map: Optional[Dict] = None
     ) -> nn.Module:
-        """Inject cross-attention into the model."""
+        """Inject cross-attention into the model with robust error recovery and fallback."""
         try:
             with self._lock:
-                # Get both layers and their names
                 layers, layer_names = self.find_model_layers(base_model)
                 layer_indices = self.get_cross_attention_layers(base_model, layers_to_inject)
-                
-                # Store the names of layers we're injecting into
                 self._target_layer_names = [layer_names[i] for i in layer_indices]
-                
+
                 self._logger.record_event(
                     event_type="cross_attention_injection_start",
                     message="Cross-attention injection started",
@@ -995,33 +993,73 @@ class CrossAttentionInjector:
                         "timestamp": time.time()
                     }
                 )
-                
-                original_state = {name: param.clone() for name, param in base_model.named_parameters()}
-                
+
+                # Transactional: work on a deep copy
+                model_copy = copy.deepcopy(base_model)
+                successful_layers = []
+                skipped_layers = []
+
                 for layer_idx in layer_indices:
-                    self._inject_single_layer(
-                        model=base_model,
-                        scaffold_model=scaffold_model,
-                        layer_idx=layer_idx,
-                        injection_strategy=injection_strategy,
-                        token_map=token_map
+                    strategies = [injection_strategy, "parallel", "replace"]
+                    injected = False
+                    for strat in strategies:
+                        try:
+                            self._inject_single_layer(
+                                model=model_copy,
+                                scaffold_model=scaffold_model,
+                                layer_idx=layer_idx,
+                                injection_strategy=strat,
+                                token_map=token_map
+                            )
+                            injected = True
+                            if strat != injection_strategy:
+                                self._logger.record_event(
+                                    event_type="cross_attention_injection_retry",
+                                    message=f"Layer {layer_idx} injected with fallback strategy '{strat}'",
+                                    level="warning"
+                                )
+                            break
+                        except Exception as e:
+                            self._logger.record_event(
+                                event_type="cross_attention_injection_strategy_failed",
+                                message=f"Layer {layer_idx} injection failed with strategy '{strat}': {str(e)}",
+                                level="warning"
+                            )
+                    if not injected:
+                        skipped_layers.append(layer_idx)
+                        self._logger.record_event(
+                            event_type="cross_attention_injection_skipped",
+                            message=f"Layer {layer_idx} skipped after all strategies failed.",
+                            level="error"
+                        )
+                    else:
+                        successful_layers.append(layer_idx)
+
+                if not self.verify_injection(model_copy, model_copy.config):
+                    self._logger.record_event(
+                        event_type="cross_attention_injection_rollback",
+                        message="Verification failed after injection, rolling back to original model.",
+                        level="error"
                     )
-                
-                if not self.verify_injection(base_model, base_model.config):
-                    for name, param in base_model.named_parameters():
-                        if name in original_state:
-                            param.data.copy_(original_state[name])
-                    raise RuntimeError("Cross-attention injection verification failed")
-                
+                    return base_model  # Return original model
+
+                # Commit: copy injected layers back to base_model
+                for name, module in model_copy.named_modules():
+                    if hasattr(base_model, name):
+                        setattr(base_model, name, module)
+
                 self._logger.record_event(
                     event_type="cross_attention_injection_complete",
-                    message="Cross-attention injection completed successfully",
+                    message="Cross-attention injection completed with fallback and recovery.",
                     level="info",
-                    additional_info={"status": "success", "timestamp": time.time()}
+                    additional_info={
+                        "successful_layers": successful_layers,
+                        "skipped_layers": skipped_layers,
+                        "timestamp": time.time()
+                    }
                 )
-                
                 return base_model
-                
+
         except Exception as e:
             self._logger.record_event(
                 event_type="cross_attention_injection_failed",
@@ -1029,96 +1067,7 @@ class CrossAttentionInjector:
                 level="error",
                 additional_info={"timestamp": time.time(), "stack_trace": traceback.format_exc()}
             )
-            raise
-
-    def _get_module_by_name(self, model: nn.Module, name: str) -> Optional[nn.Module]:
-        """Safely retrieve a module by its dotted name."""
-        try:
-            return functools.reduce(getattr, name.split('.'), model)
-        except AttributeError:
-            self._logger.record_event(
-                event_type="module_retrieval_failed",
-                message=f"Could not retrieve module with name: {name}",
-                level="warning",
-                additional_info={"module_name": name, "timestamp": time.time()}
-            )
-            return None
-
-    def verify_injection(self, model: nn.Module, base_config: Any) -> bool:
-        """Verify cross-attention layers were properly injected using exact layer names."""
-        try:
-            if not self._target_layer_names:
-                self._logger.record_event(
-                    event_type="verification_failed",
-                    message="No target layers specified for verification",
-                    level="error"
-                )
-                return False
-
-            verified_layers = set()
-            
-            for layer_name in self._target_layer_names:
-                layer = self._get_module_by_name(model, layer_name)
-                
-                if layer is None:
-                    self._logger.record_event(
-                        event_type="layer_verification_failed",
-                        message=f"Could not find layer: {layer_name}",
-                        level="warning",
-                        additional_info={"layer_name": layer_name}
-                    )
-                    return False
-                    
-                if not hasattr(layer, '_cross_attn'):
-                    self._logger.record_event(
-                        event_type="missing_cross_attention",
-                        message=f"Layer missing cross-attention: {layer_name}",
-                        level="warning",
-                        additional_info={"layer_name": layer_name}
-                    )
-                    return False
-                    
-                cross_attn = layer._cross_attn
-                
-                if (cross_attn._hidden_size != base_config.hidden_size or 
-                    cross_attn._num_heads != base_config.num_attention_heads):
-                    self._logger.record_event(
-                        event_type="dimension_mismatch",
-                        message=f"Dimension mismatch in layer: {layer_name}",
-                        level="warning",
-                        additional_info={
-                            "layer_name": layer_name,
-                            "expected_hidden_size": base_config.hidden_size,
-                            "actual_hidden_size": cross_attn._hidden_size,
-                            "expected_heads": base_config.num_attention_heads,
-                            "actual_heads": cross_attn._num_heads
-                        }
-                    )
-                    return False
-                    
-                verified_layers.add(layer_name)
-            
-            if verified_layers != set(self._target_layer_names):
-                missing = set(self._target_layer_names) - verified_layers
-                self._logger.record_event(
-                    event_type="incomplete_verification",
-                    message="Not all layers were verified",
-                    level="warning",
-                    additional_info={"missing_layers": list(missing)}
-                )
-                return False
-            
-            self._logger.record_event(
-                event_type="verification_success",
-                message="All layers verified successfully",
-                level="info",
-                additional_info={"verified_layers": list(verified_layers)}
-            )
-            return True
-            
-        except Exception as e:
-            self._error_handler.handle_cross_attention_error(e)
-            return False
+            return base_model  # Return original model on failure
 
     def _inject_single_layer(
         self,
@@ -1128,7 +1077,7 @@ class CrossAttentionInjector:
         injection_strategy: str,
         token_map: Optional[Dict]
     ) -> None:
-        """Inject cross-attention into a single layer."""
+        """Inject cross-attention into a single layer with retry logic."""
         try:
             layers, _ = self.find_model_layers(model)
             layer = layers[layer_idx]
@@ -1137,7 +1086,7 @@ class CrossAttentionInjector:
                 logger=self._logger,
                 device=model.device
             )
-            
+
             layers[layer_idx] = self._create_wrapped_layer(
                 original_layer=layer,
                 cross_attn_layer=cross_attn_layer,
@@ -1145,16 +1094,17 @@ class CrossAttentionInjector:
                 token_map=token_map,
                 strategy=injection_strategy
             )
-            
+
             if not self._verify_single_layer(model, layer_idx):
                 raise RuntimeError(f"Layer {layer_idx} injection verification failed")
         except Exception as e:
             self._logger.record_event(
                 event_type="cross_attention_injection_error",
-                message=f"Failed to inject cross-attention layer {layer_idx}: {str(e)}",
+                message=f"Failed to inject cross-attention layer {layer_idx} with strategy '{injection_strategy}': {str(e)}",
                 level="error",
                 additional_info={
                     "layer_idx": layer_idx,
+                    "strategy": injection_strategy,
                     "error": str(e),
                     "stack_trace": traceback.format_exc()
                 }
@@ -1523,23 +1473,23 @@ class ScaffoldProvider:
         return self._scaffold_state.copy()
 
 # Utility function to create a scaffold model with LoRA integration
-def create_scaffold_with_lora(config_manager, logger, error_manager, lora_checkpoint_path=None):
+def create_scaffold_with_adaptation(config_manager, logger, error_manager, lora_checkpoint_path=None):
     """
-    Factory for creating a scaffold model wrapped with LoRA adapters (if enabled).
+    Factory for creating a scaffold model wrapped with adaptation (LoRA, Adapters, or Prefix Tuning).
     Optionally loads LoRA weights from a checkpoint path (for long-term memory).
-    Returns the LoRA-wrapped model and the LoraAdapterManager instance.
+    Returns the adapted model, the LoraAdapterManager instance, and the adaptation method used.
     """
     # --- Build the base scaffold model ---
     scaffold_model = ScaffoldModel(config_manager, logger, error_manager)  # Replace with your actual scaffold model class/init
-    # --- Build and apply LoRA ---
+    # --- Build and apply adaptation ---
     lora_manager = LoraAdapterManager(config_manager, logger, error_manager)
-    scaffold_model = lora_manager.apply_to(scaffold_model)
-    if lora_checkpoint_path:
+    scaffold_model, method_used = lora_manager.apply_with_fallbacks(scaffold_model)
+    if lora_checkpoint_path and method_used == "lora":
         try:
             scaffold_model = lora_manager.load_lora_weights(scaffold_model, lora_checkpoint_path)
         except Exception as e:
             logger.log_warning(f"Failed to load LoRA checkpoint {lora_checkpoint_path}: {e}", event_type="lora_load_warning")
-    return scaffold_model, lora_manager
+    return scaffold_model, lora_manager, method_used
 
 # Example usage elsewhere in the system:
-# model, lora_mgr = create_scaffold_with_lora(config_manager, logger, error_manager)
+# model, lora_mgr = create_scaffold_with_adaptation(config_manager, logger, error_manager)

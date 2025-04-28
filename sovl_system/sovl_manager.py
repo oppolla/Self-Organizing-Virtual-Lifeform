@@ -409,12 +409,18 @@ class ModelManager:
 
     def _load_scaffold_model(self, model_name: str, lora_checkpoint_path: str = None):
         """
-        Load a single scaffold model, apply scaffold wrapping, and attach LoRA adapters if enabled.
+        Load a single scaffold model, apply scaffold wrapping, and attach adaptation (LoRA, Adapters, Prefix Tuning) if enabled.
         Optionally loads LoRA weights from a checkpoint path (for long-term memory).
         """
         try:
-            from sovl_scaffold import create_scaffold_with_lora
-            scaffold_model, lora_manager = create_scaffold_with_lora(self._config_manager, self._logger, self._error_manager, lora_checkpoint_path)
+            from sovl_scaffold import create_scaffold_with_adaptation
+            scaffold_model, lora_manager, method_used = create_scaffold_with_adaptation(self._config_manager, self._logger, self._error_manager, lora_checkpoint_path)
+            self._log_event(
+                "scaffold_adaptation",
+                f"Scaffold model loaded with adaptation method: {method_used}",
+                level="info",
+                additional_info={"model_name": model_name, "adaptation_method": method_used}
+            )
             return scaffold_model, lora_manager
         except Exception as e:
             self._log_error(
