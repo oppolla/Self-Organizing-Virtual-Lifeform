@@ -21,6 +21,7 @@ from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_scaffold import GenerationScaffoldProvider
 from sovl_bonder import BondCalculator, BondModulator
+from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
 
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
@@ -39,6 +40,7 @@ class GenerationManager:
         scaffold_manager: Any,
         device: torch.device,
         curiosity_manager: Any = None,
+        generation_hooks: Dict[str, bool] = {}
     ):
         """Initialize GenerationManager with configuration and model components."""
         # Core components
@@ -54,6 +56,31 @@ class GenerationManager:
         self.scaffold_manager = scaffold_manager
         self.curiosity_manager = curiosity_manager
         self.device = device
+
+        # Generation hooks setup
+        self.generation_hooks = generation_hooks or {}
+        self.logger.record_event(
+            event_type="generation_hooks_initialized",
+            message=f"GenerationManager initialized with hooks: {self.generation_hooks}",
+            level="info",
+            component="GenerationManager"
+        )
+
+        self.primer = GenerationPrimer(
+            config_manager=self._config_manager,
+            logger=self.logger,
+            state=self.state,
+            error_manager=self.error_manager,
+            curiosity_manager=self.curiosity_manager,
+            temperament_system=getattr(self, 'temperament_system', None),
+            confidence_calculator=getattr(self, 'confidence_calculator', None),
+            bond_calculator=getattr(self, 'bond_calculator', None),
+            device=self.device,
+            lifecycle_manager=getattr(self, 'lifecycle_manager', None),
+            scaffold_manager=self.scaffold_manager,
+            memory_manager=getattr(self, 'memory_manager', None),
+            generation_hooks=self.generation_hooks  # Pass hooks explicitly
+        )
         
         # Get global session_id from config
         self.session_id = self._config_manager.get("runtime.session_id")
@@ -125,14 +152,6 @@ class GenerationManager:
         self.bond_calculator = BondCalculator(config_manager, logger, state)
         self.bond_modulator = BondModulator(self.bond_calculator)
 
-        # Generation hooks (user/system configurable, validated by sovl_schema)
-        self.generation_hooks = self._config_manager.get("generation_hooks", {
-            "curiosity": True,
-            "temperament": True,
-            "confidence": True,
-            "bonding": True
-        })
-
     def _with_lock(self, lock_name: str):
         """Context manager for thread-safe operations."""
         def decorator(func):
@@ -172,38 +191,6 @@ class GenerationManager:
                 stack_trace=traceback.format_exc()
             )
 
-    def _update_state_after_error(self, error: Exception, context: str) -> None:
-        """Update system state after an error occurs."""
-        try:
-            # Adjust confidence based on error type
-            if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
-                self.state.confidence = max(0.1, self.state.confidence - 0.1)
-            elif isinstance(error, (ValueError, RuntimeError)):
-                self.state.confidence = max(0.2, self.state.confidence - 0.05)
-            
-            # Update temperament based on error
-            if hasattr(self.state, 'temperament_score'):
-                self.state.temperament_score = max(0.1, self.state.temperament_score - 0.05)
-            
-            # Log state update
-            self.logger.record_event(
-                event_type="state_update_after_error",
-                message=f"State updated after {context} error",
-                level="info",
-                additional_info={
-                    'error_type': type(error).__name__,
-                    'new_confidence': self.state.confidence,
-                    'new_temperament': self.state.temperament_score if hasattr(self.state, 'temperament_score') else None
-                }
-            )
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to update state after error: {str(e)}",
-                error_type="state_update_error",
-                stack_trace=traceback.format_exc()
-            )
-
     @synchronized()
     def _handle_state_driven_error(self, error: Exception, context: str) -> None:
         """Handle errors with state-driven recovery strategies."""
@@ -235,41 +222,58 @@ class GenerationManager:
             )
 
     def _apply_state_driven_recovery(self, error: Exception, context: str, state_metrics: Dict[str, Any]) -> None:
-        """Apply state-driven recovery strategies based on error and current state."""
+        """Enhanced: Apply state-driven recovery strategies based on error and current state metrics."""
         try:
-            # Adjust memory management based on error type
+            recovery_actions = []
+            # Memory management
             if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
+                before = self.memory_manager.get_memory_usage() if hasattr(self.memory_manager, 'get_memory_usage') else None
                 self.memory_manager.optimize_memory_usage()
+                after = self.memory_manager.get_memory_usage() if hasattr(self.memory_manager, 'get_memory_usage') else None
                 self._clear_scaffold_cache()
-            
-            # Adjust generation parameters based on state
-            if state_metrics['confidence'] < 0.3:
+                recovery_actions.append({
+                    'action': 'optimize_memory',
+                    'before': before,
+                    'after': after
+                })
+            # Batch size adjustment based on confidence
+            if state_metrics and state_metrics.get('confidence', 1.0) < 0.3:
+                old_batch_size = getattr(self, 'base_batch_size', None)
                 self.base_batch_size = max(1, self.base_batch_size // 2)
-            
-            # Update temperament and lifecycle state
+                recovery_actions.append({
+                    'action': 'adjust_batch_size',
+                    'old_batch_size': old_batch_size,
+                    'new_batch_size': self.base_batch_size
+                })
+            # Temperament adjustment
             if hasattr(self.state, 'temperament_score'):
+                old_temp = self.state.temperament_score
                 self.state.temperament_score = max(0.1, self.state.temperament_score - 0.05)
-            
+                recovery_actions.append({
+                    'action': 'adjust_temperament',
+                    'old_temperament': old_temp,
+                    'new_temperament': self.state.temperament_score
+                })
+            # Lifecycle stage update
             if hasattr(self.state, 'lifecycle_stage'):
-                if state_metrics['lifecycle_stage'] == 'exploration':
+                old_stage = self.state.lifecycle_stage
+                if state_metrics and state_metrics.get('lifecycle_stage') == 'exploration':
                     self.state.lifecycle_stage = 'consolidation'
-            
-            # Log recovery actions
+                    recovery_actions.append({
+                        'action': 'update_lifecycle_stage',
+                        'old_stage': old_stage,
+                        'new_stage': self.state.lifecycle_stage
+                    })
             self.logger.record_event(
                 event_type="state_driven_recovery",
                 message=f"Applied state-driven recovery for {context} error",
                 level="info",
                 additional_info={
                     'error_type': type(error).__name__,
-                    'recovery_actions': {
-                        'memory_optimized': isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)),
-                        'batch_size_adjusted': state_metrics['confidence'] < 0.3,
-                        'temperament_adjusted': hasattr(self.state, 'temperament_score'),
-                        'lifecycle_updated': hasattr(self.state, 'lifecycle_stage')
-                    }
+                    'recovery_actions': recovery_actions,
+                    'state_metrics': state_metrics
                 }
             )
-            
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"Failed to apply state-driven recovery: {str(e)}",
@@ -341,80 +345,6 @@ class GenerationManager:
             
         return params
 
-    def update_temperament(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
-        """
-        Update the temperament system with new values.
-        
-        Args:
-            new_score: New temperament score (0.0 to 1.0)
-            confidence: Confidence level in the update (0.0 to 1.0)
-            lifecycle_stage: Current lifecycle stage
-        """
-        try:
-            # Validate inputs
-            if not isinstance(new_score, (int, float)) or not 0.0 <= new_score <= 1.0:
-                self.logger.record_event(
-                    event_type="temperament_update_invalid_score",
-                    message=f"Invalid temperament score: {new_score}. Ignoring update.",
-                    level="warning",
-                    additional_info={
-                        "lifecycle_stage": lifecycle_stage,
-                        "current_score": self.state.temperament_score
-                    }
-                )
-                return
-
-            if not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
-                self.logger.record_event(
-                    event_type="temperament_update_invalid_confidence",
-                    message=f"Invalid confidence: {confidence}. Ignoring update.",
-                    level="warning",
-                    additional_info={
-                        "lifecycle_stage": lifecycle_stage,
-                        "current_score": self.state.temperament_score
-                    }
-                )
-                return
-                
-            # Get configuration values
-            smoothing_factor = self._get_config_value("controls_config.temp_smoothing_factor", 0.5)
-            feedback_strength = self._get_config_value("controls_config.conf_feedback_strength", 0.5)
-            
-            # Update state with new score
-            self.state.temperament_score = new_score
-            self.state.temperament_history.append(new_score)
-            
-            # Log the update
-            self.logger.record_event(
-                event_type="temperament_updated",
-                message="Temperament system updated",
-                level="info",
-                additional_info={
-                    "new_score": new_score,
-                    "confidence": confidence,
-                    "lifecycle_stage": lifecycle_stage,
-                    "current_score": self.state.temperament_score,
-                    "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash,
-                    "smoothing_factor": smoothing_factor,
-                    "feedback_strength": feedback_strength
-                }
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_update_error",
-                message=f"Failed to update temperament: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc(),
-                    "lifecycle_stage": lifecycle_stage,
-                    "current_score": self.state.temperament_score
-                }
-            )
-            raise
-
     @property
     def current_temperament_score(self) -> float:
         """Get the current temperament score."""
@@ -430,69 +360,6 @@ class GenerationManager:
             return "Balanced"
         else:
             return "Curious"
-
-    def adjust_parameter(
-        self,
-        base_value: float,
-        parameter_type: str,
-        curiosity_pressure: Optional[float] = None
-    ) -> float:
-        """Adjust a parameter based on current temperament and curiosity pressure."""
-        try:
-            # Validate inputs
-            if not 0.0 <= base_value <= 1.0:
-                raise ValueError(f"Base value must be between 0.0 and 1.0, got {base_value}")
-            if curiosity_pressure is not None and not 0.0 <= curiosity_pressure <= 1.0:
-                raise ValueError(f"Curiosity pressure must be between 0.0 and 1.0, got {curiosity_pressure}")
-            
-            # Get current temperament score
-            current_score = self.current_temperament_score
-            
-            # Calculate adjustment based on parameter type
-            if parameter_type == "temperature":
-                # Base adjustment from temperament
-                adjustment = (current_score - 0.5) * 0.3  # Scale to ±0.15
-                
-                # Add curiosity influence if available
-                if curiosity_pressure is not None:
-                    adjustment += curiosity_pressure * 0.2  # Scale to +0.2
-                
-                # Apply adjustment with bounds
-                adjusted_value = base_value + adjustment
-                adjusted_value = max(0.1, min(1.0, adjusted_value))
-                
-                # Log the adjustment
-                self.logger.record_event(
-                    event_type="parameter_adjusted",
-                    message="Parameter adjusted",
-                    level="info",
-                    additional_info={
-                        "parameter_type": parameter_type,
-                        "base_value": base_value,
-                        "adjusted_value": adjusted_value,
-                        "temperament_score": current_score,
-                        "curiosity_pressure": curiosity_pressure,
-                        "adjustment": adjustment
-                    }
-                )
-                
-                return adjusted_value
-                
-            else:
-                raise ValueError(f"Unsupported parameter type: {parameter_type}")
-                
-        except Exception as e:
-            self.logger.record_event(
-                event_type="parameter_adjustment_error",
-                message=f"Failed to adjust parameter: {str(e)}",
-                level="error",
-                additional_info={
-                    "parameter_type": parameter_type,
-                    "base_value": base_value,
-                    "curiosity_pressure": curiosity_pressure
-                }
-            )
-            return base_value  # Return base value on error
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
@@ -931,40 +798,8 @@ class GenerationManager:
         return seq_ids
 
     def _update_curiosity(self, text: str, confidence: float) -> None:
-        """Update curiosity state with generated text and confidence."""
-        try:
-            if not self.curiosity_manager:
-                return
-                
-            # Tokenize and get embeddings for the generated text
-            inputs = self.base_tokenizer(text, return_tensors="pt")
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            with torch.no_grad():
-                outputs = self.base_model(**inputs, output_hidden_states=True)
-                text_embedding = outputs.hidden_states[-1].mean(dim=1)
-            
-            # Update curiosity with the new text and confidence
-            self.curiosity_manager.update_curiosity(
-                text=text,
-                confidence=confidence,
-                embedding=text_embedding
-            )
-            
-            # Log curiosity update
-            self.logger.log_event(
-                event_type="curiosity_update",
-                message="Curiosity updated",
-                level="info",
-                additional_info={
-                    "text": text[:200],  # Log first 200 chars
-                    "confidence": confidence,
-                    "embedding_shape": text_embedding.shape,
-                    "curiosity_pressure": self.curiosity_manager.get_pressure()
-                }
-            )
-            
-        except Exception as e:
-            self._handle_error("curiosity_update", e)
+        """[DEPRECATED] Use self.primer.update_curiosity_state instead."""
+        self.primer.update_curiosity_state(text, confidence)
 
     @synchronized()
     def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: torch.Tensor, state, error_manager, context, curiosity_manager=None) -> float:
@@ -1045,22 +880,30 @@ class GenerationManager:
 
         try:
             # --- Always-on Memory: Retrieve context ---
-            # Try to retrieve both short-term and long-term context from SystemContext if available
             system_context = getattr(self, "system_context", None)
             memory_context = None
             if system_context and hasattr(system_context, "get_short_term_context"):
                 short_ctx = system_context.get_short_term_context()
                 long_ctx = system_context.get_long_term_context(user_id=user_id)
-                # Compose memory context as a string (customize as needed)
                 memory_context = self._compose_memory_context(short_ctx, long_ctx)
             else:
                 memory_context = None
 
-            # --- BondModulator: Retrieve bond context (if enabled) ---
+            # --- Retrieve all trait values from GenerationPrimer ---
+            traits = self.primer.prepare_for_generation(prompt, user_id=user_id, metadata_entries=metadata_entries, **kwargs)
+            # Safely handle None values for traits
+            temperament = traits.get("temperament", 0.5)
+            if temperament is None:
+                temperament = 0.5  # Default neutral value
+                self.logger.log_warning("Temperament trait missing, using default value 0.5")
+            curiosity = traits.get("curiosity", 0.0)
+            if curiosity is None:
+                curiosity = 0.0
+                self.logger.log_warning("Curiosity trait missing, using default value 0.0")
+            bond_score = traits.get("bond")
             bond_context = None
-            bond_score = None
-            if self.generation_hooks.get("bonding", True) and metadata_entries is not None:
-                bond_context, bond_score = self.bond_modulator.get_bond_modulation(metadata_entries)
+            if bond_score is not None:
+                bond_context = f"Bond score: {bond_score:.2f}"
 
             # --- Compose prompt with memory and bond context ---
             composite_prompt = prompt
@@ -1080,16 +923,19 @@ class GenerationManager:
             model_device = next(self.base_model.parameters()).device
             inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
-            # --- Add generation parameters ---
+            # --- Add generation parameters and trait-driven adjustments ---
             gen_kwargs = {"num_return_sequences": num_return_sequences}
             gen_kwargs.update(kwargs)
+            # Example: adjust temperature using traits
+            base_temp = gen_kwargs.get("temperature", 1.0)
+            gen_kwargs["temperature"] = self.primer.adjust_parameter(base_temp, "temperature", temperament=temperament, curiosity=curiosity)
 
             # --- Generate text ---
             output_sequences = self.base_model.generate(**inputs, **gen_kwargs)
             generated_texts = [self.base_tokenizer.decode(seq, skip_special_tokens=True) for seq in output_sequences]
 
-            # --- Optionally: log bond score/context for this generation ---
-            if self.generation_hooks.get("bonding", True):
+            # --- Log bond score/context for this generation if present ---
+            if bond_score is not None:
                 self.logger.record_event(
                     event_type="bond_modulation_applied",
                     message="Bond context applied to generation",
@@ -1215,7 +1061,7 @@ class GenerationManager:
             
             # Apply any state-based adjustments
             if hasattr(self, 'state') and hasattr(self.state, 'temperament_score'):
-                config['temperature'] = self.adjust_parameter(
+                config['temperature'] = self.primer.adjust_parameter(
                     config['temperature'],
                     'temperature',
                     self.curiosity_manager.get_pressure() if self.curiosity_manager else None
@@ -1444,83 +1290,6 @@ class GenerationManager:
             # Ensure memory cleanup
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-
-    @state_managed_operation("apply_curiosity")
-    def _apply_curiosity(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply curiosity-driven adjustments to the generation batch (simple: direct score multiplier)."""
-        if not self.curiosity_manager or not self.generation_hooks.get("curiosity", True):
-            return batch
-        
-        curiosity_state = self.curiosity_manager.get_state()
-        if not curiosity_state:
-            return batch
-        
-        curiosity_score = curiosity_state.score  # Expect [0, 1]
-        # Use curiosity_score directly as a multiplier for max_length (preserve varying length)
-        base_max_length = batch.get("max_length", 100)
-        min_multiplier = 0.8
-        max_multiplier = 1.2
-        multiplier = min_multiplier + (max_multiplier - min_multiplier) * curiosity_score
-        batch["max_length"] = int(base_max_length * multiplier)
-        # Optionally, temperature could also be adjusted similarly if desired:
-        # batch["temperature"] = batch.get("temperature", 1.0) * multiplier
-        return batch
-
-    @state_managed_operation("update_temperament")
-    def update_temperament(self, new_score: float, confidence: float, lifecycle_stage: str) -> None:
-        """Update the temperament system with new values."""
-        if not isinstance(new_score, (int, float)) or not 0.0 <= new_score <= 1.0:
-            raise ValueError(f"Invalid temperament score: {new_score}")
-        
-        self.state.temperament_score = new_score
-        self.state.temperament_history.append(new_score)
-
-    @state_managed_operation("apply_confidence_adjustments")
-    def _apply_confidence_adjustments(self, base_confidence: float) -> float:
-        """Apply confidence adjustments based on temperament and lifecycle."""
-        temperament_score = self.current_temperament_score
-        lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage() if self.lifecycle_manager else "active"
-        lifecycle_multiplier = 1.0  # Removed LIFECYCLE_STAGE_MULTIPLIERS
-        return base_confidence * temperament_score * lifecycle_multiplier
-
-    @state_managed_operation("apply_temperament")
-    def _apply_temperament(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply temperament-based adjustments to the generation batch."""
-        temperament_state = self.state.temperament
-        if not temperament_state or not self.generation_hooks.get("temperament", True):
-            return batch
-        
-        temperature = batch.get("temperature", 1.0)
-        max_length = batch.get("max_length", 100)
-        
-        mood_label = temperament_state.current_mood_label
-        if mood_label == "excited":
-            temperature *= 1.2
-        elif mood_label == "calm":
-            temperature *= 0.8
-        
-        if temperament_state.score > 0.7:
-            max_length = int(max_length * 1.1)
-        
-        batch["temperature"] = temperature
-        batch["max_length"] = max_length
-        return batch
-
-    @state_managed_operation("apply_lifecycle_adjustments")
-    def _apply_lifecycle_adjustments(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Apply lifecycle adjustments fluidly based on data_exposure (conservative as exposure increases)."""
-        # Retrieve data_exposure from training state
-        data_exposure = getattr(getattr(self.state, 'training_state', None), 'data_exposure', 0.0)
-        data_exposure = max(0.0, min(1.0, data_exposure))  # Clamp to [0, 1]
-
-        # As data_exposure increases, become more conservative (lower multiplier)
-        min_mult = 0.8  # Most exploratory
-        max_mult = 1.2  # Most conservative
-        multiplier = max_mult - (max_mult - min_mult) * data_exposure  # Inverse mapping
-
-        batch["temperature"] = batch.get("temperature", 1.0) * multiplier
-        batch["max_length"] = int(batch.get("max_length", 100) * multiplier)
-        return batch
 
     def _calculate_adaptive_threshold(self) -> float:
         """Calculate adaptive memory threshold based on system load and model size."""
