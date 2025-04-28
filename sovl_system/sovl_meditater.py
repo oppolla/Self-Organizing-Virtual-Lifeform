@@ -20,7 +20,7 @@ from sovl_generation import GenerationManager
 from sovl_queue import capture_scribe_event
 
 class IntrospectionManager:
-    """Manages hidden ethical introspection with smart triggering, integrated with SOVL system."""
+    """Manages hidden introspection system with smart triggering."""
 
     def __init__(
         self,
