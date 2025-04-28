@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from sovl_logger import Logger
 from sovl_error import ErrorManager
+import json
+import threading
 
 """
 Centralized queue system for SOVL component communication.
@@ -17,6 +19,9 @@ logger = Logger(__name__)
 # Constants for queue management
 MAX_QUEUE_SIZE = 2000  # Maximum number of entries in queue
 WARNING_THRESHOLD = 0.8  # Warn when queue is 80% full
+FALLBACK_PATH = "scribe_fallback.jsonl"
+CRITICAL_EVENT_TYPES = {"checkpoint", "training_complete"}
+_fallback_lock = threading.Lock()
 
 @dataclass
 class ScribeEntry:
@@ -53,7 +58,7 @@ def capture_scribe_event(
         timestamp: Optional specific timestamp; defaults to now().
 
     Returns:
-        bool: True if the event was successfully queued, False otherwise.
+        bool: True if the event was successfully queued or written to fallback, False otherwise.
     """
     try:
         entry = ScribeEntry(
@@ -64,16 +69,27 @@ def capture_scribe_event(
             session_id=session_id,
             timestamp=timestamp or datetime.now()
         )
-        
-        # Attempt to put the entry into the queue
+        # Block for critical events, else use timeout
         try:
-            scribe_queue.put(entry, timeout=0.1)
-            logger.debug(f"Successfully queued entry from {origin} with event type {event_type}")
-            return True
+            if event_type in CRITICAL_EVENT_TYPES:
+                scribe_queue.put(entry, block=True)
+                logger.debug(f"Successfully queued CRITICAL entry from {origin} with event type {event_type}")
+                return True
+            else:
+                scribe_queue.put(entry, timeout=0.1)
+                logger.debug(f"Successfully queued entry from {origin} with event type {event_type}")
+                return True
         except queue.Full:
-            logger.warning(f"Scribe queue is full! Dropping event from {origin} ({event_type})")
-            return False
-            
+            logger.warning(f"Scribe queue full, writing to fallback for {origin} ({event_type})")
+            try:
+                with _fallback_lock:
+                    with open(FALLBACK_PATH, "a", encoding="utf-8") as f:
+                        json.dump(entry.__dict__, f, default=str)
+                        f.write("\n")
+                return True
+            except Exception as fallback_err:
+                logger.error(f"Failed to write scribe event to fallback: {fallback_err}")
+                return False
     except Exception as e:
         logger.error(f"Unexpected error queuing scribe event from {origin} ({event_type}): {e}", exc_info=True)
         return False

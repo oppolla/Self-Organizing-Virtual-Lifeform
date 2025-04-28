@@ -267,31 +267,51 @@ class Scriber:
 
     def shutdown(self) -> None:
         """Signals writer thread to stop, waits, and closes resources."""
+        import time
+        import json
+
         self.logger.info("Initiating Scriber shutdown...")
 
         # Signal the writer thread to stop
         self._stop_event.set()
 
+        # Forced flush and retry before join
+        for attempt in range(3):
+            try:
+                with self.jsonl_writer.lock:
+                    self.jsonl_writer._flush_buffer()
+                break
+            except Exception as e:
+                self.fallback_logger.error(f"Flush retry {attempt+1} failed: {e}")
+                time.sleep(1)
+
         # Wait for the writer thread to finish
         if self._writer_thread.is_alive():
-            self._writer_thread.join(timeout=10) # Add timeout
+            self._writer_thread.join(timeout=10)
             if self._writer_thread.is_alive():
-                self.fallback_logger.error("Writer thread did not exit gracefully.")
+                self.fallback_logger.error("Writer thread did not exit gracefully. Forcing shutdown and logging remaining queue items to fallback.")
+                # Log remaining queue items to a shutdown fallback file
+                shutdown_fallback = "scribe_shutdown_fallback.jsonl"
+                while not self.scribe_queue.empty():
+                    try:
+                        entry = self.scribe_queue.get_nowait()
+                        with open(shutdown_fallback, "a", encoding="utf-8") as f:
+                            json.dump(entry.__dict__, f, default=str)
+                            f.write("\n")
+                        self.scribe_queue.task_done()
+                    except queue.Empty:
+                        break
+                    except Exception as e:
+                        self.fallback_logger.error(f"Failed to write shutdown fallback: {e}")
 
-        # Now close the JsonlWriter
-        try:
-            self.jsonl_writer.close()
-        except Exception as e:
-            self.fallback_logger.exception(
-                "Error closing scribe file"
-            )
-            self.error_manager.handle_error(
-                e,
-                error_type="io",
-                context={
-                    "error_type": "close_error"
-                }
-            )
+        # Retry closing the JsonlWriter up to 3 times
+        for attempt in range(3):
+            try:
+                self.jsonl_writer.close()
+                break
+            except Exception as e:
+                self.fallback_logger.error(f"Close retry {attempt+1} failed: {e}")
+                time.sleep(1)
 
         self.logger.info("Scriber shutdown complete.")
 
