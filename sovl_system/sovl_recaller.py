@@ -125,8 +125,8 @@ class LongTermMemory:
     """
     Handles persistent, vector-searchable conversation storage using SQLite and FAISS.
     """
-    def __init__(self, db_path: str, embedding_dim: int, session_id: str, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, retention_days: Optional[int] = None, top_k: int = 5, logging_level: str = "info"):
-        # Use config_manager for db_path, embedding_dim, retention_days, top_k, logging_level if provided
+    def __init__(self, db_path: str, embedding_dim: int, session_id: str, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, retention_days: Optional[int] = None, top_k: int = 5, logging_level: str = "info", max_records: int = 10000):
+        # Use config_manager for db_path, embedding_dim, retention_days, top_k, logging_level, max_records if provided
         if config_manager is not None:
             try:
                 db_path = config_manager.get("memory.db_path", db_path)
@@ -134,6 +134,7 @@ class LongTermMemory:
                 retention_days = config_manager.get("memory.long_term_retention_days", retention_days)
                 top_k = config_manager.get("memory.long_term_top_k", top_k)
                 logging_level = config_manager.get("memory.memory_logging_level", logging_level)
+                max_records = config_manager.get("memory.long_term_max_records", max_records)
             except Exception as e:
                 if logger:
                     logger.log_error(f"LongTermMemory failed to get config values: {e}", error_type="LongTermMemoryError")
@@ -142,6 +143,7 @@ class LongTermMemory:
         self.session_id = session_id
         self.retention_days = retention_days
         self.top_k = top_k
+        self.max_records = max_records
         self._lock = Lock()
         self.logger = logger or Logger.get_instance()
         self.logging_level = logging_level
@@ -149,32 +151,65 @@ class LongTermMemory:
             self._init_database()
             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
             self.message_ids = []
+            self.rebuild_faiss_index()
             self.logger.record_event(
                 event_type="long_term_memory_init",
-                message=f"LongTermMemory initialized with db_path={db_path}, embedding_dim={embedding_dim}, session_id={session_id}, retention_days={retention_days}, top_k={top_k}",
+                message=f"LongTermMemory initialized with db_path={db_path}, embedding_dim={embedding_dim}, session_id={session_id}, retention_days={retention_days}, top_k={top_k}, max_records={max_records}",
                 level=logging_level
             )
         except Exception as e:
             self.logger.log_error(f"LongTermMemory.__init__ failed: {e}", error_type="LongTermMemoryError")
 
-    # Example: prune old records by retention_days (to be called after add or periodically)
-    def prune_expired(self):
-        if self.retention_days is not None:
-            try:
-                cutoff = time.time() - self.retention_days * 86400
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM conversations WHERE timestamp < ?", (cutoff,))
-                    conn.commit()
-                self.logger.record_event(
-                    event_type="long_term_memory_prune",
-                    message="Pruned expired long-term memory records.",
-                    level=self.logging_level
-                )
-            except Exception as e:
-                self.logger.log_error(f"LongTermMemory.prune_expired failed: {e}", error_type="LongTermMemoryError")
+    def _init_database(self):
+        # This method is assumed to exist as it's called in __init__
+        pass
 
-    # You may want to call this inside add() or as a periodic maintenance task
+    def rebuild_faiss_index(self):
+        """Rebuild the in-memory FAISS index and message_ids from the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, embedding FROM conversations WHERE session_id = ? ORDER BY id ASC", (self.session_id,))
+                rows = cursor.fetchall()
+                if rows:
+                    embeddings = np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
+                    self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+                    self.faiss_index.add(embeddings)
+                    self.message_ids = [row[0] for row in rows]
+                else:
+                    self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+                    self.message_ids = []
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory.rebuild_faiss_index failed: {e}", error_type="LongTermMemoryError")
+
+    def _count_records(self) -> int:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM conversations WHERE session_id = ?", (self.session_id,))
+                count = cursor.fetchone()[0]
+                return count
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory._count_records failed: {e}", error_type="LongTermMemoryError")
+            return 0
+
+    def _log_db_size(self, warning_threshold_mb: int = 100):
+        try:
+            if os.path.exists(self.db_path):
+                size_mb = os.path.getsize(self.db_path) / (1024 * 1024)
+                self.logger.record_event(
+                    event_type="long_term_memory_db_size",
+                    message=f"LongTermMemory DB size: {size_mb:.2f} MB",
+                    level="info"
+                )
+                if size_mb > warning_threshold_mb:
+                    self.logger.record_event(
+                        event_type="long_term_memory_db_size_warning",
+                        message=f"LongTermMemory DB size exceeds {warning_threshold_mb} MB: {size_mb:.2f} MB",
+                        level="warning"
+                    )
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory._log_db_size failed: {e}", error_type="LongTermMemoryError")
 
     def add(self, msg: Dict[str, Any]):
         try:
@@ -189,6 +224,41 @@ class LongTermMemory:
                     conn.commit()
                 self.faiss_index.add(msg["embedding"].reshape(1, -1))
                 self.message_ids.append(msg_id)
+                # Monitoring: log record count and warn if near capacity
+                record_count = self._count_records()
+                self.logger.record_event(
+                    event_type="long_term_memory_record_count",
+                    message=f"LongTermMemory record count: {record_count}/{self.max_records}",
+                    level="info"
+                )
+                if record_count > 0.9 * self.max_records:
+                    self.logger.record_event(
+                        event_type="long_term_memory_near_capacity",
+                        message=f"LongTermMemory record count is above 90% of max_records: {record_count}/{self.max_records}",
+                        level="warning"
+                    )
+                # Enforce max_records limit
+                if record_count > self.max_records:
+                    with sqlite3.connect(self.db_path) as conn:
+                        cursor = conn.cursor()
+                        # Find IDs of oldest records to delete
+                        cursor.execute(
+                            "SELECT id FROM conversations WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?",
+                            (self.session_id, record_count - self.max_records)
+                        )
+                        ids_to_delete = [row[0] for row in cursor.fetchall()]
+                        if ids_to_delete:
+                            placeholders = ','.join('?' for _ in ids_to_delete)
+                            cursor.execute(f"DELETE FROM conversations WHERE id IN ({placeholders})", ids_to_delete)
+                            conn.commit()
+                            self.logger.record_event(
+                                event_type="long_term_memory_pruned_to_limit",
+                                message=f"Pruned {len(ids_to_delete)} oldest records to enforce max_records limit.",
+                                level="info"
+                            )
+                            self.rebuild_faiss_index()
+                # Log DB size
+                self._log_db_size()
                 self.logger.record_event(
                     event_type="long_term_memory_add",
                     message="Message added to LongTermMemory.",
@@ -201,36 +271,41 @@ class LongTermMemory:
     def query(self, query_embedding: np.ndarray, user_id: Optional[str] = None, top_k: int = 5, short_term_memory: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         try:
             with self._lock:
+                if len(self.message_ids) == 0:
+                    self.logger.record_event(
+                        event_type="long_term_memory_query_empty",
+                        message="No rows found for LongTermMemory query.",
+                        level=self.logging_level
+                    )
+                    return []
+                # Use in-memory FAISS index for fast search
+                k = min(top_k, len(self.message_ids))
+                D, I = self.faiss_index.search(query_embedding.reshape(1, -1), k)
+                # Map indices to message IDs
+                result_ids = [self.message_ids[i] for i in I[0]]
+                # Fetch corresponding rows from DB
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
-                    where = "WHERE session_id = ?"
-                    params = [self.session_id]
+                    placeholders = ','.join('?' for _ in result_ids)
+                    where = f"WHERE id IN ({placeholders}) AND session_id = ?"
+                    params = result_ids + [self.session_id]
                     if user_id:
                         where += " AND user_id = ?"
                         params.append(user_id)
                     cursor.execute(f"SELECT id, role, content, embedding, timestamp, user_id FROM conversations {where}", params)
                     rows = cursor.fetchall()
-                    if not rows:
-                        self.logger.record_event(
-                            event_type="long_term_memory_query_empty",
-                            message="No rows found for LongTermMemory query.",
-                            level=self.logging_level
-                        )
-                        return []
-                    embeddings = np.stack([np.frombuffer(row[3], dtype=np.float32) for row in rows])
-                    faiss_index = faiss.IndexFlatL2(self.embedding_dim)
-                    faiss_index.add(embeddings)
-                    D, I = faiss_index.search(query_embedding.reshape(1, -1), min(top_k, len(rows)))
+                    # Preserve order of result_ids
+                    id_to_row = {row[0]: row for row in rows}
                     results = [
                         {
-                            "id": rows[i][0],
-                            "role": rows[i][1],
-                            "content": rows[i][2],
-                            "timestamp": rows[i][4],
-                            "user_id": rows[i][5],
+                            "id": id_to_row[rid][0],
+                            "role": id_to_row[rid][1],
+                            "content": id_to_row[rid][2],
+                            "timestamp": id_to_row[rid][4],
+                            "user_id": id_to_row[rid][5],
                             "session_id": self.session_id
                         }
-                        for i in I[0]
+                        for rid in result_ids if rid in id_to_row
                     ]
                     self.logger.record_event(
                         event_type="long_term_memory_query",
@@ -253,8 +328,7 @@ class LongTermMemory:
                     else:
                         cursor.execute("DELETE FROM conversations WHERE session_id = ?", (self.session_id,))
                     conn.commit()
-                self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
-                self.message_ids = []
+                self.rebuild_faiss_index()
                 self.logger.record_event(
                     event_type="long_term_memory_clear",
                     message="LongTermMemory cleared.",

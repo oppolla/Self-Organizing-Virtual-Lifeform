@@ -9,6 +9,8 @@ from sovl_config import ConfigManager
 from sovl_state import SOVLState  # Import for type clarity and direct integration
 import traceback
 import threading
+import concurrent.futures
+import time
 
 class GenerationPrimer:
     """
@@ -141,79 +143,114 @@ class GenerationPrimer:
         if self.error_manager:
             self.error_manager.handle_data_error(error, error_info, component="GenerationPrimer")
 
+    def _with_timeout(self, func, timeout, fallback, trait_name, *args, **kwargs):
+        """Run func with timeout, return fallback on timeout or error."""
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(func, *args, **kwargs)
+                return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            self.logger.log_warning(
+                f"Trait '{trait_name}' computation timed out after {timeout}s; using fallback.",
+                event_type="trait_timeout",
+                component="GenerationPrimer"
+            )
+            return fallback
+        except Exception as e:
+            self.logger.log_warning(
+                f"Trait '{trait_name}' computation failed: {e}; using fallback.",
+                event_type="trait_error",
+                component="GenerationPrimer"
+            )
+            return fallback
+
     def compute_traits(self, **kwargs) -> Dict[str, Any]:
         """
         Aggregates trait values from all connected modules, respecting generation hooks.
         Returns a dictionary with all trait outputs.
         Validates trait managers and state compatibility.
+        Now uses parallel fetching, timeouts, and fallbacks for each trait.
         """
         traits = {}
         state_arg = kwargs.get("state", self.state)
-        # Validate state_arg type
         if not isinstance(state_arg, SOVLState):
             self.logger.log_error("Invalid state type for trait computation", error_type="primer_state_type_error")
             return {}
 
-        # Curiosity
-        if self.generation_hooks.get("curiosity", True):
-            if not self.curiosity_manager or not hasattr(self.curiosity_manager, 'compute_curiosity'):
-                self.logger.log_error("Curiosity manager missing or invalid", error_type="primer_curiosity_manager_error")
-                traits["curiosity"] = None
-            else:
+        timeout = 1.5  # seconds
+        trait_jobs = {}
+        trait_fallbacks = {
+            "curiosity": 0.5,
+            "temperament": 0.5,
+            "confidence": 0.5,
+            "bond": 0.5
+        }
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            # Curiosity
+            if self.generation_hooks.get("curiosity", True):
+                if not self.curiosity_manager or not hasattr(self.curiosity_manager, 'compute_curiosity'):
+                    self.logger.log_error("Curiosity manager missing or invalid", error_type="primer_curiosity_manager_error")
+                    traits["curiosity"] = trait_fallbacks["curiosity"]
+                else:
+                    trait_jobs["curiosity"] = executor.submit(
+                        lambda: self.curiosity_manager.compute_curiosity(state=state_arg, **kwargs)
+                    )
+            # Temperament
+            if self.generation_hooks.get("temperament", True):
+                if not self.temperament_system or not hasattr(self.temperament_system, 'current_score'):
+                    self.logger.log_error("Temperament system missing or invalid", error_type="primer_temperament_manager_error")
+                    traits["temperament"] = trait_fallbacks["temperament"]
+                else:
+                    trait_jobs["temperament"] = executor.submit(
+                        lambda: self.temperament_system.current_score(state=state_arg)
+                    )
+            # Confidence
+            if self.generation_hooks.get("confidence", True):
+                if not self.confidence_calculator or not hasattr(self.confidence_calculator, 'calculate_confidence_score'):
+                    self.logger.log_error("Confidence calculator missing or invalid", error_type="primer_confidence_manager_error")
+                    traits["confidence"] = trait_fallbacks["confidence"]
+                else:
+                    trait_jobs["confidence"] = executor.submit(
+                        lambda: self.confidence_calculator.calculate_confidence_score(state=state_arg, **kwargs)
+                    )
+            # Bond
+            if self.generation_hooks.get("bond", True):
+                if not self.bond_calculator or not hasattr(self.bond_calculator, 'calculate_bond'):
+                    self.logger.log_error("Bond calculator missing or invalid", error_type="primer_bond_manager_error")
+                    traits["bond"] = trait_fallbacks["bond"]
+                else:
+                    def bond_func():
+                        bond_score = self.bond_calculator.calculate_bond(state=state_arg, **kwargs)
+                        if self.bond_modulator:
+                            try:
+                                bond_score = self.bond_modulator.get_bond_modulation(kwargs.get("user_id"), bond_score)
+                            except Exception as e:
+                                self.logger.log_warning(f"BondModulator failed: {str(e)}", error_type="bond_modulation_error")
+                        return bond_score
+                    trait_jobs["bond"] = executor.submit(bond_func)
+            # Collect results with timeout and fallback
+            for trait, future in trait_jobs.items():
                 try:
-                    traits["curiosity"] = self.curiosity_manager.compute_curiosity(state=state_arg, **kwargs)
+                    traits[trait] = future.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    self.logger.log_warning(
+                        f"Trait '{trait}' computation timed out after {timeout}s; using fallback.",
+                        event_type="trait_timeout",
+                        component="GenerationPrimer"
+                    )
+                    traits[trait] = trait_fallbacks[trait]
                 except Exception as e:
-                    traits["curiosity"] = None
-                    self.handle_error("curiosity_computation", e, {"kwargs": kwargs})
-
-        # Temperament
-        if self.generation_hooks.get("temperament", True):
-            if not self.temperament_system or not hasattr(self.temperament_system, 'current_score'):
-                self.logger.log_error("Temperament system missing or invalid", error_type="primer_temperament_manager_error")
-                traits["temperament"] = None
-            else:
-                try:
-                    traits["temperament"] = self.temperament_system.current_score(state=state_arg)
-                except Exception as e:
-                    traits["temperament"] = None
-                    self.handle_error("temperament_computation", e, {"kwargs": kwargs})
-
-        # Confidence
-        if self.generation_hooks.get("confidence", True):
-            if not self.confidence_calculator or not hasattr(self.confidence_calculator, 'calculate_confidence_score'):
-                self.logger.log_error("Confidence calculator missing or invalid", error_type="primer_confidence_manager_error")
-                traits["confidence"] = None
-            else:
-                try:
-                    traits["confidence"] = self.confidence_calculator.calculate_confidence_score(state=state_arg, **kwargs)
-                except Exception as e:
-                    traits["confidence"] = None
-                    self.handle_error("confidence_computation", e, {"kwargs": kwargs})
-
-        # Bond
-        if self.generation_hooks.get("bond", True):
-            if not self.bond_calculator or not hasattr(self.bond_calculator, 'calculate_bond'):
-                self.logger.log_error("Bond calculator missing or invalid", error_type="primer_bond_manager_error")
-                traits["bond"] = None
-            else:
-                try:
-                    bond_score = self.bond_calculator.calculate_bond(state=state_arg, **kwargs)
-                    if self.bond_modulator:
-                        try:
-                            bond_score = self.bond_modulator.get_bond_modulation(kwargs.get("user_id"), bond_score)
-                        except Exception as e:
-                            self.logger.log_warning(f"BondModulator failed: {str(e)}", error_type="bond_modulation_error")
-                    traits["bond"] = bond_score
-                except Exception as e:
-                    traits["bond"] = None
-                    self.handle_error("bond_computation", e, {"kwargs": kwargs})
-
+                    self.logger.log_warning(
+                        f"Trait '{trait}' computation failed: {e}; using fallback.",
+                        event_type="trait_error",
+                        component="GenerationPrimer"
+                    )
+                    traits[trait] = trait_fallbacks[trait]
         # Fail fast if required traits are missing
         required_traits = ["curiosity", "temperament"]
         missing = [t for t in required_traits if traits.get(t) is None]
         if missing:
             raise RuntimeError(f"Failed to compute required traits: {missing}")
-
         return traits
 
     def get_traits_for_generation(self, prompt: str, **kwargs) -> Dict[str, Any]:
