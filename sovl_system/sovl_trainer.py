@@ -723,7 +723,7 @@ class TrainingWorkflowManager:
         return 0.0, {"status": "error", "error": str(last_exception) if last_exception else "unknown_error"}
         
     def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
-        """Run gestation cycle with metadata enrichment using the modular pipeline."""
+        """Run gestation cycle with metadata enrichment using the modular pipeline. Supports multiple scaffolds and robust validation."""
         # Use modular pipeline for metadata enrichment and batch preparation
         metadata_processor = getattr(self.trainer, 'metadata_processor', None)
         tokenizer = getattr(self.trainer, 'tokenizer', None)
@@ -732,65 +732,83 @@ class TrainingWorkflowManager:
         logger = getattr(self, 'logger', None)
         model_manager = getattr(self, 'model_manager', None)
         training_manager = getattr(self.trainer, 'training_manager', None)
-        lora_manager = None
-        scaffold_model = None
-        if model_manager:
-            # Assume first scaffold and lora_manager for simplicity
-            scaffold_model = model_manager.scaffold_models[0] if model_manager.scaffold_models else None
-            lora_manager = model_manager.lora_managers[0] if hasattr(model_manager, 'lora_managers') and model_manager.lora_managers else None
-        
-        if not (metadata_processor and tokenizer and device and batch_preparer and scaffold_model and lora_manager):
-            if logger:
-                logger.log_error("Gestation prerequisites not met (metadata_processor, tokenizer, device, batch_preparer, scaffold_model, lora_manager)", event_type="gestation_prereq_error")
-            return
-
-        # Prepare training batch from conversation history
-        try:
-            enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
-            batch = batch_preparer.prepare(enriched_samples)
-        except Exception as e:
-            if logger:
-                logger.log_error(f"Error during gestation batch preparation: {str(e)}", error_type="gestation_batch_error", stack_trace=traceback.format_exc())
-            return
-
-        # Train LoRA parameters only
-        try:
-            optimizer = torch.optim.AdamW(lora_manager.lora_parameters(scaffold_model), lr=2e-5)
-            # Simple training loop for one batch (extend as needed)
-            scaffold_model.train()
-            optimizer.zero_grad()
-            outputs = scaffold_model(**batch)
-            loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-            loss.backward()
-            optimizer.step()
-            if logger:
-                logger.log_info(f"Gestation LoRA training step complete. Loss: {loss.item()}", event_type="gestation_lora_train")
-        except Exception as e:
-            if logger:
-                logger.log_error(f"Error during gestation LoRA training step: {str(e)}", error_type="gestation_lora_training_error", stack_trace=traceback.format_exc())
-            return
-
-        # Save LoRA weights as long-term memory
-        try:
-            import os
-            from datetime import datetime
-            lora_dir = "lora_checkpoints"
-            os.makedirs(lora_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            lora_path = os.path.join(lora_dir, f"lora_{timestamp}.pt")
-            lora_manager.save_lora_weights(scaffold_model, lora_path)
-            if model_manager:
-                model_manager.set_active_lora_checkpoint(lora_path)
-            if logger:
-                logger.log_info(f"LoRA weights saved after gestation to {lora_path}", event_type="gestation_lora_save")
-        except Exception as e:
-            if logger:
-                logger.log_error(f"Error saving LoRA weights after gestation: {str(e)}", error_type="gestation_lora_save_error", stack_trace=traceback.format_exc())
-            return
-
-        # === DREAMER INTEGRATION ===
-        # At the end of gestation, run the Dreamer cycle if available
         dreamer = getattr(self.trainer, 'dreamer', None)
+        state = getattr(self, 'state', None)
+    
+        # Validate conversation history
+        if not conversation_history or not isinstance(conversation_history, list) or not all(isinstance(s, dict) for s in conversation_history):
+            if logger:
+                logger.log_error("Invalid or missing conversation history for gestation cycle.", event_type="gestation_invalid_conversation")
+            return
+    
+        # Validate model_manager and scaffold models
+        scaffold_count = 0
+        lora_count = 0
+        if model_manager:
+            scaffold_count = len(getattr(model_manager, 'scaffold_models', []))
+            lora_count = len(getattr(model_manager, 'lora_managers', []))
+        if scaffold_count == 0 or lora_count == 0:
+            if logger:
+                logger.log_error(f"No scaffold models ({scaffold_count}) or LoRA managers ({lora_count}) available for gestation cycle.", event_type="gestation_scaffold_lora_missing")
+            return
+    
+        # Iterate over all scaffold models/LoRA managers (future-proofing)
+        for idx in range(min(scaffold_count, lora_count)):
+            scaffold_model = model_manager.scaffold_models[idx]
+            lora_manager = model_manager.lora_managers[idx]
+            try:
+                # Prepare training batch from conversation history
+                enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
+                batch = batch_preparer.prepare(enriched_samples)
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"Error during gestation batch preparation (scaffold {idx}): {str(e)}", error_type="gestation_batch_error", stack_trace=traceback.format_exc(), additional_info={"scaffold_index": idx})
+                continue
+            
+            try:
+                optimizer = torch.optim.AdamW(lora_manager.lora_parameters(scaffold_model), lr=2e-5)
+                scaffold_model.train()
+                optimizer.zero_grad()
+                outputs = scaffold_model(**batch)
+                loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                loss.backward()
+                optimizer.step()
+                if logger:
+                    logger.log_info(f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss.item()}", event_type="gestation_lora_train", additional_info={"scaffold_index": idx})
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"Error during gestation LoRA training step (scaffold {idx}): {str(e)}", error_type="gestation_lora_training_error", stack_trace=traceback.format_exc(), additional_info={"scaffold_index": idx})
+                continue
+            
+            # Save LoRA weights as long-term memory
+            try:
+                import os
+                from datetime import datetime
+                lora_dir = "lora_checkpoints"
+                os.makedirs(lora_dir, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                lora_path = os.path.join(lora_dir, f"lora_{idx}_{timestamp}.pt")
+                lora_manager.save_lora_weights(scaffold_model, lora_path)
+                if model_manager:
+                    model_manager.set_active_lora_checkpoint(lora_path)
+                if logger:
+                    logger.log_info(f"LoRA weights saved after gestation for scaffold {idx} to {lora_path}", event_type="gestation_lora_save", additional_info={"scaffold_index": idx})
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"Error saving LoRA weights after gestation (scaffold {idx}): {str(e)}", error_type="gestation_lora_save_error", stack_trace=traceback.format_exc(), additional_info={"scaffold_index": idx})
+                continue
+            
+        # Update SOVL state if available
+        if state is not None and hasattr(state, 'update_after_gestation'):
+            try:
+                state.update_after_gestation()
+                if logger:
+                    logger.log_info("SOVL state updated after gestation.", event_type="gestation_state_update")
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"Error updating SOVL state after gestation: {str(e)}", error_type="gestation_state_update_error", stack_trace=traceback.format_exc())
+    
+        # DREAMER integration
         if dreamer is not None:
             try:
                 dreamer.run_dream_cycle()
@@ -872,8 +890,19 @@ class SOVLTrainer:
         # Initialize metadata processor for processing training data
         self.metadata_processor = TrainingSampleEnricher(config_manager, logger)
         
-        # Initialize TrainingManager
-        self.training_manager = TrainingManager(self.config, self.model, self.device, config_manager, logger, None)
+        # Initialize ErrorManager for TrainingManager
+        from sovl_error import ErrorManager
+        self.error_manager = ErrorManager(
+            context=self,
+            state_tracker=None,  # Optionally provide a state tracker if needed
+            config_manager=config_manager,
+            error_cooldown=self.config.logging.error_cooldown
+        )
+        
+        # Initialize TrainingManager with ErrorManager
+        self.training_manager = TrainingManager(
+            self.config, self.model, self.device, config_manager, logger, self.error_manager
+        )
         
         # Initialize training state tracking
         self._training_state = {
@@ -1718,7 +1747,10 @@ class Dreamer:
                 if words:
                     random.shuffle(words)
                     if random.random() < noise_level:
-                        words.insert(random.randint(0, len(words)), random.choice(["???", "dream", "echo", "phantom", "mist", "fragment"]))
+                        words.insert(
+                            random.randint(0, len(words)),
+                            random.choice(["???", "dream", "echo", "phantom", "mist", "fragment"])
+                        )
                     ed[key] = " ".join(words)
         # Mutate metadata
         meta = dream_event["metadata"].copy()
