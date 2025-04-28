@@ -102,17 +102,51 @@ class BondCalculator:
         Returns:
             signature: dict
         """
-        if not metadata_entries:
+        if not metadata_entries or not isinstance(metadata_entries, list):
+            self.logger.log_warning("metadata_entries is empty or not a list in _generate_signature")
             return None
-        # Extract features
-        devices = [md.get('device') for md in metadata_entries if 'device' in md]
+
+        valid_entries = []
+        for idx, md in enumerate(metadata_entries):
+            if not isinstance(md, dict):
+                self.logger.log_warning(f"Skipping non-dict metadata entry at index {idx}")
+                continue
+            # Validate required keys and types
+            device = md.get('device', None)
+            timestamp = md.get('timestamp', None)
+            content_metrics = md.get('content_metrics', {})
+            if device is not None and not isinstance(device, str):
+                self.logger.log_warning(f"Skipping entry at index {idx}: device is not a string")
+                continue
+            if timestamp is None or not isinstance(timestamp, (int, float)) or timestamp <= 0:
+                self.logger.log_warning(f"Skipping entry at index {idx}: invalid timestamp {timestamp}")
+                continue
+            if not isinstance(content_metrics, dict):
+                self.logger.log_warning(f"Skipping entry at index {idx}: content_metrics is not a dict")
+                continue
+            word_count = content_metrics.get('word_count', 0)
+            sentiment_score = content_metrics.get('sentiment_score', 0.0)
+            if (word_count is not None and not isinstance(word_count, (int, float))) or (isinstance(word_count, (int, float)) and word_count < 0):
+                self.logger.log_warning(f"Skipping entry at index {idx}: invalid word_count {word_count}")
+                continue
+            if sentiment_score is not None and not isinstance(sentiment_score, (int, float)):
+                self.logger.log_warning(f"Skipping entry at index {idx}: invalid sentiment_score {sentiment_score}")
+                continue
+            valid_entries.append(md)
+
+        if not valid_entries:
+            self.logger.log_warning("No valid metadata entries after validation in _generate_signature")
+            return None
+
+        # Extract features from valid entries
+        devices = [md.get('device') for md in valid_entries if 'device' in md]
         device_fingerprint = devices[0] if devices else 'unknown'
-        timestamps = [md.get('timestamp') for md in metadata_entries if 'timestamp' in md]
+        timestamps = [md.get('timestamp') for md in valid_entries if 'timestamp' in md]
         timestamps.sort()
         avg_gap = (sum(t2-t1 for t1, t2 in zip(timestamps, timestamps[1:])) / (len(timestamps)-1)) if len(timestamps) > 1 else 0.0
         activity_level = len(timestamps)
-        avg_word_count = sum(md.get('content_metrics', {}).get('word_count', 0) for md in metadata_entries) / len(metadata_entries)
-        avg_sentiment = sum(md.get('content_metrics', {}).get('sentiment_score', 0.0) for md in metadata_entries) / len(metadata_entries)
+        avg_word_count = sum(md.get('content_metrics', {}).get('word_count', 0) for md in valid_entries) / len(valid_entries)
+        avg_sentiment = sum(md.get('content_metrics', {}).get('sentiment_score', 0.0) for md in valid_entries) / len(valid_entries)
         # Compose signature dict
         signature = {
             'device_fingerprint': device_fingerprint,
@@ -174,48 +208,62 @@ class BondCalculator:
         Returns:
             bond_score: float
         """
-        signature = self._generate_signature(metadata_entries, extra_data=extra_data, **kwargs)
-        if not signature:
+        try:
+            if not metadata_entries or not isinstance(metadata_entries, list):
+                self.logger.log_warning("metadata_entries is empty or not a list in calculate_bond")
+                return self.default_bond_score
+
+            signature = self._generate_signature(metadata_entries, extra_data=extra_data, **kwargs)
+            if not signature:
+                self.logger.log_warning("No valid signature generated in calculate_bond; returning default bond score")
+                return self.default_bond_score
+            sig_hash = self._hash_signature(signature)
+            # Engagement
+            activity_level = signature['activity_level']
+            avg_gap = signature['avg_gap']
+            avg_word_count = signature['avg_word_count']
+            avg_sentiment = signature['avg_sentiment']
+            device_stability = 1.0  # For now, assume stable if only one device in batch
+            # Weighted sum (tune weights as needed)
+            score = (
+                0.3 * min(activity_level / 20, 1.0) +            # Cap activity at 20 events
+                0.2 * (1.0 - min(avg_gap / 3600, 1.0)) +         # Prefer shorter avg gap, cap at 1 hour
+                0.2 * min(avg_word_count / 50, 1.0) +            # Cap avg word count at 50
+                0.2 * (avg_sentiment + 1) / 2 +                  # Normalize sentiment (-1 to 1) to (0 to 1)
+                0.1 * device_stability                           # Prefer single device
+            )
+            bond_score = self.min_bond_score + (self.max_bond_score - self.min_bond_score) * min(max(score, 0.0), 1.0)
+            # Update registry
+            with self.lock:
+                if sig_hash in self.identified_users:
+                    self.identified_users[sig_hash]['bond_score'] = bond_score
+                    self.identified_users[sig_hash]['last_seen'] = time.time()
+                    # Sync update with central state
+                    if self.state and hasattr(self.state, 'add_identified_user'):
+                        self.state.add_identified_user(sig_hash, self.identified_users[sig_hash])
+                else:
+                    profile = {
+                        'signature': signature,
+                        'first_seen': time.time(),
+                        'last_seen': time.time(),
+                        'bond_score': bond_score,
+                        'metadata_count': len(metadata_entries)
+                    }
+                    self.identified_users[sig_hash] = profile
+                    # Sync with central state
+                    if self.state and hasattr(self.state, 'add_identified_user'):
+                        self.state.add_identified_user(sig_hash, profile)
+            # Optionally, fuse extra modalities
+            bond_score = self._fuse_modalities(signature, extra_data=extra_data, bond_score=bond_score, **kwargs)
+            return bond_score
+        except Exception as e:
+            self.logger.record_event(
+                event_type="bond_score_failed",
+                message=f"Failed to calculate bond score: {str(e)}",
+                level="error",
+                additional_info={"error": str(e)}
+            )
             return self.default_bond_score
-        sig_hash = self._hash_signature(signature)
-        # Engagement
-        activity_level = signature['activity_level']
-        avg_gap = signature['avg_gap']
-        avg_word_count = signature['avg_word_count']
-        avg_sentiment = signature['avg_sentiment']
-        device_stability = 1.0  # For now, assume stable if only one device in batch
-        # Weighted sum (tune weights as needed)
-        score = (
-            0.3 * min(activity_level / 20, 1.0) +            # Cap activity at 20 events
-            0.2 * (1.0 - min(avg_gap / 3600, 1.0)) +         # Prefer shorter avg gap, cap at 1 hour
-            0.2 * min(avg_word_count / 50, 1.0) +            # Cap avg word count at 50
-            0.2 * (avg_sentiment + 1) / 2 +                  # Normalize sentiment (-1 to 1) to (0 to 1)
-            0.1 * device_stability                           # Prefer single device
-        )
-        bond_score = self.min_bond_score + (self.max_bond_score - self.min_bond_score) * min(max(score, 0.0), 1.0)
-        # Update registry
-        with self.lock:
-            if sig_hash in self.identified_users:
-                self.identified_users[sig_hash]['bond_score'] = bond_score
-                self.identified_users[sig_hash]['last_seen'] = time.time()
-                # Sync update with central state
-                if self.state and hasattr(self.state, 'add_identified_user'):
-                    self.state.add_identified_user(sig_hash, self.identified_users[sig_hash])
-            else:
-                profile = {
-                    'signature': signature,
-                    'first_seen': time.time(),
-                    'last_seen': time.time(),
-                    'bond_score': bond_score,
-                    'metadata_count': len(metadata_entries)
-                }
-                self.identified_users[sig_hash] = profile
-                # Sync with central state
-                if self.state and hasattr(self.state, 'add_identified_user'):
-                    self.state.add_identified_user(sig_hash, profile)
-        # Optionally, fuse extra modalities
-        bond_score = self._fuse_modalities(signature, extra_data=extra_data, bond_score=bond_score, **kwargs)
-        return bond_score
 
     def _fuse_modalities(self, signature: dict, extra_data: Optional[dict] = None, bond_score: float = 0.5, **kwargs) -> float:
         """

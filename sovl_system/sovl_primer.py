@@ -26,6 +26,7 @@ class GenerationPrimer:
         temperament_system: Optional[Any] = None,
         confidence_calculator: Optional[Any] = None,
         bond_calculator: Optional[Any] = None,
+        bond_modulator: Optional[Any] = None,
         device: Optional[Any] = None,
         lifecycle_manager: Optional[Any] = None,
         scaffold_manager: Optional[Any] = None,
@@ -46,6 +47,7 @@ class GenerationPrimer:
         self.temperament_system = temperament_system
         self.confidence_calculator = confidence_calculator
         self.bond_calculator = bond_calculator
+        self.bond_modulator = bond_modulator
         self.device = device
         self.lifecycle_manager = lifecycle_manager
         self.scaffold_manager = scaffold_manager
@@ -195,7 +197,13 @@ class GenerationPrimer:
                 traits["bond"] = None
             else:
                 try:
-                    traits["bond"] = self.bond_calculator.calculate_bond(state=state_arg, **kwargs)
+                    bond_score = self.bond_calculator.calculate_bond(state=state_arg, **kwargs)
+                    if self.bond_modulator:
+                        try:
+                            bond_score = self.bond_modulator.get_bond_modulation(kwargs.get("user_id"), bond_score)
+                        except Exception as e:
+                            self.logger.log_warning(f"BondModulator failed: {str(e)}", error_type="bond_modulation_error")
+                    traits["bond"] = bond_score
                 except Exception as e:
                     traits["bond"] = None
                     self.handle_error("bond_computation", e, {"kwargs": kwargs})

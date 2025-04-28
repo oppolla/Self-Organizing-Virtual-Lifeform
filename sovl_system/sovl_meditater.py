@@ -89,6 +89,7 @@ class IntrospectionManager:
             ])
             self.debug_mode = config.get("debug_mode", False)
             self.followup_depth = config.get("followup_depth", 3)
+            self.max_followup_depth = config.get("max_followup_depth", 4)
             conf_thresh = config.get("confidence_threshold", None)
             # Validate confidence_threshold
             if conf_thresh is not None:
@@ -401,7 +402,7 @@ class IntrospectionManager:
                 except Exception:
                     novelty = 0.3  # fallback to moderate novelty
             dynamic_depth = int(round(base_depth + (1 - temperament_score) * 2 + (1 - confidence) * 2 + novelty * 2))
-            dynamic_depth = max(1, min(dynamic_depth, 6))
+            dynamic_depth = max(1, min(dynamic_depth, self.max_followup_depth))
             self.logger.record_event(
                 event_type="dynamic_followup_depth",
                 message=f"Using dynamic follow-up depth: {dynamic_depth}",

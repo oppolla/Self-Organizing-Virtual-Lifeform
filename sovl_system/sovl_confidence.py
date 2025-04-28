@@ -491,48 +491,67 @@ class ConfidenceCalculator:
                 )
                 return self.default_confidence
 
-            if len(state.confidence_history) >= self.min_history_length:
-                # Use weighted average of recent confidences
-                recent_confidences = list(state.confidence_history)[-self.min_history_length:]
-                # Validate history values
-                if any(not isinstance(c, (int, float)) or c < self.min_confidence or c > self.max_confidence for c in recent_confidences):
-                    error_manager.logger.record_event(
-                        event_type="confidence_history_invalid",
-                        message="Invalid values in confidence history",
-                        level="error",
-                        additional_info={"history": recent_confidences}
-                    )
-                    return self.default_confidence
-                # Defensive: ensure recovery_weights length matches history
-                weights = self.recovery_weights
-                if len(weights) != len(recent_confidences):
-                    weights = [1.0 / len(recent_confidences)] * len(recent_confidences)
-                recovered_confidence = sum(c * w for c, w in zip(recent_confidences, weights))
-                # Clamp recovered confidence
-                recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
-                # Log recovery
+            if len(state.confidence_history) < self.min_history_length:
                 error_manager.logger.record_event(
-                    event_type="confidence_recovered",
-                    message="Recovered confidence from history",
+                    event_type="confidence_history_insufficient",
+                    message="Insufficient history for recovery",
                     level="warning",
                     additional_info={
                         "error": str(error),
-                        "recovered_confidence": recovered_confidence,
                         "history_length": len(state.confidence_history)
                     }
                 )
-                return recovered_confidence
-            # If recovery fails, use conservative default
+                return self.default_confidence
+
+            recent_confidences = list(state.confidence_history)[-self.min_history_length:]
+            valid_confidences = [
+                c for c in recent_confidences
+                if isinstance(c, (int, float)) and self.min_confidence <= c <= self.max_confidence
+            ]
+
+            if not valid_confidences:
+                # Try alternative: use temperament if available
+                if hasattr(state, 'temperament_score') and isinstance(state.temperament_score, (int, float)):
+                    recovered_confidence = self.default_confidence * (1.0 + state.temperament_score * 0.1)
+                    recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
+                    error_manager.logger.record_event(
+                        event_type="confidence_recovered_temperament",
+                        message="Recovered confidence using temperament score as fallback",
+                        level="info",
+                        additional_info={
+                            "error": str(error),
+                            "recovered_confidence": recovered_confidence,
+                            "temperament_score": state.temperament_score
+                        }
+                    )
+                    return recovered_confidence
+                error_manager.logger.record_event(
+                    event_type="confidence_history_no_valid_entries",
+                    message="No valid history entries for recovery, using default",
+                    level="warning",
+                    additional_info={
+                        "error": str(error),
+                        "history": recent_confidences
+                    }
+                )
+                return self.default_confidence
+
+            # Use average of valid confidences for partial recovery
+            weights = [1.0 / len(valid_confidences)] * len(valid_confidences)
+            recovered_confidence = sum(c * w for c, w in zip(valid_confidences, weights))
+            recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
             error_manager.logger.record_event(
-                event_type="confidence_default_used",
-                message="Using default confidence due to insufficient history",
-                level="warning",
+                event_type="partial_confidence_recovery",
+                message=f"Recovered confidence using {len(valid_confidences)} valid history entries",
+                level="info",
                 additional_info={
                     "error": str(error),
-                    "history_length": len(state.confidence_history)
+                    "recovered_confidence": recovered_confidence,
+                    "valid_confidences": valid_confidences
                 }
             )
-            return self.default_confidence
+            return recovered_confidence
+
         except Exception as recovery_error:
             error_manager.logger.record_event(
                 event_type="confidence_recovery_failed",

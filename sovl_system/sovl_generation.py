@@ -20,7 +20,7 @@ from sovl_confidence import ConfidenceCalculator, calculate_confidence_score
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_scaffold import GenerationScaffoldProvider
-from sovl_bonder import BondCalculator, BondModulator
+from sovl_bonder import BondCalculator
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
 
 class GenerationError(Exception):
@@ -154,9 +154,10 @@ class GenerationManager:
         # Validate and initialize curiosity state
         self._validate_curiosity_state()
 
-        # BondModulator integration
+        # BondCalculator integration
         self.bond_calculator = BondCalculator(config_manager, logger, state)
-        self.bond_modulator = BondModulator(self.bond_calculator)
+
+        self._last_good_memory_context = None  # Cache for fallback memory context
 
     def _with_lock(self, lock_name: str):
         """Context manager for thread-safe operations."""
@@ -887,20 +888,44 @@ class GenerationManager:
     def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", metadata_entries: list = None, **kwargs) -> List[str]:
         """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration."""
         request_time = time.time()
-
+        traits = None
+        generated_texts = None
+        error = None
         try:
             # --- Always-on Memory: Retrieve context ---
             memory_context = None
+            context_retrieved = False
             if self.dialogue_context_manager:
-                try:
-                    short_ctx = self.dialogue_context_manager.get_short_term_context()
-                    long_ctx = self.dialogue_context_manager.get_long_term_context(user_id=user_id)
-                    memory_context = self._compose_memory_context(short_ctx, long_ctx)
-                except Exception as e:
-                    self.logger.log_warning(
-                        f"Failed to retrieve memory context: {str(e)}",
-                        error_type="memory_context_retrieval_error"
-                    )
+                backoff = 0.1
+                for attempt in range(3):
+                    try:
+                        short_ctx = self.dialogue_context_manager.get_short_term_context()
+                        long_ctx = self.dialogue_context_manager.get_long_term_context(user_id=user_id)
+                        memory_context = self._compose_memory_context(short_ctx, long_ctx)
+                        context_retrieved = True
+                        self._last_good_memory_context = memory_context
+                        break
+                    except Exception as e:
+                        self.logger.log_warning(
+                            f"Attempt {attempt+1}: Failed to retrieve memory context: {str(e)}",
+                            error_type="memory_context_retrieval_error"
+                        )
+                        if attempt < 2:
+                            import time as _time
+                            _time.sleep(backoff)
+                            backoff *= 2
+                if not context_retrieved:
+                    if self._last_good_memory_context:
+                        memory_context = self._last_good_memory_context
+                        self.logger.log_warning(
+                            "Using cached memory context due to repeated retrieval failures.",
+                            error_type="memory_context_fallback"
+                        )
+                    else:
+                        self.logger.log_warning(
+                            "No memory context available after retries and no cache present.",
+                            error_type="memory_context_missing"
+                        )
             else:
                 self.logger.log_warning(
                     "No dialogue context manager available for memory retrieval",
@@ -980,22 +1005,6 @@ class GenerationManager:
                 "processing_time_ms": (time.time() - request_time) * 1000
             }
 
-            # --- Sync all traits to state after successful generation ---
-            try:
-                self.primer.update_state_after_operation(
-                    context="generate_text",
-                    result={
-                        "generated_texts": generated_texts,
-                        "traits": traits
-                    }
-                )
-            except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"Failed to sync traits to state after generation: {str(e)}",
-                    error_type="trait_state_sync_error",
-                    stack_trace=traceback.format_exc()
-                )
-
             # Assemble capture data
             event_data, source_metadata = ScribeAssembler.assemble_scribe_data(
                 manager=self,
@@ -1018,10 +1027,12 @@ class GenerationManager:
             return generated_texts
 
         except (ValueError, RuntimeError, GenerationError, IndexError) as e:
+            error = e
             # Log and propagate critical errors
             self._handle_error("generate_text", e)
             raise
         except Exception as e:
+            error = e
             # Log generation error
             capture_scribe_event(
                 origin="sovl_generation",
@@ -1045,6 +1056,23 @@ class GenerationManager:
             self._handle_error("generate_text", e)
             # For broad compatibility, return a fallback error message
             return ["An error occurred during text generation"]
+        finally:
+            # --- Always sync all traits to state, even on error ---
+            try:
+                self.primer.update_state_after_operation(
+                    context="generate_text",
+                    result={
+                        "generated_texts": generated_texts,
+                        "traits": traits,
+                        "error": str(error) if error else None
+                    }
+                )
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"Failed to sync traits to state after generation (finally block): {str(e)}",
+                    error_type="trait_state_sync_error",
+                    stack_trace=traceback.format_exc()
+                )
 
     def set_system_context(self, system_context):
         """Bind the system context for always-on memory integration."""
