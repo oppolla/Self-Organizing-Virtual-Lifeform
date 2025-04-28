@@ -123,7 +123,6 @@ class SystemContext:
             
         self._initialized = True
         self._lock = RLock()  # Using RLock for reentrant locking
-        self._resource_locks = defaultdict(RLock)  # Using RLock for reentrant locking
         self._component_states = {}
         self._error_history = deque(maxlen=SystemConstants.MAX_ERROR_HISTORY)
         self._last_error_time = 0
@@ -339,85 +338,7 @@ class SystemContext:
             'last_error': None,
             'component_states': {}
         }
-        
-        try:
-            # Initialize core components in dependency order
-            self.config_manager = ConfigManager(config_path)
-            self.logger = Logger()
-            self.error_handler = ErrorManager()
-            self.event_dispatcher = EventDispatcher()
-            
-            # Initialize metadata processor for scribe
-            self.metadata_processor = MetadataProcessor(
-                config_manager=self.config_manager,
-                logger=self.logger
-            )
-            
-            # Initialize scribe queue and scriber
-            self.scribe_queue = get_scribe_queue()
-            self.scriber = Scriber(
-                config_manager=self.config_manager,
-                error_manager=self.error_handler,
-                metadata_processor=self.metadata_processor,
-                logger=self.logger,
-                scribe_queue=self.scribe_queue,
-                state_accessor=self.state_manager
-            )
-            
-            # Initialize memory managers
-            self.ram_manager = RAMManager()
-            self.gpu_manager = GPUMemoryManager()
-            
-            # Initialize state management
-            self.state_manager = StateManager(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                ram_manager=self.ram_manager,
-                gpu_manager=self.gpu_manager
-            )
-            
-            # Initialize state tracking
-            self.state_tracker = StateTracker(
-                config_manager=self.config_manager,
-                logger=self.logger
-            )
-            
-            # Initialize AI components
-            self.curiosity_manager = CuriosityManager(
-                config_manager=self.config_manager,
-                logger=self.logger,
-                error_manager=self.error_handler,
-                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-                state_manager=self.state_manager
-            )
-            self.temperament_system = TemperamentSystem()
-            
-            # Initialize model components
-            self.model_manager = ModelManager()
-            self.processor = SOVLProcessor()
-            self.generation_manager = GenerationManager()
-            
-            # Initialize training components
-            self.trainer = SOVLTrainer()
-            self.training_cycle_manager = TrainingCycleManager()
-            
-            # Initialize system state
-            self._initialize_system_state()
-            
-            # Start memory monitoring
-            self._start_memory_monitoring()
-            
-            # Complete initialization sequence
-            self._complete_initialization()
-            
-        except Exception as e:
-            self._handle_initialization_error(e)
-            raise SystemInitializationError(
-                message=f"Failed to initialize system context: {str(e)}",
-                config_path=config_path,
-                stack_trace=traceback.format_exc()
-            )
-    
+
     def _handle_initialization_error(self, error: Exception):
         """Handle initialization errors safely."""
         try:
@@ -475,21 +396,16 @@ class SystemContext:
                 self._last_error_cleanup = current_time
     
     @synchronized("_lock")
-    def get_resource_lock(self, resource_name: str) -> RLock:
-        """Get a lock for a specific resource."""
-        return self._resource_locks[resource_name]
-    
-    @synchronized("_lock")
     def update_component_state(self, component_name: str, state: Dict[str, Any]):
         """Update the state of a component in a thread-safe manner."""
-        with self.get_resource_lock(component_name):
+        with self._lock:
             self._component_states[component_name] = state
             self.system_state['component_states'][component_name] = state
     
     @synchronized("_lock")
     def get_component_state(self, component_name: str) -> Dict[str, Any]:
         """Get the current state of a component in a thread-safe manner."""
-        with self.get_resource_lock(component_name):
+        with self._lock:
             return self._component_states.get(component_name, {}).copy()
     
     @synchronized("_lock")
