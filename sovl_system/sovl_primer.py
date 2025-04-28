@@ -12,7 +12,7 @@ import traceback
 class GenerationPrimer:
     """
     GenerationPrimer is the unified integration point for all trait modules, providing trait aggregation,
-    parameter adjustment, dynamic trait toggling, error handling, and logging for generation.
+    parameter adjustment, dynamic trait toggling for generation.
 
     """
     def __init__(
