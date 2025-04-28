@@ -18,6 +18,7 @@ from sovl_manager import ModelManager
 from sovl_utils import synchronized
 from sovl_generation import GenerationManager
 from sovl_queue import capture_scribe_event
+from sovl_bonder import BondCalculator
 
 class IntrospectionManager:
     """Manages hidden introspection system with smart triggering."""
@@ -30,7 +31,8 @@ class IntrospectionManager:
         curiosity_manager: CuriosityManager,
         confidence_calculator: ConfidenceCalculator,
         temperament_system: TemperamentSystem,
-        model_manager: ModelManager
+        model_manager: ModelManager,
+        bond_calculator: BondCalculator = None  # Optional bond_calculator for bond modulation
     ):
         self.context = context
         self.state_manager = state_manager
@@ -39,6 +41,7 @@ class IntrospectionManager:
         self.confidence_calculator = confidence_calculator
         self.temperament_system = temperament_system
         self.model_manager = model_manager
+        self.bond_calculator = bond_calculator
         self.logger = context.logger
         self.config_handler = context.config_handler
 
@@ -870,6 +873,26 @@ class IntrospectionManager:
             # Adjust temperament traits
             for trait, score in dialogue['traits'].items():
                 self.temperament_system.adjust_trait(trait, score * 0.1)
+
+            # Adjust bond score if bond_calculator is available
+            if self.bond_calculator and hasattr(self.bond_calculator, 'adjust_bond'):
+                try:
+                    user_id = dialogue.get('user_id')
+                    bond_delta = dialogue.get('bond_delta', 0.1 if dialogue['is_approved'] else -0.1)
+                    self.bond_calculator.adjust_bond(user_id=user_id, delta=bond_delta)
+                    self.logger.record_event(
+                        event_type="introspection_bond_adjusted",
+                        message=f"Bond score adjusted for user {user_id} by {bond_delta}",
+                        level="info",
+                        additional_info={"user_id": user_id, "bond_delta": bond_delta}
+                    )
+                except Exception as bond_exc:
+                    self.logger.record_event(
+                        event_type="introspection_bond_adjust_failed",
+                        message=f"Failed to adjust bond: {type(bond_exc).__name__}: {bond_exc}",
+                        level="warning",
+                        additional_info={"user_id": dialogue.get('user_id')}
+                    )
 
             self.logger.record_event(
                 event_type="introspection_system_updated",

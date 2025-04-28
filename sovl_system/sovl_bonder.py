@@ -12,6 +12,7 @@ import time
 import hashlib
 import json
 import re
+import traceback
 
 class BondCalculator:
     """Calculates bonding score based on user wordprint and duration of knowing.
@@ -267,17 +268,67 @@ class BondCalculator:
 
     def _fuse_modalities(self, signature: dict, extra_data: Optional[dict] = None, bond_score: float = 0.5, **kwargs) -> float:
         """
-        Placeholder for future feature fusion (e.g., facial, voice, device).
+        Fuse additional modalities (e.g., facial, voice, device) into the bond score.
         Args:
             signature: user signature dict
-            extra_data: dict of additional modality data
-            bond_score: current bond score
+            extra_data: dict of additional modality data. Expected keys (optional): 
+                - 'face_score': float in [0,1] (confidence from facial recognition)
+                - 'voice_score': float in [0,1] (confidence from voice analysis)
+                - ...future modalities...
+            bond_score: current bond score (from text/behavioral analysis)
             kwargs: reserved for future extensions
         Returns:
             bond_score: float (possibly modified)
+        Notes:
+            - If extra_data is provided but contains unrecognized or invalid keys, a warning is logged.
+            - If no recognized modalities are present, the original bond_score is returned.
         """
-        # For now, does nothing. In future, could adjust bond_score based on extra_data.
-        return bond_score
+        try:
+            if extra_data is None:
+                return bond_score
+
+            # Validate and extract modality scores
+            modality_scores = {}
+            for key in ['face_score', 'voice_score']:
+                if key in extra_data:
+                    val = extra_data[key]
+                    if not isinstance(val, (int, float)) or not (0.0 <= val <= 1.0):
+                        self.logger.log_warning(
+                            f"extra_data['{key}'] is not a float in [0,1]: {val}",
+                            event_type="bond_modality_validation_warning"
+                        )
+                        continue
+                    modality_scores[key] = float(val)
+
+            if not modality_scores:
+                self.logger.log_warning(
+                    "extra_data provided to _fuse_modalities but no recognized modalities found. Ignoring.",
+                    event_type="bond_modality_unused_warning"
+                )
+                return bond_score
+
+            # Compute weighted average using modality_weights config
+            weights = self.modality_weights.copy() if hasattr(self, 'modality_weights') else {'text': 1.0}
+            total_weight = weights.get('text', 1.0)
+            fused_score = bond_score * total_weight
+            for key, score in modality_scores.items():
+                w = weights.get(key.replace('_score', ''), 0.0)
+                fused_score += score * w
+                total_weight += w
+
+            if total_weight > 0:
+                fused_score /= total_weight
+            else:
+                fused_score = bond_score  # fallback
+
+            return max(self.min_bond_score, min(self.max_bond_score, fused_score))
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed in _fuse_modalities: {str(e)}",
+                error_type="bond_modality_fusion_error",
+                stack_trace=traceback.format_exc()
+            )
+            return bond_score
 
     def get_all_signatures(self):
         """Return all known user signatures and profiles, prefer central state if available."""
@@ -471,6 +522,29 @@ class BondCalculator:
                 e, {"user_input": user_input[:50]}, state.history.conversation_id
             )
             return self.default_bond_score
+
+    def adjust_bond(self, user_id: str, delta: float) -> None:
+        """
+        Adjust the bond score for a user by a given delta, clamped to [min_bond_score, max_bond_score].
+        Logs the adjustment. If user does not exist, logs a warning.
+        """
+        if not user_id:
+            self.logger.log_warning("adjust_bond called with empty user_id", event_type="bond_adjust_warning")
+            return
+        with self.lock:
+            profile = self.identified_users.get(user_id)
+            if not profile or "bond_score" not in profile:
+                self.logger.log_warning(f"adjust_bond: user_id {user_id} not found or missing bond_score", event_type="bond_adjust_warning")
+                return
+            old_score = profile["bond_score"]
+            new_score = max(self.min_bond_score, min(self.max_bond_score, old_score + delta))
+            profile["bond_score"] = new_score
+            self.logger.record_event(
+                event_type="bond_score_adjusted",
+                message=f"Bond score for user {user_id} adjusted by {delta}",
+                level="info",
+                additional_info={"old_score": old_score, "new_score": new_score, "delta": delta, "user_id": user_id}
+            )
 
 class BondModulator:
     """Active component to provide bond-based modulation for system interaction based on user perception."""
