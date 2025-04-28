@@ -12,6 +12,8 @@ from sovl_memory import RAMManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ConfigurationError
 from sovl_config import ConfigManager
+import hashlib
+import threading
 
 class ShortTermMemory:
     """
@@ -30,7 +32,8 @@ class ShortTermMemory:
         self.max_short_term = max_short_term
         self.expiry_seconds = expiry_seconds
         self.memory = []  # List of dicts, each with a timestamp
-        self._lock = Lock()
+        self._read_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self.logger = logger or Logger.get_instance()
         self.logging_level = logging_level
         try:
@@ -43,83 +46,120 @@ class ShortTermMemory:
             self.logger.log_error(f"ShortTermMemory.__init__ failed: {e}", error_type="ShortTermMemoryError")
 
     def add(self, msg: Dict[str, Any]):
-        try:
-            with self._lock:
-                msg_with_time = dict(msg)
-                msg_with_time["_timestamp"] = time.time()
-                self.memory.append(msg_with_time)
-                # Prune by count
-                if len(self.memory) > self.max_short_term:
-                    removed = self.memory.pop(0)
-                    self.logger.record_event(
-                        event_type="short_term_memory_prune",
-                        message="ShortTermMemory pruned oldest message due to max size.",
-                        level=self.logging_level,
-                        additional_info={"removed": removed}
-                    )
-                # Prune by expiry
-                if self.expiry_seconds is not None:
-                    now = time.time()
-                    before = len(self.memory)
-                    self.memory = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
-                    after = len(self.memory)
-                    if before != after:
-                        self.logger.record_event(
-                            event_type="short_term_memory_expiry_prune",
-                            message=f"ShortTermMemory pruned {before - after} expired messages.",
-                            level=self.logging_level
-                        )
+        start_wait = time.perf_counter()
+        with self._write_lock:
+            wait_time = time.perf_counter() - start_wait
+            self.logger.record_event(
+                event_type="short_term_memory_write_lock_acquired",
+                message=f"Write lock acquired in {wait_time:.6f} seconds.",
+                level="debug"
+            )
+            start_hold = time.perf_counter()
+            msg_with_time = dict(msg)
+            msg_with_time["_timestamp"] = time.time()
+            self.memory.append(msg_with_time)
+            # Prune by count
+            if len(self.memory) > self.max_short_term:
+                removed = self.memory.pop(0)
                 self.logger.record_event(
-                    event_type="short_term_memory_add",
-                    message="Message added to ShortTermMemory.",
+                    event_type="short_term_memory_prune",
+                    message="ShortTermMemory pruned oldest message due to max size.",
                     level=self.logging_level,
-                    additional_info={"msg": msg}
+                    additional_info={"removed": removed}
                 )
-        except Exception as e:
-            self.logger.log_error(f"ShortTermMemory.add failed: {e}", error_type="ShortTermMemoryError")
+            # Prune by expiry
+            if self.expiry_seconds is not None:
+                now = time.time()
+                before = len(self.memory)
+                self.memory = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
+                after = len(self.memory)
+                if before != after:
+                    self.logger.record_event(
+                        event_type="short_term_memory_expiry_prune",
+                        message=f"ShortTermMemory pruned {before - after} expired messages.",
+                        level=self.logging_level
+                    )
+            hold_time = time.perf_counter() - start_hold
+            self.logger.record_event(
+                event_type="short_term_memory_write_lock_held",
+                message=f"Write lock held for {hold_time:.6f} seconds.",
+                level="debug"
+            )
+        # Logging outside lock
+        self.logger.record_event(
+            event_type="short_term_memory_add",
+            message="Message added to ShortTermMemory.",
+            level=self.logging_level,
+            additional_info={"msg": msg}
+        )
 
     def get(self) -> List[Dict[str, Any]]:
-        try:
-            with self._lock:
-                now = time.time()
-                # Filter expired messages
-                if self.expiry_seconds is not None:
-                    filtered = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
-                else:
-                    filtered = list(self.memory)
-                self.logger.record_event(
-                    event_type="short_term_memory_get",
-                    message="ShortTermMemory context retrieved.",
-                    level=self.logging_level,
-                    additional_info={"size": len(filtered)}
-                )
-                # Remove _timestamp before returning
-                return [{k: v for k, v in m.items() if k != "_timestamp"} for m in filtered]
-        except Exception as e:
-            self.logger.log_error(f"ShortTermMemory.get failed: {e}", error_type="ShortTermMemoryError")
-            return []
+        start_wait = time.perf_counter()
+        with self._read_lock:
+            wait_time = time.perf_counter() - start_wait
+            self.logger.record_event(
+                event_type="short_term_memory_read_lock_acquired",
+                message=f"Read lock acquired in {wait_time:.6f} seconds.",
+                level="debug"
+            )
+            now = time.time()
+            if self.expiry_seconds is not None:
+                filtered = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
+            else:
+                filtered = list(self.memory)
+            self.logger.record_event(
+                event_type="short_term_memory_get",
+                message="ShortTermMemory context retrieved.",
+                level=self.logging_level,
+                additional_info={"size": len(filtered)}
+            )
+            # Remove _timestamp before returning
+            result = [{k: v for k, v in m.items() if k != "_timestamp"} for m in filtered]
+        self.logger.record_event(
+            event_type="short_term_memory_get",
+            message="ShortTermMemory context retrieved.",
+            level=self.logging_level,
+            additional_info={"size": len(result)}
+        )
+        return result
 
     def clear(self):
-        try:
-            with self._lock:
-                self.memory = []
-                self.logger.record_event(
-                    event_type="short_term_memory_clear",
-                    message="ShortTermMemory cleared.",
-                    level=self.logging_level
-                )
-        except Exception as e:
-            self.logger.log_error(f"ShortTermMemory.clear failed: {e}", error_type="ShortTermMemoryError")
+        start_wait = time.perf_counter()
+        with self._write_lock:
+            wait_time = time.perf_counter() - start_wait
+            self.logger.record_event(
+                event_type="short_term_memory_write_lock_acquired",
+                message=f"Write lock acquired in {wait_time:.6f} seconds.",
+                level="debug"
+            )
+            self.memory = []
+        self.logger.record_event(
+            event_type="short_term_memory_clear",
+            message="ShortTermMemory cleared.",
+            level=self.logging_level
+        )
 
     def to_dict(self):
         """Serialize short-term memory for persistence."""
-        with self._lock:
+        with self._read_lock:
             return list(self.memory)
 
     def from_dict(self, memory_list):
         """Restore short-term memory from saved state."""
-        with self._lock:
+        with self._write_lock:
             self.memory = list(memory_list)
+
+    def remove_last(self):
+        """Remove the most recently added message (for transactional rollback)."""
+        with self._write_lock:
+            if self.memory:
+                removed = self.memory.pop()
+                self.logger.record_event(
+                    event_type="short_term_memory_rollback",
+                    message="Rolled back last message from ShortTermMemory.",
+                    level="warning",
+                    additional_info={"removed": removed}
+                )
 
 class LongTermMemory:
     """
@@ -144,9 +184,11 @@ class LongTermMemory:
         self.retention_days = retention_days
         self.top_k = top_k
         self.max_records = max_records
-        self._lock = Lock()
+        self._read_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self.logger = logger or Logger.get_instance()
         self.logging_level = logging_level
+        self.message_timestamps = {}  # message_id -> timestamp
         try:
             self._init_database()
             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
@@ -161,24 +203,61 @@ class LongTermMemory:
             self.logger.log_error(f"LongTermMemory.__init__ failed: {e}", error_type="LongTermMemoryError")
 
     def _init_database(self):
-        # This method is assumed to exist as it's called in __init__
-        pass
+        """Ensure the conversations table exists with the correct schema and indexes."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Create table if not exists
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS conversations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        role TEXT,
+                        content TEXT,
+                        embedding BLOB,
+                        timestamp REAL,
+                        user_id TEXT,
+                        session_id TEXT
+                    )
+                """)
+                # Create indexes for performance
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_id ON conversations (session_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON conversations (user_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON conversations (timestamp)")
+                conn.commit()
+                # Schema validation
+                cursor.execute("PRAGMA table_info(conversations)")
+                columns = {row[1] for row in cursor.fetchall()}
+                required = {"id", "role", "content", "embedding", "timestamp", "user_id", "session_id"}
+                if not required.issubset(columns):
+                    raise ConfigurationError(f"Conversations table schema invalid. Missing columns: {required - columns}")
+                # Placeholder for future migrations
+                # self._migrate_schema_if_needed(cursor)
+            self.logger.record_event(
+                event_type="long_term_memory_db_init",
+                message="Conversations table and indexes ensured.",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.log_error(f"LongTermMemory._init_database failed: {e}", error_type="LongTermMemoryError")
+            raise ConfigurationError(f"Failed to initialize conversations table: {e}")
 
     def rebuild_faiss_index(self):
         """Rebuild the in-memory FAISS index and message_ids from the database."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT id, embedding FROM conversations WHERE session_id = ? ORDER BY id ASC", (self.session_id,))
+                cursor.execute("SELECT id, embedding, timestamp FROM conversations WHERE session_id = ? ORDER BY id ASC", (self.session_id,))
                 rows = cursor.fetchall()
                 if rows:
                     embeddings = np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
                     self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
                     self.faiss_index.add(embeddings)
                     self.message_ids = [row[0] for row in rows]
+                    self.message_timestamps = {row[0]: row[2] for row in rows}
                 else:
                     self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
                     self.message_ids = []
+                    self.message_timestamps = {}
         except Exception as e:
             self.logger.log_error(f"LongTermMemory.rebuild_faiss_index failed: {e}", error_type="LongTermMemoryError")
 
@@ -212,131 +291,144 @@ class LongTermMemory:
             self.logger.log_error(f"LongTermMemory._log_db_size failed: {e}", error_type="LongTermMemoryError")
 
     def add(self, msg: Dict[str, Any]):
-        try:
-            with self._lock:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "INSERT INTO conversations (role, content, embedding, timestamp, user_id, session_id) VALUES (?, ?, ?, ?, ?, ?)",
-                        (msg["role"], msg["content"], msg["embedding"].tobytes(), msg["timestamp"], msg["user_id"], self.session_id)
-                    )
-                    msg_id = cursor.lastrowid
-                    conn.commit()
-                self.faiss_index.add(msg["embedding"].reshape(1, -1))
-                self.message_ids.append(msg_id)
-                # Monitoring: log record count and warn if near capacity
-                record_count = self._count_records()
-                self.logger.record_event(
-                    event_type="long_term_memory_record_count",
-                    message=f"LongTermMemory record count: {record_count}/{self.max_records}",
-                    level="info"
-                )
-                if record_count > 0.9 * self.max_records:
-                    self.logger.record_event(
-                        event_type="long_term_memory_near_capacity",
-                        message=f"LongTermMemory record count is above 90% of max_records: {record_count}/{self.max_records}",
-                        level="warning"
-                    )
-                # Enforce max_records limit
-                if record_count > self.max_records:
-                    with sqlite3.connect(self.db_path) as conn:
-                        cursor = conn.cursor()
-                        # Find IDs of oldest records to delete
-                        cursor.execute(
-                            "SELECT id FROM conversations WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?",
-                            (self.session_id, record_count - self.max_records)
-                        )
-                        ids_to_delete = [row[0] for row in cursor.fetchall()]
-                        if ids_to_delete:
-                            placeholders = ','.join('?' for _ in ids_to_delete)
-                            cursor.execute(f"DELETE FROM conversations WHERE id IN ({placeholders})", ids_to_delete)
-                            conn.commit()
-                            self.logger.record_event(
-                                event_type="long_term_memory_pruned_to_limit",
-                                message=f"Pruned {len(ids_to_delete)} oldest records to enforce max_records limit.",
-                                level="info"
-                            )
-                            self.rebuild_faiss_index()
-                # Log DB size
-                self._log_db_size()
-                self.logger.record_event(
-                    event_type="long_term_memory_add",
-                    message="Message added to LongTermMemory.",
-                    level=self.logging_level,
-                    additional_info={"msg": msg, "msg_id": msg_id}
-                )
-        except Exception as e:
-            self.logger.log_error(f"LongTermMemory.add failed: {e}", error_type="LongTermMemoryError")
+        start_wait = time.perf_counter()
+        with self._write_lock:
+            wait_time = time.perf_counter() - start_wait
+            self.logger.record_event(
+                event_type="long_term_memory_write_lock_acquired",
+                message=f"Write lock acquired in {wait_time:.6f} seconds.",
+                level="debug"
+            )
+            start_hold = time.perf_counter()
+            self.faiss_index.add(msg["embedding"].reshape(1, -1))
+            hold_time = time.perf_counter() - start_hold
+            self.logger.record_event(
+                event_type="long_term_memory_write_lock_held",
+                message=f"Write lock held for {hold_time:.6f} seconds.",
+                level="debug"
+            )
+        # DB write and logging outside lock
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO conversations (role, content, embedding, timestamp, user_id, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (msg["role"], msg["content"], msg["embedding"].tobytes(), msg["timestamp"], msg["user_id"], self.session_id)
+            )
+            msg_id = cursor.lastrowid
+            conn.commit()
+        # Update message_ids and message_timestamps in memory
+        with self._write_lock:
+            self.message_ids.append(msg_id)
+            self.message_timestamps[msg_id] = msg["timestamp"]
+        self.logger.record_event(
+            event_type="long_term_memory_add",
+            message="Message added to LongTermMemory.",
+            level=self.logging_level,
+            additional_info={"msg": msg, "msg_id": msg_id}
+        )
 
-    def query(self, query_embedding: np.ndarray, user_id: Optional[str] = None, top_k: int = 5, short_term_memory: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
-        try:
-            with self._lock:
-                if len(self.message_ids) == 0:
-                    self.logger.record_event(
-                        event_type="long_term_memory_query_empty",
-                        message="No rows found for LongTermMemory query.",
-                        level=self.logging_level
-                    )
-                    return []
-                # Use in-memory FAISS index for fast search
-                k = min(top_k, len(self.message_ids))
-                D, I = self.faiss_index.search(query_embedding.reshape(1, -1), k)
-                # Map indices to message IDs
-                result_ids = [self.message_ids[i] for i in I[0]]
-                # Fetch corresponding rows from DB
+    def query(self, query_embedding: np.ndarray, user_id: Optional[str] = None, top_k: int = 5, min_timestamp: Optional[float] = None, short_term_memory: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        start_time = time.perf_counter()
+        with self._read_lock:
+            if len(self.message_ids) == 0:
+                self.logger.record_event(
+                    event_type="long_term_memory_query_empty",
+                    message="No rows found for LongTermMemory query.",
+                    level=self.logging_level
+                )
+                return []
+            # Pre-filter message_ids by min_timestamp if provided
+            filtered_ids = self.message_ids
+            if min_timestamp is not None:
+                filtered_ids = [mid for mid in self.message_ids if self.message_timestamps.get(mid, 0) >= min_timestamp]
+            if not filtered_ids:
+                self.logger.record_event(
+                    event_type="long_term_memory_query_empty",
+                    message="No rows after timestamp filtering.",
+                    level=self.logging_level
+                )
+                return []
+            k = min(top_k, len(filtered_ids))
+            # Build a filtered FAISS index if filtering, else use the main one
+            if min_timestamp is not None:
+                # Stack embeddings for filtered_ids
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
-                    placeholders = ','.join('?' for _ in result_ids)
-                    where = f"WHERE id IN ({placeholders}) AND session_id = ?"
-                    params = result_ids + [self.session_id]
-                    if user_id:
-                        where += " AND user_id = ?"
-                        params.append(user_id)
-                    cursor.execute(f"SELECT id, role, content, embedding, timestamp, user_id FROM conversations {where}", params)
+                    placeholders = ','.join('?' for _ in filtered_ids)
+                    cursor.execute(f"SELECT id, embedding FROM conversations WHERE id IN ({placeholders})", filtered_ids)
                     rows = cursor.fetchall()
-                    # Preserve order of result_ids
-                    id_to_row = {row[0]: row for row in rows}
-                    results = [
-                        {
-                            "id": id_to_row[rid][0],
-                            "role": id_to_row[rid][1],
-                            "content": id_to_row[rid][2],
-                            "timestamp": id_to_row[rid][4],
-                            "user_id": id_to_row[rid][5],
-                            "session_id": self.session_id
-                        }
-                        for rid in result_ids if rid in id_to_row
-                    ]
-                    self.logger.record_event(
-                        event_type="long_term_memory_query",
-                        message="LongTermMemory query executed.",
-                        level=self.logging_level,
-                        additional_info={"num_results": len(results)}
-                    )
-                    return results
-        except Exception as e:
-            self.logger.log_error(f"LongTermMemory.query failed: {e}", error_type="LongTermMemoryError")
-            return []
+                    if not rows:
+                        return []
+                    embeddings = np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
+                    temp_index = faiss.IndexFlatL2(self.embedding_dim)
+                    temp_index.add(embeddings)
+                    D, I = temp_index.search(query_embedding.reshape(1, -1), k)
+                    result_ids = [rows[i][0] for i in I[0]]
+            else:
+                D, I = self.faiss_index.search(query_embedding.reshape(1, -1), k)
+                result_ids = [filtered_ids[i] for i in I[0]]
+        # Fetch corresponding rows from DB
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            placeholders = ','.join('?' for _ in result_ids)
+            where = f"WHERE id IN ({placeholders}) AND session_id = ?"
+            params = result_ids + [self.session_id]
+            if user_id:
+                where += " AND user_id = ?"
+                params.append(user_id)
+            cursor.execute(f"SELECT id, role, content, embedding, timestamp, user_id FROM conversations {where}", params)
+            rows = cursor.fetchall()
+            id_to_row = {row[0]: row for row in rows}
+            results = [
+                {
+                    "id": id_to_row[rid][0],
+                    "role": id_to_row[rid][1],
+                    "content": id_to_row[rid][2],
+                    "timestamp": id_to_row[rid][4],
+                    "user_id": id_to_row[rid][5],
+                    "session_id": self.session_id
+                }
+                for rid in result_ids if rid in id_to_row
+            ]
+        query_time = time.perf_counter() - start_time
+        self.logger.record_event(
+            event_type="long_term_memory_query",
+            message=f"LongTermMemory query executed in {query_time:.6f} seconds.",
+            level=self.logging_level,
+            additional_info={"num_results": len(results)}
+        )
+        return results
 
     def clear(self, user_id: Optional[str] = None):
-        try:
-            with self._lock:
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    if user_id:
-                        cursor.execute("DELETE FROM conversations WHERE user_id = ? AND session_id = ?", (user_id, self.session_id))
-                    else:
-                        cursor.execute("DELETE FROM conversations WHERE session_id = ?", (self.session_id,))
-                    conn.commit()
-                self.rebuild_faiss_index()
-                self.logger.record_event(
-                    event_type="long_term_memory_clear",
-                    message="LongTermMemory cleared.",
-                    level=self.logging_level,
-                    additional_info={"user_id": user_id}
-                )
-        except Exception as e:
-            self.logger.log_error(f"LongTermMemory.clear failed: {e}", error_type="LongTermMemoryError")
+        start_wait = time.perf_counter()
+        with self._write_lock:
+            wait_time = time.perf_counter() - start_wait
+            self.logger.record_event(
+                event_type="long_term_memory_write_lock_acquired",
+                message=f"Write lock acquired in {wait_time:.6f} seconds.",
+                level="debug"
+            )
+            self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
+            self.message_ids = []
+            self.message_timestamps = {}
+        # DB clear and logging outside lock
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if user_id:
+                cursor.execute("DELETE FROM conversations WHERE user_id = ? AND session_id = ?", (user_id, self.session_id))
+            else:
+                cursor.execute("DELETE FROM conversations WHERE session_id = ?", (self.session_id,))
+            conn.commit()
+        self.logger.record_event(
+            event_type="long_term_memory_clear",
+            message="LongTermMemory cleared.",
+            level=self.logging_level,
+            additional_info={"user_id": user_id}
+        )
+
+class MemoryPressureError(Exception):
+    """Raised when a message cannot be added due to high RAM usage, even after cleanup attempts."""
+    pass
 
 class DialogueContextManager:
     """
@@ -354,7 +446,8 @@ class DialogueContextManager:
         short_term_expiry_seconds: Optional[int] = None,
         long_term_retention_days: Optional[int] = None,
         long_term_top_k: int = 5,
-        memory_logging_level: str = "info"
+        memory_logging_level: str = "info",
+        model_manager: Optional[object] = None
     ):
         self.config_manager = config_manager
         # Use config_manager for all memory parameters if provided
@@ -393,7 +486,11 @@ class DialogueContextManager:
             top_k=long_term_top_k,
             logging_level=memory_logging_level
         )
-        self.embedding_fn = embedding_fn or self._default_embedding_fn
+        self.model_manager = model_manager
+        if embedding_fn is not None:
+            self.embedding_fn = embedding_fn
+        else:
+            self.embedding_fn = self._embedding_from_base_model_with_fallback
         self.ram_manager = None
         if config_manager is not None and hasattr(RAMManager, 'check_memory_health'):
             try:
@@ -401,30 +498,84 @@ class DialogueContextManager:
             except Exception as e:
                 self.logger.log_error(f"DialogueContextManager: RAMManager init failed: {e}", error_type="RAMManagerInitError")
 
-    def _default_embedding_fn(self, content: str) -> np.ndarray:
-        return np.random.rand(self.embedding_dim).astype(np.float32)
+    def _embedding_from_base_model_with_fallback(self, text: str) -> np.ndarray:
+        # Try to use base model for embedding, fallback to hash-based if unavailable
+        try:
+            if self.model_manager is not None and hasattr(self.model_manager, 'base_model') and hasattr(self.model_manager, 'base_tokenizer'):
+                tokenizer = self.model_manager.base_tokenizer
+                model = self.model_manager.base_model
+                import torch
+                inputs = tokenizer(text, return_tensors='pt', truncation=True, max_length=128)
+                with torch.no_grad():
+                    outputs = model(**inputs, output_hidden_states=True)
+                last_hidden = outputs.last_hidden_state  # (batch, seq, hidden)
+                pooled = last_hidden.mean(dim=1).squeeze().cpu().numpy()
+                if pooled.shape[0] > self.embedding_dim:
+                    pooled = pooled[:self.embedding_dim]
+                elif pooled.shape[0] < self.embedding_dim:
+                    pooled = np.pad(pooled, (0, self.embedding_dim - pooled.shape[0]))
+                return pooled.astype(np.float32)
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Base model embedding failed: {e}", error_type="EmbeddingError")
+        # Fallback: hash-based deterministic embedding
+        return self._hash_based_embedding(text)
+
+    def _hash_based_embedding(self, text: str) -> np.ndarray:
+        hash_bytes = hashlib.sha256(text.encode('utf-8')).digest()
+        needed = self.embedding_dim * 4  # 4 bytes per float32
+        full_bytes = (hash_bytes * ((needed // len(hash_bytes)) + 1))[:needed]
+        arr = np.frombuffer(full_bytes, dtype=np.uint8).astype(np.float32)
+        arr = arr[:self.embedding_dim]
+        arr = arr / np.linalg.norm(arr) if np.linalg.norm(arr) > 0 else arr
+        return arr
+
+    def _validate_embedding(self, embedding: np.ndarray) -> bool:
+        return (
+            isinstance(embedding, np.ndarray)
+            and embedding.shape == (self.embedding_dim,)
+            and embedding.dtype == np.float32
+        )
 
     def add_message(self, role: str, content: str, user_id: str = "default"):
+        """
+        Transactionally add a message to both short-term and long-term memory.
+        If long-term add fails, rollback short-term add.
+        Raises MemoryPressureError if RAM usage is critically high even after cleanup.
+        """
         try:
             if self.ram_manager:
                 try:
                     ram_health = self.ram_manager.check_memory_health()
                     if ram_health.get('usage_percentage', 0) > 0.90:
-                        if self.logger:
-                            self.logger.record_event(
-                                event_type="ram_usage_high",
-                                message=f"RAM usage high ({ram_health['usage_percentage']*100:.1f}%), skipping add_message.",
-                                level="warning"
-                            )
-                        return  # Skip adding message if RAM is critically high
-                except Exception as e:
-                    if self.logger:
+                        before = len(self.short_term.memory)
+                        self.short_term.clear()  # Attempt to free memory
+                        after = len(self.short_term.memory)
                         self.logger.record_event(
-                            event_type="ram_health_check_failed",
-                            message=f"RAM health check failed: {e}",
+                            event_type="ram_usage_high_cleanup",
+                            message=f"RAM usage high, pruned short-term memory from {before} to {after}.",
                             level="warning"
                         )
+                        # Re-check RAM
+                        ram_health = self.ram_manager.check_memory_health()
+                        if ram_health.get('usage_percentage', 0) > 0.90:
+                            self.logger.record_event(
+                                event_type="ram_usage_still_high",
+                                message="RAM usage still high after cleanup, skipping message.",
+                                level="error"
+                            )
+                            raise MemoryPressureError("RAM usage critically high, message not added.")
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="ram_health_check_failed",
+                        message=f"RAM health check failed: {e}",
+                        level="warning"
+                    )
             embedding = self.embedding_fn(content)
+            if not self._validate_embedding(embedding):
+                if self.logger:
+                    self.logger.log_error("Invalid embedding generated. Skipping message.", error_type="EmbeddingError")
+                return
             timestamp = time.time()
             msg = {
                 "role": role,
@@ -435,12 +586,20 @@ class DialogueContextManager:
                 "session_id": self.session_id
             }
             self.short_term.add(msg)
-            self.long_term.add(msg)
+            try:
+                self.long_term.add(msg)
+            except Exception as e:
+                self.short_term.remove_last()
+                if self.logger:
+                    self.logger.log_error(f"LongTermMemory.add failed, rolled back ShortTermMemory: {e}", error_type="MemoryConsistencyError")
+                raise
+        except MemoryPressureError:
+            raise
         except Exception as e:
             if self.logger:
-                self.logger.log_error(f"DialogueContextManager.add_message failed: {e}", error_type="DialogueContextManagerError")
+                self.logger.log_error(f"DialogueContextManager.add_message failed: {e}", error_type="MemoryConsistencyError")
             if self.error_manager:
-                self.error_manager.record_error(e, error_type="DialogueContextManagerError")
+                self.error_manager.record_error(e, error_type="MemoryConsistencyError")
 
     def get_short_term_context(self) -> List[Dict[str, Any]]:
         try:
@@ -490,10 +649,19 @@ class DialogueContextManager:
         try:
             self.add_message(role, input_message, user_id)
             stm = self.short_term.get()
-            short_term_emb = np.stack([msg["embedding"] for msg in stm]) if stm else np.empty((0, self.embedding_dim), dtype=np.float32)
-            query_emb = short_term_emb[-1] if short_term_emb.shape[0] > 0 else self._default_embedding_fn(input_message)
+            # Only use messages with valid embeddings
+            valid_stm = [msg for msg in stm if self._validate_embedding(msg.get("embedding"))]
+            short_term_emb = np.stack([msg["embedding"] for msg in valid_stm]) if valid_stm else np.empty((0, self.embedding_dim), dtype=np.float32)
+            query_emb = short_term_emb[-1] if short_term_emb.shape[0] > 0 else self.embedding_fn(input_message)
             long_term_msgs = self.get_long_term_context(user_id, query_emb)
-            long_term_emb = np.stack([query_emb for _ in long_term_msgs]) if long_term_msgs else np.empty((0, self.embedding_dim), dtype=np.float32)
+            valid_ltm = [msg for msg in long_term_msgs if self._validate_embedding(msg.get("embedding"))]
+            if len(valid_ltm) < len(long_term_msgs):
+                self.logger.record_event(
+                    event_type="long_term_memory_invalid_embedding",
+                    message=f"Skipped {len(long_term_msgs) - len(valid_ltm)} long-term messages with invalid embeddings.",
+                    level="warning"
+                )
+            long_term_emb = np.stack([msg["embedding"] for msg in valid_ltm]) if valid_ltm else np.empty((0, self.embedding_dim), dtype=np.float32)
             if short_term_emb.shape[0] > 0 and long_term_emb.shape[0] > 0:
                 combined = np.concatenate([short_term_emb, long_term_emb], axis=0)
             elif short_term_emb.shape[0] > 0:

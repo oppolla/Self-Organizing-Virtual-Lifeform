@@ -239,7 +239,8 @@ class SystemContext:
                     memory_logging_level=getattr(config_manager.memory_config, 'memory_logging_level', 'info'),
                     long_term_retention_days=getattr(config_manager.memory_config, 'long_term_retention_days', None),
                     long_term_top_k=getattr(config_manager.memory_config, 'long_term_top_k', 5),
-                    short_term_expiry_seconds=getattr(config_manager.memory_config, 'short_term_expiry_seconds', None)
+                    short_term_expiry_seconds=getattr(config_manager.memory_config, 'short_term_expiry_seconds', None),
+                    model_manager=self.model_manager
                 )
             except Exception as e:
                 self.memory_context = None
