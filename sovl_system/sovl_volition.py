@@ -13,6 +13,10 @@ import traceback
 from abc import ABC, abstractmethod
 import sovl_state
 import random
+from sovl_state import StateManager
+import concurrent.futures
+import re
+import threading
 
 class SensationNode(ABC):
     """
@@ -50,11 +54,22 @@ class SensationNode(ABC):
         """
         pass
 
+class NoOpTuner:
+    def update_parameters(self, params):
+        pass
+    def get_current_parameters(self):
+        return {}
+
+class NoOpMotivator:
+    def consider_goal(self, description, source, context):
+        print(f"[NoOpMotivator] Goal not created: {description} (no motivator present)")
+
 class AutonomyManager:
     """
     A lightweight decision-making framework for autonomous system optimization in the SOVL System.
-    Processes system metrics and uses LLM-based reasoning to make decisions, initially for memory health.
-    Now also integrates with Motivator for dynamic, emergent goal-driven behavior.
+    - The `tuner` dependency is required for actions like 'throttle' (dynamic parameter tuning).
+    - The `motivator` dependency is required for goal-driven behavior (e.g., 'explore' action).
+    If these are not provided, safe no-op fallbacks are used, but full functionality is not guaranteed.
     """
     def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref, tuner: Optional[SOVLTuner] = None, motivator=None):
         """
@@ -72,9 +87,9 @@ class AutonomyManager:
         self.logger = logger
         self.device = device
         self.system_ref = system_ref
-        self.tuner = tuner  # Link to SOVLTuner for dynamic parameter tuning
-        self.memory_lock = Lock
-        self.motivator = motivator  # <-- Integration point
+        self.tuner = tuner if tuner is not None else NoOpTuner()
+        self.motivator = motivator if motivator is not None else NoOpMotivator()
+        self.context_lock = Lock()
         # Cache configuration
         self.controls_config = config_manager.get_section("controls_config")
         self.autonomy_config = config_manager.get_section("autonomy_config", {
@@ -97,7 +112,9 @@ class AutonomyManager:
             "action_timeout": 10.0,  # New: Timeout for actions
             "fallback_decision_limit": 3,  # New: Fallback after repeated LLM failures
             "strict_mode": False,  # Added: strict vs best-effort mode
-            "enable_autosys_control": False  # New: Automated system control (LLM-driven throttle/pause/shutdown)
+            "enable_autosys_control": False,  # New: Automated system control (LLM-driven throttle/pause/shutdown)
+            "sense_node_cache_ttl": 1.0,  # seconds
+            "sense_node_priority": {}  # name -> priority (lower is higher priority)
         })
         
         # State tracking
@@ -142,6 +159,10 @@ class AutonomyManager:
                 "timestamp": time.time()
             }
         )
+
+        self._sense_cache = {}  # name -> (observation, timestamp)
+        self._sense_cache_ttl = self.config_manager.get("sense_node_cache_ttl", 1.0)  # seconds
+        self._sense_node_priority = self.config_manager.get("sense_node_priority", {})  # name -> priority (lower is higher priority)
 
     def collect_metrics(self) -> Dict[str, float]:
         """
@@ -283,11 +304,7 @@ class AutonomyManager:
     def llm_decide(self, prompt: str, allowed_responses: list) -> str:
         """
         Query the LLM with the prompt and parse the response into an allowed action string.
-        Args:
-            prompt: The structured prompt string.
-            allowed_responses: List of valid responses (e.g., ["continue", "pause", ...] or ["yes", "no"])
-        Returns:
-            Action string chosen by the LLM.
+        Enhanced: robust output validation, failure tracking, and safer fallbacks.
         """
         self.logger.record_event(
             event_type="llm_prompt_sent",
@@ -296,14 +313,25 @@ class AutonomyManager:
             additional_info={"prompt": prompt, "timestamp": time.time(), "allowed_responses": allowed_responses}
         )
         llm_output = None
+        action = None
+        allowed_set = {resp.lower().strip(): resp for resp in allowed_responses}
+        failure_threshold = 3
+
         try:
             if self.generation_manager is None:
-                raise RuntimeError("No generation_manager attached to AutonomyManager.")
+                self.logger.record_event(
+                    event_type="generation_manager_missing_critical",
+                    message="No generation_manager attached to AutonomyManager. Fallback to safe action.",
+                    level="critical",
+                    additional_info={"prompt": prompt, "timestamp": time.time()}
+                )
+                self.consecutive_llm_failures += 1
+                return self._safe_fallback_action(allowed_responses)
             result = self.generation_manager.generate_text(prompt, num_return_sequences=1, user_id="autonomy_manager")
             if isinstance(result, list) and result:
-                llm_output = result[0].strip().lower()
+                llm_output = result[0]
             else:
-                llm_output = None
+                llm_output = ""
         except Exception as e:
             self.logger.record_event(
                 event_type="llm_decision_error",
@@ -311,24 +339,68 @@ class AutonomyManager:
                 level="error",
                 additional_info={"prompt": prompt, "timestamp": time.time()}
             )
-            llm_output = None
+            self.consecutive_llm_failures += 1
+            return self._safe_fallback_action(allowed_responses)
+
+        # Robust extraction: try to find a valid action in the output
+        extracted = None
+        if isinstance(llm_output, str):
+            # Try to extract a valid action (case-insensitive, word-boundary)
+            for resp in allowed_responses:
+                pattern = r'\\b' + re.escape(resp) + r'\\b'
+                if re.search(pattern, llm_output, re.IGNORECASE):
+                    extracted = resp
+                    break
+            # Try to extract from JSON or quoted string
+            if not extracted:
+                m = re.search(r'"([a-zA-Z_]+)"', llm_output)
+                if m and m.group(1).lower() in allowed_set:
+                    extracted = allowed_set[m.group(1).lower()]
+            # Fallback: try to match any allowed response as substring
+            if not extracted:
+                for resp in allowed_responses:
+                    if resp.lower() in llm_output.lower():
+                        extracted = resp
+                        break
+        else:
+            llm_output = str(llm_output)
+
+        if extracted and extracted.lower() in allowed_set:
+            action = allowed_set[extracted.lower()]
+            self.consecutive_llm_failures = 0
+        else:
+            self.consecutive_llm_failures += 1
+            self.logger.record_event(
+                event_type="llm_decision_invalid",
+                message=f"Invalid or unrecognized LLM action '{llm_output}'. Fallback triggered.",
+                level="warning",
+                additional_info={"timestamp": time.time(), "failures": self.consecutive_llm_failures}
+            )
+            if self.consecutive_llm_failures >= failure_threshold:
+                self.logger.record_event(
+                    event_type="llm_decision_fallback_mode",
+                    message=f"Consecutive LLM failures ({self.consecutive_llm_failures}) exceeded threshold. Entering fallback mode.",
+                    level="error",
+                    additional_info={"timestamp": time.time()}
+                )
+                return self._safe_fallback_action(allowed_responses)
+            else:
+                return self._safe_fallback_action(allowed_responses)
         self.logger.record_event(
             event_type="llm_decision_output",
             message="LLM decision output",
             level="debug",
-            additional_info={"llm_output": llm_output, "timestamp": time.time()}
+            additional_info={"llm_output": llm_output, "action": action, "timestamp": time.time()}
         )
-        # Validate output
-        allowed_set = set(map(str.lower, allowed_responses))
-        if llm_output not in allowed_set:
-            self.logger.record_event(
-                event_type="llm_decision_invalid",
-                message=f"Invalid LLM action '{llm_output}', falling back to '{allowed_responses[0]}'.",
-                level="warning",
-                additional_info={"timestamp": time.time()}
-            )
-            return allowed_responses[0]  # Safe fallback
-        return llm_output
+        return action
+
+    def _safe_fallback_action(self, allowed_responses):
+        # Prefer throttle or pause if available, else first allowed
+        for safer in ["throttle", "pause"]:
+            for resp in allowed_responses:
+                if resp.lower() == safer:
+                    return resp
+        return allowed_responses[0]
 
     def execute_action(self, action: str) -> None:
         """
@@ -339,7 +411,13 @@ class AutonomyManager:
         if action == "continue":
             return  # No-op for normal operation
         elif action == "throttle":
-            if self.tuner:
+            if isinstance(self.tuner, NoOpTuner):
+                self.logger.record_event(
+                    event_type="tuner_missing",
+                    message="Tuner is required for 'throttle' action but is missing. No parameters updated.",
+                    level="warning"
+                )
+            else:
                 self.tuner.update_parameters({
                     "data_config.batch_size": 1,
                     "generation_config.temperature": 0.6
@@ -362,33 +440,39 @@ class AutonomyManager:
                 self.system_ref.shutdown()
                 self.logger.record_event(event_type="shutdown", message="System shutdown initiated by LLM.")
         elif action == "explore":
-            # Robust curiosity-driven question generation
-            if hasattr(self, "curiosity") and self.curiosity:
-                try:
-                    question = None
-                    if hasattr(self.curiosity, "generate_curiosity_question"):
-                        question = self.curiosity.generate_curiosity_question(context="explore", spontaneous=True)
-                    self.logger.record_event(
-                        event_type="curiosity_question_generated",
-                        message=f"Curiosity-driven question: {question}",
-                        additional_info={"timestamp": time.time()}
-                    )
-                    if question and hasattr(self, "motivator") and self.motivator:
-                        self.motivator.consider_goal(description=question, source="curiosity")
-                except Exception as e:
-                    self.logger.record_event(
-                        event_type="curiosity_question_failed",
-                        message=f"Failed to generate curiosity question: {str(e)}",
-                        level="error",
-                        additional_info={"timestamp": time.time()}
-                    )
-            else:
+            if isinstance(self.motivator, NoOpMotivator):
                 self.logger.record_event(
-                    event_type="explore_action_skipped",
-                    message="Curiosity module not available; skipping explore action.",
-                    level="warning",
-                    additional_info={"timestamp": time.time()}
+                    event_type="motivator_missing",
+                    message="Motivator is required for 'explore' action but is missing. No goal created.",
+                    level="warning"
                 )
+            else:
+                if hasattr(self, "curiosity") and self.curiosity:
+                    try:
+                        question = None
+                        if hasattr(self.curiosity, "generate_curiosity_question"):
+                            question = self.curiosity.generate_curiosity_question(context="explore", spontaneous=True)
+                        self.logger.record_event(
+                            event_type="curiosity_question_generated",
+                            message=f"Curiosity-driven question: {question}",
+                            additional_info={"timestamp": time.time()}
+                        )
+                        if question:
+                            self.motivator.consider_goal(description=question, source="curiosity", context={})
+                    except Exception as e:
+                        self.logger.record_event(
+                            event_type="curiosity_question_failed",
+                            message=f"Failed to generate curiosity question: {str(e)}",
+                            level="error",
+                            additional_info={"timestamp": time.time()}
+                        )
+                else:
+                    self.logger.record_event(
+                        event_type="explore_action_skipped",
+                        message="Curiosity module not available; skipping explore action.",
+                        level="warning",
+                        additional_info={"timestamp": time.time()}
+                    )
         else:
             # Try action registry if present
             if hasattr(self, "action_registry") and action in self.action_registry:
@@ -412,20 +496,39 @@ class AutonomyManager:
     def aggregate_sensory_context(self) -> dict:
         """
         Collect the latest observation from each registered sense node and system/system resource state.
-        Returns:
-            Dictionary summarizing all sensory, core system, and resource state.
+        Uses timeout, error isolation, caching, and prioritization.
         """
         context = {}
-        for name, node in self.sense_nodes.items():
-            try:
-                context[name] = node.get_latest_observation()
-            except Exception as e:
-                self.logger.record_event(
-                    event_type="sense_observation_failed",
-                    message=f"Failed to get observation from '{name}': {str(e)}",
-                    level="warning",
-                    additional_info={"timestamp": time.time()}
-                )
+        now = time.time()
+        # Prioritize nodes
+        nodes = list(self.sense_nodes.items())
+        nodes.sort(key=lambda item: self._sense_node_priority.get(item[0], 100))  # Default low priority
+
+        def get_obs(name, node):
+            # Caching
+            cached = self._sense_cache.get(name)
+            if cached and now - cached[1] < self._sense_cache_ttl:
+                return cached[0]
+            # Timeout and error isolation
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(node.get_latest_observation)
+                try:
+                    obs = future.result(timeout=1.0)
+                    self._sense_cache[name] = (obs, now)
+                    return obs
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="sense_observation_failed",
+                        message=f"Failed or timed out getting observation from '{name}': {str(e)}",
+                        level="warning",
+                        additional_info={"timestamp": now}
+                    )
+                    self._sense_cache[name] = (None, now)
+                    return None
+
+        for name, node in nodes:
+            context[name] = get_obs(name, node)
+
         # Add system state (battery, error, etc.)
         if hasattr(self.system_ref, 'get_battery_level'):
             try:
@@ -555,14 +658,35 @@ class AutonomyManager:
     def check_and_act(self) -> None:
         """
         Main loop to aggregate context, prompt the LLM, and execute the chosen action.
+        If generation_manager is missing, log a critical error and skip LLM-based actions.
         """
         if not self.autonomy_config["enable_autonomy"]:
             return
         if not getattr(self, "enable_autosys_control", False):
             return
+        if self.generation_manager is None:
+            self.logger.record_event(
+                event_type="generation_manager_missing_critical",
+                message="No generation_manager available in check_and_act. Skipping LLM-based decision.",
+                level="critical",
+                additional_info={"timestamp": time.time()}
+            )
+            return
         try:
-            with self.memory_lock:
+            with self.context_lock:
                 context = self.aggregate_sensory_context()
+                if isinstance(self.tuner, NoOpTuner):
+                    self.logger.record_event(
+                        event_type="tuner_fallback",
+                        message="Tuner is not configured. Using no-op fallback.",
+                        level="warning"
+                    )
+                if isinstance(self.motivator, NoOpMotivator):
+                    self.logger.record_event(
+                        event_type="motivator_fallback",
+                        message="Motivator is not configured. Using no-op fallback.",
+                        level="warning"
+                    )
                 if self.tuner:
                     context["tunable_parameters"] = self.tuner.get_current_parameters()
                 prompt = self.build_structured_prompt(context)
@@ -696,30 +820,26 @@ class AutonomyManager:
         return 'completed'
 
 class Goal:
-    def __init__(self, description, source, context, priority=1.0, status='active', metadata=None, completion=0.0, ephemeral=False, soft_completed=False, last_checked=None, relevance=1.0):
-        self.description = description          # Natural language or structured
-        self.source = source                   # 'user', 'curiosity', 'pattern', etc.
-        self.context = context                 # Dict: user_id, session, etc.
-        self.priority = priority               # Fluid, modulated by bond, context, etc.
-        self.status = status                   # 'active', 'pending', 'stale', 'completed', etc.
-        self.metadata = metadata or {}         # Arbitrary info
-        self.created_at = time.time()
-        self.last_updated = self.created_at
-        self.completion = completion           # 0.0 (not started) to 1.0 (done)
-        self.ephemeral = ephemeral             # If True, goal can be dropped easily
-        self.soft_completed = soft_completed   # If True, goal was softly completed (not strictly finished)
-        self.last_checked = last_checked or time.time()
-        self.relevance = relevance             # 0.0 (irrelevant) to 1.0 (highly relevant)
+    GOAL_SCHEMA_VERSION = 1
 
-    def decay_priority(self, decay_rate=0.01):
-        # Decay priority and relevance over time
-        time_passed = time.time() - self.last_updated
-        self.priority *= (1 - decay_rate) ** time_passed
-        self.relevance *= (1 - decay_rate/2) ** time_passed
-        self.last_updated = time.time()
+    def __init__(self, description, source, context, priority=1.0, status='active', metadata=None, completion=0.0, ephemeral=False, soft_completed=False, last_checked=None, relevance=1.0, created_at=None, last_updated=None):
+        self.description = description
+        self.source = source
+        self.context = context
+        self.priority = priority
+        self.status = status
+        self.metadata = metadata or {}
+        self.created_at = created_at if created_at is not None else time.time()
+        self.last_updated = last_updated if last_updated is not None else self.created_at
+        self.completion = completion
+        self.ephemeral = ephemeral
+        self.soft_completed = soft_completed
+        self.last_checked = last_checked or time.time()
+        self.relevance = relevance
 
     def to_dict(self):
         return {
+            "version": self.GOAL_SCHEMA_VERSION,
             "description": self.description,
             "source": self.source,
             "context": self.context,
@@ -737,54 +857,27 @@ class Goal:
 
     @classmethod
     def from_dict(cls, data):
-        goal = cls(
-            description=data["description"],
-            source=data["source"],
-            context=data["context"],
-            priority=data.get("priority", 1.0),
-            status=data.get("status", "active"),
-            metadata=data.get("metadata", {}),
-            completion=data.get("completion", 0.0),
-            ephemeral=data.get("ephemeral", False),
-            soft_completed=data.get("soft_completed", False),
-            last_checked=data.get("last_checked", time.time()),
-            relevance=data.get("relevance", 1.0),
-        )
-        goal.created_at = data.get("created_at", time.time())
-        goal.last_updated = data.get("last_updated", goal.created_at)
-        return goal
-
-    def decay_priority(self, decay_rate=0.01):
-        # Decay priority over time
-        time_passed = time.time() - self.last_updated
-        self.priority *= (1 - decay_rate) ** time_passed
-        self.last_updated = time.time()
-
-    def to_dict(self):
-        return {
-            "description": self.description,
-            "source": self.source,
-            "context": self.context,
-            "priority": self.priority,
-            "status": self.status,
-            "metadata": self.metadata,
-            "created_at": self.created_at,
-            "last_updated": self.last_updated,
-        }
-
-    @classmethod
-    def from_dict(cls, data):
-        goal = cls(
-            description=data["description"],
-            source=data["source"],
-            context=data["context"],
-            priority=data.get("priority", 1.0),
-            status=data.get("status", "active"),
-            metadata=data.get("metadata", {}),
-        )
-        goal.created_at = data.get("created_at", time.time())
-        goal.last_updated = data.get("last_updated", goal.created_at)
-        return goal
+        try:
+            version = data.get("version", 1)
+            return cls(
+                description=data.get("description", "unknown"),
+                source=data.get("source", "unknown"),
+                context=data.get("context", {}),
+                priority=data.get("priority", 1.0),
+                status=data.get("status", "active"),
+                metadata=data.get("metadata", {}),
+                completion=data.get("completion", 0.0),
+                ephemeral=data.get("ephemeral", False),
+                soft_completed=data.get("soft_completed", False),
+                last_checked=data.get("last_checked", time.time()),
+                relevance=data.get("relevance", 1.0),
+                created_at=data.get("created_at", time.time()),
+                last_updated=data.get("last_updated", data.get("created_at", time.time())),
+            )
+        except Exception as e:
+            import traceback
+            print(f"Failed to load goal from dict: {e}\n{traceback.format_exc()}")
+            return None
 
 class Motivator:
     """
@@ -798,6 +891,7 @@ class Motivator:
         logger,
         config_manager,
         bonder,
+        state_manager,
         decay_rate=0.01,
         min_priority=0.1,
         completion_threshold=0.95,
@@ -806,12 +900,14 @@ class Motivator:
         irrelevance_threshold=0.2,
         completion_drive=0.7,
         novelty_drive=0.2,
+        max_goals=30,
     ):
         self.curiosity = curiosity
         self.memory = memory
         self.logger = logger
         self.config_manager = config_manager
         self.bonder = bonder
+        self.state_manager = state_manager
         self.decay_rate = decay_rate
         self.min_priority = min_priority
         self.completion_threshold = completion_threshold
@@ -820,21 +916,77 @@ class Motivator:
         self.irrelevance_threshold = irrelevance_threshold
         self.completion_drive = completion_drive
         self.novelty_drive = novelty_drive
+        self.max_goals = max_goals
         self.goals = []  # List[Goal]
+        self._goal_lock = threading.Lock()
         self.load_goals_from_memory()
 
     # --- Goal Emergence ---
     def consider_goal(self, description, source, context):
+        with self._goal_lock:
+            # Enforce max_goals limit
+            active_goals = [g for g in self.goals if g.status == 'active']
+            if len(active_goals) >= self.max_goals:
+                self.logger.record_event(
+                    event_type="goal_rejected",
+                    message=f"Goal limit reached ({self.max_goals}). Goal not added: {description}",
+                    additional_info={"source": source, "context": context}
+                )
+                return  # Do not add new goal
+
+            # --- Conflict Detection ---
+            conflict = self._detect_goal_conflict(description, source, context, active_goals)
+            if conflict:
+                self.logger.record_event(
+                    event_type="goal_conflict",
+                    message=f"Goal '{description}' conflicts with existing goal '{conflict.description}'. Rejected.",
+                    additional_info={"new_goal": description, "conflict_with": conflict.description, "context": context}
+                )
+                return  # Reject conflicting goal
+
+            bond = self.bonder.get_bond(context.get('user_id')) if source == 'user' and context.get('user_id') else 1.0
+            priority = self.estimate_priority(description, source, context, bond)
+            if self.should_create_goal(priority):
+                goal = Goal(description, source, context, priority)
+                self.goals.append(goal)
+                self._prioritize_goals()
+                self.logger.record_event(event_type="goal_created", message=description, additional_info={"priority": priority, "source": source, "context": context})
+                self.persist_goals()
+
+    def _detect_goal_conflict(self, description, source, context, active_goals):
         """
-        Called when a potential goal arises (user request, curiosity spike, pattern, etc.)
+        Returns the first conflicting goal if found, else None.
+        Conflict logic: same context and mutually exclusive actions (customize as needed).
         """
-        bond = self.bonder.get_bond(context.get('user_id')) if source == 'user' and context.get('user_id') else 1.0
-        priority = self.estimate_priority(description, source, context, bond)
-        if self.should_create_goal(priority):
-            goal = Goal(description, source, context, priority)
-            self.goals.append(goal)
-            self.logger.record_event(event_type="goal_created", message=description, additional_info={"priority": priority, "source": source, "context": context})
-            self.persist_goals()
+        new_action = context.get('action')
+        new_ctx = context.get('location') or context.get('target')
+        for goal in active_goals:
+            existing_action = goal.context.get('action')
+            existing_ctx = goal.context.get('location') or goal.context.get('target')
+            # Example: mutually exclusive if same context/location and different actions
+            if new_ctx and existing_ctx and new_ctx == existing_ctx and new_action and existing_action and new_action != existing_action:
+                return goal
+        return None
+
+    def _prioritize_goals(self):
+        """
+        Sorts self.goals by priority, relevance, and compatibility.
+        Keeps only the top N active goals (configurable).
+        """
+        n = self.config_manager.get('goal_queue_size', self.max_goals)
+        # Only keep top N active goals, drop or deprioritize the rest
+        active_goals = [g for g in self.goals if g.status == 'active']
+        sorted_goals = sorted(active_goals, key=lambda g: (g.priority, g.relevance), reverse=True)
+        for i, goal in enumerate(sorted_goals):
+            if i >= n:
+                goal.status = 'dropped'
+                self.logger.record_event(
+                    event_type="goal_dropped_low_priority",
+                    message=f"Goal '{goal.description}' dropped due to low priority in queue.",
+                    additional_info={"priority": goal.priority, "relevance": goal.relevance}
+                )
+        # Rebuild self.goals with updated statuses
+        self.goals = sorted(self.goals, key=lambda g: (g.status != 'active', -g.priority, -g.relevance))
 
     def estimate_priority(self, description, source, context, bond):
         # Use heuristics, bond, curiosity, context, etc. to estimate priority (future: temperament, novelty, etc.)
@@ -851,60 +1003,93 @@ class Motivator:
 
     # --- Goal Lifecycle Management ---
     def reevaluate_goals(self):
-        """
-        Periodically update priorities, decay old goals, drop or revive as needed.
-        """
-        for goal in self.goals:
-            # Simulate memory/context checks (stub for now)
-            goal.last_checked = time.time()
-            # Example: If completion is high, soft-complete
-            if goal.completion >= 0.95 and goal.status == 'active':
-                goal.status = 'completed'
-                goal.soft_completed = True
-                self.logger.record_event("goal_soft_completed", message=goal.description)
-            # Example: If relevance is low or goal is ephemeral and stale, drop it
-            elif goal.relevance < 0.2 or (goal.ephemeral and goal.status == 'stale'):
-                goal.status = 'dropped'
-                self.logger.record_event("goal_dropped_irrelevant", message=goal.description)
-            else:
-                goal.decay_priority()
-        # Remove dropped/completed goals from active list if you want ephemeral behavior
-        self.goals = [g for g in self.goals if g.status not in ('dropped', 'completed') or g.soft_completed]
-        self.persist_goals()
-
-    def update_goal_progress(self, goal, progress_delta):
-        goal.completion = min(max(goal.completion + progress_delta, 0.0), 1.0)
-        if goal.completion >= 1.0:
-            self.complete_goal(goal, soft=True)
-        else:
+        with self._goal_lock:
+            for goal in self.goals:
+                goal.last_checked = time.time()
+                if goal.completion >= 0.95 and goal.status == 'active':
+                    goal.status = 'completed'
+                    goal.soft_completed = True
+                    self.logger.record_event("goal_soft_completed", message=goal.description)
+                elif goal.relevance < 0.2 or (goal.ephemeral and goal.status == 'stale'):
+                    goal.status = 'dropped'
+                    self.logger.record_event("goal_dropped_irrelevant", message=goal.description)
+                else:
+                    goal.decay_priority()
+            self.goals = [g for g in self.goals if g.status not in ('dropped', 'completed') or g.soft_completed]
             self.persist_goals()
 
+    def update_goal_progress(self, goal, progress_delta):
+        with self._goal_lock:
+            goal.completion = min(max(goal.completion + progress_delta, 0.0), 1.0)
+            if goal.completion >= 1.0:
+                self.complete_goal(goal, soft=True)
+            else:
+                self.persist_goals()
+
     def complete_goal(self, goal, soft=False):
-        goal.status = 'completed'
-        goal.priority = 0
-        goal.completion = 1.0
-        goal.soft_completed = soft
-        goal.metadata['completed_at'] = time.time()
-        self.logger.record_event(event_type="goal_completed", message=goal.description)
-        self.persist_goals()
+        with self._goal_lock:
+            goal.status = 'completed'
+            goal.priority = 0
+            goal.completion = 1.0
+            goal.soft_completed = soft
+            goal.metadata['completed_at'] = time.time()
+            self.logger.record_event(event_type="goal_completed", message=goal.description)
+            self.persist_goals()
 
     def drop_goal(self, goal, reason="decayed"):
-        goal.status = 'dropped'
-        goal.priority = 0
-        goal.metadata['dropped_at'] = time.time()
-        self.logger.record_event(event_type="goal_dropped", message=goal.description, additional_info={"reason": reason})
-        self.persist_goals()
+        with self._goal_lock:
+            goal.status = 'dropped'
+            goal.priority = 0
+            goal.metadata['dropped_at'] = time.time()
+            self.logger.record_event(event_type="goal_dropped", message=goal.description, additional_info={"reason": reason})
+            self.persist_goals()
 
     # --- Persistence ---
     def persist_goals(self):
-        # Save goals to sovl_state for cross-session continuity
-        sovl_state_instance = getattr(sovl_state, 'state', sovl_state)
-        sovl_state_instance.set_goals([g.to_dict() for g in self.goals])
+        with self._goal_lock:
+            def update_fn(state):
+                try:
+                    state.set_goals([g.to_dict() for g in self.goals])
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="goal_persist_failed",
+                        message=f"Failed to persist goals: {str(e)}",
+                        level="error"
+                    )
+                return state
+            try:
+                self.state_manager.update_state_atomic(update_fn)
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="goal_persist_atomic_failed",
+                    message=f"Atomic persist failed: {str(e)}",
+                    level="error"
+                )
 
     def load_goals_from_memory(self):
-        sovl_state_instance = getattr(sovl_state, 'state', sovl_state)
-        goal_dicts = sovl_state_instance.get_goals() if hasattr(sovl_state_instance, 'get_goals') else []
-        self.goals = [Goal.from_dict(g) for g in goal_dicts]
+        with self._goal_lock:
+            try:
+                sovl_state_instance = getattr(sovl_state, 'state', sovl_state)
+                goal_dicts = sovl_state_instance.get_goals() if hasattr(sovl_state_instance, 'get_goals') else []
+                loaded_goals = []
+                for g in goal_dicts:
+                    goal = Goal.from_dict(g)
+                    if goal is not None:
+                        loaded_goals.append(goal)
+                    else:
+                        self.logger.record_event(
+                            event_type="goal_load_skipped",
+                            message="Skipped invalid goal during load.",
+                            level="warning"
+                        )
+                self.goals = loaded_goals
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="goal_load_failed",
+                    message=f"Failed to load goals from sovl_state: {str(e)}",
+                    level="error"
+                )
+                self.goals = []
 
     # --- Reflection/Introspection (Optional) ---
     def reflect_on_goals(self):
