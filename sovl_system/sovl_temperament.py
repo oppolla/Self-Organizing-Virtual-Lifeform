@@ -11,6 +11,7 @@ from sovl_confidence import ConfidenceCalculator
 import math
 from sovl_utils import synchronized, safe_divide
 from sovl_error import ErrorManager, ConfigurationError
+from threading import Lock
 
 @dataclass
 class TemperamentConfig:
@@ -444,6 +445,7 @@ class TemperamentAdjuster:
         self.temperament_system = None
         self._last_parameter_hash = None
         self._last_state_hash = None
+        self._lock = Lock()
         
         # Initialize components
         self._initialize_events()
@@ -484,62 +486,77 @@ class TemperamentAdjuster:
             
     def _on_state_update(self, state: SOVLState) -> None:
         """Handle state updates by synchronizing with the TemperamentSystem."""
-        try:
-            if not self.temperament_system:
-                 self.logger.log_error(
-                    error_msg="Temperament system not initialized, cannot process state update.",
-                    error_type="temperament_state_error"
-                 )
-                 return
+        with self._lock:
+            original_score = getattr(state, "temperament_score", None)
+            original_history = list(getattr(state, "temperament_history", []))
+            try:
+                if not self.temperament_system:
+                    self.logger.log_error(
+                        error_msg="Temperament system not initialized, cannot process state update.",
+                        error_type="temperament_state_error"
+                    )
+                    return
 
-            # Get the latest score from the core temperament system
-            new_temperament_score = self.temperament_system.current_score
+                new_temperament_score = self.temperament_system.current_score
 
-            # --- Validate State Consistency ---
-            # Check consistency *before* updating the state object
-            is_consistent = self._validate_state_consistency(state, new_temperament_score)
-            
-            if not is_consistent:
-                # Handle inconsistency - e.g., reset history
-                state.temperament_history.clear()
-                self.logger.record_event(
-                    event_type="temperament_history_reset",
-                    message="Temperament history reset due to inconsistency detected before state update",
-                    level="warning",
+                # --- Validate State Consistency ---
+                is_consistent = self._validate_state_consistency(state, new_temperament_score)
+                if not is_consistent:
+                    if hasattr(state, "temperament_history"):
+                        state.temperament_history.clear()
+                    else:
+                        state.temperament_history = []
+                    self.logger.record_event(
+                        event_type="temperament_history_reset",
+                        message="Temperament history reset due to inconsistency detected before state update",
+                        level="warning",
+                        additional_info={
+                            "conversation_id": getattr(state, "conversation_id", None),
+                            "state_hash": getattr(state, "state_hash", None),
+                            "score_before_reset": new_temperament_score,
+                            "last_history_score": state.temperament_history[-1] if state.temperament_history else None
+                        }
+                    )
+
+                # --- Validate temperament_history type ---
+                if not isinstance(state.temperament_history, (list, )):
+                    self.logger.log_error(
+                        error_msg="Invalid temperament_history type, resetting to empty list.",
+                        error_type="temperament_state_error"
+                    )
+                    state.temperament_history = []
+
+                # --- Update State with rollback on error ---
+                try:
+                    state.temperament_score = new_temperament_score
+                    history_maxlen = self.config_handler.config_manager.get("temperament_config.temperament_history_maxlen", 5)
+                    state.temperament_history.append(state.temperament_score)
+                    if len(state.temperament_history) > history_maxlen:
+                        state.temperament_history.pop(0)
+                except Exception as e:
+                    # Rollback on error
+                    state.temperament_score = original_score
+                    state.temperament_history = list(original_history)
+                    self.logger.log_error(
+                        error_msg=f"State update failed, rolled back: {e}",
+                        error_type="temperament_state_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    raise
+
+                self._last_state_hash = self._compute_state_hash(state)
+                self.event_dispatcher.notify("temperament_updated", state)
+
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"Failed to synchronize state: {str(e)}",
+                    error_type="temperament_state_error",
+                    stack_trace=traceback.format_exc(),
                     additional_info={
-                        "conversation_id": state.conversation_id,
-                        "state_hash": state.state_hash,
-                        "score_before_reset": new_temperament_score,
-                        "last_history_score": state.temperament_history[-1] if state.temperament_history else None
+                        "conversation_id": getattr(state, 'conversation_id', 'N/A'),
+                        "state_hash": getattr(state, 'state_hash', 'N/A')
                     }
                 )
-
-            # --- Update State ---
-            # Now, update the state object with the score from the temperament system
-            state.temperament_score = new_temperament_score
-            
-            # Append the new score to the history (handle max length if needed)
-            history_maxlen = self.config_handler.config_manager.get("temperament_config.temperament_history_maxlen", 5)
-            state.temperament_history.append(state.temperament_score)
-            if len(state.temperament_history) > history_maxlen:
-                 state.temperament_history.pop(0) # Remove oldest entry
-
-            # Update internal state hash tracker
-            self._last_state_hash = self._compute_state_hash(state)
-            
-            # Notify other components that the temperament aspect of the state has been updated
-            self.event_dispatcher.notify("temperament_updated", state)
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to synchronize state: {str(e)}",
-                error_type="temperament_state_error",
-                stack_trace=traceback.format_exc(),
-                additional_info={
-                    "conversation_id": getattr(state, 'conversation_id', 'N/A'),
-                    "state_hash": getattr(state, 'state_hash', 'N/A')
-                }
-            )
             
     def _validate_state_consistency(self, state: SOVLState, new_score: float) -> bool:
         """
@@ -974,55 +991,80 @@ class TemperamentManager:
                     threshold=self.pressure.empty_prompt_threshold
                 )
 
-                # Use GenerationManager's public API to generate the internal prompt
                 prompt = " "  # Default minimal prompt
-                try:
-                    result = self.generation_manager.generate_text(
-                        prompt=prompt,
-                        num_return_sequences=1,
-                        temperature=1.0  # More creative/expressive output for internal prompts
-                    )
-                    response = result[0] if result and isinstance(result, list) else None
-                except Exception as e:
-                    self._log_error(
-                        f"Error during internal prompt generation: {str(e)}",
-                        error_type="internal_prompt_generation_error",
-                        stack_trace=traceback.format_exc()
-                    )
-                    response = None
+                max_retries = 3
+                response = None
+                last_exception = None
 
-                # --- Scribe event capture ---
-                try:
-                    from sovl_queue import capture_scribe_event
-                    capture_scribe_event(
-                        origin="sovl_temperament",
-                        event_type="internal_prompt_generated",
-                        event_data={
-                            "prompt": prompt,
-                            "response": response,
-                            "temperament_score": temperament_score,
-                            "pressure": self.pressure.current_pressure,
-                            "threshold": self.pressure.empty_prompt_threshold
-                        },
-                        source_metadata={
-                            "module": "TemperamentManager",
-                            "session_id": getattr(self, 'session_id', None)
-                        },
-                        session_id=getattr(self, 'session_id', None)
-                    )
-                except Exception as e:
-                    self._log_error(
-                        f"Failed to capture scribe event for internal prompt: {str(e)}",
-                        error_type="scribe_event_error",
-                        stack_trace=traceback.format_exc()
-                    )
+                for attempt in range(max_retries):
+                    try:
+                        result = self.generation_manager.generate_text(
+                            prompt=prompt,
+                            num_return_sequences=1,
+                            temperature=1.0
+                        )
+                        response = result[0] if result and isinstance(result, list) else None
+                        if response:
+                            break
+                    except Exception as e:
+                        last_exception = e
+                        if attempt < max_retries - 1:
+                            self.logger.log_warning(
+                                f"Internal prompt generation attempt {attempt + 1} failed: {e}"
+                            )
+                            time.sleep(1)
+                            continue
+                        self.logger.log_error(
+                            f"Internal prompt generation failed after {max_retries} attempts: {e}"
+                        )
+                        response = None
 
-                self._log_event(
-                    "internal_prompt_generated",
-                    "Internal prompt generated successfully due to temperament pressure.",
-                    level="info",
-                    response_snippet=response[:50] + '...' if response else 'None'
-                )
+                # Fallback prompt if all attempts fail
+                if not response:
+                    response = "[No response generated. Please try again later.]"
+                    self.logger.log_warning("Using fallback prompt due to generation failure")
+
+                # Only capture scribe event for successful (non-fallback) generations
+                if response and (last_exception is None or response != "[No response generated. Please try again later.]"):
+                    try:
+                        from sovl_queue import capture_scribe_event
+                        capture_scribe_event(
+                            origin="sovl_temperament",
+                            event_type="internal_prompt_generated",
+                            event_data={
+                                "prompt": prompt,
+                                "response": response,
+                                "temperament_score": temperament_score,
+                                "pressure": self.pressure.current_pressure,
+                                "threshold": self.pressure.empty_prompt_threshold
+                            },
+                            source_metadata={
+                                "module": "TemperamentManager",
+                                "session_id": getattr(self, 'session_id', None)
+                            },
+                            session_id=getattr(self, 'session_id', None)
+                        )
+                    except Exception as e:
+                        self._log_error(
+                            f"Failed to capture scribe event for internal prompt: {str(e)}",
+                            error_type="scribe_event_error",
+                            stack_trace=traceback.format_exc()
+                        )
+
+                if response and (last_exception is None or response != "[No response generated. Please try again later.]"):
+                    self._log_event(
+                        "internal_prompt_generated",
+                        "Internal prompt generated successfully due to temperament pressure.",
+                        level="info",
+                        response_snippet=response[:50] + '...' if response else 'None'
+                    )
+                else:
+                    self._log_event(
+                        "internal_prompt_generation_failed",
+                        "Failed to generate internal prompt, using fallback.",
+                        level="warning",
+                        response_snippet=response[:50] + '...' if response else 'None'
+                    )
                 return response
             else:
                 # Threshold not met, no internal prompt needed
