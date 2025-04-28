@@ -20,11 +20,6 @@ import functools
 from sovl_engram import LoraAdapterManager
 import difflib
 import copy
-
-# File-level: Core scaffold module for SOVL.
-# - Manages error handling, token mapping, sparse attention utilities,
-#   cross-attention injection, and scaffold state management.
-
 # Centralized handler for scaffold errors and recovery.
 class ScaffoldErrorManager:
     """Centralized error handling for scaffold operations."""
