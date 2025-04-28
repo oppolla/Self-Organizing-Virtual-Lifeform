@@ -1,1 +1,1 @@
-pregen
+primer module
