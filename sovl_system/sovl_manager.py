@@ -83,6 +83,7 @@ class ModelManager:
         self._logger = logger
         self._device = device
         self._memory_lock = Lock()
+        self._gpu_lock = Lock()  # Add dedicated GPU lock
         self._last_failed_recovery_key = None  # Track last failed recovery attempt
 
         # Initialize error manager
@@ -231,7 +232,8 @@ class ModelManager:
             cache_cleared = False
             if torch.cuda.is_available():
                 self._log_event("memory_allocation_recovery_attempt", "Clearing CUDA cache.", level="info", additional_info={"error_hash": record.hash})
-                torch.cuda.empty_cache()
+                with self._gpu_lock:
+                    torch.cuda.empty_cache()
                 cache_cleared = True
                 self._log_event("memory_allocation_recovery_step", "Cleared CUDA cache.", level="info", additional_info={"error_hash": record.hash})
 
@@ -347,34 +349,35 @@ class ModelManager:
         Optionally loads LoRA weights for scaffold models from checkpoint.
         """
         try:
-            # Clear existing scaffold resources before loading
-            self._clear_scaffold_resources()
-            
-            # Load tokenizers first
-            self._load_tokenizers()
-            
-            # Load base model
-            self._load_base_model()
-            
-            # Load each scaffold model
-            self.scaffold_models = []
-            self.lora_managers = []
-            for model_name in self.scaffold_model_names:
-                scaffold_model, lora_manager = self._load_scaffold_model(model_name, lora_checkpoint_path)
-                self.scaffold_models.append(scaffold_model)
-                self.lora_managers.append(lora_manager)
-            
-            self._log_event(
-                "model_loading",
-                "Successfully loaded all models",
-                level="info",
-                additional_info={
-                    "base_model": self.base_model_name,
-                    "scaffold_models": self.scaffold_model_names,
-                    "num_scaffolds_loaded": len(self.scaffold_models),
-                    "quantization": self.quantization_mode
-                }
-            )
+            with self._memory_lock:
+                # Clear existing scaffold resources before loading
+                self._clear_scaffold_resources()
+                
+                # Load tokenizers first
+                self._load_tokenizers()
+                
+                # Load base model
+                self._load_base_model()
+                
+                # Load each scaffold model
+                self.scaffold_models = []
+                self.lora_managers = []
+                for model_name in self.scaffold_model_names:
+                    scaffold_model, lora_manager = self._load_scaffold_model(model_name, lora_checkpoint_path)
+                    self.scaffold_models.append(scaffold_model)
+                    self.lora_managers.append(lora_manager)
+                
+                self._log_event(
+                    "model_loading",
+                    "Successfully loaded all models",
+                    level="info",
+                    additional_info={
+                        "base_model": self.base_model_name,
+                        "scaffold_models": self.scaffold_model_names,
+                        "num_scaffolds_loaded": len(self.scaffold_models),
+                        "quantization": self.quantization_mode
+                    }
+                )
         except Exception as e:
             self.error_manager.handle_error(
                 error=e,
@@ -399,7 +402,8 @@ class ModelManager:
             self.scaffold_tokenizers = []
             self.scaffold_unk_ids = []
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                with self._gpu_lock:
+                    torch.cuda.empty_cache()
             self._log_event("scaffold_cleanup", "Cleared scaffold model/tokenizer resources", level="debug")
 
     def _load_scaffold_model(self, model_name: str, lora_checkpoint_path: str = None):
@@ -469,31 +473,34 @@ class ModelManager:
             with self._memory_lock:
                 # Load the scaffold model with appropriate quantization
                 if self.quantization_mode == "int4":
-                    model = AutoModelForCausalLM.from_pretrained(
-                        model_name,
-                        load_in_4bit=True,
-                        device_map="auto",
-                        torch_dtype=torch.float16,
-                        quantization_config=bnb.nn.QuantizeConfig(
+                    with self._gpu_lock:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_name,
                             load_in_4bit=True,
-                            bnb_4bit_compute_dtype=torch.float16,
-                            bnb_4bit_use_double_quant=True,
-                            bnb_4bit_quant_type="nf4"
+                            device_map="auto",
+                            torch_dtype=torch.float16,
+                            quantization_config=bnb.nn.QuantizeConfig(
+                                load_in_4bit=True,
+                                bnb_4bit_compute_dtype=torch.float16,
+                                bnb_4bit_use_double_quant=True,
+                                bnb_4bit_quant_type="nf4"
+                            )
                         )
-                    )
                 elif self.quantization_mode == "int8":
-                    model = AutoModelForCausalLM.from_pretrained(
-                        model_name,
-                        load_in_8bit=True,
-                        device_map="auto",
-                        torch_dtype=torch.float16
-                    )
+                    with self._gpu_lock:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_name,
+                            load_in_8bit=True,
+                            device_map="auto",
+                            torch_dtype=torch.float16
+                        )
                 else:  # fp16
-                    model = AutoModelForCausalLM.from_pretrained(
-                        model_name,
-                        torch_dtype=torch.float16,
-                        device_map="auto"
-                    )
+                    with self._gpu_lock:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_name,
+                            torch_dtype=torch.float16,
+                            device_map="auto"
+                        )
                 
                 model.eval()
                 return model
@@ -511,31 +518,34 @@ class ModelManager:
         try:
             with self._memory_lock:
                 if self.quantization_mode == "int4":
-                    self.base_model = AutoModelForCausalLM.from_pretrained(
-                        self.base_model_name,
-                        load_in_4bit=True,
-                        device_map="auto",
-                        torch_dtype=torch.float16,
-                        quantization_config=bnb.nn.QuantizeConfig(
+                    with self._gpu_lock:
+                        self.base_model = AutoModelForCausalLM.from_pretrained(
+                            self.base_model_name,
                             load_in_4bit=True,
-                            bnb_4bit_compute_dtype=torch.float16,
-                            bnb_4bit_use_double_quant=True,
-                            bnb_4bit_quant_type="nf4"
+                            device_map="auto",
+                            torch_dtype=torch.float16,
+                            quantization_config=bnb.nn.QuantizeConfig(
+                                load_in_4bit=True,
+                                bnb_4bit_compute_dtype=torch.float16,
+                                bnb_4bit_use_double_quant=True,
+                                bnb_4bit_quant_type="nf4"
+                            )
                         )
-                    )
                 elif self.quantization_mode == "int8":
-                    self.base_model = AutoModelForCausalLM.from_pretrained(
-                        self.base_model_name,
-                        load_in_8bit=True,
-                        device_map="auto",
-                        torch_dtype=torch.float16
-                    )
+                    with self._gpu_lock:
+                        self.base_model = AutoModelForCausalLM.from_pretrained(
+                            self.base_model_name,
+                            load_in_8bit=True,
+                            device_map="auto",
+                            torch_dtype=torch.float16
+                        )
                 else:  # fp16
-                    self.base_model = AutoModelForCausalLM.from_pretrained(
-                        self.base_model_name,
-                        torch_dtype=torch.float16,
-                        device_map="auto"
-                    )
+                    with self._gpu_lock:
+                        self.base_model = AutoModelForCausalLM.from_pretrained(
+                            self.base_model_name,
+                            torch_dtype=torch.float16,
+                            device_map="auto"
+                        )
                 
                 self.base_model.eval()
                 return self.base_model
@@ -550,30 +560,31 @@ class ModelManager:
     def _load_tokenizers(self):
         """Load tokenizers for both base and scaffold models."""
         try:
-            self.base_tokenizer = AutoTokenizer.from_pretrained(
-                self.base_model_name,
-                padding_side="left",
-                truncation_side="left"
-            )
-            
-            self.scaffold_tokenizers = [AutoTokenizer.from_pretrained(
-                name,
-                padding_side="left",
-                truncation_side="left"
-            ) for name in self.scaffold_model_names]
-            
-            # Update scaffold_unk_ids after loading tokenizers
-            self.scaffold_unk_ids = [tokenizer.unk_token_id for tokenizer in self.scaffold_tokenizers]
-            
-            self._log_event(
-                "tokenizer_loading",
-                "Successfully loaded tokenizers",
-                level="info",
-                additional_info={
-                    "base_tokenizer": self.base_model_name,
-                    "scaffold_tokenizers": self.scaffold_model_names
-                }
-            )
+            with self._memory_lock:
+                self.base_tokenizer = AutoTokenizer.from_pretrained(
+                    self.base_model_name,
+                    padding_side="left",
+                    truncation_side="left"
+                )
+                
+                self.scaffold_tokenizers = [AutoTokenizer.from_pretrained(
+                    name,
+                    padding_side="left",
+                    truncation_side="left"
+                ) for name in self.scaffold_model_names]
+                
+                # Update scaffold_unk_ids after loading tokenizers
+                self.scaffold_unk_ids = [tokenizer.unk_token_id for tokenizer in self.scaffold_tokenizers]
+                
+                self._log_event(
+                    "tokenizer_loading",
+                    "Successfully loaded tokenizers",
+                    level="info",
+                    additional_info={
+                        "base_tokenizer": self.base_model_name,
+                        "scaffold_tokenizers": self.scaffold_model_names
+                    }
+                )
         except Exception as e:
             self.error_manager.handle_error(
                 error=e,
@@ -590,15 +601,16 @@ class ModelManager:
         """Set the quantization mode and reload models if needed."""
         try:
             validate_quantization_mode(mode)
-            if mode != self.quantization_mode:
-                self.quantization_mode = mode
-                self.reload_models()
-                
-                self._log_event(
-                    "quantization_change",
-                    f"Changed quantization mode to {mode}",
-                    level="info"
-                )
+            with self._memory_lock:
+                if mode != self.quantization_mode:
+                    self.quantization_mode = mode
+                    self.reload_models()
+                    
+                    self._log_event(
+                        "quantization_change",
+                        f"Changed quantization mode to {mode}",
+                        level="info"
+                    )
         except Exception as e:
             # Log the error before handling it with the manager
             self._log_error(
@@ -628,17 +640,18 @@ class ModelManager:
     def reload_models(self):
         """Reload all models with current settings."""
         try:
-            self.cleanup()
-            self.load_models()
-            
-            self._log_event(
-                "model_reloading",
-                "Successfully reloaded all models",
-                level="info",
-                additional_info={
-                    "quantization": self.quantization_mode
-                }
-            )
+            with self._memory_lock:
+                self.cleanup()
+                self.load_models()
+                
+                self._log_event(
+                    "model_reloading",
+                    "Successfully reloaded all models",
+                    level="info",
+                    additional_info={
+                        "quantization": self.quantization_mode
+                    }
+                )
         except Exception as e:
             self.error_manager.handle_error(
                 error=e,
