@@ -547,6 +547,7 @@ class ConfidenceCalculator:
 
 # Singleton instance of ConfidenceCalculator
 _confidence_calculator = None
+_confidence_calculator_lock = Lock()
 
 def calculate_confidence_score(
     logits: torch.Tensor,
@@ -570,9 +571,13 @@ def calculate_confidence_score(
         float: Confidence score between 0.0 and 1.0
     """
     global _confidence_calculator
-    if _confidence_calculator is None:
-        _confidence_calculator = ConfidenceCalculator(state.config_manager, state.logger)
-        
+    with _confidence_calculator_lock:
+        if _confidence_calculator is None:
+            if not hasattr(state, 'config_manager') or not hasattr(state, 'logger'):
+                raise ValueError("State missing required config_manager or logger")
+            if not isinstance(state.config_manager, ConfigManager) or not isinstance(state.logger, Logger):
+                raise TypeError("Invalid config_manager or logger types")
+            _confidence_calculator = ConfidenceCalculator(state.config_manager, state.logger)
     return _confidence_calculator.calculate_confidence_score(
         logits=logits,
         generated_ids=generated_ids,
@@ -581,3 +586,9 @@ def calculate_confidence_score(
         context=context,
         curiosity_manager=curiosity_manager
     )
+
+def reset_confidence_calculator():
+    """Reset the singleton ConfidenceCalculator instance (for testing or reconfiguration)."""
+    global _confidence_calculator
+    with _confidence_calculator_lock:
+        _confidence_calculator = None
