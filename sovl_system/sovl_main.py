@@ -585,17 +585,17 @@ class SystemContext:
             self.memory_context.clear_long_term_memory(user_id)
 
     def bind_generation_manager(self, generation_manager):
-        """Bind the GenerationManager to this SystemContext for always-on memory.
-        
+        """
+        Bind the GenerationManager to this SystemContext for always-on memory.
+
         Note: This method is primarily for backward compatibility and testing.
         The GenerationManager should be initialized with dialogue_context_manager
-        during SystemContext initialization.
+        during SystemContext initialization. Late binding is not supported in production.
         """
         if hasattr(self, 'generation_manager') and self.generation_manager is not None:
-            self.logger.log_warning(
-                "Attempting to bind GenerationManager after initialization. "
-                "This may lead to inconsistent state. Consider reinitializing SystemContext.",
-                error_type="late_generation_manager_binding"
+            raise RuntimeError(
+                "GenerationManager is already bound. Late binding is not allowed. "
+                "Reinitialize SystemContext if you need to change it."
             )
         self.generation_manager = generation_manager
         # Provide self as system_context to generation_manager
