@@ -23,6 +23,10 @@ from sovl_scaffold import GenerationScaffoldProvider
 from sovl_bonder import BondCalculator, BondModulator
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
 
+class GenerationError(Exception):
+    """Raised when text generation fails in a way that should halt upstream processing."""
+    pass
+
 class GenerationManager:
     """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
     
@@ -162,8 +166,8 @@ class GenerationManager:
             return wrapper
         return decorator
 
-    def _handle_error(self, context: str, error: Exception) -> None:
-        """Handle errors using the ErrorManager with state-driven error handling."""
+    def _handle_error(self, context: str, error: Exception, extra_context: dict = None) -> None:
+        """Handle errors using the ErrorManager with state-driven error handling. Optionally accepts extra context for logging."""
         try:
             # Get current state metrics
             state_metrics = {
@@ -172,7 +176,9 @@ class GenerationManager:
                 'temperament_score': self.current_temperament_score,
                 'lifecycle_stage': self.state.lifecycle_stage if hasattr(self.state, 'lifecycle_stage') else 'unknown'
             }
-            
+            # Merge in any extra context
+            if extra_context:
+                state_metrics.update(extra_context)
             # Handle error with state context
             self.error_manager.handle_generation_error(
                 error=error,
@@ -180,10 +186,11 @@ class GenerationManager:
                 state=self.state,
                 state_metrics=state_metrics
             )
-            
             # Update state based on error
             self._update_state_after_error(error, context)
-            
+            # Re-raise critical errors for upstream handling
+            if isinstance(error, (ValueError, RuntimeError, GenerationError, IndexError)):
+                raise
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"Failed to handle error: {str(e)}",
@@ -874,6 +881,7 @@ class GenerationManager:
         return decorator
 
     @state_managed_operation("generate_text")
+    @GenerationManager._with_lock('generation')
     def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", metadata_entries: list = None, **kwargs) -> List[str]:
         """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration."""
         request_time = time.time()
@@ -891,16 +899,23 @@ class GenerationManager:
 
             # --- Retrieve all trait values from GenerationPrimer ---
             traits = self.primer.prepare_for_generation(prompt, user_id=user_id, metadata_entries=metadata_entries, **kwargs)
-            # Safely handle None values for traits
-            temperament = traits.get("temperament", 0.5)
-            if temperament is None:
-                temperament = 0.5  # Default neutral value
-                self.logger.log_warning("Temperament trait missing, using default value 0.5")
-            curiosity = traits.get("curiosity", 0.0)
-            if curiosity is None:
-                curiosity = 0.0
-                self.logger.log_warning("Curiosity trait missing, using default value 0.0")
+
+            # --- Validate and sanitize trait values ---
+            def validate_trait(name, value, default, valid_range=None):
+                if value is None:
+                    self.logger.log_warning(f"Trait '{name}' is None, using default value {default}")
+                    return default
+                if valid_range and not (valid_range[0] <= value <= valid_range[1]):
+                    self.logger.log_warning(f"Trait '{name}' value {value} out of range {valid_range}, using default {default}")
+                    return default
+                return value
+
+            temperament = validate_trait("temperament", traits.get("temperament"), 0.5, (0.0, 1.0))
+            curiosity = validate_trait("curiosity", traits.get("curiosity"), 0.0, (0.0, 1.0))
             bond_score = traits.get("bond")
+            if bond_score is not None and not isinstance(bond_score, (float, int)):
+                self.logger.log_warning(f"Trait 'bond' is not a number: {bond_score}, ignoring bond context")
+                bond_score = None
             bond_context = None
             if bond_score is not None:
                 bond_context = f"Bond score: {bond_score:.2f}"
@@ -955,6 +970,22 @@ class GenerationManager:
                 "processing_time_ms": (time.time() - request_time) * 1000
             }
 
+            # --- Sync all traits to state after successful generation ---
+            try:
+                self.primer.update_state_after_operation(
+                    context="generate_text",
+                    result={
+                        "generated_texts": generated_texts,
+                        "traits": traits
+                    }
+                )
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"Failed to sync traits to state after generation: {str(e)}",
+                    error_type="trait_state_sync_error",
+                    stack_trace=traceback.format_exc()
+                )
+
             # Assemble capture data
             event_data, source_metadata = ScribeAssembler.assemble_scribe_data(
                 manager=self,
@@ -976,6 +1007,10 @@ class GenerationManager:
 
             return generated_texts
 
+        except (ValueError, RuntimeError, GenerationError, IndexError) as e:
+            # Log and propagate critical errors
+            self._handle_error("generate_text", e)
+            raise
         except Exception as e:
             # Log generation error
             capture_scribe_event(
@@ -996,9 +1031,9 @@ class GenerationManager:
                 session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
-
             # Handle error through existing mechanism
             self._handle_error("generate_text", e)
+            # For broad compatibility, return a fallback error message
             return ["An error occurred during text generation"]
 
     def set_system_context(self, system_context):
@@ -1104,6 +1139,7 @@ class GenerationManager:
         return generated_texts
 
     @state_managed_operation("backchannel_scaffold_prompt")
+    @GenerationManager._with_lock('generation')
     def backchannel_scaffold_prompt(
         self, 
         prompt: str, 
@@ -1117,10 +1153,42 @@ class GenerationManager:
         request_time = time.time()
 
         try:
+            # Proactive memory management: check and clear before generation
+            if not self.check_memory_health():
+                self.memory_manager.manage_memory()
+                # After managing, check again and abort if still unhealthy
+                if not self.check_memory_health():
+                    self.logger.record_event(
+                        event_type="memory_exhaustion_abort",
+                        message="Aborting scaffold generation due to persistent memory exhaustion.",
+                        level="error",
+                        additional_info={
+                            "scaffold_index": scaffold_index,
+                            "prompt_length": len(prompt),
+                            "generation_params": kwargs,
+                            "memory_usage": self.memory_manager.get_memory_usage()
+                        }
+                    )
+                    raise RuntimeError("Memory exhausted: unable to safely proceed with scaffold generation.")
+
             # Memory optimization: Check memory health before proceeding
             if not self.check_memory_health():
                 self.memory_manager.manage_memory()
-
+                # After managing, check again and abort if still unhealthy
+                if not self.check_memory_health():
+                    self.logger.record_event(
+                        event_type="memory_exhaustion_abort",
+                        message="Aborting scaffold generation due to persistent memory exhaustion.",
+                        level="error",
+                        additional_info={
+                            "scaffold_index": scaffold_index,
+                            "prompt_length": len(prompt),
+                            "generation_params": kwargs,
+                            "memory_usage": self.memory_manager.get_memory_usage()
+                        }
+                    )
+                    raise RuntimeError("Memory exhausted: unable to safely proceed with scaffold generation.")
+            
             # Validate scaffold index and model early
             if not (0 <= scaffold_index < len(self.scaffolds)):
                 raise IndexError(f"Invalid scaffold_index {scaffold_index}. Only {len(self.scaffolds)} scaffolds available")
@@ -1251,6 +1319,15 @@ class GenerationManager:
                 
                 return generated_text
             
+        except (ValueError, RuntimeError, GenerationError, IndexError) as e:
+            # Log and propagate critical errors
+            self._handle_error("backchannel_scaffold_prompt", e, {
+                'scaffold_index': scaffold_index,
+                'prompt_length': len(prompt),
+                'generation_params': kwargs,
+                'memory_usage': self.memory_manager.get_memory_usage()
+            })
+            raise
         except Exception as e:
             # Log error
             capture_scribe_event(
@@ -1277,7 +1354,6 @@ class GenerationManager:
                 session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
-            
             # Handle error through existing mechanism
             self._handle_error("backchannel_scaffold_prompt", e, {
                 'scaffold_index': scaffold_index,
@@ -1285,7 +1361,8 @@ class GenerationManager:
                 'generation_params': kwargs,
                 'memory_usage': self.memory_manager.get_memory_usage()
             })
-            raise
+            # For broad compatibility, raise a GenerationError for upstream detection
+            raise GenerationError(f"Failed in backchannel_scaffold_prompt: {e}") from e
         finally:
             # Ensure memory cleanup
             if torch.cuda.is_available():

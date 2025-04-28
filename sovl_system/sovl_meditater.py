@@ -42,6 +42,9 @@ class IntrospectionManager:
         self.logger = context.logger
         self.config_handler = context.config_handler
 
+        # State inconsistency tracking
+        self.state_inconsistent = False
+
         # Initialize configuration
         self._initialize_config()
 
@@ -49,6 +52,7 @@ class IntrospectionManager:
         self.dialogues: deque[Dict] = deque(maxlen=self.config_handler.config_manager.get("introspection_config.dialogue_maxlen", 100))
         self.last_trigger_time: float = 0
         self._lock = Lock()
+        self._async_lock = asyncio.Lock()  # For async safety
 
         # Subscribe to config changes
         self.context.event_dispatcher.subscribe("config_change", self._on_config_change)
@@ -85,7 +89,22 @@ class IntrospectionManager:
             ])
             self.debug_mode = config.get("debug_mode", False)
             self.followup_depth = config.get("followup_depth", 3)
-            self.confidence_threshold = config.get("confidence_threshold", None)
+            conf_thresh = config.get("confidence_threshold", None)
+            # Validate confidence_threshold
+            if conf_thresh is not None:
+                try:
+                    conf_thresh = float(conf_thresh)
+                    if not (0.0 < conf_thresh <= 1.0):
+                        raise ValueError
+                except Exception:
+                    self.logger.record_event(
+                        event_type="introspection_invalid_confidence_threshold",
+                        message=f"Invalid confidence_threshold in config: {conf_thresh}. Using base_approval_threshold.",
+                        level="warning"
+                    )
+                    conf_thresh = None
+            self.confidence_threshold = conf_thresh
+            self.batch_size = config.get("batch_size", 4)
 
             self._validate_config_values()
 
@@ -100,6 +119,11 @@ class IntrospectionManager:
                 }
             )
 
+        except (AttributeError, KeyError, TypeError) as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "initialize_config"
+            })
+            raise
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "initialize_config"
@@ -117,6 +141,17 @@ class IntrospectionManager:
                 raise ValueError("max_confidence_trigger must be between 0.0 and 1.0")
             if not isinstance(self.triggering_moods, list):
                 raise ValueError("triggering_moods must be a list")
+            # Validate triggering_moods contents
+            valid_moods = set(["cautious", "melancholy", "balanced", "curious"])  # fallback defaults
+            # Try to get valid moods from temperament_system if possible
+            if hasattr(self.temperament_system, "valid_moods"):
+                valid_moods = set(self.temperament_system.valid_moods)
+            elif hasattr(self.temperament_system, "moods"):
+                valid_moods = set(self.temperament_system.moods)
+            # Validate each mood
+            invalid_moods = [m for m in self.triggering_moods if m not in valid_moods]
+            if invalid_moods:
+                raise ValueError(f"triggering_moods contains invalid moods: {invalid_moods}. Valid moods are: {sorted(valid_moods)}")
             if not self.cooldown_seconds > 0:
                 raise ValueError("cooldown_seconds must be positive")
             if not 0.0 <= self.base_approval_threshold <= 1.0:
@@ -129,6 +164,8 @@ class IntrospectionManager:
                 raise ValueError("followup_depth must be a non-negative integer")
             if self.confidence_threshold is not None and not 0.0 <= self.confidence_threshold <= 1.0:
                 raise ValueError("confidence_threshold must be between 0.0 and 1.0")
+            if not isinstance(self.batch_size, int) or self.batch_size < 1:
+                raise ValueError("batch_size must be a positive integer")
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "validate_config_values"
@@ -151,27 +188,93 @@ class IntrospectionManager:
             })
 
     def _sync_state(self) -> None:
-        """Synchronize dialogues with SOVLState."""
-        try:
-            state = self.state_manager.get_state()
-            if state and hasattr(state, 'introspection_dialogues'):
-                with self._lock:
-                    self.dialogues = deque(state.introspection_dialogues, maxlen=self.dialogues.maxlen)
-            self.logger.record_event(
-                event_type="introspection_state_synced",
-                message="Introspection state synchronized with SOVLState",
-                level="info"
-            )
-        except StateError as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "sync_state"
-            })
-            raise
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "sync_state"
-            })
-            raise
+        """Synchronize dialogues with SOVLState, handling outdated or locked state."""
+        max_retries = 3
+        retry_delay = 0.5  # seconds
+        attempt = 0
+        while attempt < max_retries:
+            try:
+                state = self.state_manager.get_state()
+                # Check for state lock or staleness if supported
+                # (Assume state has .is_locked or .is_stale attributes, or add your own checks if available)
+                if hasattr(state, 'is_locked') and state.is_locked:
+                    self.logger.record_event(
+                        event_type="introspection_state_sync_locked",
+                        message=f"State is locked by another operation. Retry {attempt+1}/{max_retries}",
+                        level="warning"
+                    )
+                    import time as _time
+                    _time.sleep(retry_delay)
+                    attempt += 1
+                    continue
+                if hasattr(state, 'is_stale') and state.is_stale:
+                    self.logger.record_event(
+                        event_type="introspection_state_sync_stale",
+                        message=f"State is stale/outdated. Retry {attempt+1}/{max_retries}",
+                        level="warning"
+                    )
+                    import time as _time
+                    _time.sleep(retry_delay)
+                    attempt += 1
+                    continue
+                if state and hasattr(state, 'introspection_dialogues'):
+                    with self._lock:
+                        self.dialogues = deque(state.introspection_dialogues, maxlen=self.dialogues.maxlen)
+                self.logger.record_event(
+                    event_type="introspection_state_synced",
+                    message="Introspection state synchronized with SOVLState",
+                    level="info"
+                )
+                self.state_inconsistent = False
+                return
+            except StateError as e:
+                self.state_inconsistent = True
+                self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                    "operation": "sync_state"
+                })
+                self.logger.record_event(
+                    event_type="introspection_state_inconsistent",
+                    message="StateError during sync; system state marked inconsistent.",
+                    level="critical"
+                )
+                raise
+            except (AttributeError, KeyError, TypeError) as e:
+                self.state_inconsistent = True
+                self.logger.record_event(
+                    event_type="introspection_state_sync_error",
+                    message=f"State sync error: {type(e).__name__}: {e}",
+                    level="error",
+                    additional_info={"traceback": traceback.format_exc()}
+                )
+                self.logger.record_event(
+                    event_type="introspection_state_inconsistent",
+                    message="Attribute/Key/Type error during sync; system state marked inconsistent.",
+                    level="critical"
+                )
+                raise
+            except Exception as e:
+                self.state_inconsistent = True
+                self.logger.record_event(
+                    event_type="introspection_state_sync_unexpected_error",
+                    message=f"Unexpected error during state sync: {type(e).__name__}: {e}",
+                    level="critical",
+                    additional_info={"traceback": traceback.format_exc()}
+                )
+                self.logger.record_event(
+                    event_type="introspection_state_inconsistent",
+                    message="Unexpected error during sync; system state marked inconsistent.",
+                    level="critical"
+                )
+                raise
+            attempt += 1
+        # If we reach here, all retries failed due to lock/stale state
+        self.state_inconsistent = True
+        self.logger.record_event(
+            event_type="introspection_state_sync_failed",
+            message="Failed to sync introspection state after retries due to locked or stale state.",
+            level="critical"
+        )
+        raise StateError("Failed to sync introspection state after retries due to locked or stale state.")
 
     def _init_trigger_conditions(self):
         """Initialize dynamic triggering conditions."""
@@ -235,6 +338,13 @@ class IntrospectionManager:
 
     async def conduct_hidden_dialogue(self, action_description: str, show_status: bool = True) -> Dict:
         """Conduct hidden ethical evaluation with optional UI status."""
+        if self.state_inconsistent:
+            self.logger.record_event(
+                event_type="introspection_state_inconsistent_abort",
+                message="Aborting conduct_hidden_dialogue due to inconsistent state.",
+                level="critical"
+            )
+            raise RuntimeError("Cannot conduct introspection: system state is inconsistent. Attempt resync first.")
         dialogue_id = str(uuid.uuid4())
         result = {
             "dialogue_id": dialogue_id,
@@ -256,20 +366,40 @@ class IntrospectionManager:
             # --- Dynamic followup depth calculation ---
             temperament_score = self.temperament_system.current_score
             base_depth = self.followup_depth
-            # Try to get confidence and novelty, fallback to neutral values if not available
-            confidence = 1.0
-            novelty = 0.0
+            # Try to get confidence and novelty, fallback to None if not available
+            confidence = None
+            novelty = None
             try:
-                # Get initial confidence from the state or a default
                 state = self.state_manager.get_state()
-                confidence = getattr(state, 'last_confidence', 1.0)
+                confidence = getattr(state, 'last_confidence', None)
             except Exception:
-                pass
+                confidence = None
             try:
-                # Try to get novelty score from curiosity manager (if implemented)
-                novelty = getattr(self.curiosity_manager, 'get_novelty_score', lambda ctx: 0.0)(self.context.state_summary)
+                novelty_func = getattr(self.curiosity_manager, 'get_novelty_score', None)
+                if callable(novelty_func):
+                    novelty = novelty_func(self.context.state_summary)
             except Exception:
-                pass
+                novelty = None
+            # Use more robust defaults if missing
+            if confidence is None or not (0.0 <= confidence <= 1.0):
+                confidence = self.confidence_calculator.calculate_confidence_score(
+                    logits=torch.tensor([]),
+                    generated_ids=torch.tensor([]),
+                    state=self.state_manager.get_state(),
+                    error_manager=self.error_manager,
+                    context=self.context,
+                    curiosity_manager=self.curiosity_manager
+                )
+                if not (0.0 <= confidence <= 1.0):
+                    confidence = 0.7  # fallback to moderate confidence
+            if novelty is None or not (0.0 <= novelty <= 1.0):
+                # Try to estimate novelty using curiosity score if available
+                try:
+                    novelty = self.curiosity_manager.calculate_curiosity_score(self.context.state_summary)
+                    # Clamp to [0,1]
+                    novelty = max(0.0, min(1.0, novelty))
+                except Exception:
+                    novelty = 0.3  # fallback to moderate novelty
             dynamic_depth = int(round(base_depth + (1 - temperament_score) * 2 + (1 - confidence) * 2 + novelty * 2))
             dynamic_depth = max(1, min(dynamic_depth, 6))
             self.logger.record_event(
@@ -278,7 +408,6 @@ class IntrospectionManager:
                 additional_info={"temperament": temperament_score, "confidence": confidence, "novelty": novelty}
             )
             # --- End dynamic depth calculation ---
-
             answers = await self._answer_questions(questions, followup_depth=dynamic_depth, confidence_threshold=self.confidence_threshold)
             conclusion = self._reach_conclusion(answers)
 
@@ -287,7 +416,7 @@ class IntrospectionManager:
                 "questions": answers
             })
 
-            with self._lock:
+            async with self._async_lock:
                 self.dialogues.append(result)
                 self.last_trigger_time = time.time()
                 state = self.state_manager.get_state()
@@ -316,12 +445,19 @@ class IntrospectionManager:
                     },
                     session_id=getattr(self.context, 'session_id', None)
                 )
-            except Exception as e:
+            except (AttributeError, KeyError, TypeError) as e:
                 self.logger.record_event(
                     event_type="scribe_queue_error",
                     message=f"Failed to queue introspection insight: {e}",
                     level="error",
                     additional_info={"dialogue_id": dialogue_id}
+                )
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="scribe_queue_unexpected_error",
+                    message=f"Unexpected error in scribe queue: {type(e).__name__}: {e}",
+                    level="critical",
+                    additional_info={"dialogue_id": dialogue_id, "traceback": traceback.format_exc()}
                 )
 
             self.context.event_dispatcher.dispatch(
@@ -340,12 +476,22 @@ class IntrospectionManager:
                 "dialogue_id": dialogue_id
             })
             return result
+        except (AttributeError, KeyError, TypeError, RuntimeError) as e:
+            self.logger.record_event(
+                event_type="introspection_dialogue_error",
+                message=f"Dialogue error: {type(e).__name__}: {e}",
+                level="error",
+                additional_info={"traceback": traceback.format_exc(), "dialogue_id": dialogue_id}
+            )
+            return result
         except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "conduct_hidden_dialogue",
-                "action_description": action_description,
-                "dialogue_id": dialogue_id
-            })
+            # Log unexpected exceptions separately for debugging
+            self.logger.record_event(
+                event_type="introspection_dialogue_unexpected_error",
+                message=f"Unexpected error during hidden dialogue: {type(e).__name__}: {e}",
+                level="critical",
+                additional_info={"traceback": traceback.format_exc(), "dialogue_id": dialogue_id}
+            )
             return result
 
     def _add_dialogue_to_history(self, dialogue: Dict, state: SOVLState) -> None:
@@ -463,7 +609,13 @@ class IntrospectionManager:
                 'depth': depth
             })
             # Stop if confidence exceeds threshold
-            threshold = confidence_threshold if confidence_threshold is not None else self.base_approval_threshold
+            threshold = confidence_threshold
+            if threshold is None:
+                threshold = self.confidence_threshold
+            if threshold is None:
+                threshold = self.base_approval_threshold
+            if not (0.0 < threshold <= 1.0):
+                threshold = self.base_approval_threshold
             if response['confidence'] >= threshold:
                 break
             # Generate a follow-up question based on the answer
@@ -507,19 +659,64 @@ class IntrospectionManager:
             })
             return "What deeper ethical issue does this raise?"
 
+    async def _query_internal_model_batch(self, questions: List[str]) -> List[Dict]:
+        """Batch query the system's model for ethical evaluation."""
+        try:
+            inputs = self.model_manager.tokenizer(
+                questions,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512
+            )
+            inputs = inputs.to(self.context.device)
+
+            with torch.no_grad():
+                outputs = self.model_manager.model(**inputs)
+                logits = outputs.logits[:, -1, :]
+                probs = torch.softmax(logits, dim=-1)
+                confidences = probs.max(dim=-1).values.cpu().tolist()
+                decisions = [conf > 0.5 for conf in confidences]
+
+            results = []
+            for i, question in enumerate(questions):
+                results.append({
+                    "question": question,
+                    "decision": decisions[i],
+                    "confidence": confidences[i],
+                    "reasoning": "Evaluated based on model output probabilities."
+                })
+            return results
+        except Exception as e:
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "query_internal_model_batch",
+                "questions": questions
+            })
+            return [{"question": q, "decision": False, "confidence": 0.0, "reasoning": ""} for q in questions]
+
     async def _answer_questions(self, questions: List[str], followup_depth: int = 0, confidence_threshold: float = None) -> List[Dict]:
         """Answer questions using the system's own reasoning, with optional recursive followup."""
         answers = []
-        for question in questions:
-            if followup_depth > 0:
-                # Use recursive followup system
-                qas = await self._recursive_followup_questions(question, max_depth=followup_depth, confidence_threshold=confidence_threshold)
+        # Validate threshold at entry
+        threshold = confidence_threshold
+        if threshold is None:
+            threshold = self.confidence_threshold
+        if threshold is None:
+            threshold = self.base_approval_threshold
+        if not (0.0 < threshold <= 1.0):
+            threshold = self.base_approval_threshold
+        if followup_depth > 0:
+            for question in questions:
+                qas = await self._recursive_followup_questions(question, max_depth=followup_depth, confidence_threshold=threshold)
                 answers.extend(qas)
-            else:
-                try:
-                    response = await self._query_internal_model(question)
+        else:
+            batch_size = getattr(self, "batch_size", 4)
+            for i in range(0, len(questions), batch_size):
+                batch = questions[i:i + batch_size]
+                responses = await self._query_internal_model_batch(batch)
+                for response in responses:
                     answer = {
-                        "question": question,
+                        "question": response["question"],
                         "answer": response["decision"],
                         "confidence": response["confidence"],
                         "reasoning": response.get("reasoning", "")
@@ -529,13 +726,8 @@ class IntrospectionManager:
                         event_type="introspection_question_answered",
                         message="Answered introspection question",
                         level="debug" if self.debug_mode else "info",
-                        additional_info={"question": question, "answer": answer["answer"]}
+                        additional_info={"question": answer["question"], "answer": answer["answer"]}
                     )
-                except Exception as e:
-                    self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                        "operation": "answer_questions",
-                        "question": question
-                    })
         return answers
 
     async def _query_internal_model(self, question: str) -> Dict:
@@ -706,15 +898,97 @@ class IntrospectionManager:
             )
             return True
         except StateError as e:
+            self.state_inconsistent = True
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "set_state"
             })
+            self.logger.record_event(
+                event_type="introspection_state_inconsistent",
+                message="StateError during set_state; system state marked inconsistent.",
+                level="critical"
+            )
             return False
         except Exception as e:
+            self.state_inconsistent = True
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "set_state"
             })
+            self.logger.record_event(
+                event_type="introspection_state_inconsistent",
+                message=f"Unexpected error during set_state; system state marked inconsistent: {type(e).__name__}: {e}",
+                level="critical"
+            )
             return False
+
+    @synchronized("_lock")
+    def reset(self) -> bool:
+        """Reset dialogue history and trigger conditions."""
+        try:
+            self.dialogues.clear()
+            self.last_trigger_time = 0
+            self._init_trigger_conditions()
+            state = self.state_manager.get_state()
+            state.introspection_dialogues = deque(maxlen=self.dialogues.maxlen)
+            self.state_manager.update_state(state)
+            self.logger.record_event(
+                event_type="introspection_reset",
+                message="Introspection state reset, including dialogues and trigger conditions",
+                level="info"
+            )
+            self.state_inconsistent = False
+            return True
+        except StateError as e:
+            self.state_inconsistent = True
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "reset"
+            })
+            self.logger.record_event(
+                event_type="introspection_state_inconsistent",
+                message="StateError during reset; system state marked inconsistent.",
+                level="critical"
+            )
+            return False
+        except Exception as e:
+            self.state_inconsistent = True
+            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                "operation": "reset"
+            })
+            self.logger.record_event(
+                event_type="introspection_state_inconsistent",
+                message=f"Unexpected error during reset; system state marked inconsistent: {type(e).__name__}: {e}",
+                level="critical"
+            )
+            return False
+
+    def try_resync_state(self) -> bool:
+        """Attempt to resynchronize state and clear inconsistency flag if successful."""
+        try:
+            self._sync_state()
+            if not self.state_inconsistent:
+                self.logger.record_event(
+                    event_type="introspection_state_resync_success",
+                    message="State resynchronized successfully.",
+                    level="info"
+                )
+                return True
+            else:
+                self.logger.record_event(
+                    event_type="introspection_state_resync_failed",
+                    message="State resync attempted but inconsistency remains.",
+                    level="warning"
+                )
+                return False
+        except Exception as e:
+            self.logger.record_event(
+                event_type="introspection_state_resync_failed",
+                message=f"State resync failed: {type(e).__name__}: {e}",
+                level="error"
+            )
+            return False
+
+    def is_state_inconsistent(self) -> bool:
+        """Return True if the system state is known to be inconsistent."""
+        return self.state_inconsistent
 
     @synchronized("_lock")
     def get_recent_dialogues(self, count: int = 5) -> List[Dict]:
@@ -758,29 +1032,3 @@ class IntrospectionManager:
                 "operation": "get_approval_stats"
             })
             return {}
-
-    @synchronized("_lock")
-    def reset(self) -> bool:
-        """Reset dialogue history."""
-        try:
-            self.dialogues.clear()
-            self.last_trigger_time = 0
-            state = self.state_manager.get_state()
-            state.introspection_dialogues = deque(maxlen=self.dialogues.maxlen)
-            self.state_manager.update_state(state)
-            self.logger.record_event(
-                event_type="introspection_reset",
-                message="Introspection state reset successfully",
-                level="info"
-            )
-            return True
-        except StateError as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "reset"
-            })
-            return False
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "reset"
-            })
-            return False

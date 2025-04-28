@@ -496,18 +496,47 @@ class GenerationPrimer:
                 stack_trace=traceback.format_exc()
             )
 
+    def sync_traits_to_state(self, traits: dict) -> None:
+        """
+        Automatically syncs all trait values to the corresponding attributes in SOVLState.
+        Only updates traits that are present as attributes on the state object.
+        Logs a warning if a trait is not found on the state.
+        """
+        if not traits:
+            return
+        for trait, value in traits.items():
+            if hasattr(self.state, trait):
+                try:
+                    setattr(self.state, trait, value)
+                except Exception as e:
+                    self.logger.log_error(
+                        error_msg=f"Failed to set state.{trait} to {value}: {str(e)}",
+                        error_type="trait_state_sync_error",
+                        stack_trace=traceback.format_exc()
+                    )
+            else:
+                self.logger.log_warning(
+                    f"Trait '{trait}' not found in SOVLState; skipping state update.",
+                    event_type="trait_state_sync_warning"
+                )
+
     def update_state_after_operation(self, context: str = None, result: dict = None) -> None:
         """
         Enhanced state updates post-operation. Handles operation result and logs adjustments.
         Adds fallback logic if SOVLState.update_after_operation is not available.
+        Now also syncs all traits in result['traits'] to state.
         """
         try:
+            # Sync all traits to state if present in result
+            traits = result.get("traits") if result else None
+            if traits:
+                self.sync_traits_to_state(traits)
             # Fallback: Apply default adjustment if no result and confidence exists
             used_fallback = False
             if not result and hasattr(self.state, 'confidence'):
                 self.state.confidence = min(1.0, self.state.confidence + 0.05)  # Default success boost
                 used_fallback = True
-            # Apply result-based adjustments
+            # Apply result-based adjustments (legacy deltas)
             if result:
                 if "confidence_delta" in result and hasattr(self.state, "confidence"):
                     self.state.confidence = max(0.0, min(1.0, self.state.confidence + result["confidence_delta"]))

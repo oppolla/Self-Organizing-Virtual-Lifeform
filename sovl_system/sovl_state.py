@@ -958,83 +958,235 @@ class StateManager:
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         self._device = device
+        self._lock = threading.Lock()
         
     def save_state(self, state: SOVLState, path_prefix: str) -> None:
-        """Save system state using the SOVLState instance."""
-        try:
-            state_dict = state.to_dict()
-            # Implement your own save logic here, e.g. using pickle, json, or another persistence method
-            with open(f"{path_prefix}_state.json", "w") as f:
-                import json
-                json.dump(state_dict, f)
-            
-            self._logger.record_event(
-                event_type="state_saved_by_manager",
-                message=f"System state saved via StateManager to {path_prefix}_state.json",
-                level="info",
-                additional_info={
-                    "state_size": len(str(state_dict)),
-                    "state_hash": state.state_hash()
-                }
-            )
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"StateManager failed to save state: {str(e)}",
-                error_type="state_save_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise StateError(f"StateManager save failed: {str(e)}")
-            
+        """Save system state using the SOVLState instance. Retries on transient errors."""
+        max_retries = 3
+        retry_delay = 0.5  # seconds
+        attempt = 0
+        while attempt < max_retries:
+            with self._lock:
+                try:
+                    state_dict = state.to_dict()
+                    with open(f"{path_prefix}_state.json", "w") as f:
+                        import json
+                        json.dump(state_dict, f)
+                    self._logger.record_event(
+                        event_type="state_saved_by_manager",
+                        message=f"System state saved via StateManager to {path_prefix}_state.json",
+                        level="info",
+                        additional_info={
+                            "state_size": len(str(state_dict)),
+                            "state_hash": state.state_hash()
+                        }
+                    )
+                    return
+                except (OSError, IOError) as e:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        self._logger.log_error(
+                            error_msg=f"StateManager failed to save state after {max_retries} attempts: {str(e)}",
+                            error_type="state_save_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                        raise StateError(f"StateManager save failed after {max_retries} attempts: {str(e)}")
+                    else:
+                        self._logger.log_event(
+                            "state_save_retry",
+                            f"Retrying save_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
+                            level="warning"
+                        )
+                    import time as _time
+                    _time.sleep(retry_delay)
+                except Exception as e:
+                    self._logger.log_error(
+                        error_msg=f"StateManager failed to save state: {str(e)}",
+                        error_type="state_save_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    raise StateError(f"StateManager save failed: {str(e)}")
+
     def load_state(self, path_prefix: str) -> SOVLState:
-        """Load system state using the SOVLState instance."""
-        try:
-            import os
-            import json
-            state_path = f"{path_prefix}_state.json"
-            if not os.path.exists(state_path):
-                self._logger.log_event(
-                    "state_load_empty_by_manager",
-                    f"No state data found by StateManager at {state_path}, creating new state.",
-                    level="warning"
-                )
-                return SOVLState(
-                    config_manager=self._config_manager,
-                    logger=self._logger,
-                    device=self._device
-                )
+        """Load system state using the SOVLState instance. Retries on transient errors."""
+        max_retries = 3
+        retry_delay = 0.5  # seconds
+        attempt = 0
+        while attempt < max_retries:
+            with self._lock:
+                try:
+                    import os
+                    import json
+                    state_path = f"{path_prefix}_state.json"
+                    if not os.path.exists(state_path):
+                        self._logger.log_event(
+                            "state_load_empty_by_manager",
+                            f"No state data found by StateManager at {state_path}, creating new state.",
+                            level="warning"
+                        )
+                        return SOVLState(
+                            config_manager=self._config_manager,
+                            logger=self._logger,
+                            device=self._device
+                        )
+                    with open(state_path, "r") as f:
+                        state_dict = json.load(f)
+                    if not isinstance(state_dict, dict):
+                        raise StateError(f"StateManager loaded invalid state data type: {type(state_dict)}")
+                    loaded_state = SOVLState.from_dict(
+                        data=state_dict,
+                        config_manager=self._config_manager,
+                        logger=self._logger,
+                        device=self._device
+                    )
+                    self._logger.record_event(
+                        event_type="state_loaded_by_manager",
+                        message=f"System state loaded via StateManager from {path_prefix}_state.json",
+                        level="info",
+                        additional_info={
+                            "state_size": len(str(state_dict)),
+                            "state_hash": loaded_state.state_hash()
+                        }
+                    )
+                    return loaded_state
+                except (OSError, IOError) as e:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        self._logger.log_error(
+                            error_msg=f"StateManager failed to load state after {max_retries} attempts: {str(e)}",
+                            error_type="state_load_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                        raise StateError(f"StateManager load failed after {max_retries} attempts: {str(e)}")
+                    else:
+                        self._logger.log_event(
+                            "state_load_retry",
+                            f"Retrying load_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
+                            level="warning"
+                        )
+                    import time as _time
+                    _time.sleep(retry_delay)
+                except Exception as e:
+                    self._logger.log_error(
+                        error_msg=f"StateManager failed to load state: {str(e)}",
+                        error_type="state_load_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    raise StateError(f"StateManager load failed: {str(e)}")
                 
-            with open(state_path, "r") as f:
-                state_dict = json.load(f)
-            if not isinstance(state_dict, dict):
-                raise StateError(f"StateManager loaded invalid state data type: {type(state_dict)}")
-            
-            loaded_state = SOVLState.from_dict(
-                data=state_dict,
-                config_manager=self._config_manager,
-                logger=self._logger,
-                device=self._device
-            )
-            
-            self._logger.record_event(
-                event_type="state_loaded_by_manager",
-                message=f"System state loaded via StateManager from {path_prefix}_state.json",
-                level="info",
-                additional_info={
-                    "state_size": len(str(state_dict)),
-                    "state_hash": loaded_state.state_hash()
-                }
-            )
-            
-            return loaded_state
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"StateManager failed to load state: {str(e)}",
-                error_type="state_load_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise StateError(f"StateManager load failed: {str(e)}")
+    def save_state(self, state: SOVLState, path_prefix: str) -> None:
+        """Save system state using the SOVLState instance. Retries on transient errors."""
+        max_retries = 3
+        retry_delay = 0.5  # seconds
+        attempt = 0
+        while attempt < max_retries:
+            with self._lock:
+                try:
+                    state_dict = state.to_dict()
+                    with open(f"{path_prefix}_state.json", "w") as f:
+                        import json
+                        json.dump(state_dict, f)
+                    self._logger.record_event(
+                        event_type="state_saved_by_manager",
+                        message=f"System state saved via StateManager to {path_prefix}_state.json",
+                        level="info",
+                        additional_info={
+                            "state_size": len(str(state_dict)),
+                            "state_hash": state.state_hash()
+                        }
+                    )
+                    return
+                except (OSError, IOError) as e:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        self._logger.log_error(
+                            error_msg=f"StateManager failed to save state after {max_retries} attempts: {str(e)}",
+                            error_type="state_save_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                        raise StateError(f"StateManager save failed after {max_retries} attempts: {str(e)}")
+                    else:
+                        self._logger.log_event(
+                            "state_save_retry",
+                            f"Retrying save_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
+                            level="warning"
+                        )
+                    import time as _time
+                    _time.sleep(retry_delay)
+                except Exception as e:
+                    self._logger.log_error(
+                        error_msg=f"StateManager failed to save state: {str(e)}",
+                        error_type="state_save_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    raise StateError(f"StateManager save failed: {str(e)}")
+
+    def load_state(self, path_prefix: str) -> SOVLState:
+        """Load system state using the SOVLState instance. Retries on transient errors."""
+        max_retries = 3
+        retry_delay = 0.5  # seconds
+        attempt = 0
+        while attempt < max_retries:
+            with self._lock:
+                try:
+                    import os
+                    import json
+                    state_path = f"{path_prefix}_state.json"
+                    if not os.path.exists(state_path):
+                        self._logger.log_event(
+                            "state_load_empty_by_manager",
+                            f"No state data found by StateManager at {state_path}, creating new state.",
+                            level="warning"
+                        )
+                        return SOVLState(
+                            config_manager=self._config_manager,
+                            logger=self._logger,
+                            device=self._device
+                        )
+                    with open(state_path, "r") as f:
+                        state_dict = json.load(f)
+                    if not isinstance(state_dict, dict):
+                        raise StateError(f"StateManager loaded invalid state data type: {type(state_dict)}")
+                    loaded_state = SOVLState.from_dict(
+                        data=state_dict,
+                        config_manager=self._config_manager,
+                        logger=self._logger,
+                        device=self._device
+                    )
+                    self._logger.record_event(
+                        event_type="state_loaded_by_manager",
+                        message=f"System state loaded via StateManager from {path_prefix}_state.json",
+                        level="info",
+                        additional_info={
+                            "state_size": len(str(state_dict)),
+                            "state_hash": loaded_state.state_hash()
+                        }
+                    )
+                    return loaded_state
+                except (OSError, IOError) as e:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        self._logger.log_error(
+                            error_msg=f"StateManager failed to load state after {max_retries} attempts: {str(e)}",
+                            error_type="state_load_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                        raise StateError(f"StateManager load failed after {max_retries} attempts: {str(e)}")
+                    else:
+                        self._logger.log_event(
+                            "state_load_retry",
+                            f"Retrying load_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
+                            level="warning"
+                        )
+                    import time as _time
+                    _time.sleep(retry_delay)
+                except Exception as e:
+                    self._logger.log_error(
+                        error_msg=f"StateManager failed to load state: {str(e)}",
+                        error_type="state_load_error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    raise StateError(f"StateManager load failed: {str(e)}")
 
 class StateTracker(StateBase):
     """Tracks component states and their changes."""
@@ -1277,20 +1429,26 @@ class UserProfileState(StateBase):
         """Serialize profiles simply for persistence."""
         try:
             with self.lock:
-                return {
-                    "profiles": {
-                        cid: {
-                            "lexicon": dict(p["lexicon"]),
-                            "interactions": p["interactions"],
-                            "session_time": p["session_time"],
-                            "inputs": list(p["inputs"]),
-                            "last_interaction": p["last_interaction"],
+                result = {"profiles": {}, "version": "1.0"}
+                for cid, p in self.profiles.items():
+                    try:
+                        # Defensive serialization
+                        lexicon = dict(p["lexicon"]) if isinstance(p["lexicon"], dict) or isinstance(p["lexicon"], defaultdict) else {}
+                        inputs = list(p["inputs"]) if isinstance(p["inputs"], (deque, list)) else []
+                        early_interactions = list(p.get("early_interactions", [])) if isinstance(p.get("early_interactions", []), (list, deque)) else []
+                        result["profiles"][cid] = {
+                            "lexicon": lexicon,
+                            "interactions": int(p.get("interactions", 0)),
+                            "session_time": float(p.get("session_time", 0.0)),
+                            "inputs": inputs,
+                            "last_interaction": float(p.get("last_interaction", time.time())),
                             "nickname": p.get("nickname", ""),
-                            "early_interactions": list(p.get("early_interactions", []))
-                        } for cid, p in self.profiles.items()
-                    },
-                    "version": "1.0"
-                }
+                            "early_interactions": early_interactions
+                        }
+                    except Exception as profile_exc:
+                        self.log_error(error_msg=f"Profile serialization failed for {cid}: {str(profile_exc)}")
+                        continue
+                return result
         except Exception as e:
             self.log_error(error_msg=f"Profile serialization failed: {str(e)}")
             raise StateError(f"Profile serialization failed: {str(e)}")
@@ -1301,15 +1459,31 @@ class UserProfileState(StateBase):
             with self.lock:
                 self.profiles.clear()
                 for cid, p in data.get("profiles", {}).items():
-                    self.profiles[cid] = {
-                        "lexicon": defaultdict(int, p.get("lexicon", {})),
-                        "interactions": int(p.get("interactions", 0)),
-                        "session_time": float(p.get("session_time", 0.0)),
-                        "inputs": deque(p.get("inputs", []), maxlen=self.max_inputs),
-                        "last_interaction": float(p.get("last_interaction", time.time())),
-                        "nickname": p.get("nickname", ""),
-                        "early_interactions": list(p.get("early_interactions", []))
-                    }
+                    try:
+                        lexicon = defaultdict(int, p.get("lexicon", {})) if isinstance(p.get("lexicon", {}), dict) else defaultdict(int)
+                        interactions = int(p.get("interactions", 0))
+                        session_time = float(p.get("session_time", 0.0))
+                        # Defensive: Only accept list for inputs
+                        raw_inputs = p.get("inputs", [])
+                        if not isinstance(raw_inputs, list):
+                            self.log_error(error_msg=f"Malformed 'inputs' for {cid}")
+                            raw_inputs = []
+                        inputs = deque(raw_inputs, maxlen=self.max_inputs)
+                        last_interaction = float(p.get("last_interaction", time.time()))
+                        nickname = p.get("nickname", "")
+                        early_interactions = list(p.get("early_interactions", [])) if isinstance(p.get("early_interactions", []), list) else []
+                        self.profiles[cid] = {
+                            "lexicon": lexicon,
+                            "interactions": interactions,
+                            "session_time": session_time,
+                            "inputs": inputs,
+                            "last_interaction": last_interaction,
+                            "nickname": nickname,
+                            "early_interactions": early_interactions
+                        }
+                    except Exception as profile_exc:
+                        self.log_error(error_msg=f"Profile loading failed for {cid}: {str(profile_exc)}")
+                        continue
                 self.log_event("profiles_loaded", "Profiles loaded", profile_count=len(self.profiles))
         except Exception as e:
             self.log_error(error_msg=f"Profile loading failed: {str(e)}")
