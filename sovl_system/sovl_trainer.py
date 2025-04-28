@@ -14,6 +14,7 @@ from sovl_logger import Logger, LoggerConfig
 from transformers import get_linear_schedule_with_warmup
 from sovl_engram import LoraAdapterManager
 from sovl_io import JSONLLoader
+import threading
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -92,76 +93,70 @@ class TrainingConfig:
         self.memory = self.MemoryConfig()
         self.params = self.TrainingParams()
         self.logging = self.LoggingConfig()
+        self._update_lock = threading.Lock()
         self._load_config()
         
     # Load and validate all config sections (optimizer, scheduler, memory, params, logging).
     def _load_config(self) -> None:
         """Load and validate training configuration."""
-        try:
-            # Load optimizer config
-            self.optimizer.type = self.config_manager.get("training.optimizer.type", "adamw")
-            self.optimizer.learning_rate = self.config_manager.get("training.learning_rate", 2e-5)
-            self.optimizer.weight_decay = self.config_manager.get("training.weight_decay", 0.01)
-            self.optimizer.grad_accum_steps = self.config_manager.get("training.grad_accum_steps", 4)
-            self.optimizer.max_grad_norm = self.config_manager.get("training.max_grad_norm", 1.0)
-            
-            # Load scheduler config
-            self.scheduler.type = self.config_manager.get("training.scheduler_type", "linear")
-            self.scheduler.warmup_steps = self.config_manager.get("training.warmup_steps", 0)
-            self.scheduler.total_steps = self.config_manager.get("training.total_steps", 100000)
-            self.scheduler.cosine_min_lr = self.config_manager.get("training.cosine_min_lr", 1e-6)
-            self.scheduler.warmup_ratio = self.config_manager.get("training.warmup_ratio", 0.1)
-            
-            # Load memory config
-            self.memory.batch_size = self.config_manager.get("training.batch_size", 2)
-            self.memory.max_seq_length = self.config_manager.get("training.max_seq_length", 512)
-            self.memory.use_amp = self.config_manager.get("training.use_amp", True)
-            self.memory.max_patience = self.config_manager.get("training.max_patience", 2)
-            
-            # Load training params
-            self.params.max_epochs = self.config_manager.get("training.max_epochs", 3)
-            self.params.validate_every_n_steps = self.config_manager.get("training.validate_every_n_steps", 100)
-            self.params.checkpoint_interval = self.config_manager.get("training.checkpoint_interval", 1000)
-            self.params.checkpoint_path = self.config_manager.get("training.checkpoint_path", "checkpoints/sovl_trainer")
-            self.params.dropout_rate = self.config_manager.get("training.dropout_rate", 0.1)
-            self.params.metrics_to_track = self.config_manager.get(
-                "training.metrics_to_track",
-                ["loss", "accuracy", "confidence"]
-            )
-            
-            # Load logging config
-            self.logging.log_file = self.config_manager.get("training.logging.log_file", "training_logs.jsonl")
-            self.logging.max_size_mb = self.config_manager.get("training.logging.max_size_mb", 10)
-            self.logging.compress_old = self.config_manager.get("training.logging.compress_old", True)
-            self.logging.max_in_memory_logs = self.config_manager.get("training.logging.max_in_memory_logs", 1000)
-            self.logging.rotation_count = self.config_manager.get("training.logging.rotation_count", 5)
-            self.logging.max_log_age_days = self.config_manager.get("training.logging.max_log_age_days", 30)
-            self.logging.prune_interval_hours = self.config_manager.get("training.logging.prune_interval_hours", 24)
-            self.logging.memory_threshold_mb = self.config_manager.get("training.logging.memory_threshold_mb", 100)
-            self.logging.gpu_memory_threshold = self.config_manager.get("training.logging.gpu_memory_threshold", 0.85)
-            self.logging.error_cooldown = self.config_manager.get("training.logging.error_cooldown", 1.0)
-            self.logging.max_recent_errors = self.config_manager.get("training.logging.max_recent_errors", 100)
-            self.logging.error_handling_config = self.config_manager.get(
-                "training.logging.error_handling_config",
-                {
-                    "max_history_per_error": 10,
-                    "critical_threshold": 5,
-                    "warning_threshold": 10,
-                    "retry_attempts": 3,
-                    "retry_delay": 1.0,
-                    "memory_recovery_attempts": 3,
-                    "memory_recovery_delay": 1.0
-                }
-            )
-            
-            # Validate configurations
-            self._validate()
-            
-        except Exception as e:
-            raise ConfigurationError(
-                f"Failed to load training configuration: {str(e)}",
-                traceback.format_exc()
-            )
+        # Load optimizer config
+        self.optimizer.type = self.config_manager.get("training.optimizer.type", "adamw")
+        self.optimizer.learning_rate = self.config_manager.get("training.learning_rate", 2e-5)
+        self.optimizer.weight_decay = self.config_manager.get("training.weight_decay", 0.01)
+        self.optimizer.grad_accum_steps = self.config_manager.get("training.grad_accum_steps", 4)
+        self.optimizer.max_grad_norm = self.config_manager.get("training.max_grad_norm", 1.0)
+        
+        # Load scheduler config
+        self.scheduler.type = self.config_manager.get("training.scheduler_type", "linear")
+        self.scheduler.warmup_steps = self.config_manager.get("training.warmup_steps", 0)
+        self.scheduler.total_steps = self.config_manager.get("training.total_steps", 100000)
+        self.scheduler.cosine_min_lr = self.config_manager.get("training.cosine_min_lr", 1e-6)
+        self.scheduler.warmup_ratio = self.config_manager.get("training.warmup_ratio", 0.1)
+        
+        # Load memory config
+        self.memory.batch_size = self.config_manager.get("training.batch_size", 2)
+        self.memory.max_seq_length = self.config_manager.get("training.max_seq_length", 512)
+        self.memory.use_amp = self.config_manager.get("training.use_amp", True)
+        self.memory.max_patience = self.config_manager.get("training.max_patience", 2)
+        
+        # Load training params
+        self.params.max_epochs = self.config_manager.get("training.max_epochs", 3)
+        self.params.validate_every_n_steps = self.config_manager.get("training.validate_every_n_steps", 100)
+        self.params.checkpoint_interval = self.config_manager.get("training.checkpoint_interval", 1000)
+        self.params.checkpoint_path = self.config_manager.get("training.checkpoint_path", "checkpoints/sovl_trainer")
+        self.params.dropout_rate = self.config_manager.get("training.dropout_rate", 0.1)
+        self.params.metrics_to_track = self.config_manager.get(
+            "training.metrics_to_track",
+            ["loss", "accuracy", "confidence"]
+        )
+        
+        # Load logging config
+        self.logging.log_file = self.config_manager.get("training.logging.log_file", "training_logs.jsonl")
+        self.logging.max_size_mb = self.config_manager.get("training.logging.max_size_mb", 10)
+        self.logging.compress_old = self.config_manager.get("training.logging.compress_old", True)
+        self.logging.max_in_memory_logs = self.config_manager.get("training.logging.max_in_memory_logs", 1000)
+        self.logging.rotation_count = self.config_manager.get("training.logging.rotation_count", 5)
+        self.logging.max_log_age_days = self.config_manager.get("training.logging.max_log_age_days", 30)
+        self.logging.prune_interval_hours = self.config_manager.get("training.logging.prune_interval_hours", 24)
+        self.logging.memory_threshold_mb = self.config_manager.get("training.logging.memory_threshold_mb", 100)
+        self.logging.gpu_memory_threshold = self.config_manager.get("training.logging.gpu_memory_threshold", 0.85)
+        self.logging.error_cooldown = self.config_manager.get("training.logging.error_cooldown", 1.0)
+        self.logging.max_recent_errors = self.config_manager.get("training.logging.max_recent_errors", 100)
+        self.logging.error_handling_config = self.config_manager.get(
+            "training.logging.error_handling_config",
+            {
+                "max_history_per_error": 10,
+                "critical_threshold": 5,
+                "warning_threshold": 10,
+                "retry_attempts": 3,
+                "retry_delay": 1.0,
+                "memory_recovery_attempts": 3,
+                "memory_recovery_delay": 1.0
+            }
+        )
+        
+        # Validate configurations
+        self._validate()
             
     # Assert correctness of loaded configuration (value ranges, types, etc.).
     def _validate(self) -> None:
@@ -209,6 +204,18 @@ class TrainingConfig:
             required_error_keys = {"max_history_per_error", "critical_threshold", "warning_threshold"}
             assert all(key in self.logging.error_handling_config for key in required_error_keys), \
                 f"error_handling_config must contain all required keys: {required_error_keys}"
+            ehc = self.logging.error_handling_config
+            assert ehc["max_history_per_error"] > 0, "max_history_per_error must be positive"
+            assert ehc["critical_threshold"] >= 0, "critical_threshold must be non-negative"
+            assert ehc["warning_threshold"] >= 0, "warning_threshold must be non-negative"
+            if "retry_attempts" in ehc:
+                assert isinstance(ehc["retry_attempts"], int) and ehc["retry_attempts"] > 0, "retry_attempts must be a positive integer"
+            if "retry_delay" in ehc:
+                assert isinstance(ehc["retry_delay"], (float, int)) and ehc["retry_delay"] > 0, "retry_delay must be positive"
+            if "memory_recovery_attempts" in ehc:
+                assert isinstance(ehc["memory_recovery_attempts"], int) and ehc["memory_recovery_attempts"] > 0, "memory_recovery_attempts must be a positive integer"
+            if "memory_recovery_delay" in ehc:
+                assert isinstance(ehc["memory_recovery_delay"], (float, int)) and ehc["memory_recovery_delay"] > 0, "memory_recovery_delay must be positive"
             
         except AssertionError as e:
             raise ConfigurationError(f"Invalid training configuration: {str(e)}")
@@ -216,22 +223,23 @@ class TrainingConfig:
     # Update a training config key, propagate to ConfigManager, and reload settings.
     def update(self, key: str, value: Any) -> bool:
         """Update a configuration parameter."""
-        try:
-            # Update in config manager
-            success = self.config_manager.update(f"training.{key}", value)
-            
-            if success:
-                # Reload configuration to ensure consistency
-                self._load_config()
+        with self._update_lock:
+            try:
+                # Update in config manager
+                success = self.config_manager.update(f"training.{key}", value)
                 
-            return success
-            
-        except Exception as e:
-            raise ConfigurationError(
-                f"Failed to update training configuration: {str(e)}",
-                traceback.format_exc()
-            )
-            
+                if success:
+                    # Reload configuration to ensure consistency
+                    self._load_config()
+                    
+                return success
+                
+            except Exception as e:
+                raise ConfigurationError(
+                    f"Failed to update training configuration: {str(e)}",
+                    traceback.format_exc()
+                )
+                
     # Retrieve a training config parameter via ConfigManager.
     def get(self, key: str, default: Any = None) -> Any:
         """Get a configuration parameter."""
@@ -352,21 +360,41 @@ class TrainingManager:
             
     @torch.no_grad()
     def _prepare_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Prepare batch for training with memory optimization."""
-        # Move tensors to device and truncate sequences if needed
+        """Prepare batch for training with memory optimization and robust device handling."""
         prepared_batch = {}
         max_length = self.config.memory.max_seq_length
-        
+        device = self.device
+        # Check device availability
+        if device.type == "cuda" and not torch.cuda.is_available():
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_warning(
+                    message=f"CUDA device requested but is not available. Falling back to CPU.",
+                    event_type="device_warning"
+                )
+            device = torch.device("cpu")
         for key, tensor in batch.items():
-            # Move to device
-            tensor = tensor.to(self.device)
-            
+            if not isinstance(tensor, torch.Tensor):
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_warning(
+                        message=f"Non-tensor value for key {key} in batch",
+                        event_type="batch_preparation_warning"
+                    )
+                continue
+            # Only move if not already on the correct device
+            if tensor.device != device:
+                try:
+                    tensor = tensor.to(device)
+                except RuntimeError as e:
+                    if hasattr(self, "logger") and self.logger:
+                        self.logger.log_error(
+                            error_msg=f"Failed to move tensor to device {device}: {str(e)}",
+                            error_type="device_transfer_error"
+                        )
+                    raise
             # Truncate sequences if needed
             if key in ["input_ids", "attention_mask"] and tensor.size(1) > max_length:
                 tensor = tensor[:, :max_length]
-            
             prepared_batch[key] = tensor
-            
         return prepared_batch
         
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -621,47 +649,79 @@ class TrainingWorkflowManager:
         self.model_manager = getattr(trainer, 'model_manager', None)  # <-- Add reference to model manager
         
     def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
-        """Run a complete training cycle using the modular pipeline."""
+        """Run a complete training cycle using the modular pipeline with error recovery and notification."""
         device = getattr(self.trainer, 'device', None)
         batch_preparer = getattr(self.trainer, 'batch_preparer', None)
         logger = getattr(self, 'logger', None)
         training_manager = getattr(self.trainer, 'training_manager', None)
-
-        if not (device and batch_preparer and training_manager):
-            if logger:
-                logger.log_warning(
-                    "Missing modular pipeline component(s) for training cycle.",
-                    event_type="training_cycle_modular_pipeline_missing"
-                )
-            return 0.0, {"status": "missing_pipeline_component"}
-
-        # Prepare batch using modular batch preparer
-        try:
-            collated_batch = batch_preparer.prepare(batch)
-        except Exception as e:
-            if logger:
-                logger.log_error(
-                    f"Failed to prepare training batch: {str(e)}",
-                    error_type="training_cycle_batch_preparation_error"
-                )
-            return 0.0, {"status": "batch_preparation_error"}
-
-        # Run training step
-        try:
-            metrics = training_manager.train_step(batch=collated_batch)
-            loss = metrics.get("loss", 0.0)
-        except Exception as e:
-            if logger:
-                logger.log_error(
-                    f"Error during training step: {str(e)}",
-                    error_type="training_cycle_training_error",
-                    stack_trace=traceback.format_exc()
-                )
-            return 0.0, {"status": "training_step_error"}
-
-        # Optionally update state or log event if needed
-        return loss, metrics
-            
+        error_manager = getattr(self.trainer, 'error_manager', None)
+        error_handling_cfg = None
+        # Get error handling config if available
+        if hasattr(self, 'config') and self.config and hasattr(self.config, 'logging'):
+            error_handling_cfg = getattr(self.config.logging, 'error_handling_config', None)
+        retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
+        retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
+        last_exception = None
+        for attempt in range(retry_attempts):
+            # Prepare batch using modular batch preparer
+            try:
+                collated_batch = batch_preparer.prepare(batch)
+            except Exception as e:
+                last_exception = e
+                if logger:
+                    logger.log_error(
+                        f"Failed to prepare training batch: {str(e)}",
+                        error_type="training_cycle_batch_preparation_error",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={"attempt": attempt+1}
+                    )
+                if error_manager:
+                    error_manager.notify_error(
+                        error_type="training_cycle_batch_preparation_error",
+                        error_msg=str(e),
+                        context={"attempt": attempt+1, "batch": batch}
+                    )
+                if attempt < retry_attempts - 1 and retry_delay > 0:
+                    time.sleep(retry_delay)
+                continue
+            # Run training step
+            try:
+                metrics = training_manager.train_step(batch=collated_batch)
+                loss = metrics.get("loss", 0.0)
+                return loss, metrics
+            except Exception as e:
+                last_exception = e
+                if logger:
+                    logger.log_error(
+                        f"Error during training step: {str(e)}",
+                        error_type="training_cycle_training_error",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={"attempt": attempt+1}
+                    )
+                if error_manager:
+                    error_manager.notify_error(
+                        error_type="training_cycle_training_error",
+                        error_msg=str(e),
+                        context={"attempt": attempt+1, "batch": batch}
+                    )
+                if attempt < retry_attempts - 1 and retry_delay > 0:
+                    time.sleep(retry_delay)
+                continue
+        # If all attempts failed
+        if logger:
+            logger.log_error(
+                f"Training cycle failed after {retry_attempts} attempts: {str(last_exception)}",
+                error_type="training_cycle_final_failure",
+                stack_trace=traceback.format_exc() if last_exception else None
+            )
+        if error_manager:
+            error_manager.notify_error(
+                error_type="training_cycle_final_failure",
+                error_msg=str(last_exception),
+                context={"batch": batch}
+            )
+        return 0.0, {"status": "error", "error": str(last_exception) if last_exception else "unknown_error"}
+        
     def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
         """Run gestation cycle with metadata enrichment using the modular pipeline."""
         # Use modular pipeline for metadata enrichment and batch preparation
@@ -1724,4 +1784,3 @@ class Dreamer:
         dream_candidates = self.score_and_select_dreams(events)
         dreams = self.generate_dream_events(dream_candidates)
         self.log_dreams(dreams)
-
