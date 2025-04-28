@@ -354,7 +354,7 @@ class TrainingManager:
             return torch.optim.lr_scheduler.LinearLR(
                 self.optimizer,
                 start_factor=1.0,
-                end_factor=0.0,
+                end_factor=0.5,  # Decay to 50% of initial learning rate
                 total_iters=self.config.scheduler.total_steps
             )
         elif scheduler_type == "cosine":
@@ -364,7 +364,11 @@ class TrainingManager:
                 eta_min=self.config.scheduler.cosine_min_lr
             )
         elif scheduler_type == "constant":
-            return None
+            return torch.optim.lr_scheduler.ConstantLR(
+                self.optimizer,
+                factor=1.0,  # Maintain constant learning rate
+                total_iters=self.config.scheduler.total_steps
+            )
         else:
             raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
             
@@ -762,6 +766,15 @@ class TrainingWorkflowManager:
                 logger.log_error(f"No scaffold models ({scaffold_count}) or LoRA managers ({lora_count}) available for gestation cycle.", event_type="gestation_scaffold_lora_missing")
             return
     
+        # Validate scaffold and LoRA manager counts
+        if scaffold_count != lora_count:
+            if logger:
+                logger.log_warning(
+                    f"Mismatch between scaffold models ({scaffold_count}) and LoRA managers ({lora_count}). Using minimum count ({min(scaffold_count, lora_count)}).",
+                    event_type="gestation_scaffold_lora_mismatch",
+                    additional_info={"scaffold_count": scaffold_count, "lora_count": lora_count}
+                )
+    
         # Iterate over all scaffold models/LoRA managers (future-proofing)
         for idx in range(min(scaffold_count, lora_count)):
             scaffold_model = model_manager.scaffold_models[idx]
@@ -772,11 +785,19 @@ class TrainingWorkflowManager:
                 batch = batch_preparer.prepare(enriched_samples)
             except Exception as e:
                 if logger:
-                    logger.log_error(f"Error during gestation batch preparation (scaffold {idx}): {str(e)}", error_type="gestation_batch_error", stack_trace=traceback.format_exc(), additional_info={"scaffold_index": idx})
+                    logger.log_error(
+                        f"Error during gestation batch preparation (scaffold {idx}): {str(e)}",
+                        error_type="gestation_batch_error",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={"scaffold_index": idx}
+                    )
                 continue
             
             try:
-                optimizer = torch.optim.AdamW(lora_manager.lora_parameters(scaffold_model), lr=2e-5)
+                optimizer = torch.optim.AdamW(
+                    lora_manager.lora_parameters(scaffold_model),
+                    lr=self.config.optimizer.learning_rate  # Use configured learning rate
+                )
                 scaffold_model.train()
                 optimizer.zero_grad()
                 outputs = scaffold_model(**batch)
@@ -784,10 +805,19 @@ class TrainingWorkflowManager:
                 loss.backward()
                 optimizer.step()
                 if logger:
-                    logger.log_info(f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss.item()}", event_type="gestation_lora_train", additional_info={"scaffold_index": idx})
+                    logger.log_info(
+                        f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss.item()}",
+                        event_type="gestation_lora_train",
+                        additional_info={"scaffold_index": idx}
+                    )
             except Exception as e:
                 if logger:
-                    logger.log_error(f"Error during gestation LoRA training step (scaffold {idx}): {str(e)}", error_type="gestation_lora_training_error", stack_trace=traceback.format_exc(), additional_info={"scaffold_index": idx})
+                    logger.log_error(
+                        f"Error during gestation LoRA training step (scaffold {idx}): {str(e)}",
+                        error_type="gestation_lora_training_error",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={"scaffold_index": idx}
+                    )
                 continue
             
             # Save LoRA weights as long-term memory
@@ -802,10 +832,19 @@ class TrainingWorkflowManager:
                 if model_manager:
                     model_manager.set_active_lora_checkpoint(lora_path)
                 if logger:
-                    logger.log_info(f"LoRA weights saved after gestation for scaffold {idx} to {lora_path}", event_type="gestation_lora_save", additional_info={"scaffold_index": idx})
+                    logger.log_info(
+                        f"LoRA weights saved after gestation for scaffold {idx} to {lora_path}",
+                        event_type="gestation_lora_save",
+                        additional_info={"scaffold_index": idx}
+                    )
             except Exception as e:
                 if logger:
-                    logger.log_error(f"Error saving LoRA weights after gestation (scaffold {idx}): {str(e)}", error_type="gestation_lora_save_error", stack_trace=traceback.format_exc(), additional_info={"scaffold_index": idx})
+                    logger.log_error(
+                        f"Error saving LoRA weights after gestation (scaffold {idx}): {str(e)}",
+                        error_type="gestation_lora_save_error",
+                        stack_trace=traceback.format_exc(),
+                        additional_info={"scaffold_index": idx}
+                    )
                 continue
             
         # Update SOVL state if available
@@ -816,7 +855,11 @@ class TrainingWorkflowManager:
                     logger.log_info("SOVL state updated after gestation.", event_type="gestation_state_update")
             except Exception as e:
                 if logger:
-                    logger.log_error(f"Error updating SOVL state after gestation: {str(e)}", error_type="gestation_state_update_error", stack_trace=traceback.format_exc())
+                    logger.log_error(
+                        f"Error updating SOVL state after gestation: {str(e)}",
+                        error_type="gestation_state_update_error",
+                        stack_trace=traceback.format_exc()
+                    )
     
         # DREAMER integration
         if dreamer is not None:
@@ -826,7 +869,11 @@ class TrainingWorkflowManager:
                     logger.log_info("Dreamer cycle completed after gestation.", event_type="gestation_dreamer")
             except Exception as e:
                 if logger:
-                    logger.log_error(f"Error during Dreamer cycle: {str(e)}", error_type="gestation_dreamer_error", stack_trace=traceback.format_exc())
+                    logger.log_error(
+                        f"Error during Dreamer cycle: {str(e)}",
+                        error_type="gestation_dreamer_error",
+                        stack_trace=traceback.format_exc()
+                    )
 
     def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Run dream cycle."""
@@ -1710,7 +1757,7 @@ class Dreamer:
         events = []
         try:
             loader = JSONLLoader(self.config_manager, self.logger, self.error_manager) if self.error_manager else JSONLLoader(self.config_manager, self.logger, None)
-            
+
             # First pass: Find the index of the last 'wake' event
             last_wake_idx = None
             current_idx = 0
@@ -1718,14 +1765,14 @@ class Dreamer:
                 if entry.get("event_type") == "wake":
                     last_wake_idx = current_idx
                 current_idx += 1
-            
+
             # Second pass: Collect events from last_wake_idx (or start) using streaming
             current_idx = 0
             for entry in loader.stream_jsonl(self.scribe_path):
                 if last_wake_idx is None or current_idx > last_wake_idx:
                     events.append(entry)
                 current_idx += 1
-                
+
         except Exception as e:
             if self.logger:
                 self.logger.log_error(
@@ -1733,7 +1780,7 @@ class Dreamer:
                     error_type="scribe_stream_error",
                     stack_trace=traceback.format_exc()
                 )
-        
+
         return events
 
     def score_and_select_dreams(self, events):

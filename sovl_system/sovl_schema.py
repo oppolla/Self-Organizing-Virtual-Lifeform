@@ -958,6 +958,18 @@ class ValidationSchema:
         }
 
     @staticmethod
+    def _get_training_optimizer_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the training optimizer config schema."""
+        return {
+            "learning_rate": ConfigSchema(
+                field="training.optimizer.learning_rate",
+                type=float,
+                default=2e-5,
+                range=(1e-7, 1e-3)
+            ),
+        }
+
+    @staticmethod
     def _get_motivator_config_schema() -> Dict[str, ConfigSchema]:
         """Return the motivator_config schema for the Motivator class."""
         return {
