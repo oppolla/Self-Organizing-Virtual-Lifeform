@@ -23,6 +23,10 @@ FALLBACK_PATH = "scribe_fallback.jsonl"
 CRITICAL_EVENT_TYPES = {"checkpoint", "training_complete"}
 _fallback_lock = threading.Lock()
 
+# Thread-safe singleton queue
+_scribe_queue = None
+_scribe_queue_lock = threading.Lock()
+
 @dataclass
 class ScribeEntry:
     """Standardized structure for entries going into the scribe queue."""
@@ -33,8 +37,17 @@ class ScribeEntry:
     session_id: Optional[str] = None
     timestamp: datetime = datetime.now()
 
-# Initialize the queue
-scribe_queue: queue.Queue[ScribeEntry] = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+def get_scribe_queue(maxsize: Optional[int] = None) -> queue.Queue:
+    """
+    Get the singleton scribe queue instance, initializing it if necessary.
+    Optionally set maxsize on first initialization.
+    """
+    global _scribe_queue
+    with _scribe_queue_lock:
+        if _scribe_queue is None:
+            qsize = maxsize if maxsize is not None else MAX_QUEUE_SIZE
+            _scribe_queue = queue.Queue(maxsize=qsize)
+        return _scribe_queue
 
 def capture_scribe_event(
     origin: str,
@@ -70,13 +83,14 @@ def capture_scribe_event(
             timestamp=timestamp or datetime.now()
         )
         # Block for critical events, else use timeout
+        q = get_scribe_queue()
         try:
             if event_type in CRITICAL_EVENT_TYPES:
-                scribe_queue.put(entry, block=True)
+                q.put(entry, block=True)
                 logger.debug(f"Successfully queued CRITICAL entry from {origin} with event type {event_type}")
                 return True
             else:
-                scribe_queue.put(entry, timeout=0.1)
+                q.put(entry, timeout=0.1)
                 logger.debug(f"Successfully queued entry from {origin} with event type {event_type}")
                 return True
         except queue.Full:
@@ -94,25 +108,20 @@ def capture_scribe_event(
         logger.error(f"Unexpected error queuing scribe event from {origin} ({event_type}): {e}", exc_info=True)
         return False
 
-def get_scribe_queue() -> queue.Queue[ScribeEntry]:
-    """
-    Get the scribe queue instance.
-    
-    Returns:
-        queue.Queue[ScribeEntry]: The shared scribe queue instance.
-    """
-    return scribe_queue
-
-def clear_scribe_queue() -> None:
+def clear_scribe_queue(caller: str, confirm: bool = False) -> None:
     """
     Clear all items from the scribe queue.
     Use with caution - only in emergency situations or during shutdown.
+    Requires explicit confirmation and caller name.
     """
-    logger.warning("Clearing scribe queue - this should only be done in emergency situations")
-    while not scribe_queue.empty():
+    if not confirm:
+        raise ValueError("Queue clearing requires explicit confirmation (confirm=True)")
+    logger.warning(f"Clearing scribe queue by {caller} - this should only be done in emergency situations")
+    q = get_scribe_queue()
+    while not q.empty():
         try:
-            scribe_queue.get_nowait()
-            scribe_queue.task_done()
+            q.get_nowait()
+            q.task_done()
         except queue.Empty:
             break
     logger.info("Scribe queue cleared successfully")
@@ -124,7 +133,8 @@ def get_scribe_queue_size() -> int:
     Returns:
         int: Number of items currently in the queue.
     """
-    return scribe_queue.qsize()
+    q = get_scribe_queue()
+    return q.qsize()
 
 def check_scribe_queue_health() -> Tuple[str, float]:
     """
