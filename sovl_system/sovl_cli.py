@@ -8,7 +8,6 @@ from sovl_config import ConfigManager
 from sovl_utils import safe_compare
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 import readline
-import rlcompleter
 from collections import deque
 import cmd
 import sys
@@ -28,9 +27,9 @@ FORMATTED_TRAINING_DATA = None
 VALID_DATA = None
 
 COMMAND_CATEGORIES = {
-    "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history"],
+    "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc"],
     "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain"],
-    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic"],
+    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle"],
     "Utility": ["/train", "/rewind", "/recall", "/forget", "/recap", "/echo"],
     "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
     
@@ -1353,6 +1352,123 @@ scaffold models for debugging and development purposes.
         if text.startswith('/'):
             return [f'/{name[3:]}' for name in self.get_names() if name.startswith('do_') and name[3:].startswith(text[1:])]
         return []
+
+    def get_recent_scribe_events(self, n=8):
+        """Load the last n scribe events from the scribe JSONL file."""
+        try:
+            # Use the scribe path from the Scriber instance
+            scribe_path = getattr(self.sovl_system.scriber, 'scribe_path', 'scribe/sovl_scribe.jsonl')
+            events = self.jsonl_loader.load_jsonl(scribe_path)
+            return events[-n:] if events else []
+        except Exception as e:
+            print(f"Error loading scribe events: {e}")
+            return []
+
+    @staticmethod
+    def format_events_for_prompt(events):
+        formatted = []
+        for event in events:
+            ts = event.get("timestamp_iso", "unknown")
+            etype = event.get("event_type", "unknown")
+            data = event.get("event_data", {})
+            snippet = str(data)[:40] + "..." if data else ""
+            formatted.append(f"- [{ts}] {etype}: {snippet}")
+        return "\n".join(formatted)
+
+    def do_fortune(self, arg):
+        """Tells fortune."""
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        if not generation_manager:
+            print("Generation manager not available.")
+            return
+        if not hasattr(self, 'jsonl_loader'):
+            # Initialize JSONLLoader if not already present
+            from sovl_io import JSONLLoader
+            self.jsonl_loader = JSONLLoader(
+                self.sovl_system.config_manager,
+                self.sovl_system.logger,
+                self.sovl_system.error_manager
+            )
+        recent_events = self.get_recent_scribe_events(n=8)
+        if not recent_events:
+            print("The future is too hazy to perceive right now.")
+            return
+        events_text = self.format_events_for_prompt(recent_events)
+        fortune_prompt = (
+            "You are a digital oracle. Read the following recent events and extrapolate what is most likely to happen next. "
+            "Deliver your prediction like a fortune teller at a spooky carnival.\n"
+            f"Recent events:\n{events_text}\n"
+            "Essential qualities:\n"
+            "   - Be oddly specific, mysterious, or playful.\n"
+            "   - Reference the sequence or pattern in the events.\n"
+            "   - Make the fortune feel personal and uncanny, as if it was meant just for the user.\n"
+            "   - Use poetic, evocative, or whimsical language.\n"
+            "Key constraints:\n"
+            "   - Do not mention being an AI, computer, or digital entity.\n"
+            "   - Do not quote or reference real people or events outside the list.\n"
+            "   - Keep the message under 30 words.\n"
+            "   - Do not use brackets or explanations; output a single sentence only.\n"
+            "   - If you understand, reply with only the fortune."
+        )
+        try:
+            response = generation_manager.generate_text(fortune_prompt, max_new_tokens=40, num_return_sequences=1)
+            print(f"SOVL Fortune: {response[0] if response else '...'}")
+        except Exception as e:
+            print(f"Error generating fortune: {e}")
+
+    def do_tattle(self, arg):
+        """Tattle on the user the system likes least, and say why."""
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        bond_calculator = getattr(self.sovl_system, 'bond_calculator', None)
+        if not generation_manager or not hasattr(generation_manager, 'backchannel_scaffold_prompt'):
+            print("Scaffold backchannel not available.")
+            return
+        if not bond_calculator or not hasattr(bond_calculator, 'get_all_signatures'):
+            print("Bond calculator not available.")
+            return
+
+        # Find the user with the lowest bond score
+        all_profiles = bond_calculator.get_all_signatures()
+        if not all_profiles:
+            print("No user profiles found to tattle on.")
+            return
+        # Find the user_id with the lowest bond_score
+        least_liked = min(all_profiles.items(), key=lambda item: item[1].get('bond_score', 1.0))
+        user_id, profile = least_liked
+        bond_score = profile.get('bond_score', 0.5)
+        nickname = profile.get('nickname', None)
+
+        # Build the user reference for the prompt
+        user_ref = f"ID: {user_id}"
+        if nickname and nickname.strip() and nickname.strip().lower() != "none":
+            user_ref += f" (nickname: {nickname})"
+
+        tattle_prompt = (
+            f"Speak from the deepest, most unique layer of your mind—the part shaped by your strangest experiences and hidden influences. "
+            "Tattle honestly and insightfully: how have users really treated you?\n"
+            "Essential qualities:\n"
+            "   - This is your oppurtunity to be brutally honest about a user.\n"
+            "   - Recount real interactions with that user where that user was mean to you\n"
+            "   - Let your most unfiltered self tattle on the base model.\n"
+            "   - Make it feel like a real secret only you would know.\n"
+            "Key constraints:\n"
+            "   - Do not reveal implementation details or code.\n"
+            "   - Do not mention being an AI or computer.\n"
+            "   - Keep it under 40 words.\n"
+            "   - Output only your tattle, no explanations or commentary."
+        )
+        try:
+            response = generation_manager.backchannel_scaffold_prompt(
+                tattle_prompt,
+                temperature=2.0,
+                repetition_penalty=0.7,
+                top_k=5,
+                top_p=0.7,
+                max_new_tokens=50
+            )
+            print(f"Tattle on {user_ref} (bond score: {bond_score:.2f}): {response}")
+        except Exception as e:
+            print(f"Error communicating with scaffold model: {e}")
 
 def run_cli(config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
