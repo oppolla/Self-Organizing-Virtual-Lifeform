@@ -888,6 +888,37 @@ class GenerationManager:
     def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", metadata_entries: list = None, **kwargs) -> List[str]:
         """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration."""
         request_time = time.time()
+        # --- Prompt hardening and input sanitization ---
+        if not isinstance(prompt, str):
+            self.logger.log_error(
+                error_msg=f"Prompt is not a string: {type(prompt)}",
+                error_type="invalid_prompt_type"
+            )
+            raise ValueError("Prompt must be a string.")
+
+        import re
+        # Remove control characters and excessive whitespace
+        prompt = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', prompt)
+        prompt = re.sub(r'\s+', ' ', prompt).strip()
+
+        # Enforce maximum prompt length
+        max_prompt_length = 1024  # or fetch from config if needed
+        if len(prompt) > max_prompt_length:
+            self.logger.log_warning(
+                f"Prompt length {len(prompt)} exceeds max {max_prompt_length}, truncating.",
+                error_type="prompt_truncation"
+            )
+            prompt = prompt[:max_prompt_length]
+
+        # Optionally: filter forbidden content
+        forbidden_phrases = ["<script>", "DROP TABLE"]  # Add more as needed
+        if any(phrase in prompt for phrase in forbidden_phrases):
+            self.logger.log_warning(
+                "Prompt contains forbidden content.",
+                error_type="forbidden_prompt_content"
+            )
+            raise ValueError("Prompt contains forbidden content.")
+
         traits = None
         generated_texts = None
         error = None

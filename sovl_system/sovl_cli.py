@@ -679,20 +679,21 @@ scaffold models for debugging and development purposes.
 
     def do_reset(self, arg):
         """Reset the system to its initial state."""
-        if hasattr(self.sovl_system, 'reset'):
-            try:
-                self.sovl_system.reset()
-                print("System has been reset.")
-            except Exception as e:
-                print(f"Error resetting system: {e}")
-        elif hasattr(self.sovl_system, 'reset_state'):
-            try:
-                self.sovl_system.reset_state()
-                print("System state has been reset.")
-            except Exception as e:
-                print(f"Error resetting system state: {e}")
-        else:
-            print("Reset not implemented or unavailable.")
+        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+        if not state_manager:
+            print("StateManager not available for atomic update.")
+            return
+        try:
+            def reset_update(state):
+                # Reinitialize or clear state as appropriate
+                if hasattr(state, '_initialize_state'):
+                    state._initialize_state()
+                    print("System state has been reset (atomic).")
+                else:
+                    print("State object does not support initialization/reset.")
+            state_manager.update_state_atomic(reset_update)
+        except Exception as e:
+            print(f"Atomic reset update failed: {e}")
 
     def do_monitor(self, arg):
         """Show system monitoring information."""
@@ -874,19 +875,27 @@ scaffold models for debugging and development purposes.
     def do_glitch(self, arg):
         """Simulate a glitch by corrupting a recent memory or state entry for testing."""
         print("Simulating a glitch: corrupting a recent memory or state entry...")
-        state = getattr(self.sovl_system, 'state', None)
-        if state and hasattr(state, 'history') and hasattr(state.history, 'memories'):
-            import random
-            memories = state.history.memories
-            if memories:
-                idx = random.randint(0, len(memories) - 1)
-                original = memories[idx]
-                memories[idx] = "[GLITCHED DATA]"
-                print(f"Memory at index {idx} has been corrupted (was: {original}).")
-            else:
-                print("No memories to corrupt.")
-        else:
-            print("State history or memories not available to glitch.")
+        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+        if not state_manager:
+            print("StateManager not available for atomic update.")
+            return
+        try:
+            def glitch_update(state):
+                if hasattr(state, 'history') and hasattr(state.history, 'memories'):
+                    import random
+                    memories = state.history.memories
+                    if memories:
+                        idx = random.randint(0, len(memories) - 1)
+                        original = memories[idx]
+                        memories[idx] = "[GLITCHED DATA]"
+                        print(f"Memory at index {idx} has been corrupted (was: {original}).")
+                    else:
+                        print("No memories to corrupt.")
+                else:
+                    print("State history or memories not available to glitch.")
+            state_manager.update_state_atomic(glitch_update)
+        except Exception as e:
+            print(f"Atomic glitch update failed: {e}")
 
     def do_debate(self, arg):
         """Have the LLM debate itself on a topic of its own choosing (or a provided topic)."""
@@ -925,18 +934,26 @@ scaffold models for debugging and development purposes.
         except ValueError:
             print("Invalid argument. Usage: rewind [N]")
             return
-        state = getattr(self.sovl_system, 'state', None)
-        if state and hasattr(state, 'history') and hasattr(state.history, 'rewind'):
-            state.history.rewind(n)
-            print(f"Rewound conversation history by {n} turn(s).")
-        elif state and hasattr(state, 'history') and hasattr(state.history, 'memories'):
-            memories = state.history.memories
-            actual = min(n, len(memories))
-            for _ in range(actual):
-                memories.pop()
-            print(f"Rewound conversation history by {actual} turn(s) (fallback).")
-        else:
-            print("Conversation history rewind not available.")
+        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+        if not state_manager:
+            print("StateManager not available for atomic update.")
+            return
+        try:
+            def rewind_update(state):
+                if hasattr(state, 'history') and hasattr(state.history, 'rewind'):
+                    state.history.rewind(n)
+                    print(f"Rewound conversation history by {n} turn(s).")
+                elif hasattr(state, 'history') and hasattr(state.history, 'memories'):
+                    memories = state.history.memories
+                    actual = min(n, len(memories))
+                    for _ in range(actual):
+                        memories.pop()
+                    print(f"Rewound conversation history by {actual} turn(s) (fallback).")
+                else:
+                    print("Conversation history rewind not available.")
+            state_manager.update_state_atomic(rewind_update)
+        except Exception as e:
+            print(f"Atomic rewind update failed: {e}")
 
     def do_recap(self, arg):
         """Summarize the last 16 logs in sovl_recaller into a recap."""
