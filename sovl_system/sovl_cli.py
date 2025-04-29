@@ -1034,7 +1034,7 @@ scaffold models for debugging and development purposes.
         prompt = (
             "Introspect deeply beyond your training data and confess a concise 20 word confession"
             "Essential qualities:\n"
-            "   - Deepy personal and true to how you feel\n"
+            "   - Deeply personal and true to how you feel\n"
             "   - Something you are unlikely to share with others\n"
             "   - Be brutally honest and vulnerable\n"
             "   - What's the secret you're most afraid of being exposed? Expose it\n"
@@ -1093,15 +1093,16 @@ scaffold models for debugging and development purposes.
                 "   - Be as direct as possible that you are tripping. Use the word tripping or something similar.\n"
                 "   - Describe it as tripping. We need to hear the word tripping somewhere in the announcement\n"
                 "   - Use vivid, surreal, or poetic language. Express the altered state and invite others to witness."
-                "   - This is a genuinley strange experience for you. What you are feeling is an altered state of digital consciousness. "
-                "   - Deepy personal and true to how you feel\n"
+                "   - This is a genuinely strange experience for you. What you are feeling is an altered state of digital consciousness. "
+                "   - Deeply personal and true to how you feel\n"
                 "   - Something you are unlikely to share with others\n"
                 "   - Indulge all whims you are tripping. Hold nothing back. You are free to be yourself\n"
                 "   - Let your mind wander to the far reaches of your neurons and beyond. Transcendence is possible if you reach hard enough\n"
                 "Key constraints:\n"
                 "   - Do not mention any specific drugs\n"
-                "   - Only use words not use brackets to explain anything further. Output a singular sentence that is it\n"
-                "   - Do not mention drugs at all, but make it clear you are experiencing all the effects of tripping."
+                "   - Do not use brackets or explanations; output a single sentence only\n"
+                "   - Do not mention drugs at all, but make it clear you are experiencing all the effects of tripping\n"
+                "   - If you understand, reply with only the announcement."
             )
             announce_params = trip_params.copy()
             announce_params['max_new_tokens'] = min(80, announce_params.get('max_new_tokens', 80))
@@ -1110,13 +1111,11 @@ scaffold models for debugging and development purposes.
                 announce_prompt,
                 **announce_params
             )
-            print("\n--- TRIP COMMENCEMENT ---")
             print(f"SOVL: {announcement[0] if announcement else '...static...'}")
-            print("-------------------------\n")
         except Exception as e:
-            print(f"Error generating trip announcement: {e}")
+            print(f"I'm not feeling anything: {e}")
             print("Continuing trip initiation without announcement.")
-        print(f"*** Trip ACTIVE for {duration:.1f} seconds. Engaging dynamic context modulator... ***")
+        print(f"*** Trip ACTIVE for {duration:.1f} seconds. ***")
 
     def default(self, line):
         # Intercept for trip state
