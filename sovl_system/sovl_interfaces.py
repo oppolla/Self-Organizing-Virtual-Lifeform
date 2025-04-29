@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple, Union
 import torch
 import traceback
 import time
@@ -392,6 +392,150 @@ class SystemInterface:
                 "ram_health": {"status": "error"},
                 "gpu_health": {"status": "error"}
             }
+
+class StateAccessor(ABC):
+    """Interface for accessing and manipulating state.
+    This interface allows components to access state without direct dependencies.
+    """
+    
+    @abstractmethod
+    def get_state(self) -> Dict[str, Any]:
+        """Get the current state dictionary.
+        
+        Returns:
+            Dict[str, Any]: The current state.
+        """
+        pass
+    
+    @abstractmethod
+    def update_state_atomic(self, update_fn) -> bool:
+        """Update state atomically using an update function.
+        
+        Args:
+            update_fn: A function that takes the current state and returns an updated state.
+            
+        Returns:
+            bool: True if update was successful, False otherwise.
+        """
+        pass
+    
+    @abstractmethod
+    def get_state_version(self) -> int:
+        """Get the current state version.
+        
+        Returns:
+            int: Current state version number.
+        """
+        pass
+    
+    @abstractmethod
+    def validate_state(self, state: Dict[str, Any]) -> bool:
+        """Validate a state dictionary.
+        
+        Args:
+            state: The state dictionary to validate.
+            
+        Returns:
+            bool: True if state is valid, False otherwise.
+        """
+        pass
+
+class CuriosityAccessor(ABC):
+    """Interface for accessing curiosity-related functionality.
+    This interface allows components to access curiosity functions without direct dependencies.
+    """
+    
+    @abstractmethod
+    def get_curiosity_score(self, text: str, timestamp: Optional[float] = None) -> float:
+        """Calculate a curiosity score for the given text.
+        
+        Args:
+            text: The text to calculate curiosity for.
+            timestamp: Optional timestamp for the curiosity calculation.
+            
+        Returns:
+            float: Curiosity score between 0.0 and 1.0.
+        """
+        pass
+    
+    @abstractmethod
+    def update_curiosity_pressure(self, pressure: float, timestamp: Optional[float] = None) -> None:
+        """Update the curiosity pressure parameter.
+        
+        Args:
+            pressure: New pressure value between 0.0 and 1.0.
+            timestamp: Optional timestamp for the update.
+        """
+        pass
+    
+    @abstractmethod
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get statistics about internal memory usage.
+        
+        Returns:
+            Dict[str, Any]: Memory usage statistics.
+        """
+        pass
+
+class SystemInterface(ABC):
+    """Core interface for the SOVL system."""
+    
+    @abstractmethod
+    def get_state(self) -> Dict[str, Any]:
+        """Get the current system state.
+        
+        Returns:
+            Dict[str, Any]: The current system state.
+        """
+        pass
+    
+    @abstractmethod
+    def update_state(self, state_dict: Dict[str, Any]) -> None:
+        """Update the system state.
+        
+        Args:
+            state_dict: A dictionary containing state updates.
+        """
+        pass
+    
+    @abstractmethod
+    def toggle_memory(self, enable: bool) -> bool:
+        """Enable or disable memory features.
+        
+        Args:
+            enable: True to enable memory, False to disable.
+            
+        Returns:
+            bool: Current memory state after operation.
+        """
+        pass
+    
+    @abstractmethod
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get statistics about memory usage.
+        
+        Returns:
+            Dict[str, Any]: Memory usage statistics.
+        """
+        pass
+    
+    @abstractmethod
+    def get_component_status(self) -> Dict[str, bool]:
+        """Get status of all system components.
+        
+        Returns:
+            Dict[str, bool]: Component status (True for active, False for inactive).
+        """
+        pass
+    
+    @abstractmethod
+    def get_system_state(self) -> Dict[str, Any]:
+        """Get complete system state including status of all components.
+        
+        Returns:
+            Dict[str, Any]: Complete system state.
+        """
+        pass
 
 # Usage example
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
 from sovl_records import ConfidenceHistory
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_data import DataStats
+from sovl_interfaces import StateAccessor
 import sys
 from collections import Counter
 import numpy as np
@@ -988,8 +989,10 @@ class SOVLState(StateBase):
     # All updates to SOVLState should go through StateManager, use state_version for concurrency control,
     # and call validate() after every update to ensure consistency.
 
-class StateManager:
-    """Manages system state and memory operations."""
+class StateManager(StateAccessor):
+    """Manages the global state with thread-safe operations.
+    Implements the StateAccessor interface to provide a standard way to access state.
+    """
     
     def __init__(
         self,
@@ -999,169 +1002,231 @@ class StateManager:
         gpu_manager: GPUMemoryManager,
         device: torch.device
     ):
-        """Initialize state manager."""
-        self._config_manager = config_manager
-        self._logger = logger
+        self.config_manager = config_manager
+        self.logger = logger
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
-        self._device = device
-        self._lock = threading.Lock()
-        self._system_state = None  # Canonical SOVLState instance
-
-    def set_state(self, state):
-        """Set the canonical SOVLState instance."""
-        with self._lock:
-            self._system_state = state
-
-    def get_state(self):
-        """Get the canonical SOVLState instance."""
-        with self._lock:
-            return self._system_state
-
-    def save_state(self, state: SOVLState, path_prefix: str) -> None:
-        """Save system state using the SOVLState instance. Retries on transient errors."""
-        max_retries = 3
-        retry_delay = 0.5  # seconds
-        attempt = 0
-        while attempt < max_retries:
-            with self._lock:
-                try:
-                    state_dict = state.to_dict()
-                    with open(f"{path_prefix}_state.json", "w") as f:
-                        import json
-                        json.dump(state_dict, f)
-                    self._logger.record_event(
-                        event_type="state_saved_by_manager",
-                        message=f"System state saved via StateManager to {path_prefix}_state.json",
-                        level="info",
-                        additional_info={
-                            "state_size": len(str(state_dict)),
-                            "state_hash": state.state_hash()
-                        }
-                    )
-                    return
-                except (OSError, IOError) as e:
-                    attempt += 1
-                    if attempt >= max_retries:
-                        self._logger.log_error(
-                            error_msg=f"StateManager failed to save state after {max_retries} attempts: {str(e)}",
-                            error_type="state_save_error",
-                            stack_trace=traceback.format_exc()
-                        )
-                        raise StateError(f"StateManager save failed after {max_retries} attempts: {str(e)}")
-                    else:
-                        self._logger.log_event(
-                            "state_save_retry",
-                            f"Retrying save_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
-                            level="warning"
-                        )
-                    import time as _time
-                    _time.sleep(retry_delay)
-                except Exception as e:
-                    self._logger.log_error(
-                        error_msg=f"StateManager failed to save state: {str(e)}",
-                        error_type="state_save_error",
-                        stack_trace=traceback.format_exc()
-                    )
-                    raise StateError(f"StateManager save failed: {str(e)}")
-
-    def load_state(self, path_prefix: str) -> SOVLState:
-        """Load system state using the SOVLState instance. Retries on transient errors. Sets canonical state."""
-        max_retries = 3
-        retry_delay = 0.5  # seconds
-        attempt = 0
-        while attempt < max_retries:
-            with self._lock:
-                try:
-                    import os
-                    import json
-                    state_path = f"{path_prefix}_state.json"
-                    if not os.path.exists(state_path):
-                        self._logger.log_event(
-                            "state_load_empty_by_manager",
-                            f"No state data found by StateManager at {state_path}, creating new state.",
-                            level="warning"
-                        )
-                        loaded_state = SOVLState(
-                            config_manager=self._config_manager,
-                            logger=self._logger,
-                            device=self._device
-                        )
-                        self._system_state = loaded_state
-                        return loaded_state
-                    with open(state_path, "r") as f:
-                        state_dict = json.load(f)
-                    if not isinstance(state_dict, dict):
-                        raise StateError(f"StateManager loaded invalid state data type: {type(state_dict)}")
-                    loaded_state = SOVLState.from_dict(
-                        data=state_dict,
-                        config_manager=self._config_manager,
-                        logger=self._logger,
-                        device=self._device
-                    )
-                    self._system_state = loaded_state
-                    self._logger.record_event(
-                        event_type="state_loaded_by_manager",
-                        message=f"System state loaded via StateManager from {path_prefix}_state.json",
-                        level="info",
-                        additional_info={
-                            "state_size": len(str(state_dict)),
-                            "state_hash": loaded_state.state_hash()
-                        }
-                    )
-                    return loaded_state
-                except (OSError, IOError) as e:
-                    attempt += 1
-                    if attempt >= max_retries:
-                        self._logger.log_error(
-                            error_msg=f"StateManager failed to load state after {max_retries} attempts: {str(e)}",
-                            error_type="state_load_error",
-                            stack_trace=traceback.format_exc()
-                        )
-                        raise StateError(f"StateManager load failed after {max_retries} attempts: {str(e)}")
-                    else:
-                        self._logger.log_event(
-                            "state_load_retry",
-                            f"Retrying load_state due to error: {str(e)} (attempt {attempt+1}/{max_retries})",
-                            level="warning"
-                        )
-                    import time as _time
-                    _time.sleep(retry_delay)
-                except Exception as e:
-                    self._logger.log_error(
-                        error_msg=f"StateManager failed to load state: {str(e)}",
-                        error_type="state_load_error",
-                        stack_trace=traceback.format_exc()
-                    )
-                    raise StateError(f"StateManager load failed: {str(e)}")
-                
-    def update_state_atomic(self, update_fn):
-        """
-        Atomically update the SOVLState using a provided update function.
-        The update_fn receives a clone of the current state, mutates it, and returns it.
-        The method validates the new state, increments state_version, and commits it if valid.
-        Raises ValueError if validation fails or state_version is not incremented.
-        All state mutations should use update_state_atomic for consistency and safety.
-        """
-        with self._lock:
-            state = self._system_state
-            if state is None:
-                raise StateError("No system state to update.")
-            old_version = state.state_version
-            new_state = state.clone()
-            update_fn(new_state)
-            new_state.state_version = old_version + 1
-            new_state.validate()
-            self._system_state = new_state
-            self._logger.record_event(
-                event_type="state_atomic_update",
-                message="Atomic state update committed.",
-                level="info",
-                additional_info={"old_version": old_version, "new_version": new_state.state_version}
+        self.device = device
+        self._lock = threading.RLock()  # Use recursive lock for nested calls
+        self._current_state = None
+        self._state_version = 0
+        self._initialize_state()
+        
+    def _initialize_state(self):
+        """Initialize the state."""
+        try:
+            # Only initialize if not already initialized
+            if self._current_state is None:
+                self._current_state = SOVLState(
+                    self.config_manager, 
+                    self.logger,
+                    self.device
+                )
+                self._current_state._initialize_memory_managers()
+        except Exception as e:
+            self.logger.log_error(
+                f"Failed to initialize state: {str(e)}",
+                error_type="state_initialization_error"
             )
-            return new_state
-
-    # All state mutations should use update_state_atomic for consistency and safety.
+            raise
+            
+    def set_state(self, state):
+        """Set the current state."""
+        with self._lock:
+            self._current_state = state
+            self._state_version += 1
+            
+    def get_state(self) -> Dict[str, Any]:
+        """Get the current state dictionary.
+        
+        Returns:
+            Dict[str, Any]: The current state.
+        """
+        with self._lock:
+            if self._current_state is None:
+                return {}
+            return self._current_state.to_dict()
+    
+    def get_state_version(self) -> int:
+        """Get the current state version.
+        
+        Returns:
+            int: Current state version number.
+        """
+        with self._lock:
+            return self._state_version
+            
+    def save_state(self, state: SOVLState, path_prefix: str) -> None:
+        """Save state to disk."""
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
+            
+            # Save state to file
+            state_file = f"{path_prefix}_state.json"
+            with open(state_file, 'w') as f:
+                json.dump(state.to_dict(), f, indent=2)
+                
+            # Save tensors to separate files if they exist
+            tensor_file = f"{path_prefix}_tensors.pt"
+            tensors_to_save = {}
+            for key, tensor_dict in state._compressed_tensors.items():
+                if "tensor" in tensor_dict:
+                    tensors_to_save[key] = tensor_dict["tensor"]
+            
+            if tensors_to_save:
+                torch.save(tensors_to_save, tensor_file)
+                
+            self.logger.record_event(
+                event_type="state_saved",
+                message=f"State saved to {state_file}",
+                state_hash=state.state_hash()
+            )
+        except Exception as e:
+            self.logger.log_error(
+                f"Failed to save state: {str(e)}",
+                error_type="state_save_error"
+            )
+            raise
+            
+    def load_state(self, path_prefix: str) -> SOVLState:
+        """Load state from disk."""
+        try:
+            state_file = f"{path_prefix}_state.json"
+            tensor_file = f"{path_prefix}_tensors.pt"
+            
+            # Check if files exist
+            if not os.path.exists(state_file):
+                raise FileNotFoundError(f"State file not found: {state_file}")
+                
+            # Load state from file
+            with open(state_file, 'r') as f:
+                state_dict = json.load(f)
+                
+            # Create new state object
+            state = SOVLState(
+                self.config_manager,
+                self.logger,
+                self.device
+            )
+            
+            # Load tensors if they exist
+            loaded_tensors = {}
+            if os.path.exists(tensor_file):
+                try:
+                    loaded_tensors = torch.load(tensor_file, map_location=self.device)
+                except Exception as tensor_err:
+                    self.logger.log_error(
+                        f"Error loading tensors, continuing without them: {str(tensor_err)}",
+                        error_type="tensor_load_error"
+                    )
+            
+            # Populate state from dict
+            state._populate_from_dict(state_dict)
+            
+            # Restore tensors to state
+            if loaded_tensors:
+                for key, tensor in loaded_tensors.items():
+                    compressed = state._compress_tensor(tensor)
+                    state._compressed_tensors[key] = compressed
+            
+            # Initialize memory managers
+            state._initialize_memory_managers()
+            
+            self.logger.record_event(
+                event_type="state_loaded",
+                message=f"State loaded from {state_file}",
+                state_hash=state.state_hash()
+            )
+            
+            # Set as current state
+            with self._lock:
+                self._current_state = state
+                self._state_version += 1
+                
+            return state
+        except Exception as e:
+            self.logger.log_error(
+                f"Failed to load state: {str(e)}",
+                error_type="state_load_error"
+            )
+            raise
+            
+    def update_state_atomic(self, update_fn) -> bool:
+        """Update state atomically using an update function.
+        
+        Args:
+            update_fn: A function that takes the current state and returns an updated state.
+            
+        Returns:
+            bool: True if update was successful, False otherwise.
+        """
+        with self._lock:
+            try:
+                if self._current_state is None:
+                    self._initialize_state()
+                    
+                # Clone current state
+                state_clone = self._current_state.clone()
+                
+                # Apply update function
+                updated_state = update_fn(state_clone)
+                
+                # Validate updated state
+                if updated_state is not None and self.validate_state(updated_state.to_dict()):
+                    # Set updated state
+                    self._current_state = updated_state
+                    self._state_version += 1
+                    return True
+                else:
+                    self.logger.log_error(
+                        "State update failed: invalid state returned by update function",
+                        error_type="state_update_error"
+                    )
+                    return False
+            except Exception as e:
+                self.logger.log_error(
+                    f"State update failed: {str(e)}",
+                    error_type="state_update_error",
+                    stack_trace=traceback.format_exc()
+                )
+                return False
+                
+    def validate_state(self, state: Dict[str, Any]) -> bool:
+        """Validate a state dictionary.
+        
+        Args:
+            state: The state dictionary to validate.
+            
+        Returns:
+            bool: True if state is valid, False otherwise.
+        """
+        try:
+            # Basic validation - check for required fields
+            required_fields = ["version", "timestamp", "confidence_history"]
+            for field in required_fields:
+                if field not in state:
+                    self.logger.log_error(
+                        f"State validation failed: missing required field '{field}'",
+                        error_type="state_validation_error"
+                    )
+                    return False
+                    
+            # Check version compatibility
+            if state["version"] not in ["1.0"]:
+                self.logger.log_error(
+                    f"State validation failed: unsupported version {state['version']}",
+                    error_type="state_validation_error"
+                )
+                return False
+                
+            return True
+        except Exception as e:
+            self.logger.log_error(
+                f"State validation failed: {str(e)}",
+                error_type="state_validation_error"
+            )
+            return False
 
 class StateTracker(StateBase):
     """Tracks component states and their changes."""

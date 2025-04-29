@@ -13,6 +13,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_queue import capture_scribe_event
 from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_interfaces import CuriosityAccessor
 import json
 
 class Curiosity:
@@ -574,8 +575,11 @@ class CuriositySystem:
                 "gpu_health": {"status": "error"}
             }
 
-class CuriosityManager:
-    """Manages curiosity-driven exploration and question generation."""
+class CuriosityManager(CuriosityAccessor):
+    """
+    Manages the system's curiosity component, implementing the CuriosityAccessor interface.
+    Handles calculation of curiosity scores, memory embeddings, and exploration decisions.
+    """
     
     def __init__(
         self,
@@ -589,8 +593,8 @@ class CuriosityManager:
         confidence_calculator=None,
         generation_manager=None
     ):
-        """Initialize CuriosityManager with configuration and components."""
-        self._config_manager = config_manager
+        """Initialize the curiosity manager with necessary components and configs."""
+        self.config_manager = config_manager
         self.logger = logger
         self.error_manager = error_manager
         self.device = device
@@ -600,43 +604,45 @@ class CuriosityManager:
         self.confidence_calculator = confidence_calculator
         self.generation_manager = generation_manager
         
-        # Get global session_id from config
-        self.session_id = self._config_manager.get("runtime.session_id")
-        if not self.session_id:
-            self.logger.log_warning("No global session_id found in config")
-        
-        # Initialize configuration
-        self._initialize_config()
+        # Thread safety
+        self._lock = threading.RLock()
         
         # Initialize components
+        self._initialize_config()
+        
+        # Create core components
         self.curiosity = Curiosity(
-            config_manager=self._config_manager,
-            logger=self.logger
-        )
-        self.pressure = CuriosityPressure(
-            config_manager=self._config_manager,
-            logger=self.logger
-        )
-        self.callbacks = CuriosityCallbacks(logger=self.logger)
-        self.system = CuriositySystem(
-            config_manager=self._config_manager,
+            config_manager=self.config_manager, 
             logger=self.logger,
-            ram_manager=self.state_manager.ram_manager if self.state_manager else None,
-            gpu_manager=self.state_manager.gpu_manager if self.state_manager else None
+            ram_manager=self._ram_manager if hasattr(self, '_ram_manager') else None,
+            gpu_manager=self._gpu_manager if hasattr(self, '_gpu_manager') else None
         )
+        
+        self.curiosity_pressure = CuriosityPressure(
+            config_manager=self.config_manager,
+            logger=self.logger
+        )
+        
+        self.callbacks = CuriosityCallbacks(logger=self.logger)
+        
+        # Register default callbacks
+        self._register_default_callbacks()
+        
+        # Initialize metrics
+        self._curiosity_score = 0.0
+        self._exploration_count = 0
+        self._last_update = time.time()
+        self._exploration_queue = deque(maxlen=100)
         
         # Log initialization
         self._record_event(
-            "curiosity_manager_initialized",
-            "CuriosityManager initialized successfully",
+            event_type="curiosity_manager_initialized",
+            message="CuriosityManager initialized successfully",
             level="info",
             additional_info={
-                "config": {
-                    "weight_ignorance": self.curiosity.weight_ignorance,
-                    "weight_novelty": self.curiosity.weight_novelty,
-                    "metrics_maxlen": self.curiosity.metrics_maxlen,
-                    "exploration_queue_maxlen": self._config_manager.get("curiosity_config.exploration_queue_maxlen", 100)
-                }
+                "device": str(self.device),
+                "max_exploration_rate": self.max_exploration_rate,
+                "curiosity_threshold": self.curiosity_threshold
             }
         )
 
@@ -807,9 +813,9 @@ class CuriosityManager:
                 },
                 source_metadata={
                     "level": level,
-                    "session_id": self.session_id
+                    "session_id": getattr(self, 'session_id', None)
                 },
-                session_id=self.session_id,
+                session_id=getattr(self, 'session_id', None),
                 timestamp=datetime.now()
             )
 
@@ -842,9 +848,9 @@ class CuriosityManager:
                 },
                 source_metadata={
                     "stack_trace": traceback.format_exc(),
-                    "session_id": self.session_id
+                    "session_id": getattr(self, 'session_id', None)
                 },
-                session_id=self.session_id,
+                session_id=getattr(self, 'session_id', None),
                 timestamp=datetime.now()
             )
 
@@ -890,19 +896,49 @@ class CuriosityManager:
             })
             return 0.0
             
-    def should_explore(self, prompt: str) -> bool:
-        """Determine if exploration should be triggered."""
-        try:
-            curiosity_score = self.calculate_curiosity_score(prompt)
-            threshold = self.config_manager.get("novelty_threshold_spontaneous")
+    def should_explore(self, prompt: str = None) -> bool:
+        """
+        Determine if the system should explore based on curiosity score.
+        
+        Args:
+            prompt: Optional prompt to calculate curiosity for
             
-            return curiosity_score > threshold
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "exploration_check",
-                "prompt": prompt
-            })
-            return False
+        Returns:
+            bool: True if system should explore
+        """
+        with self._lock:
+            try:
+                # Get curiosity score, either for prompt or global
+                score = self.calculate_curiosity_score(prompt) if prompt else self._curiosity_score
+                
+                # Check if above threshold and within rate limits
+                explore = (
+                    score > self.curiosity_threshold and 
+                    self._exploration_count < self.max_exploration_rate
+                )
+                
+                if explore:
+                    self._exploration_count += 1
+                
+                self._record_event(
+                    event_type="curiosity_explore_decision",
+                    message=f"Exploration decision: {explore}",
+                    level="info",
+                    additional_info={
+                        "score": score,
+                        "threshold": self.curiosity_threshold,
+                        "exploration_count": self._exploration_count
+                    }
+                )
+                
+                return explore
+            except Exception as e:
+                self._record_error(
+                    message=f"Failed to determine exploration status: {str(e)}",
+                    error_type="curiosity_explore_error",
+                    stack_trace=traceback.format_exc()
+                )
+                return False
             
     def queue_exploration(self, prompt: str) -> bool:
         """Queue a prompt for exploration atomically in SOVLState."""
@@ -1094,3 +1130,82 @@ class CuriosityManager:
                 }
             )
         return question
+
+    def get_curiosity_score(self, prompt: str = None) -> float:
+        """
+        Get the curiosity score for the given prompt.
+        If no prompt is provided, returns the current global curiosity score.
+        
+        Args:
+            prompt: Optional prompt to calculate curiosity for
+            
+        Returns:
+            float: Curiosity score between 0 and 1
+        """
+        with self._lock:
+            if prompt:
+                return self.calculate_curiosity_score(prompt)
+            return self._curiosity_score
+    
+    def update_curiosity_score(self, score: float) -> bool:
+        """
+        Update the global curiosity score.
+        
+        Args:
+            score: New curiosity score between 0 and 1
+            
+        Returns:
+            bool: True if update was successful
+        """
+        with self._lock:
+            try:
+                clamped_score = max(0.0, min(1.0, float(score)))
+                self._curiosity_score = clamped_score
+                self._last_update = time.time()
+                
+                self._record_event(
+                    event_type="curiosity_score_updated",
+                    message=f"Global curiosity score updated to {clamped_score:.4f}",
+                    level="info"
+                )
+                
+                return True
+            except Exception as e:
+                self._record_error(
+                    message=f"Failed to update curiosity score: {str(e)}",
+                    error_type="curiosity_update_error",
+                    stack_trace=traceback.format_exc()
+                )
+                return False
+    
+    def nudge_curiosity(self, amount: float) -> float:
+        """
+        Nudge the curiosity score by the given amount.
+        
+        Args:
+            amount: Amount to nudge curiosity (-1.0 to 1.0)
+            
+        Returns:
+            float: Updated curiosity score
+        """
+        with self._lock:
+            try:
+                amount = max(-1.0, min(1.0, float(amount)))
+                current = self._curiosity_score
+                new_score = max(0.0, min(1.0, current + amount))
+                self._curiosity_score = new_score
+                
+                self._record_event(
+                    event_type="curiosity_nudged",
+                    message=f"Curiosity nudged by {amount:.4f}, from {current:.4f} to {new_score:.4f}",
+                    level="info"
+                )
+                
+                return new_score
+            except Exception as e:
+                self._record_error(
+                    message=f"Failed to nudge curiosity: {str(e)}",
+                    error_type="curiosity_nudge_error",
+                    stack_trace=traceback.format_exc()
+                )
+                return self._curiosity_score
