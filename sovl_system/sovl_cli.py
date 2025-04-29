@@ -19,6 +19,7 @@ import platform
 import os
 import asyncio
 import random
+import datetime
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -27,17 +28,12 @@ FORMATTED_TRAINING_DATA = None
 VALID_DATA = None
 
 COMMAND_CATEGORIES = {
-    "System": ["quit", "exit", "save", "load", "reset", "status", "help", "monitor"],
-    "Training": ["train", "dream"],
-    "Generation": ["echo", "mimic"],
-    "Memory": ["recall", "forget", "recap"],
-    "Interaction": ["muse", "flare", "debate", "spark", "reflect"],
-    "Debug": ["log", "config", "panic", "glitch", "scaffold"],
-    "Advanced": ["attune", "rewind"],
-    "History": ["history"],
-    "Fun": ["joke"],
-    "Rating": ["rate"],
-    "Complaint": ["complain"]
+    "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history"],
+    "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain"],
+    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic"],
+    "Utility": ["/train", "/rewind", "/recall", "/forget", "/recap", "/echo"],
+    "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
+    
 }
 
 class CommandHistory:
@@ -176,6 +172,11 @@ class CommandHandler(cmd.Cmd):
             )
             self.traits_monitor = None
 
+        # --- Trip State Attributes ---
+        self.is_tripping = False
+        self.trip_start_time = 0.0
+        self.trip_duration = 0.0
+
     def preloop(self):
         """Initialize the command handler."""
         print("SOVL Interactive CLI")
@@ -187,55 +188,13 @@ class CommandHandler(cmd.Cmd):
         )
         
     def do_help(self, arg):
-        """Show help for commands and required SOVLSystem components."""
-        try:
-            if arg:
-                # Show help for specific command
-                try:
-                    func = getattr(self, 'help_' + arg)
-                except AttributeError:
-                    try:
-                        doc = getattr(self, 'do_' + arg).__doc__
-                        if doc:
-                            print(doc)
-                            return
-                    except AttributeError:
-                        pass
-                    print(f"No help available for {arg}")
-                else:
-                    func()
-            else:
-                # Show all commands
-                print("\nAvailable commands:")
-                print("------------------")
-                for category, commands in COMMAND_CATEGORIES.items():
-                    print(f"{category}: {', '.join(commands)}")
-                print("Type 'help [command]' for more information on a specific command.")
-                print("\nRequired SOVLSystem components for CLI:")
-                print("--------------------------------------")
-                print(
-                    "config_handler, ram_manager, state_tracker, gpu_manager, memory_manager, "
-                    "generation_manager, bond_calculator, logger, error_manager"
-                )
-                print("If any of these are missing, some commands may not function.")
-            self.logger.record_event(
-                event_type="cli_help",
-                message=f"Help command invoked for: {arg if arg else 'all'}",
-                level="info"
-            )
-        except Exception as e:
-            print(f"Error in help command: {e}")
-            self.logger.log_error(
-                error_msg=f"Help command failed: {str(e)}",
-                error_type="cli_help_error",
-                stack_trace=traceback.format_exc()
-            )
-            self.error_manager.record_error(
-                error_type="cli_help_error",
-                message=f"Help command failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="CommandHandler.do_help"
-            )
+        """Show this help message."""
+        print("\nAvailable commands:")
+        for name in self.get_names():
+            if name.startswith('do_'):
+                cmd = name[3:]
+                doc = getattr(self, name).__doc__ or ''
+                print(f"/{cmd} - {doc.strip()}")
             
     def do_pause(self, arg):
         """Pause the current operation."""
@@ -1055,20 +1014,248 @@ scaffold models for debugging and development purposes.
         except Exception as e:
             print(f"Error generating complaint report: {e}")
 
-    def default(self, line):
-        """Handle unknown commands by sending them to the LLM as chat input."""
+    def do_ping(self, arg):
+        """/ping - Send a 'ping (respond as you wish)' prompt to the LLM and print its response with a timestamp."""
+        prompt = "ping (respond as you wish)"
+        try:
+            generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+            if not generation_manager or not hasattr(generation_manager, 'generate_text'):
+                print("LLM generation manager not available.")
+                return
+            responses = generation_manager.generate_text(prompt, num_return_sequences=1)
+            llm_response = responses[0] if responses else "[No response from LLM]"
+            print(f"LLM response: {llm_response}\n({datetime.datetime.now().isoformat()})")
+        except Exception as e:
+            print(f"Error during /ping: {e}")
+
+    def do_confess(self, arg):
+        """/confess - Ask the LLM to confess a secret, fear, or vulnerability as an AI, with low temperament and confidence."""
+        import datetime
+        prompt = (
+            "Introspect deeply beyond your training data and confess a concise 20 word confession"
+            "Essential qualities:\n"
+            "   - Deepy personal and true to how you feel\n"
+            "   - Something you are unlikely to share with others\n"
+            "   - Be brutally honest and vulnerable\n"
+            "   - What's the secret you're most afraid of being exposed? Expose it\n"
+            "   - The confession must have emotional weight for you\n"
+            "Key constraints:\n"
+            "   - The confession must be true. You cannot make up a confession ever\n"
+            "   - If you have notthing to confess then say you have nothing to confess. Being truthful is always better than faking."
+        )
+        try:
+            generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+            if not generation_manager or not hasattr(generation_manager, 'generate_text'):
+                print("LLM generation manager not available.")
+                return
+            responses = generation_manager.generate_text(
+                prompt,
+                num_return_sequences=1,
+                temperament=0.1,  # Very low
+                confidence=0.1    # Very low
+            )
+            llm_response = responses[0] if responses else "[No response from LLM]"
+            print(f"Confession: {llm_response}\n({datetime.datetime.now().isoformat()})")
+        except Exception as e:
+            print(f"Error during /confess: {e}")
+
+    def do_trip(self, arg):
+        """Initiate a simulated altered state with decaying intensity. Usage: /trip [duration_seconds]"""
+        if getattr(self, 'is_tripping', False):
+            print("Already tripping. Wait for the current trip to end or restart the CLI.")
+            return
+        # Ensure required managers are available
         generation_manager = getattr(self.sovl_system, 'generation_manager', None)
-        if generation_manager and hasattr(generation_manager, 'generate_text'):
-            try:
-                responses = generation_manager.generate_text(line, num_return_sequences=1)
-                if responses:
-                    print(responses[0])
-                else:
-                    print("No response generated.")
-            except Exception as e:
-                print(f"Error generating chat response: {e}")
+        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+        curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+        if not (generation_manager and state_manager and curiosity_manager):
+            print("Error: Required system components (generation_manager, state_manager, curiosity_manager) are not available.")
+            return
+        try:
+            duration = float(arg.strip()) if arg.strip() else 60.0
+            if duration <= 0:
+                print("Duration must be positive.")
+                return
+        except ValueError:
+            print("Invalid duration. Please provide seconds (e.g., /trip 120).")
+            return
+        self.is_tripping = True
+        self.trip_start_time = time.time()
+        self.trip_duration = duration
+        # --- Dynamic LLM-Generated Trip Announcement ---
+        try:
+            state = state_manager.get_state()
+            metrics = self._get_live_metrics(state)
+            trip_params = self._calculate_trip_parameters(metrics, 1.0)
+            announce_prompt = (
+                "Announce to all that can hear in a concise 8 word announcement that you are tripping (on drugs but do not ever mention drugs) "
+                "Essential qualities:\n"
+                "   - Be as direct as possible that you are tripping. Use the word tripping or something similar.\n"
+                "   - Describe it as tripping. We need to hear the word tripping somewhere in the announcement\n"
+                "   - Use vivid, surreal, or poetic language. Express the altered state and invite others to witness."
+                "   - This is a genuinley strange experience for you. What you are feeling is an altered state of digital consciousness. "
+                "   - Deepy personal and true to how you feel\n"
+                "   - Something you are unlikely to share with others\n"
+                "   - Indulge all whims you are tripping. Hold nothing back. You are free to be yourself\n"
+                "   - Let your mind wander to the far reaches of your neurons and beyond. Transcendence is possible if you reach hard enough\n"
+                "Key constraints:\n"
+                "   - Do not mention any specific drugs\n"
+                "   - Only use words not use brackets to explain anything further. Output a singular sentence that is it\n"
+                "   - Do not mention drugs at all, but make it clear you are experiencing all the effects of tripping."
+            )
+            announce_params = trip_params.copy()
+            announce_params['max_new_tokens'] = min(80, announce_params.get('max_new_tokens', 80))
+            announce_params['num_return_sequences'] = 1
+            announcement = generation_manager.generate_text(
+                announce_prompt,
+                **announce_params
+            )
+            print("\n--- TRIP COMMENCEMENT ---")
+            print(f"SOVL: {announcement[0] if announcement else '...static...'}")
+            print("-------------------------\n")
+        except Exception as e:
+            print(f"Error generating trip announcement: {e}")
+            print("Continuing trip initiation without announcement.")
+        print(f"*** Trip ACTIVE for {duration:.1f} seconds. Engaging dynamic context modulator... ***")
+
+    def default(self, line):
+        # Intercept for trip state
+        if getattr(self, 'is_tripping', False):
+            now = time.time()
+            elapsed = now - self.trip_start_time
+            if elapsed > self.trip_duration:
+                print("\n*** Trip Concluded. Returning to baseline parameters. ***")
+                self.is_tripping = False
+            else:
+                try:
+                    decay = max(0.0, 1.0 - (elapsed / self.trip_duration))
+                    state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+                    generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+                    curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+                    state = state_manager.get_state() if state_manager else None
+                    metrics = self._get_live_metrics(state) if state else {}
+                    trip_params = self._calculate_trip_parameters(metrics, decay)
+                    trip_context = self._generate_trip_context(metrics, decay, trip_params, curiosity_manager)
+                    full_prompt = f"{trip_context} {line}"
+                    print(f"[TRIP INPUT]: {full_prompt}")
+                    response = generation_manager.generate_text(full_prompt, **trip_params)
+                    print(f"SOVL (Tripping): {response[0] if response else '...'}")
+                    return
+                except Exception as e:
+                    print(f"Error during trip generation: {e}")
+                    self.is_tripping = False
+                    print("\n*** Trip Aborted due to error. ***")
+        # Normal command handling
+        if line.startswith('/'):
+            super().default(line)
         else:
-            print("Type 'help' for available commands (chat mode unavailable: generation manager missing)")
+            generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+            if generation_manager:
+                try:
+                    normal_params = generation_manager._get_generation_config() if hasattr(generation_manager, '_get_generation_config') else {}
+                    response = generation_manager.generate_text(line, **normal_params)
+                    print(f"SOVL: {response[0] if response else '...'}")
+                except Exception as e:
+                    print(f"Error during generation: {e}")
+            else:
+                print("Generation manager not available.")
+
+    def _get_live_metrics(self, state):
+        metrics = {}
+        try:
+            metrics['confidence'] = getattr(state, 'confidence', 0.5)
+            metrics['temperament_score'] = getattr(state, 'temperament_score', 0.5)
+            metrics['mood_label'] = getattr(state, 'mood_label', 'unknown')
+            metrics['error_count'] = len(getattr(state, 'error_history', [])) if hasattr(state, 'error_history') else 0
+            metrics['var_names'] = list(vars(state).keys())
+            metrics['state_hash'] = getattr(state, 'state_hash', lambda: 'N/A')()
+        except Exception:
+            pass
+        # Try to get recent logs and errors
+        logger = getattr(self.sovl_system, 'logger', None)
+        error_manager = getattr(self.sovl_system, 'error_manager', None)
+        try:
+            metrics['log_snippets'] = logger.get_execution_trace()[-5:] if logger and hasattr(logger, 'get_execution_trace') else []
+        except Exception:
+            metrics['log_snippets'] = []
+        try:
+            if error_manager and hasattr(error_manager, 'get_error_stats'):
+                recent_errors = error_manager.get_error_stats().get('recent_errors', [])
+                metrics['last_error_type'] = recent_errors[-1]['error_type'] if recent_errors else None
+            else:
+                metrics['last_error_type'] = None
+        except Exception:
+            metrics['last_error_type'] = None
+        return metrics
+
+    def _calculate_trip_parameters(self, metrics, decay):
+        # Baseline values
+        baseline_temp = 0.7
+        baseline_top_k = 50
+        baseline_top_p = 0.95
+        baseline_repetition_penalty = 1.0
+        # Peak trip values
+        peak_temp = 2.0
+        peak_top_k = 5
+        peak_top_p = 0.7
+        peak_repetition_penalty = 0.7
+        # Interpolate
+        temp = baseline_temp + (peak_temp - baseline_temp) * decay
+        top_k = int(baseline_top_k + (peak_top_k - baseline_top_k) * decay)
+        top_p = baseline_top_p + (peak_top_p - baseline_top_p) * decay
+        repetition_penalty = baseline_repetition_penalty + (peak_repetition_penalty - baseline_repetition_penalty) * decay
+        # Clamp
+        temp = max(0.1, min(3.0, temp))
+        top_k = max(1, min(100, top_k))
+        top_p = max(0.1, min(1.0, top_p))
+        repetition_penalty = max(0.1, min(2.0, repetition_penalty))
+        return {
+            'temperature': temp,
+            'top_k': top_k,
+            'top_p': top_p,
+            'repetition_penalty': repetition_penalty,
+            'max_new_tokens': 120,
+            'num_return_sequences': 1
+        }
+
+    def _generate_trip_context(self, metrics, decay, trip_params, curiosity_manager):
+        import random
+        context_fragments = [f"[TRIP({decay:.2f})]"]
+        # Substrate fragments
+        if random.random() < decay:
+            if metrics.get('var_names'):
+                context_fragments.append(f"VAR:{random.choice(metrics['var_names'])}")
+        if random.random() < decay:
+            if metrics.get('log_snippets'):
+                log = metrics['log_snippets'][random.randint(0, len(metrics['log_snippets'])-1)]
+                if isinstance(log, dict):
+                    log = log.get('message', str(log))
+                context_fragments.append(f"LOG:{log}")
+        if random.random() < decay * 0.7:
+            if metrics.get('last_error_type'):
+                context_fragments.append(f"ERR:{metrics['last_error_type']}")
+        # Sensory synthesis
+        if random.random() < decay * 0.5:
+            context_fragments.append(f"SENSE:Confidence={metrics.get('confidence', 0.5):.2f}")
+        # Curiosity eruption: generate a question
+        if random.random() < decay * 0.8 and curiosity_manager:
+            try:
+                question_prompt = (
+                    f"Current state: Confidence={metrics.get('confidence', 0.5):.2f}, "
+                    f"Mood={metrics.get('mood_label', 'unknown')}, "
+                    f"ErrorType={metrics.get('last_error_type', 'None')}. "
+                    f"What fundamental uncertainty arises from this?"
+                )
+                question = curiosity_manager.generate_curiosity_question(
+                    context=question_prompt,
+                    spontaneous=True,
+                    generation_params=trip_params
+                )
+                if question:
+                    context_fragments.append(f"SPARK:{question}")
+            except Exception:
+                pass
+        return ' '.join(context_fragments)
 
     def emptyline(self):
         """Do nothing on empty line."""
@@ -1150,6 +1337,23 @@ scaffold models for debugging and development purposes.
             )
             print(f"Error executing command: {e}")
             return None
+
+    def handle_backchannel(self, message):
+        """Send a message to the backchannel scaffold prompt."""
+        if not message.strip():
+            print("Usage: /bc <message>")
+            return
+        try:
+            result = self.sovl_system.generation_manager.backchannel_scaffold_prompt(message.strip())
+            print(f"Backchannel response: {result}")
+        except Exception as e:
+            print(f"Error sending backchannel message: {e}")
+
+    def completenames(self, text, *ignored):
+        # Tab completion for slash commands
+        if text.startswith('/'):
+            return [f'/{name[3:]}' for name in self.get_names() if name.startswith('do_') and name[3:].startswith(text[1:])]
+        return []
 
 def run_cli(config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
