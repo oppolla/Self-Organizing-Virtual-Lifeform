@@ -625,17 +625,6 @@ class CuriosityManager:
             gpu_manager=self.state_manager.gpu_manager if self.state_manager else None
         )
         
-        # Initialize state
-        self._state = {
-            'metrics': defaultdict(float),
-            'exploration_queue': deque(maxlen=self._config_manager.get("curiosity_config.exploration_queue_maxlen", 100)),
-            'last_exploration_time': 0.0,
-            'exploration_count': 0,
-            'curiosity_score': 0.0,
-            'pressure': 0.0,
-            'session_id': self.session_id
-        }
-        
         # Log initialization
         self._record_event(
             "curiosity_manager_initialized",
@@ -860,12 +849,17 @@ class CuriosityManager:
             )
 
     def update_metrics(self, metric_name: str, value: float) -> bool:
-        """Update curiosity metrics."""
+        """Update curiosity metrics atomically in SOVLState."""
         try:
-            maxlen = self.config_manager.get("metrics_maxlen")
-            self.metrics[metric_name].append(value)
-            if len(self.metrics[metric_name]) > maxlen:
-                self.metrics[metric_name].pop(0)
+            def update_fn(state):
+                if not hasattr(state, "curiosity_metrics"):
+                    from collections import defaultdict
+                    state.curiosity_metrics = defaultdict(list)
+                state.curiosity_metrics[metric_name].append(value)
+                maxlen = self.config_manager.get("metrics_maxlen")
+                if len(state.curiosity_metrics[metric_name]) > maxlen:
+                    state.curiosity_metrics[metric_name] = state.curiosity_metrics[metric_name][-maxlen:]
+            self.state_manager.update_state_atomic(update_fn)
             return True
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, {
@@ -911,13 +905,18 @@ class CuriosityManager:
             return False
             
     def queue_exploration(self, prompt: str) -> bool:
-        """Queue a prompt for exploration."""
+        """Queue a prompt for exploration atomically in SOVLState."""
         try:
-            self.exploration_queue.append({
-                "prompt": prompt,
-                "timestamp": time.time(),
-                "score": self.calculate_curiosity_score(prompt)
-            })
+            def update_fn(state):
+                if not hasattr(state, "curiosity_exploration_queue"):
+                    from collections import deque
+                    state.curiosity_exploration_queue = deque(maxlen=self._config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
+                state.curiosity_exploration_queue.append({
+                    "prompt": prompt,
+                    "timestamp": time.time(),
+                    "score": self.calculate_curiosity_score(prompt)
+                })
+            self.state_manager.update_state_atomic(update_fn)
             return True
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, {
@@ -927,21 +926,22 @@ class CuriosityManager:
             return False
             
     def get_next_exploration(self) -> Optional[Dict]:
-        """Get next prompt for exploration."""
+        """Get next prompt for exploration atomically from SOVLState."""
         try:
-            if not self.exploration_queue:
+            state = self.state_manager.get_state()
+            if not hasattr(state, "curiosity_exploration_queue") or not state.curiosity_exploration_queue:
                 return None
-                
             timeout = self.config_manager.get("curiosity_question_timeout")
             current_time = time.time()
-            
-            while self.exploration_queue:
-                item = self.exploration_queue[0]
+            queue = state.curiosity_exploration_queue
+            while queue:
+                item = queue[0]
                 if current_time - item["timestamp"] > timeout:
-                    self.exploration_queue.popleft()
+                    def update_fn(s):
+                        s.curiosity_exploration_queue.popleft()
+                    self.state_manager.update_state_atomic(update_fn)
                 else:
                     return item
-                    
             return None
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, {

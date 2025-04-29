@@ -529,6 +529,11 @@ class SOVLState(StateBase):
                 conversation_id=str(uuid.uuid4())
             )
             
+            # Curiosity state additions
+            from collections import defaultdict, deque
+            self.curiosity_metrics = defaultdict(list)
+            self.curiosity_exploration_queue = deque(maxlen=self.config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
+            
             self.version = self.STATE_VERSION
             
             self.log_event(
@@ -786,7 +791,10 @@ class SOVLState(StateBase):
                     "training_state": self._training_state.__dict__,
                     "conversation_history": self.history.to_dict(),
                     "conversation_metadata": self._conversation_metadata,
-                    "goals": [goal.copy() for goal in self.goals]
+                    "goals": [goal.copy() for goal in self.goals],
+                    # Curiosity state additions
+                    "curiosity_metrics": {k: list(v) for k, v in getattr(self, "curiosity_metrics", {}).items()},
+                    "curiosity_exploration_queue": list(getattr(self, "curiosity_exploration_queue", [])),
                 }
                 if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
                     state_data['short_term_memory'] = self.short_term_memory.to_dict()
@@ -834,6 +842,15 @@ class SOVLState(StateBase):
             
             # Load goals
             self.goals = [goal.copy() for goal in data.get("goals", [])]
+            
+            # Curiosity state additions
+            from collections import defaultdict, deque
+            metrics = data.get("curiosity_metrics", {})
+            self.curiosity_metrics = defaultdict(list)
+            for k, v in metrics.items():
+                self.curiosity_metrics[k] = list(v)
+            queue = data.get("curiosity_exploration_queue", [])
+            self.curiosity_exploration_queue = deque(queue, maxlen=self.config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
             
             # Load short term memory
             if 'short_term_memory' in data and hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'from_dict'):

@@ -235,19 +235,31 @@ class ErrorManager(IErrorHandler):
     def _recover_training(self, record: ErrorRecord) -> None:
         """Attempt to recover from a training error."""
         try:
-            # Reset training state
-            self.state_tracker.reset_training_state()
-            
+            # Atomically reset training state
+            state_manager = getattr(self.context, "state_manager", None)
+            if state_manager:
+                def update_fn(state):
+                    if hasattr(state, "reset_training_state"):
+                        state.reset_training_state()
+                state_manager.update_state_atomic(update_fn)
+            else:
+                self.logger.record_event(
+                    event_type="training_recovery_failed",
+                    message="StateManager not available for atomic training state reset.",
+                    level="critical"
+                )
+                return
+
             # Adjust batch size
             current_batch_size = self.config_manager.get("training_config.batch_size", 32)
             new_batch_size = max(1, current_batch_size // 2)
             self.config_manager.update("training_config.batch_size", new_batch_size)
-            
+
             # Adjust learning rate
             current_lr = self.config_manager.get("training_config.learning_rate", 0.0003)
             new_lr = current_lr * 0.5
             self.config_manager.update("training_config.learning_rate", new_lr)
-            
+
             self.logger.record_event(
                 event_type="training_recovery",
                 message="Reset training state, reduced batch size and learning rate",
@@ -261,7 +273,7 @@ class ErrorManager(IErrorHandler):
                     **record.additional_info
                 }
             )
-            
+
         except Exception as e:
             self.logger.record_event(
                 event_type="training_recovery_failed",
@@ -276,24 +288,34 @@ class ErrorManager(IErrorHandler):
     def _recover_curiosity(self, record: ErrorRecord) -> None:
         """Attempt to recover from a curiosity error."""
         try:
-            # Reset curiosity state
-            self.state_tracker.reset_curiosity_state()
-            
+            # Atomically reset curiosity state
+            state_manager = getattr(self.context, "state_manager", None)
+            if state_manager:
+                def update_fn(state):
+                    if hasattr(state, "reset_curiosity_state"):
+                        state.reset_curiosity_state()
+                state_manager.update_state_atomic(update_fn)
+            else:
+                self.logger.record_event(
+                    event_type="curiosity_recovery_failed",
+                    message="StateManager not available for atomic curiosity state reset.",
+                    level="critical"
+                )
+                return
+
             # Reset curiosity parameters
             curiosity_params = {
                 "pressure": 0.5,
                 "novelty_threshold_spontaneous": 0.7,
                 "novelty_threshold_response": 0.6
             }
-            
-            # Update parameters via config manager
             for param, value in curiosity_params.items():
                 self.config_manager.update(f"curiosity_config.{param}", value)
-            
+
             # Clear question queue if available
             if hasattr(self.context, 'curiosity_manager'):
                 self.context.curiosity_manager.clear_question_queue()
-            
+
             self.logger.record_event(
                 event_type="curiosity_recovery",
                 message="Reset curiosity state and parameters",
@@ -304,7 +326,7 @@ class ErrorManager(IErrorHandler):
                     **record.additional_info
                 }
             )
-            
+
         except Exception as e:
             self.logger.record_event(
                 event_type="curiosity_recovery_failed",
@@ -323,24 +345,36 @@ class ErrorManager(IErrorHandler):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-            
-            # Clear memory cache
-            self.state_tracker.clear_memory_cache()
-            
+
+            # Atomically clear memory cache
+            state_manager = getattr(self.context, "state_manager", None)
+            if state_manager:
+                def update_fn(state):
+                    if hasattr(state, "clear_memory_cache"):
+                        state.clear_memory_cache()
+                state_manager.update_state_atomic(update_fn)
+            else:
+                self.logger.record_event(
+                    event_type="memory_recovery_failed",
+                    message="StateManager not available for atomic memory cache clear.",
+                    level="critical"
+                )
+                return
+
             # Reduce memory limit
             current_limit = self.config_manager.get("memory_config.max_memory_mb", 512)
             new_limit = max(256, current_limit // 2)
             self.config_manager.update("memory_config.max_memory_mb", new_limit)
-            
+
             # Reduce training batch size
             current_batch = self.config_manager.get("training_config.batch_size", 32)
             new_batch = max(1, current_batch // 2)
             self.config_manager.update("training_config.batch_size", new_batch)
-            
+
             # Clear system caches if available
             if hasattr(self.context, 'memory_manager'):
                 self.context.memory_manager.clear_caches()
-            
+
             self.logger.record_event(
                 event_type="memory_recovery",
                 message="Cleared memory caches and reduced limits",
@@ -355,7 +389,7 @@ class ErrorManager(IErrorHandler):
                     **record.additional_info
                 }
             )
-            
+
         except Exception as e:
             self.logger.record_event(
                 event_type="memory_recovery_failed",
@@ -370,24 +404,34 @@ class ErrorManager(IErrorHandler):
     def _recover_generation(self, record: ErrorRecord) -> None:
         """Attempt to recover from a generation error."""
         try:
-            # Reset generation state
-            self.state_tracker.reset_generation_state()
-            
+            # Atomically reset generation state
+            state_manager = getattr(self.context, "state_manager", None)
+            if state_manager:
+                def update_fn(state):
+                    if hasattr(state, "reset_generation_state"):
+                        state.reset_generation_state()
+                state_manager.update_state_atomic(update_fn)
+            else:
+                self.logger.record_event(
+                    event_type="generation_recovery_failed",
+                    message="StateManager not available for atomic generation state reset.",
+                    level="critical"
+                )
+                return
+
             # Reset generation parameters to safer values
             generation_params = {
                 "temperature": 0.7,
                 "top_p": 0.9,
                 "max_length": 128
             }
-            
-            # Update parameters via config manager
             for param, value in generation_params.items():
                 self.config_manager.update(f"generation_config.{param}", value)
-            
+
             # Clear generation cache if available
             if hasattr(self.context, 'generation_manager'):
                 self.context.generation_manager.clear_cache()
-            
+
             self.logger.record_event(
                 event_type="generation_recovery",
                 message="Reset generation state and parameters",
@@ -398,7 +442,7 @@ class ErrorManager(IErrorHandler):
                     **record.additional_info
                 }
             )
-            
+
         except Exception as e:
             self.logger.record_event(
                 event_type="generation_recovery_failed",
@@ -413,44 +457,48 @@ class ErrorManager(IErrorHandler):
     def _recover_data(self, record: ErrorRecord) -> None:
         """Attempt to recover from a data error."""
         try:
-            # Reset data state
-            self.state_tracker.reset_data_state()
-            
+            # Atomically reset data state
+            state_manager = getattr(self.context, "state_manager", None)
+            if state_manager:
+                def update_fn(state):
+                    if hasattr(state, "reset_data_state"):
+                        state.reset_data_state()
+                state_manager.update_state_atomic(update_fn)
+            else:
+                self.logger.record_event(
+                    event_type="data_recovery_failed",
+                    message="StateManager not available for atomic data state reset.",
+                    level="critical"
+                )
+                return
+
             # Reduce batch size
             current_batch_size = self.config_manager.get("data_config.batch_size", 32)
             new_batch_size = max(1, current_batch_size // 2)
             self.config_manager.update("data_config.batch_size", new_batch_size)
-            
-            try:
-                self.logger.record_event(
-                    event_type="data_recovery",
-                    message="Reset data state and reduced batch size",
-                    level="info",
-                    additional_info={
-                        "error_type": record.error_type,
-                        "old_batch_size": current_batch_size,
-                        "new_batch_size": new_batch_size,
-                        **record.additional_info
-                    }
-                )
-            except Exception as log_exc:
-                print(f"[ERROR] Failed to log data recovery event: {log_exc}")
-                traceback.print_exc()
-                
+
+            self.logger.record_event(
+                event_type="data_recovery",
+                message="Reset data state and reduced batch size",
+                level="info",
+                additional_info={
+                    "error_type": record.error_type,
+                    "old_batch_size": current_batch_size,
+                    "new_batch_size": new_batch_size,
+                    **record.additional_info
+                }
+            )
+
         except Exception as e:
-            try:
-                self.logger.record_event(
-                    event_type="data_recovery_failed",
-                    message=f"Failed to recover from data error: {str(e)}",
-                    level="critical",
-                    additional_info={
-                        "error_type": record.error_type,
-                        **record.additional_info
-                    }
-                )
-            except Exception as log_exc:
-                print(f"[ERROR] Failed to log data recovery failure: {log_exc}")
-                traceback.print_exc()
+            self.logger.record_event(
+                event_type="data_recovery_failed",
+                message=f"Failed to recover from data error: {str(e)}",
+                level="critical",
+                additional_info={
+                    "error_type": record.error_type,
+                    **record.additional_info
+                }
+            )
 
     def _recover_model_loading(self, record: ErrorRecord) -> None:
         """Recovery strategy for model loading errors."""
