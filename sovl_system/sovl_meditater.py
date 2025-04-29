@@ -502,7 +502,10 @@ class IntrospectionManager:
         """Add introspection dialogue to conversation history for training."""
         try:
             content = self._format_dialogue_for_history(dialogue)
-            state.history.add_message(role="introspection", content=content)
+            def update_fn(current_state):
+                current_state.history.add_message(role="introspection", content=content)
+                return current_state
+            self.state_manager.update_state_atomic(update_fn)
             self.logger.record_event(
                 event_type="introspection_added_to_history",
                 message="Introspection dialogue added to conversation history",
@@ -911,8 +914,10 @@ class IntrospectionManager:
         try:
             if not isinstance(state, SOVLState):
                 raise ValueError("State must be an instance of SOVLState")
-            state.introspection_dialogues = deque(self.dialogues, maxlen=self.dialogues.maxlen)
-            self.state_manager.update_state(state)
+            def update_fn(current_state):
+                current_state.introspection_dialogues = deque(self.dialogues, maxlen=self.dialogues.maxlen)
+                return current_state
+            self.state_manager.update_state_atomic(update_fn)
             self._sync_state()
             self.logger.record_event(
                 event_type="introspection_state_set",
@@ -951,9 +956,10 @@ class IntrospectionManager:
             self.dialogues.clear()
             self.last_trigger_time = 0
             self._init_trigger_conditions()
-            state = self.state_manager.get_state()
-            state.introspection_dialogues = deque(maxlen=self.dialogues.maxlen)
-            self.state_manager.update_state(state)
+            def update_fn(state):
+                state.introspection_dialogues = deque(maxlen=self.dialogues.maxlen)
+                return state
+            self.state_manager.update_state_atomic(update_fn)
             self.logger.record_event(
                 event_type="introspection_reset",
                 message="Introspection state reset, including dialogues and trigger conditions",

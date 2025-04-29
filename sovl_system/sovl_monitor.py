@@ -233,7 +233,7 @@ class TraitsMonitor:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        state: SOVLState,
+        state_manager: StateManager,
         curiosity_manager: CuriosityManager,
         training_manager: TrainingCycleManager,
         error_manager: ErrorManager,
@@ -247,7 +247,7 @@ class TraitsMonitor:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            state: SOVLState instance for accessing system state
+            state_manager: StateManager for atomic SOVLState access
             curiosity_manager: CuriosityManager for curiosity metrics
             training_manager: TrainingCycleManager for lifecycle metrics
             error_manager: ErrorManager instance for error handling
@@ -257,7 +257,7 @@ class TraitsMonitor:
         """
         self._config_manager = config_manager
         self._logger = logger
-        self._state = state
+        self._state_manager = state_manager
         self._curiosity_manager = curiosity_manager
         self._training_manager = training_manager
         self._error_manager = error_manager
@@ -398,15 +398,16 @@ class TraitsMonitor:
     def _get_current_traits(self) -> Dict[str, float]:
         """Collect current values for all monitored traits, including bond score."""
         try:
+            state = self._state_manager.get_state()
             # Core traits and states
             traits = {
                 'curiosity': self._curiosity_manager.get_curiosity_score(),
-                'confidence': self._state.get_confidence_level(),
+                'confidence': state.get_confidence_level(),
                 'lifecycle': self._training_manager.get_lifecycle_phase(),
-                'temperament': self._state.get_temperament_score(),
+                'temperament': state.get_temperament_score(),
             }
             # Training state metrics
-            training_state = self._state._training_state
+            training_state = state._training_state
             traits.update({
                 'data_exposure': training_state.data_exposure,
                 'sleep_confidence': safe_divide(

@@ -981,9 +981,14 @@ class SOVLSystem(SystemInterface):
             with self._lock:
                 if not self.state_tracker:
                     raise ValueError("State tracker not initialized")
-                    
-                self.state_tracker.update_state(state_dict)
-                
+                # Use atomic update protocol
+                if hasattr(self.context, 'state_manager') and self.context.state_manager:
+                    def update_fn(state):
+                        # This assumes SOVLState has a from_dict method that mutates in place
+                        state.from_dict(state_dict, getattr(self.context, 'device', None))
+                    self.context.state_manager.update_state_atomic(update_fn)
+                else:
+                    self.state_tracker.update_state(state_dict)
         except Exception as e:
             self.error_manager.handle_error(
                 error_type="state_update",

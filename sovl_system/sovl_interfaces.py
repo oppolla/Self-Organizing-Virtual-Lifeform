@@ -87,7 +87,8 @@ class SystemMediator:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        device: torch.device
+        device: torch.device,
+        state_manager: StateManager = None
     ):
         """
         Initialize the mediator with core dependencies.
@@ -96,11 +97,12 @@ class SystemMediator:
             config_manager: Configuration manager.
             logger: Logging manager.
             device: Device for tensor operations.
+            state_manager: StateManager for atomic state updates.
         """
         self.config_manager = config_manager
         self.logger = logger
         self.device = device
-        self.state_manager = StateManager(
+        self.state_manager = state_manager or StateManager(
             config_manager=config_manager,
             logger=logger,
             device=device
@@ -165,8 +167,11 @@ class SystemMediator:
                 system_state = self._system.get_state()
                 orchestrator_state = self.state_manager.load_state().to_dict()
                 merged_state = self._merge_states(system_state, orchestrator_state)
-                self._system.update_state(merged_state)
-                self.state_manager.save_state(SOVLState.from_dict(merged_state, self.device))
+                # Atomically update state using state_manager
+                def update_fn(state):
+                    # This assumes SOVLState has a from_dict method that mutates in place
+                    state.from_dict(merged_state, self.device)
+                self.state_manager.update_state_atomic(update_fn)
                 self._orchestrator.sync_state()
                 self._log_event("state_synchronized", {
                     "system_state_hash": self._hash_state(system_state),
@@ -187,6 +192,8 @@ class SystemMediator:
             try:
                 if self._system:
                     self._system.shutdown()
+                # Optionally, perform an atomic update or just save the current state
+                # If any shutdown state mutation is needed, do it atomically here
                 self.state_manager.save_state(self.state_manager.load_state())
                 self._log_event("system_shutdown", {})
             except Exception as e:
@@ -277,17 +284,25 @@ class SOVLSystemAdapter(SystemInterface):
     Adapter to make SOVLSystem compatible with SystemInterface.
     """
     
-    def __init__(self, sovl_system: 'SOVLSystem'):
-        self._system = sovl_system
+    def __init__(self, sovl_system: 'SOVLSystem', state_manager: StateManager = None):
+        self.sovl_system = sovl_system
+        self.state_manager = state_manager or getattr(sovl_system, 'state_manager', None)
     
     def get_state(self) -> Dict[str, Any]:
-        return self._system.state_tracker.get_state()
+        return self.sovl_system.get_state()
     
     def update_state(self, state_dict: Dict[str, Any]) -> None:
-        self._system.state_tracker.state.from_dict(state_dict, self._system.context.device)
+        # Atomically update state using state_manager
+        if self.state_manager:
+            def update_fn(state):
+                # This assumes SOVLState has a from_dict method that mutates in place
+                state.from_dict(state_dict, getattr(self.sovl_system, 'device', None))
+            self.state_manager.update_state_atomic(update_fn)
+        else:
+            self.sovl_system.update_state(state_dict)
     
     def shutdown(self) -> None:
-        self._system.state_tracker.state.save_state()
+        self.sovl_system.shutdown()
 
 class SOVLOrchestratorAdapter(OrchestratorInterface):
     """

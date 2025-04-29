@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from sovl_utils import NumericalGuard, safe_divide, synchronized
 from sovl_logger import Logger
 from sovl_config import ConfigManager
-from sovl_state import SOVLState
+from sovl_state import SOVLState, StateManager
 from sovl_records import ConfidenceHistory
 from transformers import PreTrainedTokenizer, LogitsProcessor
 from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
@@ -258,6 +258,7 @@ class TensorValidator:
 
 class SOVLProcessor:
     """Processes and manages the SOVL system state."""
+    # NOTE: All mutations to SOVLState must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
     
     # Constants for adjustments
     TEMPERAMENT_SCALE: float = 0.1
@@ -267,7 +268,7 @@ class SOVLProcessor:
     PADDING_ID: int = -100
     DEFAULT_SPECIAL_IDS: Set[int] = {-100, 0, 1, 2, 3}  # Example default special IDs
 
-    def __init__(self, config_manager: Optional[ConfigManager] = None, logger: Optional[Logger] = None, device: Optional[torch.device] = None):
+    def __init__(self, config_manager: Optional[ConfigManager] = None, logger: Optional[Logger] = None, device: Optional[torch.device] = None, state_manager: Optional[StateManager] = None):
         """
         Initialize the SOVL processor.
 
@@ -275,11 +276,13 @@ class SOVLProcessor:
             config_manager: Configuration manager instance. If None, will be created.
             logger: Logger for event recording. If None, will be created.
             device: Device for tensor operations. If None, will use default device.
+            state_manager: State manager for atomic state updates. If None, will use default.
         """
         # Initialize fundamental dependencies
         self.config_manager = config_manager or ConfigManager()
         self.logger = logger or Logger()
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.state_manager = state_manager
         
         # Initialize state attributes
         self.token_map: Dict[int, int] = {}
@@ -554,38 +557,37 @@ class SOVLProcessor:
     def load_state(self, state: Dict[str, Any]) -> None:
         """
         Load processor state.
-
-        Args:
-            state: State dictionary.
         """
+        def update_fn(current_state):
+            # Basic type checking for loaded state
+            if "config" in state:
+                if not isinstance(state["config"], dict):
+                    raise TypeError("Expected 'config' to be a dict in loaded state")
+                self.config.update(self.config_manager, **state["config"])
+            if "token_mapping" in state:
+                if not isinstance(state["token_mapping"], dict):
+                    raise TypeError("Expected 'token_mapping' to be a dict in loaded state")
+                self.scaffold_unk_id = state["token_mapping"].get("scaffold_unk_id", 0)
+                self.token_map = state["token_mapping"].get("token_map", {})
+                if not isinstance(self.token_map, dict):
+                    raise TypeError("Expected 'token_map' within 'token_mapping' to be a dict")
+            if "confidence_history" in state:
+                if not isinstance(state["confidence_history"], dict):
+                    raise TypeError("Expected 'confidence_history' to be a dict in loaded state")
+                self._confidence_history.from_dict(state["confidence_history"])
+            return current_state
         try:
-            with self._lock:
-                # Basic type checking for loaded state
-                if "config" in state:
-                    if not isinstance(state["config"], dict):
-                        raise TypeError("Expected 'config' to be a dict in loaded state")
-                    self.config.update(self.config_manager, **state["config"])
-                
-                if "token_mapping" in state:
-                    if not isinstance(state["token_mapping"], dict):
-                        raise TypeError("Expected 'token_mapping' to be a dict in loaded state")
-                    self.scaffold_unk_id = state["token_mapping"].get("scaffold_unk_id", 0)
-                    self.token_map = state["token_mapping"].get("token_map", {})
-                    if not isinstance(self.token_map, dict):
-                        raise TypeError("Expected 'token_map' within 'token_mapping' to be a dict")
-
-                if "confidence_history" in state:
-                    if not isinstance(state["confidence_history"], dict):
-                        raise TypeError("Expected 'confidence_history' to be a dict in loaded state")
-                    # Assuming ConfidenceHistory handles its own loading validation
-                    self._confidence_history.from_dict(state["confidence_history"])
-                
-                self.logger.log_training_event(
-                    event_type="state_loaded",
-                    message="Processor state loaded",
-                    level="info",
-                    additional_info={"loaded_keys": list(state.keys())} # Avoid logging potentially large state
-                )
+            if self.state_manager:
+                self.state_manager.update_state_atomic(update_fn)
+            else:
+                with self._lock:
+                    update_fn(None)
+            self.logger.log_training_event(
+                event_type="state_loaded",
+                message="Processor state loaded",
+                level="info",
+                additional_info={"loaded_keys": list(state.keys())}
+            )
         except Exception as e:
             self.logger.log_error(
                 error_type="state_error",
@@ -593,7 +595,6 @@ class SOVLProcessor:
                 error=str(e),
                 stack_trace=traceback.format_exc()
             )
-            # Reset to a known good state on load failure
             self.reset()
             self.logger.log_training_event(
                 event_type="state_load_failed_reset",
@@ -603,35 +604,28 @@ class SOVLProcessor:
 
     def reset(self) -> None:
         """Reset processor state to defaults."""
-        with self._lock:
-            # Reset configuration
+        def update_fn(current_state):
             self.config = ProcessorConfig.from_config_manager(self.config_manager)
-
-            # Reset token mapping
             self.scaffold_unk_id = 0
             self.token_map = {}
-
-            # Reset confidence history
             self._confidence_history.clear_history()
-
-            # Reset validator and confidence calculator
             self._validator = TensorValidator(self.device, self.logger)
             self.confidence_calculator = ConfidenceCalculator(self.config_manager, self.logger)
-
-            # Reset curiosity queue
             self._curiosity_queue.clear()
             self._last_curiosity_update = 0.0
-
-            # Re-initialize error manager
             self._initialize_error_manager()
-
-            self.logger.log_training_event(
-                event_type="processor_reset",
-                message="Processor state reset",
-                level="info"
-            )
-            # Log init state after reset is complete
-            self._log_init()
+            return current_state
+        if self.state_manager:
+            self.state_manager.update_state_atomic(update_fn)
+        else:
+            with self._lock:
+                update_fn(None)
+        self.logger.log_training_event(
+            event_type="processor_reset",
+            message="Processor state reset",
+            level="info"
+        )
+        self._log_init()
 
     def detect_repetitions(
         self,

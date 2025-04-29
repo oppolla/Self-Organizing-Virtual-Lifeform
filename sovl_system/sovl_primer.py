@@ -6,7 +6,7 @@ from sovl_bonder import BondCalculator, BondModulator
 from sovl_logger import Logger 
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
-from sovl_state import SOVLState  # Import for type clarity and direct integration
+from sovl_state import SOVLState, StateManager 
 import traceback
 import threading
 import concurrent.futures
@@ -22,7 +22,7 @@ class GenerationPrimer:
         self,
         config_manager: Any,
         logger: Logger,
-        state: SOVLState,
+        state_manager: 'StateManager',
         error_manager: ErrorManager,
         curiosity_manager: Optional[Any] = None,
         temperament_system: Optional[Any] = None,
@@ -42,8 +42,7 @@ class GenerationPrimer:
     ):
         self.config_manager = config_manager
         self.logger = logger if logger else Logger()
-        # State is now explicitly typed and required
-        self.state: SOVLState = state
+        self.state_manager = state_manager
         self.error_manager = error_manager if error_manager else ErrorManager()
         self.curiosity_manager = curiosity_manager
         self.temperament_system = temperament_system
@@ -131,7 +130,7 @@ class GenerationPrimer:
         """Aggregate and report errors with context."""
         error_info = {
             "context": context,
-            "state": str(self.state),
+            "state": str(self.state_manager.get_state()),
             "traits": list(self.generation_hooks.keys()),
             "extra": extra or {}
         }
@@ -172,7 +171,7 @@ class GenerationPrimer:
         Now uses parallel fetching, timeouts, and fallbacks for each trait.
         """
         traits = {}
-        state_arg = kwargs.get("state", self.state)
+        state_arg = kwargs.get("state", self.state_manager.get_state())
         if not isinstance(state_arg, SOVLState):
             self.logger.log_error("Invalid state type for trait computation", error_type="primer_state_type_error")
             return {}
@@ -311,7 +310,7 @@ class GenerationPrimer:
         metadata = {
             "prompt": prompt,
             "traits": traits,
-            "state": str(self.state),
+            "state": str(self.state_manager.get_state()),
             "device": str(self.device) if self.device else None,
             "timestamp": kwargs.get("timestamp"),
             "generation_hooks": self.generation_hooks.copy(),
@@ -388,12 +387,15 @@ class GenerationPrimer:
        
         return traits
 
-    def update_state(self, new_state: SOVLState):
+    def update_state(self, new_state: 'SOVLState'):
         """
         Update the state object used by the primer and all trait computations.
         Useful for hot-swapping user/system state at runtime.
         """
-        self.state = new_state
+        def update_fn(_):
+            # Replace the entire state (if your StateManager supports this)
+            return new_state
+        self.state_manager.update_state_atomic(update_fn)
         self.logger.record_event(
             event_type="state_updated",
             message="GenerationPrimer state object updated.",
@@ -423,46 +425,44 @@ class GenerationPrimer:
         Update system state after an error occurs. Adjusts confidence and temperament as appropriate.
         Thread-safe, validates attributes, and rolls back on failure.
         """
-        with self._state_lock:
-            original_confidence = getattr(self.state, 'confidence', None)
-            original_temperament = getattr(self.state, 'temperament_score', None)
+        def update_fn(state):
+            original_confidence = getattr(state, 'confidence', None)
+            original_temperament = getattr(state, 'temperament_score', None)
             try:
-                # Validate confidence
-                if not hasattr(self.state, 'confidence') or not isinstance(self.state.confidence, (int, float)):
+                if not hasattr(state, 'confidence') or not isinstance(state.confidence, (int, float)):
                     self.logger.log_error("Invalid or missing confidence attribute in SOVLState")
-                    return
-                # Adjust confidence based on error type
+                    return state
                 if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
-                    self.state.confidence = max(0.1, self.state.confidence - 0.1)
+                    state.confidence = max(0.1, state.confidence - 0.1)
                 elif isinstance(error, (ValueError, RuntimeError)):
-                    self.state.confidence = max(0.2, self.state.confidence - 0.05)
-                # Validate and update temperament_score if present
-                if hasattr(self.state, 'temperament_score'):
-                    if not isinstance(self.state.temperament_score, (int, float)):
+                    state.confidence = max(0.2, state.confidence - 0.05)
+                if hasattr(state, 'temperament_score'):
+                    if not isinstance(state.temperament_score, (int, float)):
                         self.logger.log_error("Invalid temperament_score type in SOVLState")
-                        return
-                    self.state.temperament_score = max(0.0, self.state.temperament_score - 0.05)
+                        return state
+                    state.temperament_score = max(0.0, state.temperament_score - 0.05)
                 self.logger.record_event(
                     event_type="state_updated_after_error",
                     message=f"State updated after {context} error",
                     level="info",
                     additional_info={
                         'error_type': type(error).__name__,
-                        'new_confidence': self.state.confidence,
-                        'new_temperament': getattr(self.state, 'temperament_score', None)
+                        'new_confidence': state.confidence,
+                        'new_temperament': getattr(state, 'temperament_score', None)
                     }
                 )
             except Exception as e:
-                # Rollback on failure
                 if original_confidence is not None:
-                    self.state.confidence = original_confidence
-                if original_temperament is not None and hasattr(self.state, 'temperament_score'):
-                    self.state.temperament_score = original_temperament
+                    state.confidence = original_confidence
+                if original_temperament is not None and hasattr(state, 'temperament_score'):
+                    state.temperament_score = original_temperament
                 self.logger.log_error(
                     error_msg=f"Failed to update state after error: {str(e)}",
                     error_type="state_update_error",
                     stack_trace=traceback.format_exc()
                 )
+            return state
+        self.state_manager.update_state_atomic(update_fn)
 
     def handle_state_driven_error(self, error: Exception, context: str, state_metrics: dict = None) -> None:
         """
@@ -470,7 +470,7 @@ class GenerationPrimer:
         """
         if self.error_manager and hasattr(self.error_manager, "handle_generation_error"):
             try:
-                self.error_manager.handle_generation_error(error=error, context=context, state=self.state, state_metrics=state_metrics)
+                self.error_manager.handle_generation_error(error=error, context=context, state=self.state_manager.get_state(), state_metrics=state_metrics)
                 self.logger.record_event(
                     event_type="state_driven_error_handled",
                     message=f"State-driven error handled for context: {context}",
@@ -500,66 +500,55 @@ class GenerationPrimer:
         Brings logic to parity with sovl_generation: includes memory optimization, batch size, temperament,
         and lifecycle adjustments, all conditional on state_metrics, and logs before/after states.
         """
-        recovery_actions = []
-        try:
-            # Memory optimization (if available)
-            if hasattr(self.state, 'ram_manager') and self.state.ram_manager:
-                before = self.state.ram_manager.get_usage()
-                self.state.ram_manager.optimize_memory()
-                after = self.state.ram_manager.get_usage()
-                recovery_actions.append({
-                    "action": "optimize_memory",
-                    "before": before,
-                    "after": after
-                })
-            # Batch size adjustment based on confidence
-            if state_metrics and state_metrics.get('confidence', 1.0) < 0.3 and hasattr(self.state, 'batch_size'):
-                old_batch_size = self.state.batch_size
-                self.state.batch_size = max(1, self.state.batch_size // 2)
-                recovery_actions.append({
-                    "action": "adjust_batch_size",
-                    "old_batch_size": old_batch_size,
-                    "new_batch_size": self.state.batch_size
-                })
-            # Temperament adjustment (if present)
-            if hasattr(self.state, 'temperament_score'):
-                old_temp = self.state.temperament_score
-                self.state.temperament_score = max(0.1, self.state.temperament_score - 0.05)
-                recovery_actions.append({
-                    'action': 'adjust_temperament',
-                    'old_temperament': old_temp,
-                    'new_temperament': self.state.temperament_score
-                })
-            # Lifecycle stage update based on metrics
-            if hasattr(self.state, 'lifecycle_stage'):
-                old_stage = self.state.lifecycle_stage
-                if state_metrics and state_metrics.get('lifecycle_stage') == 'exploration':
-                    self.state.lifecycle_stage = 'consolidation'
+        def update_fn(state):
+            recovery_actions = []
+            try:
+                if hasattr(state, 'ram_manager') and state.ram_manager:
+                    before = state.ram_manager.get_usage()
+                    state.ram_manager.optimize_memory()
+                    after = state.ram_manager.get_usage()
                     recovery_actions.append({
-                        'action': 'update_lifecycle_stage',
-                        'old_stage': old_stage,
-                        'new_stage': self.state.lifecycle_stage
+                        "action": "optimize_memory",
+                        "before": before,
+                        "after": after
                     })
-            # Call error_manager's recovery if available
-            if self.error_manager and hasattr(self.error_manager, "apply_recovery_strategy"):
-                self.error_manager.apply_recovery_strategy(error=error, context=context, state=self.state, state_metrics=state_metrics)
-            self.logger.record_event(
-                event_type="state_driven_recovery_applied",
-                message=f"State-driven recovery applied for context: {context}",
-                level="info",
-                additional_info={
-                    "error_type": type(error).__name__,
-                    "context": context,
-                    "state_metrics": state_metrics,
-                    "recovery_actions": recovery_actions
-                }
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed during state-driven recovery: {str(e)}",
-                error_type="state_driven_recovery_error",
-                stack_trace=traceback.format_exc()
-            )
+                if state_metrics and state_metrics.get('confidence', 1.0) < 0.3 and hasattr(state, 'batch_size'):
+                    old_batch_size = state.batch_size
+                    state.batch_size = max(1, state.batch_size // 2)
+                    recovery_actions.append({
+                        "action": "adjust_batch_size",
+                        "old_batch_size": old_batch_size,
+                        "new_batch_size": state.batch_size
+                    })
+                if hasattr(state, 'temperament_score'):
+                    old_temp = state.temperament_score
+                    state.temperament_score = max(0.1, state.temperament_score - 0.05)
+                    recovery_actions.append({
+                        'action': 'adjust_temperament',
+                        'old_temperament': old_temp,
+                        'new_temperament': state.temperament_score
+                    })
+                if hasattr(state, 'lifecycle_stage'):
+                    old_stage = state.lifecycle_stage
+                    if state_metrics and state_metrics.get('lifecycle_stage') == 'exploration':
+                        state.lifecycle_stage = 'consolidation'
+                        recovery_actions.append({
+                            'action': 'update_lifecycle_stage',
+                            'old_stage': old_stage,
+                            'new_stage': state.lifecycle_stage
+                        })
+                # Call error_manager's recovery if available (outside atomic update)
+            except Exception as e:
+                self.logger.log_error(
+                    error_msg=f"Failed during state-driven recovery: {str(e)}",
+                    error_type="state_driven_recovery_error",
+                    stack_trace=traceback.format_exc()
+                )
+            return state
+        self.state_manager.update_state_atomic(update_fn)
+        # Call error_manager's recovery if available (outside atomic update)
+        if self.error_manager and hasattr(self.error_manager, "apply_recovery_strategy"):
+            self.error_manager.apply_recovery_strategy(error=error, context=context, state=self.state_manager.get_state(), state_metrics=state_metrics)
 
     def sync_traits_to_state(self, traits: dict) -> None:
         """
@@ -569,21 +558,24 @@ class GenerationPrimer:
         """
         if not traits:
             return
-        for trait, value in traits.items():
-            if hasattr(self.state, trait):
-                try:
-                    setattr(self.state, trait, value)
-                except Exception as e:
-                    self.logger.log_error(
-                        error_msg=f"Failed to set state.{trait} to {value}: {str(e)}",
-                        error_type="trait_state_sync_error",
-                        stack_trace=traceback.format_exc()
+        def update_fn(state):
+            for trait, value in traits.items():
+                if hasattr(state, trait):
+                    try:
+                        setattr(state, trait, value)
+                    except Exception as e:
+                        self.logger.log_error(
+                            error_msg=f"Failed to set state.{trait} to {value}: {str(e)}",
+                            error_type="trait_state_sync_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                else:
+                    self.logger.log_warning(
+                        f"Trait '{trait}' not found in SOVLState; skipping state update.",
+                        event_type="trait_state_sync_warning"
                     )
-            else:
-                self.logger.log_warning(
-                    f"Trait '{trait}' not found in SOVLState; skipping state update.",
-                    event_type="trait_state_sync_warning"
-                )
+            return state
+        self.state_manager.update_state_atomic(update_fn)
 
     def update_state_after_operation(self, context: str = None, result: dict = None) -> None:
         """
@@ -591,42 +583,48 @@ class GenerationPrimer:
         Adds fallback logic if SOVLState.update_after_operation is not available.
         Now also syncs all traits in result['traits'] to state.
         """
-        try:
-            # Sync all traits to state if present in result
+        def update_fn(state):
             traits = result.get("traits") if result else None
             if traits:
-                self.sync_traits_to_state(traits)
-            # Fallback: Apply default adjustment if no result and confidence exists
+                for trait, value in traits.items():
+                    if hasattr(state, trait):
+                        try:
+                            setattr(state, trait, value)
+                        except Exception as e:
+                            self.logger.log_error(
+                                error_msg=f"Failed to set state.{trait} to {value}: {str(e)}",
+                                error_type="trait_state_sync_error",
+                                stack_trace=traceback.format_exc()
+                            )
+                    else:
+                        self.logger.log_warning(
+                            f"Trait '{trait}' not found in SOVLState; skipping state update.",
+                            event_type="trait_state_sync_warning"
+                        )
             used_fallback = False
-            if not result and hasattr(self.state, 'confidence'):
-                self.state.confidence = min(1.0, self.state.confidence + 0.05)  # Default success boost
+            if not result and hasattr(state, 'confidence'):
+                state.confidence = min(1.0, state.confidence + 0.05)
                 used_fallback = True
-            # Apply result-based adjustments (legacy deltas)
             if result:
-                if "confidence_delta" in result and hasattr(self.state, "confidence"):
-                    self.state.confidence = max(0.0, min(1.0, self.state.confidence + result["confidence_delta"]))
-                if "temperament_delta" in result and hasattr(self.state, "temperament_score"):
-                    self.state.temperament_score = max(0.0, min(1.0, self.state.temperament_score + result["temperament_delta"]))
-            # Delegate to state if method exists
-            if hasattr(self.state, "update_after_operation"):
-                self.state.update_after_operation(context=context)
+                if "confidence_delta" in result and hasattr(state, "confidence"):
+                    state.confidence = max(0.0, min(1.0, state.confidence + result["confidence_delta"]))
+                if "temperament_delta" in result and hasattr(state, "temperament_score"):
+                    state.temperament_score = max(0.0, min(1.0, state.temperament_score + result["temperament_delta"]))
+            if hasattr(state, "update_after_operation"):
+                state.update_after_operation(context=context)
             else:
                 if not used_fallback:
                     self.logger.log_warning("SOVLState.update_after_operation not available, using default adjustments.")
-            self.logger.record_event(
-                event_type="state_updated_after_operation",
-                message=f"State updated after operation: {context}",
-                level="info",
-                additional_info={
-                    'context': context,
-                    'confidence': getattr(self.state, 'confidence', None),
-                    'temperament': getattr(self.state, 'temperament_score', None),
-                    'operation_result': result
-                }
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to update state after operation: {str(e)}",
-                error_type="state_update_operation_error",
-                stack_trace=traceback.format_exc()
-            )
+            return state
+        self.state_manager.update_state_atomic(update_fn)
+        self.logger.record_event(
+            event_type="state_updated_after_operation",
+            message=f"State updated after operation: {context}",
+            level="info",
+            additional_info={
+                'context': context,
+                'confidence': getattr(self.state_manager.get_state(), 'confidence', None),
+                'temperament': getattr(self.state_manager.get_state(), 'temperament_score', None),
+                'operation_result': result
+            }
+        )
