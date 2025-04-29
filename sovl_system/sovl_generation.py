@@ -13,9 +13,7 @@ from sovl_state import SOVLState, ConversationHistory
 from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
-from sovl_curiosity import CuriosityManager
 from sovl_trainer import LifecycleManager, TrainingConfig
-from sovl_temperament import TemperamentSystem 
 from sovl_confidence import ConfidenceCalculator, calculate_confidence_score
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
