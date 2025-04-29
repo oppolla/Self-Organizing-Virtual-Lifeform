@@ -62,7 +62,8 @@ class ConfidenceCalculator:
         config_manager: ConfigManager, 
         logger: Logger, 
         temperament_system: Optional[TemperamentSystem] = None,
-        lifecycle_manager: Optional[TrainingCycleManager] = None
+        lifecycle_manager: Optional[TrainingCycleManager] = None,
+        state_manager: Optional[Any] = None
     ):
         """Initialize the confidence calculator with configuration and logging.
         
@@ -71,6 +72,7 @@ class ConfidenceCalculator:
             logger: Logger instance for logging
             temperament_system: Optional TemperamentSystem instance for mood-based adjustments
             lifecycle_manager: Optional TrainingCycleManager instance for lifecycle-based adjustments
+            state_manager: Optional StateManager for atomic state updates
             
         Raises:
             ValueError: If config_manager or logger is None
@@ -88,6 +90,7 @@ class ConfidenceCalculator:
         self.lock = Lock()
         self.temperament_system = temperament_system
         self.lifecycle_manager = lifecycle_manager
+        self.state_manager = state_manager
         
         # Initialize configuration
         self._initialize_config()
@@ -341,7 +344,8 @@ class ConfidenceCalculator:
         state: SOVLState,
         error_manager: ErrorManager,
         context: SystemContext,
-        curiosity_manager: Optional[CuriosityManager] = None
+        curiosity_manager: Optional[CuriosityManager] = None,
+        state_manager: Optional[Any] = None
     ) -> float:
         """Calculate confidence score with robust error recovery and thread safety."""
         with self.lock:
@@ -463,20 +467,32 @@ class ConfidenceCalculator:
         return confidence
 
     def __finalize_confidence(self, confidence: float, state: SOVLState) -> float:
-        """Finalize confidence score and update history with thread safety and validation."""
-        with self.lock:
-            # Clamp confidence
-            confidence = max(self.min_confidence, min(self.max_confidence, confidence))
-            # Update confidence history
-            if hasattr(state, 'confidence_history') and isinstance(state.confidence_history, deque):
-                state.confidence_history.append(confidence)
-                # Keep history bounded
-                while len(state.confidence_history) > 100:
-                    state.confidence_history.popleft()
-            else:
-                # Defensive: create history if missing
-                state.confidence_history = deque([confidence], maxlen=100)
+        """Finalize confidence score and update history atomically if state_manager is available."""
+        if self.state_manager:
+            def update_fn(s):
+                c = max(self.min_confidence, min(self.max_confidence, confidence))
+                if hasattr(s, 'confidence_history') and isinstance(s.confidence_history, deque):
+                    s.confidence_history.append(c)
+                    while len(s.confidence_history) > 100:
+                        s.confidence_history.popleft()
+                else:
+                    s.confidence_history = deque([c], maxlen=100)
+            self.state_manager.update_state_atomic(update_fn)
             return confidence
+        else:
+            with self.lock:
+                # Clamp confidence
+                confidence = max(self.min_confidence, min(self.max_confidence, confidence))
+                # Update confidence history
+                if hasattr(state, 'confidence_history') and isinstance(state.confidence_history, deque):
+                    state.confidence_history.append(confidence)
+                    # Keep history bounded
+                    while len(state.confidence_history) > 100:
+                        state.confidence_history.popleft()
+                else:
+                    # Defensive: create history if missing
+                    state.confidence_history = deque([confidence], maxlen=100)
+                return confidence
 
     def __recover_confidence(self, error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
         """Attempt to recover confidence from history or use default, with defensive checks and logging."""
@@ -574,7 +590,8 @@ def calculate_confidence_score(
     state: SOVLState,
     error_manager: ErrorManager,
     context: SystemContext,
-    curiosity_manager: Optional[CuriosityManager] = None
+    curiosity_manager: Optional[CuriosityManager] = None,
+    state_manager: Optional[Any] = None
 ) -> float:
     """Calculate confidence score with robust error recovery.
     
@@ -585,6 +602,7 @@ def calculate_confidence_score(
         error_manager: Error handling manager
         context: System context
         curiosity_manager: Optional curiosity manager
+        state_manager: Optional StateManager for atomic state updates
         
     Returns:
         float: Confidence score between 0.0 and 1.0
@@ -596,7 +614,7 @@ def calculate_confidence_score(
                 raise ValueError("State missing required config_manager or logger")
             if not isinstance(state.config_manager, ConfigManager) or not isinstance(state.logger, Logger):
                 raise TypeError("Invalid config_manager or logger types")
-            _confidence_calculator = ConfidenceCalculator(state.config_manager, state.logger)
+            _confidence_calculator = ConfidenceCalculator(state.config_manager, state.logger, state_manager=state_manager)
     return _confidence_calculator.calculate_confidence_score(
         logits=logits,
         generated_ids=generated_ids,

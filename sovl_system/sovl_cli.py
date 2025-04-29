@@ -654,9 +654,20 @@ scaffold models for debugging and development purposes.
         return self.do_exit(arg)
 
     def do_save(self, arg):
-        """Save the current system state to a file."""
+        """Save the current system state to a file using StateManager if available."""
         filename = arg.strip() if arg.strip() else "sovl_state.json"
-        if hasattr(self.sovl_system, 'save_state'):
+        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+        if state_manager and hasattr(state_manager, 'get_state'):
+            try:
+                state = state_manager.get_state()
+                if state:
+                    state_manager.save_state(state, filename.replace('.json', ''))
+                    print(f"System state saved to {filename}.")
+                else:
+                    print("No canonical state available to save.")
+            except Exception as e:
+                print(f"Error saving state: {e}")
+        elif hasattr(self.sovl_system, 'save_state'):
             try:
                 self.sovl_system.save_state(filename)
                 print(f"System state saved to {filename}.")
@@ -666,9 +677,19 @@ scaffold models for debugging and development purposes.
             print("Save not implemented or unavailable.")
 
     def do_load(self, arg):
-        """Load a system state from a file."""
+        """Load a system state from a file using StateManager if available."""
         filename = arg.strip() if arg.strip() else "sovl_state.json"
-        if hasattr(self.sovl_system, 'load_state'):
+        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+        if state_manager and hasattr(state_manager, 'load_state'):
+            try:
+                loaded_state = state_manager.load_state(filename.replace('.json', ''))
+                if loaded_state:
+                    print(f"System state loaded from {filename}.")
+                else:
+                    print("Failed to load state.")
+            except Exception as e:
+                print(f"Error loading state: {e}")
+        elif hasattr(self.sovl_system, 'load_state'):
             try:
                 self.sovl_system.load_state(filename)
                 print(f"System state loaded from {filename}.")
@@ -678,7 +699,7 @@ scaffold models for debugging and development purposes.
             print("Load not implemented or unavailable.")
 
     def do_reset(self, arg):
-        """Reset the system to its initial state."""
+        """Reset the system to its initial state using atomic update."""
         state_manager = getattr(self.sovl_system.context, 'state_manager', None)
         if not state_manager:
             print("StateManager not available for atomic update.")
@@ -873,7 +894,7 @@ scaffold models for debugging and development purposes.
         raise RuntimeError("Simulated panic: Emergency shutdown triggered for testing.")
 
     def do_glitch(self, arg):
-        """Simulate a glitch by corrupting a recent memory or state entry for testing."""
+        """Simulate a glitch by corrupting a recent memory or state entry for testing (atomic)."""
         print("Simulating a glitch: corrupting a recent memory or state entry...")
         state_manager = getattr(self.sovl_system.context, 'state_manager', None)
         if not state_manager:
@@ -926,7 +947,7 @@ scaffold models for debugging and development purposes.
             print(f"Error generating debate: {e}")
 
     def do_rewind(self, arg):
-        """Rewind the conversation history by N turns (default: 7). Usage: rewind [N]"""
+        """Rewind the conversation history by N turns (default: 7) using atomic update."""
         n = 7
         try:
             if arg.strip():

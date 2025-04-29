@@ -416,14 +416,26 @@ class SOVLOrchestrator(OrchestratorInterface):
                 "state_hash": self.state.state_hash
             })
 
+    @property
+    def state(self):
+        """Always access the canonical SOVLState via StateManager."""
+        return getattr(self.state_manager, '_system_state', None)
+
+    @state.setter
+    def state(self, value):
+        """Set the canonical SOVLState in StateManager."""
+        self.state_manager._system_state = value
+
     def sync_state(self) -> None:
-        """Synchronize orchestrator state with the system state."""
+        """Synchronize orchestrator state with the system state using atomic update."""
         with self._lock:
             if not self._system:
                 return
             try:
                 system_state = self._system.get_state()
-                self.state.from_dict(system_state, self.device)
+                def update_fn(state):
+                    state.from_dict(system_state, self.device)
+                self.state_manager.update_state_atomic(update_fn)
                 self._log_event("state_synchronized", {
                     "conversation_id": self.state.history.conversation_id,
                     "state_hash": self.state.state_hash
@@ -474,9 +486,10 @@ class SOVLOrchestrator(OrchestratorInterface):
             self.mediator.register_system(system)
             
             # Load state from file if exists, otherwise initialize new state
-            self.state = self.state_manager.load_state()
-            if self.state is None:
+            loaded_state = self.state_manager.load_state(self.config_manager.config_path)
+            if loaded_state is None:
                 raise RuntimeError("Failed to load state. System cannot proceed without a valid state.")
+            self.state = loaded_state  # Set as canonical state in StateManager
             
             # Generate a wake-up greeting
             if hasattr(system, 'generate'):
@@ -601,8 +614,8 @@ class SOVLOrchestrator(OrchestratorInterface):
         try:
             # Defensive: Attempt state save
             try:
-                if hasattr(self, 'state_manager') and self.state_manager:
-                    self.state_manager.save_state("system_state_final.json")
+                if hasattr(self, 'state_manager') and self.state_manager and self.state:
+                    self.state_manager.save_state(self.state, "system_state_final")
                     self._log_event("state_saved", {"path": "system_state_final.json"})
             except Exception as e:
                 self._log_error("Failed to save state during shutdown", e)
@@ -628,13 +641,11 @@ class SOVLOrchestrator(OrchestratorInterface):
     def _handle_execution_failure(self) -> None:
         """Handle system execution failure with recovery actions."""
         try:
-            # Attempt to save state
-            if self._system and hasattr(self._system, 'state_tracker'):
-                self._system.state_tracker.state.save_state()
-            
-            # Log failure details
+            # Attempt to save state atomically
+            if self.state:
+                self.state_manager.save_state(self.state, "system_state_failure")
             self._log_event("execution_failure_handled", {
-                "state_saved": self._system is not None,
+                "state_saved": self.state is not None,
                 "timestamp": time.time()
             })
         except Exception as e:

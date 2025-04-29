@@ -989,7 +989,18 @@ class StateManager:
         self.gpu_manager = gpu_manager
         self._device = device
         self._lock = threading.Lock()
-        
+        self._system_state = None  # Canonical SOVLState instance
+
+    def set_state(self, state):
+        """Set the canonical SOVLState instance."""
+        with self._lock:
+            self._system_state = state
+
+    def get_state(self):
+        """Get the canonical SOVLState instance."""
+        with self._lock:
+            return self._system_state
+
     def save_state(self, state: SOVLState, path_prefix: str) -> None:
         """Save system state using the SOVLState instance. Retries on transient errors."""
         max_retries = 3
@@ -1038,7 +1049,7 @@ class StateManager:
                     raise StateError(f"StateManager save failed: {str(e)}")
 
     def load_state(self, path_prefix: str) -> SOVLState:
-        """Load system state using the SOVLState instance. Retries on transient errors."""
+        """Load system state using the SOVLState instance. Retries on transient errors. Sets canonical state."""
         max_retries = 3
         retry_delay = 0.5  # seconds
         attempt = 0
@@ -1054,11 +1065,13 @@ class StateManager:
                             f"No state data found by StateManager at {state_path}, creating new state.",
                             level="warning"
                         )
-                        return SOVLState(
+                        loaded_state = SOVLState(
                             config_manager=self._config_manager,
                             logger=self._logger,
                             device=self._device
                         )
+                        self._system_state = loaded_state
+                        return loaded_state
                     with open(state_path, "r") as f:
                         state_dict = json.load(f)
                     if not isinstance(state_dict, dict):
@@ -1069,6 +1082,7 @@ class StateManager:
                         logger=self._logger,
                         device=self._device
                     )
+                    self._system_state = loaded_state
                     self._logger.record_event(
                         event_type="state_loaded_by_manager",
                         message=f"System state loaded via StateManager from {path_prefix}_state.json",
@@ -1110,10 +1124,10 @@ class StateManager:
         The update_fn receives a clone of the current state, mutates it, and returns it.
         The method validates the new state, increments state_version, and commits it if valid.
         Raises ValueError if validation fails or state_version is not incremented.
+        All state mutations should use update_state_atomic for consistency and safety.
         """
         with self._lock:
-            # Assume self._system_state is the canonical SOVLState instance
-            state = getattr(self, '_system_state', None)
+            state = self._system_state
             if state is None:
                 raise StateError("No system state to update.")
             old_version = state.state_version
@@ -1121,7 +1135,6 @@ class StateManager:
             update_fn(new_state)
             new_state.state_version = old_version + 1
             new_state.validate()
-            # Commit
             self._system_state = new_state
             self._logger.record_event(
                 event_type="state_atomic_update",
