@@ -356,70 +356,85 @@ class SOVLRunner:
             raise
 
     @error_handler
-    def _initialize_components(self, context: SystemContext) -> Tuple:
+    def _initialize_components(self, context: SystemContext) -> Dict[str, Any]:
         """Initialize core SOVL components with proper dependency handling."""
         # Define component dependencies
         dependency_graph = {
-            "model_loader": set(),
+            "model_manager": set(),
             "state_tracker": set(),
             "error_manager": {"state_tracker"},
             "memory_monitor": {"error_manager", "ram_manager", "gpu_manager"},
-            "curiosity_engine": {"error_manager", "state_tracker"},
+            "curiosity_manager": {"error_manager", "state_tracker"},
             "memoria_manager": {"error_manager", "state_tracker"}
         }
-        
+
         components = {}
         initialized = set()
-        
+
         def initialize_component(name: str):
             """Recursively initialize a component and its dependencies."""
             if name in initialized:
                 return
-            
+
             # Initialize dependencies first
             for dep in dependency_graph.get(name, set()):
                 if dep not in initialized:
                     initialize_component(dep)
-            
+
             # Component-specific initialization
-            if name == "model_loader":
-                components[name] = ModelLoader(context)
+            if name == "model_manager":
+                components[name] = ModelManager(
+                    config_manager=context.config_manager,
+                    logger=context.logger,
+                    device=context.device
+                )
             elif name == "state_tracker":
-                components[name] = StateTracker(context)
+                components[name] = StateTracker(
+                    config_manager=context.config_manager,
+                    logger=context.logger
+                )
             elif name == "error_manager":
-                components[name] = ErrorManager(context, components["state_tracker"])
+                components[name] = ErrorManager(
+                    context=context,
+                    state_tracker=components["state_tracker"],
+                    config_manager=context.config_manager
+                )
             elif name == "memory_monitor":
                 components[name] = MemoryMonitor(
-                    context,
-                    components["error_manager"],
-                    components.get("ram_manager"),
-                    components.get("gpu_manager")
+                    config_manager=context.config_manager,
+                    logger=context.logger,
+                    ram_manager=components.get("ram_manager"),
+                    gpu_manager=components.get("gpu_manager"),
+                    error_manager=components["error_manager"]
                 )
-            elif name == "curiosity_engine":
-                components[name] = CuriosityEngine(
-                    context,
-                    components["error_manager"],
-                    components["state_tracker"]
+            elif name == "curiosity_manager":
+                components[name] = CuriosityManager(
+                    config_manager=context.config_manager,
+                    logger=context.logger,
+                    error_manager=components["error_manager"],
+                    device=context.device,
+                    state_manager=components["state_tracker"]
                 )
             elif name == "memoria_manager":
                 components[name] = MemoriaManager(
-                    context,
-                    components["error_manager"],
-                    components["state_tracker"]
+                    config_manager=context.config_manager,
+                    logger=context.logger,
+                    error_manager=components["error_manager"],
+                    state_tracker=components["state_tracker"]
                 )
-            
+
             initialized.add(name)
             self.logger.log_event(
                 event_type="component_initialization",
                 message=f"Initialized {name}",
                 level="info"
             )
-        
+
         # Initialize all components
         for component_name in dependency_graph.keys():
             initialize_component(component_name)
-        
-        return tuple(components.values())
+
+        return components
 
     def _initialize_optimizer(self, model: torch.nn.Module) -> None:
         """Initialize optimizer and learning rate scheduler."""
@@ -634,6 +649,7 @@ class SOVLRunner:
         """Asynchronously save system checkpoint."""
         current_time = time.time()
         checkpoint_data = {
+            "version": "1.0",  # Add versioning for future format changes
             "timestamp": current_time,
             "model_state": self.model.state_dict(),
             "optimizer_state": optimizer.state_dict() if optimizer else None,
@@ -656,13 +672,63 @@ class SOVLRunner:
         self.last_checkpoint_time = current_time
         return True
 
+    def _validate_checkpoint(self, checkpoint_data: Dict[str, Any]) -> bool:
+        """Validate checkpoint data structure and compatibility."""
+        try:
+            # Check required fields
+            required_fields = ["timestamp", "model_state"]
+            for field in required_fields:
+                if field not in checkpoint_data:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            # Validate model state compatibility (optional deeper check)
+            if self.model:
+                model_keys = set(self.model.state_dict().keys())
+                checkpoint_keys = set(checkpoint_data["model_state"].keys())
+                missing_keys = model_keys - checkpoint_keys
+                
+                if missing_keys:
+                    self.logger.log_event(
+                        event_type="checkpoint_warning",
+                        message=f"Checkpoint missing {len(missing_keys)} model keys",
+                        level="warning"
+                    )
+            
+            return True
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Checkpoint validation failed: {str(e)}",
+                error_type="checkpoint_validation_error"
+            )
+            return False
+
+    def _load_partial_state(self, model: torch.nn.Module, state_dict: Dict[str, torch.Tensor]) -> Tuple[bool, List[str]]:
+        """Load partial model state and return success status and missing keys."""
+        try:
+            model_dict = model.state_dict()
+            # Filter out incompatible keys
+            filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
+            missing_keys = [k for k in model_dict.keys() if k not in filtered_dict]
+            
+            # Load compatible keys
+            model_dict.update(filtered_dict)
+            model.load_state_dict(model_dict)
+            
+            return len(filtered_dict) > 0, missing_keys
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Partial state loading failed: {str(e)}",
+                error_type="checkpoint_error"
+            )
+            return False, []
+
     @error_handler
     def save_checkpoint(self, force: bool = False, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
         """Save system state checkpoint with async support."""
         if not force and self.last_checkpoint_time is not None:
             if time.time() - self.last_checkpoint_time < self.checkpoint_interval:
                 return False
-                
+            
         try:
             self.logger.log_event(
                 event_type="checkpoint",
@@ -689,41 +755,61 @@ class SOVLRunner:
                 level="info"
             )
             
-            with open(checkpoint_path, 'r') as f:
-                state_data = json.load(f)
-                
-            # Load model state using ModelManager
-            if self.model_manager and state_data["model_path"] is not None:
-                self.model_manager.load_model_state(state_data["model_path"])
-                self.model = self.model_manager.get_base_model()
-                    
+            # Load using torch.load instead of json.load
+            checkpoint_data = torch.load(checkpoint_path, map_location=self.context.device)
+            
+            # Validate checkpoint structure
+            if not self._validate_checkpoint(checkpoint_data):
+                return False
+            
+            # Load model state directly from checkpoint
+            if self.model and "model_state" in checkpoint_data:
+                success, missing_keys = self._load_partial_state(self.model, checkpoint_data["model_state"])
+                if not success:
+                    self.logger.log_error(
+                        error_msg="Failed to load model state",
+                        error_type="checkpoint_error"
+                    )
+                    return False
+                if missing_keys:
+                    self.logger.log_event(
+                        event_type="checkpoint_warning",
+                        message=f"Model loaded with {len(missing_keys)} missing keys",
+                        level="warning"
+                    )
+            
             # Load optimizer state if provided
-            if optimizer is not None and "optimizer_path" in state_data:
-                optimizer_path = Path(state_data["optimizer_path"])
-                if optimizer_path.exists():
-                    optimizer.load_state_dict(torch.load(optimizer_path))
-                    
-            # Load component states
-            for name, component_data in state_data["components"].items():
-                if name in self.components:
-                    component = self.components[name]
-                    if self._validate_component_serialization(component, name):
+            if optimizer is not None and "optimizer_state" in checkpoint_data and checkpoint_data["optimizer_state"] is not None:
+                try:
+                    optimizer.load_state_dict(checkpoint_data["optimizer_state"])
+                    self.logger.log_event(
+                        event_type="checkpoint",
+                        message="Optimizer state loaded successfully",
+                        level="info"
+                    )
+                except Exception as e:
+                    self.logger.log_error(
+                        error_msg=f"Failed to load optimizer state: {str(e)}",
+                        error_type="checkpoint_error"
+                    )
+                    # Continue loading without optimizer state
+            
+            # Load component states if available
+            if "component_states" in checkpoint_data:
+                loaded_components = 0
+                for name, component_data in checkpoint_data["component_states"].items():
+                    if name in self.components:
                         try:
-                            component.from_dict(component_data)
+                            self.components[name].from_dict(component_data)
+                            loaded_components += 1
                         except Exception as e:
                             self.logger.log_error(
                                 error_msg=f"Failed to load state for component {name}: {str(e)}",
                                 error_type="checkpoint_error"
                             )
-                            return False
-                    else:
-                        self.logger.log_error(
-                            error_msg=f"Cannot load state for component {name}: Serialization validation failed",
-                            error_type="checkpoint_error"
-                        )
-                        return False
-                    
-            self.last_checkpoint_time = state_data["timestamp"]
+                            # Continue with other components instead of failing completely
+            
+            self.last_checkpoint_time = checkpoint_data["timestamp"]
             self.logger.log_event(
                 event_type="checkpoint",
                 message="Checkpoint loaded successfully",
@@ -737,18 +823,19 @@ class SOVLRunner:
                 error_type="checkpoint_error"
             )
             return False
-    
+
     def cleanup_old_checkpoints(self, max_checkpoints: int = 5):
         """Remove old checkpoints to manage disk space."""
         try:
             checkpoint_dir = Path("checkpoints")
             checkpoint_dir.mkdir(exist_ok=True)
-            checkpoints = sorted(checkpoint_dir.glob("state_*.json"), key=lambda x: x.stat().st_mtime)
+            
+            # Update to look for .pt files instead of .json
+            checkpoints = sorted(checkpoint_dir.glob("checkpoint_*.pt"), key=lambda x: x.stat().st_mtime)
+            
+            # Remove older checkpoints beyond the max limit
             for old_checkpoint in checkpoints[:-max_checkpoints]:
                 old_checkpoint.unlink()
-                model_path = checkpoint_dir / f"model_{old_checkpoint.stem.split('_')[1]}.pt"
-                if model_path.exists():
-                    model_path.unlink()
                 self.logger.log_event(
                     event_type="checkpoint_cleanup",
                     message=f"Removed old checkpoint: {old_checkpoint}",
@@ -973,10 +1060,32 @@ class SOVLRunner:
                 self.logger.log_error(error_msg="Failed to initialize context", error_type="context_error")
                 return
             self.components = self._initialize_components(self.context)
-            if not self.components or len(self.components) < 2:
+            if not self.components:
                 self.logger.log_error(error_msg="Component initialization failed or incomplete", error_type="component_error")
                 return
-            self.model = self.components[1]
+                
+            # Get model from ModelManager instead of direct tuple indexing
+            if "model_manager" in self.components and self.components["model_manager"] is not None:
+                model_manager = self.components["model_manager"]
+                self.model = model_manager.get_base_model()
+                if not isinstance(self.model, torch.nn.Module):
+                    self.logger.log_error(error_msg="Invalid model type", error_type="component_error")
+                    return
+                
+                # Get the tokenizer from the model manager
+                self.tokenizer = model_manager.get_base_tokenizer()
+                if self.tokenizer is None:
+                    self.logger.log_error(error_msg="Failed to get tokenizer from model manager", error_type="tokenizer_error")
+                    return
+                    
+                self.logger.log_event(
+                    event_type="tokenizer_initialization",
+                    message="Tokenizer initialized successfully",
+                    level="info"
+                )
+            else:
+                self.logger.log_error(error_msg="ModelManager not initialized", error_type="component_error")
+                return
             
             # Initialize state manager
             self.state_manager = StateManager(

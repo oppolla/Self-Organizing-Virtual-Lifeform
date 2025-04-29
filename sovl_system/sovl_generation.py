@@ -74,7 +74,7 @@ class GenerationManager:
             level="info",
             component="GenerationManager"
         )
-        
+
         # Lazy initialization flags
         self._initialized_primer = False
         self._initialized_memory_manager = False
@@ -110,7 +110,7 @@ class GenerationManager:
         
         # Initialize configuration
         self._initialize_config()
-        
+
         # Memory settings
         self.scaffold_unk_id = self._get_config_value("controls_config.scaffold_unk_id", scaffold_tokenizer.unk_token_id)
         self.use_token_map_memory = self._get_config_value("controls_config.use_token_map_memory", True)
@@ -254,7 +254,7 @@ class GenerationManager:
                 error_type="error_handling_error",
                 stack_trace=traceback.format_exc()
             )
-            
+
     def _update_state_after_error(self, error: Exception, context: str):
         """Update state after an error occurs."""
         # Will be implemented in future update
@@ -277,7 +277,7 @@ class GenerationManager:
             
         if not hasattr(self.curiosity_manager, 'get_curiosity_score'):
             self.logger.log_warning("CuriosityManager missing get_curiosity_score method")
-            
+
     @property
     def current_temperament_score(self) -> float:
         """Get the current temperament score."""

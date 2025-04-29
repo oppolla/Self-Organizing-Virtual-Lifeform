@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Type
 import torch
 import time
 import math
@@ -15,6 +15,7 @@ from transformers import get_linear_schedule_with_warmup
 from sovl_engram import LoraAdapterManager
 from sovl_io import JSONLLoader
 import threading
+import gc
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -237,15 +238,15 @@ class TrainingConfig:
             try:
                 # Update in config manager
                 success = self.config_manager.update(f"training.{key}", value)
+                # Only reload config if update succeeded, and do it inside the lock
+                if success:
+                    self._load_config()
             except Exception as e:
                 raise ConfigurationError(
                     f"Failed to update training configuration: {str(e)}",
                     traceback.format_exc()
                 )
-        # Only reload config if update succeeded, and do it outside the lock
-        if success:
-            self._load_config()
-        return success
+            return success
         
     # Retrieve a training config parameter via ConfigManager.
     def get(self, key: str, default: Any = None) -> Any:
@@ -379,10 +380,8 @@ class TrainingManager:
     @torch.no_grad()
     def _prepare_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Prepare batch for training with memory optimization and robust device handling."""
-        prepared_batch = {}
-        max_length = self.config.memory.max_seq_length
+        # Validate and update device if needed
         device = self.device
-        # Check device availability
         if device.type == "cuda" and not torch.cuda.is_available():
             if hasattr(self, "logger") and self.logger:
                 self.logger.log_warning(
@@ -390,6 +389,11 @@ class TrainingManager:
                     event_type="device_warning"
                 )
             device = torch.device("cpu")
+            self.device = device  # Update instance device
+        
+        # Truncate sequence lengths if needed
+        max_length = self.config.memory.max_seq_length
+        truncated_batch = {}
         for key, tensor in batch.items():
             if not isinstance(tensor, torch.Tensor):
                 if hasattr(self, "logger") and self.logger:
@@ -397,23 +401,40 @@ class TrainingManager:
                         message=f"Non-tensor value for key {key} in batch",
                         event_type="batch_preparation_warning"
                     )
+                truncated_batch[key] = tensor
                 continue
-            # Only move if not already on the correct device
-            if tensor.device != device:
-                try:
-                    tensor = tensor.to(device)
-                except RuntimeError as e:
-                    if hasattr(self, "logger") and self.logger:
-                        self.logger.log_error(
-                            error_msg=f"Failed to move tensor to device {device}: {str(e)}",
-                            error_type="device_transfer_error"
-                        )
-                    raise
+            
             # Truncate sequences if needed
             if key in ["input_ids", "attention_mask"] and tensor.size(1) > max_length:
-                tensor = tensor[:, :max_length]
-            prepared_batch[key] = tensor
-        return prepared_batch
+                truncated_batch[key] = tensor[:, :max_length]
+            else:
+                truncated_batch[key] = tensor
+        
+        # Move entire batch to device recursively using enhanced utility
+        from sovl_utils import move_batch_to_device, validate_device_consistency
+        
+        try:
+            prepared_batch = move_batch_to_device(truncated_batch, device)
+            
+            # Validate device consistency with model
+            is_consistent, error_msg = validate_device_consistency(self.model, prepared_batch, device)
+            if not is_consistent and hasattr(self, "logger") and self.logger:
+                self.logger.log_warning(
+                    message=f"Device inconsistency: {error_msg}",
+                    event_type="device_consistency_warning"
+                )
+                # Try to fix the issue by moving the model to the correct device
+                if device != next(self.model.parameters()).device:
+                    self.model.to(device)
+                    
+            return prepared_batch
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_error(
+                    error_msg=f"Failed to prepare batch: {str(e)}",
+                    error_type="batch_preparation_error"
+                )
+            raise
         
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Perform a single training step with gradient accumulation and mixed precision."""
@@ -422,6 +443,10 @@ class TrainingManager:
         
         # Prepare batch
         batch = self._prepare_batch(batch)
+        
+        # Check device state periodically
+        if self.step_count % 100 == 0:
+            self._monitor_device_state()
         
         # Determine if we should use AMP
         use_amp = self.config.memory.use_amp and self.scaler is not None
@@ -514,6 +539,9 @@ class TrainingManager:
         metrics = defaultdict(float)
         num_batches = 0
         
+        # Monitor device state before validation
+        self._monitor_device_state()
+        
         for batch in val_loader:
             # Prepare batch
             batch = self._prepare_batch(batch)
@@ -575,64 +603,112 @@ class TrainingManager:
             
         return metrics
         
-    def save_checkpoint(self, path: Optional[str] = None) -> None:
-        """Save training checkpoint with metadata."""
-        if path is None:
-            path = self.config.params.checkpoint_path
+    def save_checkpoint(self, path: Optional[str] = None) -> str:
+        """
+        Save model checkpoint with optimizer and training state.
+        Includes LoRA-aware functionality.
+        
+        Args:
+            path: Path to save checkpoint or None for default
             
+        Returns:
+            str: Path where checkpoint was saved
+        """
+        path = path or f"{self.config.params.checkpoint_path}_step{self.step_count}"
+        
+        # Create directory if it doesn't exist
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        
         checkpoint = {
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
-            "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
-            "scaler_state": self.scaler.state_dict() if self.scaler else None,
             "step_count": self.step_count,
             "optimizer_step_count": self.optimizer_step_count,
             "epoch_count": self.epoch_count,
             "best_metrics": self.best_metrics,
             "metrics_history": dict(self.metrics_history),
-            "config": self.config.__dict__
+            "checkpoint_date": int(time.time())
         }
         
-        torch.save(checkpoint, path)
+        # Add scheduler state if available
+        if self.scheduler is not None:
+            checkpoint["scheduler_state"] = self.scheduler.state_dict()
         
-    def load_checkpoint(self, path: str) -> None:
-        """Load training checkpoint with validation."""
-        import os
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Checkpoint file not found at {path}")
-
-        map_location = self.device if torch.cuda.is_available() else torch.device('cpu')
-
+        # Add scaler state if available
+        if self.scaler is not None:
+            checkpoint["scaler_state"] = self.scaler.state_dict()
+        
         try:
-            checkpoint = torch.load(path, map_location=map_location)
-            required_keys = ["model_state", "optimizer_state", "step_count", "epoch_count"]
-            if not all(key in checkpoint for key in required_keys):
-                raise ValueError(f"Checkpoint file at {path} is missing required keys.")
+            torch.save(checkpoint, path)
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_training_event(
+                    event_type="checkpoint_saved",
+                    message=f"Checkpoint saved to {path}",
+                    additional_info={
+                        "step": self.step_count,
+                        "epoch": self.epoch_count
+                    }
+                )
+                
+            # Try to save LoRA checkpoint if available
+            if self.lora_manager:
+                try:
+                    lora_path = f"{path}_lora"
+                    success = self.save_lora_checkpoint(lora_path)
+                    if success and hasattr(self, "logger") and self.logger:
+                        self.logger.log_info(
+                            message=f"Saved specialized LoRA checkpoint to {lora_path}",
+                            event_type="lora_checkpoint_saved"
+                        )
+                except Exception as e:
+                    # Non-fatal error for LoRA checkpoint failure
+                    if hasattr(self, "logger") and self.logger:
+                        self.logger.log_warning(
+                            message=f"LoRA checkpoint save failed, continuing with regular checkpoint: {str(e)}",
+                            event_type="lora_save_warning"
+                        )
+                    
+            return path
+        except Exception as e:
+            error_msg = f"Failed to save checkpoint to {path}: {e}"
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_training_event(
+                    event_type="checkpoint_save_failed",
+                    message=error_msg,
+                    level="error"
+                )
+            raise RuntimeError(error_msg)
 
-            # Validate model state dict keys
-            checkpoint_model_state = checkpoint["model_state"]
-            current_model_state = self.model.state_dict()
-            if set(checkpoint_model_state.keys()) != set(current_model_state.keys()):
-                raise ValueError("Checkpoint model state keys do not match current model")
-
-            # Load model state (strict=False, log missing/unexpected keys)
-            load_result = self.model.load_state_dict(checkpoint_model_state, strict=False)
-            missing_keys, unexpected_keys = load_result.missing_keys, load_result.unexpected_keys
-            if missing_keys or unexpected_keys:
-                if hasattr(self, 'logger') and self.logger:
+    def load_checkpoint(self, path: str) -> None:
+        """
+        Load model checkpoint with optimizer and training state.
+        Includes LoRA-aware functionality.
+        
+        Args:
+            path: Path to load checkpoint from
+        """
+        import os
+        try:
+            if not os.path.exists(path):
+                raise RuntimeError(f"Checkpoint file not found: {path}")
+                
+            checkpoint = torch.load(path, map_location=self.device)
+            
+            # Load model state
+            try:
+                missing, unexpected = self.model.load_state_dict(checkpoint["model_state"], strict=False)
+                if missing and hasattr(self, "logger") and self.logger:
                     self.logger.log_warning(
-                        f"Checkpoint loading issues: missing={missing_keys}, unexpected={unexpected_keys}",
+                        message=f"Missing keys in model state: {missing[:5]}{'...' if len(missing) > 5 else ''}",
                         event_type="checkpoint_load_warning"
                     )
-
-            # Validate optimizer param groups
-            optimizer_state = checkpoint["optimizer_state"]
-            if len(optimizer_state.get("param_groups", [])) != len(self.optimizer.param_groups):
-                raise ValueError("Optimizer parameter groups mismatch")
+            except Exception as e:
+                raise RuntimeError(f"Could not load model state: {e}")
 
             # Load optimizer state
             try:
-                self.optimizer.load_state_dict(optimizer_state)
+                self.optimizer.load_state_dict(checkpoint["optimizer_state"])
             except Exception as e:
                 raise RuntimeError(f"Could not load optimizer state: {e}")
 
@@ -656,17 +732,174 @@ class TrainingManager:
             self.epoch_count = checkpoint["epoch_count"]
             self.best_metrics = checkpoint.get("best_metrics", {})
             self.metrics_history = defaultdict(list, checkpoint.get("metrics_history", {}))
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to load checkpoint from {path}: {e}")
             
-    def save_lora_checkpoint(self, path: str):
-        if self.lora_manager:
+            # Try loading LoRA checkpoint if available
+            lora_path = f"{path}_lora"
+            if os.path.exists(lora_path) and self.lora_manager:
+                try:
+                    success = self.load_lora_checkpoint(lora_path)
+                    if success and hasattr(self, "logger") and self.logger:
+                        self.logger.log_info(
+                            message=f"Loaded specialized LoRA checkpoint from {lora_path}",
+                            event_type="lora_checkpoint_loaded"
+                        )
+                except Exception as e:
+                    # Non-fatal error - log but continue with regular checkpoint
+                    if hasattr(self, "logger") and self.logger:
+                        self.logger.log_warning(
+                            message=f"LoRA checkpoint loading failed, continuing with standard model: {str(e)}",
+                            event_type="lora_load_warning"
+                        )
+            
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_training_event(
+                    event_type="checkpoint_loaded",
+                    message=f"Checkpoint loaded from {path}",
+                    additional_info={
+                        "step": self.step_count,
+                        "epoch": self.epoch_count
+                    }
+                )
+                
+        except Exception as e:
+            error_msg = f"Failed to load checkpoint from {path}: {e}"
+            if hasattr(self, "logger") and self.logger:
+                import traceback
+                self.logger.log_error(
+                    error_msg=error_msg,
+                    error_type="checkpoint_load_error",
+                    stack_trace=traceback.format_exc()
+                )
+            raise RuntimeError(error_msg)
+
+    def save_lora_checkpoint(self, path: str) -> bool:
+        """
+        Save LoRA weights to checkpoint with error handling.
+        
+        Args:
+            path: Path to save checkpoint
+            
+        Returns:
+            bool: True if successfully saved, False if LoRA unavailable
+        """
+        if not self.lora_manager:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_warning(
+                    message="LoRA manager not available. Skipping LoRA checkpoint save.",
+                    event_type="lora_checkpoint_warning"
+                )
+            return False
+            
+        try:
             self.lora_manager.save_lora_weights(self.model, path)
             
-    def load_lora_checkpoint(self, path: str):
-        if self.lora_manager:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_info(
+                    message=f"LoRA checkpoint saved to {path}",
+                    event_type="lora_checkpoint_saved"
+                )
+            return True
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                import traceback
+                self.logger.log_error(
+                    error_msg=f"Failed to save LoRA checkpoint: {str(e)}",
+                    error_type="lora_checkpoint_error",
+                    stack_trace=traceback.format_exc()
+                )
+            # Re-raise the exception for caller handling
+            raise
+
+    def load_lora_checkpoint(self, path: str) -> bool:
+        """
+        Load LoRA weights from checkpoint with compatibility validation.
+        
+        Args:
+            path: Path to load checkpoint from
+            
+        Returns:
+            bool: True if successfully loaded, False if LoRA unavailable
+        """
+        import os
+        if not self.lora_manager:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_warning(
+                    message="LoRA manager not available. Skipping LoRA checkpoint load.",
+                    event_type="lora_checkpoint_warning"
+                )
+            return False
+            
+        try:
+            # Check if checkpoint exists
+            if not os.path.exists(path):
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_warning(
+                        message=f"LoRA checkpoint not found at {path}",
+                        event_type="lora_checkpoint_not_found"
+                    )
+                return False
+                
+            # Validate checkpoint compatibility
+            if not self.lora_manager.is_checkpoint_compatible(path, self.model):
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_warning(
+                        message=f"LoRA checkpoint at {path} is incompatible with current model",
+                        event_type="lora_checkpoint_incompatible"
+                    )
+                return False
+                
+            # Load weights
             self.model = self.lora_manager.load_lora_weights(self.model, path)
+            
+            if hasattr(self, "logger") and self.logger:
+                self.logger.log_info(
+                    message=f"LoRA checkpoint loaded from {path}",
+                    event_type="lora_checkpoint_loaded"
+                )
+            return True
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                import traceback
+                self.logger.log_error(
+                    error_msg=f"Failed to load LoRA checkpoint: {str(e)}",
+                    error_type="lora_checkpoint_error",
+                    stack_trace=traceback.format_exc()
+                )
+            # Re-raise the exception for caller handling
+            raise
+
+    def _monitor_device_state(self) -> None:
+        """Monitor device state for debugging purposes."""
+        if not hasattr(self, "logger") or not self.logger:
+            return
+            
+        try:
+            # Check model device
+            model_devices = {str(p.device) for p in self.model.parameters()}
+            
+            # Check optimizer device
+            optimizer_devices = set()
+            for param_group in self.optimizer.param_groups:
+                for p in param_group['params']:
+                    optimizer_devices.add(str(p.device))
+                    
+            # Log device state
+            self.logger.log_info(
+                message=f"Device state - Target: {self.device}, Model: {model_devices}, Optimizer: {optimizer_devices}",
+                event_type="device_monitor",
+                additional_info={
+                    "target_device": str(self.device),
+                    "model_devices": list(model_devices),
+                    "optimizer_devices": list(optimizer_devices),
+                    "cuda_available": torch.cuda.is_available(),
+                    "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0
+                }
+            )
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Error monitoring device state: {str(e)}",
+                error_type="device_monitor_error"
+            )
 
 # TrainingWorkflowManager: orchestrates full multi-phase training cycles (train, sleep, gestation, dream).
 class TrainingWorkflowManager:
@@ -681,268 +914,379 @@ class TrainingWorkflowManager:
         self.config = getattr(trainer, 'config', None)
         self.model_manager = getattr(trainer, 'model_manager', None)  # <-- Add reference to model manager
         
+        # Initialize locks for thread synchronization
+        self._training_lock = threading.RLock()  # Recursive lock for training operations
+        self._gestation_lock = threading.RLock()  # Recursive lock for gestation operations
+        self._model_lock = threading.RLock()     # Lock for model access
+        self._resource_locks = {}                # Dictionary to store locks for specific resources
+        
+    def _get_resource_lock(self, resource_name):
+        """Get or create a lock for a specific resource."""
+        if resource_name not in self._resource_locks:
+            self._resource_locks[resource_name] = threading.RLock()
+        return self._resource_locks[resource_name]
+        
     def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
         """Run a complete training cycle using the modular pipeline with error recovery and notification."""
-        device = getattr(self.trainer, 'device', None)
-        batch_preparer = getattr(self.trainer, 'batch_preparer', None)
-        logger = getattr(self, 'logger', None)
-        training_manager = getattr(self.trainer, 'training_manager', None)
-        error_manager = getattr(self.trainer, 'error_manager', None)
-        error_handling_cfg = None
-        # Get error handling config if available
-        if hasattr(self, 'config') and self.config and hasattr(self.config, 'logging'):
-            error_handling_cfg = getattr(self.config.logging, 'error_handling_config', None)
-        retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
-        retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
-        last_exception = None
-        for attempt in range(retry_attempts):
-            # Prepare batch using modular batch preparer
-            try:
-                collated_batch = batch_preparer.prepare(batch)
-            except Exception as e:
-                last_exception = e
-                if logger:
-                    logger.log_error(
-                        f"Failed to prepare training batch: {str(e)}",
-                        error_type="training_cycle_batch_preparation_error",
-                        stack_trace=traceback.format_exc(),
-                        additional_info={"attempt": attempt+1}
-                    )
-                if error_manager:
-                    error_manager.notify_error(
-                        error_type="training_cycle_batch_preparation_error",
-                        error_msg=str(e),
-                        context={"attempt": attempt+1, "batch": batch}
-                    )
-                if attempt < retry_attempts - 1 and retry_delay > 0:
-                    time.sleep(retry_delay)
-                continue
-            # Run training step
-            try:
-                metrics = training_manager.train_step(batch=collated_batch)
-                loss = metrics.get("loss", 0.0)
-                return loss, metrics
-            except Exception as e:
-                last_exception = e
-                if logger:
-                    logger.log_error(
-                        f"Error during training step: {str(e)}",
-                        error_type="training_cycle_training_error",
-                        stack_trace=traceback.format_exc(),
-                        additional_info={"attempt": attempt+1}
-                    )
-                if error_manager:
-                    error_manager.notify_error(
-                        error_type="training_cycle_training_error",
-                        error_msg=str(e),
-                        context={"attempt": attempt+1, "batch": batch}
-                    )
-                if attempt < retry_attempts - 1 and retry_delay > 0:
-                    time.sleep(retry_delay)
-                continue
-        # If all attempts failed
-        if logger:
-            logger.log_error(
-                f"Training cycle failed after {retry_attempts} attempts: {str(last_exception)}",
-                error_type="training_cycle_final_failure",
-                stack_trace=traceback.format_exc() if last_exception else None
-            )
-        if error_manager:
-            error_manager.notify_error(
-                error_type="training_cycle_final_failure",
-                error_msg=str(last_exception),
-                context={"batch": batch}
-            )
-        return 0.0, {"status": "error", "error": str(last_exception) if last_exception else "unknown_error"}
+        with self._training_lock:  # Ensure only one training cycle runs at a time
+            device = getattr(self.trainer, 'device', None)
+            batch_preparer = getattr(self.trainer, 'batch_preparer', None)
+            logger = getattr(self, 'logger', None)
+            training_manager = getattr(self.trainer, 'training_manager', None)
+            error_manager = getattr(self.trainer, 'error_manager', None)
+            error_handling_cfg = None
+            # Get error handling config if available
+            if hasattr(self, 'config') and self.config and hasattr(self.config, 'logging'):
+                error_handling_cfg = getattr(self.config.logging, 'error_handling_config', None)
+            retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
+            retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
+            last_exception = None
+            for attempt in range(retry_attempts):
+                # Prepare batch using modular batch preparer
+                try:
+                    collated_batch = batch_preparer.prepare(batch)
+                except Exception as e:
+                    last_exception = e
+                    if logger:
+                        logger.log_error(
+                            f"Failed to prepare training batch: {str(e)}",
+                            error_type="training_cycle_batch_preparation_error",
+                            stack_trace=traceback.format_exc(),
+                            additional_info={"attempt": attempt+1}
+                        )
+                    if error_manager:
+                        error_manager.notify_error(
+                            error_type="training_cycle_batch_preparation_error",
+                            error_msg=str(e),
+                            context={"attempt": attempt+1, "batch": batch}
+                        )
+                    if attempt < retry_attempts - 1 and retry_delay > 0:
+                        time.sleep(retry_delay)
+                    continue
+                # Run training step with synchronized access to training_manager
+                try:
+                    with self._get_resource_lock('training_manager'):  # Lock access to training_manager
+                        metrics = training_manager.train_step(batch=collated_batch)
+                    loss = metrics.get("loss", 0.0)
+                    return loss, metrics
+                except Exception as e:
+                    last_exception = e
+                    if logger:
+                        logger.log_error(
+                            f"Error during training step: {str(e)}",
+                            error_type="training_cycle_training_error",
+                            stack_trace=traceback.format_exc(),
+                            additional_info={"attempt": attempt+1}
+                        )
+                    if error_manager:
+                        error_manager.notify_error(
+                            error_type="training_cycle_training_error",
+                            error_msg=str(e),
+                            context={"attempt": attempt+1, "batch": batch}
+                        )
+                    if attempt < retry_attempts - 1 and retry_delay > 0:
+                        time.sleep(retry_delay)
+                    continue
+            # If all attempts failed
+            if logger:
+                logger.log_error(
+                    f"Training cycle failed after {retry_attempts} attempts: {str(last_exception)}",
+                    error_type="training_cycle_final_failure",
+                    stack_trace=traceback.format_exc() if last_exception else None
+                )
+            if error_manager:
+                error_manager.notify_error(
+                    error_type="training_cycle_final_failure",
+                    error_msg=str(last_exception),
+                    context={"batch": batch}
+                )
+            return 0.0, {"status": "error", "error": str(last_exception) if last_exception else "unknown_error"}
         
     def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
         """Run gestation cycle with metadata enrichment using the modular pipeline. Supports multiple scaffolds and robust validation and error recovery."""
-        import time
-        import os
-        from datetime import datetime
-        import traceback
+        with self._gestation_lock:  # Ensure only one gestation cycle runs at a time
+            import time
+            import os
+            import gc
+            from datetime import datetime
+            import traceback
+            import torch
 
-        # Use modular pipeline for metadata enrichment and batch preparation
-        metadata_processor = getattr(self.trainer, 'metadata_processor', None)
-        tokenizer = getattr(self.trainer, 'tokenizer', None)
-        device = getattr(self.trainer, 'device', None)
-        batch_preparer = getattr(self.trainer, 'batch_preparer', None)
-        logger = getattr(self, 'logger', None)
-        model_manager = getattr(self, 'model_manager', None)
-        training_manager = getattr(self.trainer, 'training_manager', None)
-        dreamer = getattr(self.trainer, 'dreamer', None)
-        state = getattr(self, 'state', None)
+            # Use modular pipeline for metadata enrichment and batch preparation
+            metadata_processor = getattr(self.trainer, 'metadata_processor', None)
+            tokenizer = getattr(self.trainer, 'tokenizer', None)
+            device = getattr(self.trainer, 'device', None)
+            batch_preparer = getattr(self.trainer, 'batch_preparer', None)
+            logger = getattr(self, 'logger', None)
+            model_manager = getattr(self, 'model_manager', None)
+            training_manager = getattr(self.trainer, 'training_manager', None)
+            dreamer = getattr(self.trainer, 'dreamer', None)
+            state = getattr(self, 'state', None)
 
-        # Error handling config
-        error_handling_cfg = None
-        if hasattr(self, 'config') and self.config and hasattr(self.config, 'logging'):
-            error_handling_cfg = getattr(self.config.logging, 'error_handling_config', None)
-        retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
-        retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
+            # Error handling config
+            error_handling_cfg = None
+            if hasattr(self, 'config') and self.config and hasattr(self.config, 'logging'):
+                error_handling_cfg = getattr(self.config.logging, 'error_handling_config', None)
+            retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
+            retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
 
-        # Validate conversation history
-        if not conversation_history or not isinstance(conversation_history, list) or not all(isinstance(s, dict) for s in conversation_history):
-            if logger:
-                logger.log_error("Invalid or missing conversation history for gestation cycle.", event_type="gestation_invalid_conversation")
-            return
+            # Validate conversation history
+            if not conversation_history or not isinstance(conversation_history, list) or not all(isinstance(s, dict) for s in conversation_history):
+                if logger:
+                    logger.log_error("Invalid or missing conversation history for gestation cycle.", event_type="gestation_invalid_conversation")
+                return
 
-        # Validate model_manager and scaffold models
-        scaffold_count = 0
-        lora_count = 0
-        if model_manager:
-            scaffold_count = len(getattr(model_manager, 'scaffold_models', []))
-            lora_count = len(getattr(model_manager, 'lora_managers', []))
-        if scaffold_count == 0 or lora_count == 0:
-            if logger:
-                logger.log_error(f"No scaffold models ({scaffold_count}) or LoRA managers ({lora_count}) available for gestation cycle.", event_type="gestation_scaffold_lora_missing")
-            return
-
-        # Validate scaffold and LoRA manager counts
-        if scaffold_count != lora_count:
-            if logger:
-                logger.log_warning(
-                    f"Mismatch between scaffold models ({scaffold_count}) and LoRA managers ({lora_count}). Using minimum count ({min(scaffold_count, lora_count)}).",
-                    event_type="gestation_scaffold_lora_mismatch",
-                    additional_info={"scaffold_count": scaffold_count, "lora_count": lora_count}
-                )
-
-        min_count = min(scaffold_count, lora_count)
-        successful_scaffolds = []
-
-        for idx in range(min_count):
-            scaffold_model = model_manager.scaffold_models[idx]
-            lora_manager = model_manager.lora_managers[idx]
-
-            # Retry logic for batch preparation
-            last_exception = None
-            for attempt in range(retry_attempts):
-                try:
-                    enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
-                    batch = batch_preparer.prepare(enriched_samples)
-                    break
-                except Exception as e:
-                    last_exception = e
-                    if logger:
-                        logger.log_error(
-                            f"Error during gestation batch preparation (scaffold {idx}, attempt {attempt+1}): {str(e)}",
-                            error_type="gestation_batch_error",
-                            stack_trace=traceback.format_exc(),
-                            additional_info={"scaffold_index": idx, "attempt": attempt+1}
-                        )
-                    if attempt < retry_attempts - 1 and retry_delay > 0:
-                        time.sleep(retry_delay)
-            else:
-                raise RuntimeError(f"Gestation batch preparation failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
-
-            # Retry logic for training step
-            last_exception = None
-            for attempt in range(retry_attempts):
-                try:
-                    optimizer = torch.optim.AdamW(
-                        lora_manager.lora_parameters(scaffold_model),
-                        lr=self.config.optimizer.learning_rate
-                    )
-                    scaffold_model.train()
-                    optimizer.zero_grad()
-                    outputs = scaffold_model(**batch)
-                    loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-                    loss.backward()
-                    optimizer.step()
-                    if logger:
-                        logger.log_info(
-                            f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss.item()}",
-                            event_type="gestation_lora_train",
-                            additional_info={"scaffold_index": idx}
-                        )
-                    break
-                except Exception as e:
-                    last_exception = e
-                    if logger:
-                        logger.log_error(
-                            f"Error during gestation LoRA training step (scaffold {idx}, attempt {attempt+1}): {str(e)}",
-                            error_type="gestation_lora_training_error",
-                            stack_trace=traceback.format_exc(),
-                            additional_info={"scaffold_index": idx, "attempt": attempt+1}
-                        )
-                    if attempt < retry_attempts - 1 and retry_delay > 0:
-                        time.sleep(retry_delay)
-            else:
-                raise RuntimeError(f"Gestation LoRA training failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
-
-            # Save LoRA weights as long-term memory, with rollback on failure
-            lora_dir = "lora_checkpoints"
-            os.makedirs(lora_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            lora_path = os.path.join(lora_dir, f"lora_{idx}_{timestamp}.pt")
-            try:
-                lora_manager.save_lora_weights(scaffold_model, lora_path)
+            # Validate model_manager and scaffold models with proper synchronization
+            scaffold_count = 0
+            lora_count = 0
+            with self._get_resource_lock('model_manager'):  # Lock access to model_manager
                 if model_manager:
-                    model_manager.set_active_lora_checkpoint(lora_path)
-                if logger:
-                    logger.log_info(
-                        f"LoRA weights saved after gestation for scaffold {idx} to {lora_path}",
-                        event_type="gestation_lora_save",
-                        additional_info={"scaffold_index": idx}
-                    )
-            except Exception as e:
-                # Rollback partial save
-                if os.path.exists(lora_path):
-                    os.remove(lora_path)
-                if logger:
-                    logger.log_error(
-                        f"Error saving LoRA weights after gestation (scaffold {idx}): {str(e)}",
-                        error_type="gestation_lora_save_error",
-                        stack_trace=traceback.format_exc(),
-                        additional_info={"scaffold_index": idx}
-                    )
-                raise RuntimeError(f"Failed to save LoRA weights for scaffold {idx}: {e}")
-
-            successful_scaffolds.append(idx)
-
-        if len(successful_scaffolds) != min_count:
-            raise RuntimeError("Not all scaffolds completed gestation training successfully")
-
-        # Update SOVL state if available
-        if state is not None and hasattr(state, 'update_after_gestation'):
-            try:
-                state.update_after_gestation()
-                if logger:
-                    logger.log_info("SOVL state updated after gestation.", event_type="gestation_state_update")
-            except Exception as e:
-                if logger:
-                    logger.log_error(
-                        f"Error updating SOVL state after gestation: {str(e)}",
-                        error_type="gestation_state_update_error",
-                        stack_trace=traceback.format_exc()
-                    )
-
-        # DREAMER integration
-        if dreamer is not None:
-            try:
-                dreamer.run_dream_cycle()
-                if logger:
-                    logger.log_info("Dreamer cycle completed after gestation.", event_type="gestation_dreamer")
-            except Exception as e:
-                if logger:
-                    logger.log_error(
-                        f"Error during Dreamer cycle: {str(e)}",
-                        error_type="gestation_dreamer_error",
-                        stack_trace=traceback.format_exc()
-                    )
-
-    def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
-        """Run dream cycle."""
-        try:
-            # Update state and log event
-            self.event_handler.handle_dream_complete(
-                dream_prompt=dream_prompt,
-                is_novel=is_novel,
-                memory_count=memory_count
-            )
+                    scaffold_count = len(getattr(model_manager, 'scaffold_models', []))
+                    lora_count = len(getattr(model_manager, 'lora_managers', []))
             
-        except Exception as e:
-            self.logger.error(f"Error in dream cycle: {str(e)}")
-            raise
+            if scaffold_count == 0 or lora_count == 0:
+                if logger:
+                    logger.log_error(f"No scaffold models ({scaffold_count}) or LoRA managers ({lora_count}) available for gestation cycle.", event_type="gestation_scaffold_lora_missing")
+                return
+
+            # Validate scaffold and LoRA manager counts
+            if scaffold_count != lora_count:
+                if logger:
+                    logger.log_warning(
+                        f"Mismatch between scaffold models ({scaffold_count}) and LoRA managers ({lora_count}). Using minimum count ({min(scaffold_count, lora_count)}).",
+                        event_type="gestation_scaffold_lora_mismatch",
+                        additional_info={"scaffold_count": scaffold_count, "lora_count": lora_count}
+                    )
+
+            min_count = min(scaffold_count, lora_count)
+            successful_scaffolds = []
+
+            # Run garbage collection before starting the loop
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            for idx in range(min_count):
+                # Get references to the current scaffold model and LoRA manager with synchronization
+                with self._get_resource_lock('model_manager'):  # Lock access to model_manager
+                    scaffold_model = model_manager.scaffold_models[idx]
+                    lora_manager = model_manager.lora_managers[idx]
+
+                # Local variables for memory management
+                enriched_samples = None
+                batch = None
+                optimizer = None
+                outputs = None
+                loss = None
+
+                try:
+                    # Retry logic for batch preparation
+                    last_exception = None
+                    for attempt in range(retry_attempts):
+                        try:
+                            # Clear memory before starting new attempt
+                            if enriched_samples is not None:
+                                del enriched_samples
+                            if batch is not None:
+                                del batch
+                            
+                            # Force garbage collection
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                            
+                            # Process data
+                            enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
+                            batch = batch_preparer.prepare(enriched_samples)
+                            break
+                        except Exception as e:
+                            last_exception = e
+                            if logger:
+                                logger.log_error(
+                                    f"Error during gestation batch preparation (scaffold {idx}, attempt {attempt+1}): {str(e)}",
+                                    error_type="gestation_batch_error",
+                                    stack_trace=traceback.format_exc(),
+                                    additional_info={"scaffold_index": idx, "attempt": attempt+1}
+                                )
+                            if attempt < retry_attempts - 1 and retry_delay > 0:
+                                time.sleep(retry_delay)
+                    else:
+                        raise RuntimeError(f"Gestation batch preparation failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
+
+                    # Retry logic for training step with synchronized access to the scaffold model
+                    last_exception = None
+                    for attempt in range(retry_attempts):
+                        try:
+                            # Clean up any previous attempt resources
+                            if optimizer is not None:
+                                del optimizer
+                            if outputs is not None:
+                                del outputs
+                            if loss is not None:
+                                del loss
+                                
+                            # Force garbage collection
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                            
+                            # Training step with model lock
+                            with self._model_lock:  # Lock access to models during training
+                                optimizer = torch.optim.AdamW(
+                                    lora_manager.lora_parameters(scaffold_model),
+                                    lr=self.config.optimizer.learning_rate
+                                )
+                                scaffold_model.train()
+                                optimizer.zero_grad()
+                                outputs = scaffold_model(**batch)
+                                loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                                loss.backward()
+                                optimizer.step()
+                            
+                            # Extract scalar loss value before deleting tensor
+                            loss_value = loss.item()
+                            
+                            if logger:
+                                logger.log_info(
+                                    f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss_value}",
+                                    event_type="gestation_lora_train",
+                                    additional_info={"scaffold_index": idx}
+                                )
+                            break
+                        except Exception as e:
+                            last_exception = e
+                            if logger:
+                                logger.log_error(
+                                    f"Error during gestation LoRA training step (scaffold {idx}, attempt {attempt+1}): {str(e)}",
+                                    error_type="gestation_lora_training_error",
+                                    stack_trace=traceback.format_exc(),
+                                    additional_info={"scaffold_index": idx, "attempt": attempt+1}
+                                )
+                            if attempt < retry_attempts - 1 and retry_delay > 0:
+                                time.sleep(retry_delay)
+                    else:
+                        raise RuntimeError(f"Gestation LoRA training failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
+
+                    # Save LoRA weights as long-term memory, with rollback on failure
+                    lora_dir = "lora_checkpoints"
+                    os.makedirs(lora_dir, exist_ok=True)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    lora_path = os.path.join(lora_dir, f"lora_{idx}_{timestamp}.pt")
+                    try:
+                        # Clean up resources before saving
+                        if optimizer is not None:
+                            del optimizer
+                        if outputs is not None:
+                            del outputs
+                        if loss is not None:
+                            del loss
+                        
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        
+                        # Save with proper synchronization
+                        with self._get_resource_lock('lora_manager'):  # Lock access to lora_manager
+                            lora_manager.save_lora_weights(scaffold_model, lora_path)
+                            
+                        with self._get_resource_lock('model_manager'):  # Lock access to model_manager
+                            if model_manager:
+                                model_manager.set_active_lora_checkpoint(lora_path)
+                                
+                        if logger:
+                            logger.log_info(
+                                f"LoRA weights saved after gestation for scaffold {idx} to {lora_path}",
+                                event_type="gestation_lora_save",
+                                additional_info={"scaffold_index": idx}
+                            )
+                    except Exception as e:
+                        # Rollback partial save
+                        if os.path.exists(lora_path):
+                            os.remove(lora_path)
+                        if logger:
+                            logger.log_error(
+                                f"Error saving LoRA weights after gestation (scaffold {idx}): {str(e)}",
+                                error_type="gestation_lora_save_error",
+                                stack_trace=traceback.format_exc(),
+                                additional_info={"scaffold_index": idx}
+                            )
+                        raise RuntimeError(f"Failed to save LoRA weights for scaffold {idx}: {e}")
+
+                    successful_scaffolds.append(idx)
+                    
+                finally:
+                    # Clean up all resources regardless of success or failure
+                    if enriched_samples is not None:
+                        del enriched_samples
+                    if batch is not None:
+                        del batch
+                    if optimizer is not None:
+                        del optimizer
+                    if outputs is not None:
+                        del outputs
+                    if loss is not None:
+                        del loss
+                    
+                    # Force garbage collection after each scaffold iteration
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+            if len(successful_scaffolds) != min_count:
+                raise RuntimeError("Not all scaffolds completed gestation training successfully")
+
+            # Update SOVL state if available with synchronization
+            if state is not None and hasattr(state, 'update_after_gestation'):
+                try:
+                    with self._get_resource_lock('state'):  # Lock access to state
+                        state.update_after_gestation()
+                    if logger:
+                        logger.log_info("SOVL state updated after gestation.", event_type="gestation_state_update")
+                except Exception as e:
+                    if logger:
+                        logger.log_error(
+                            f"Error updating SOVL state after gestation: {str(e)}",
+                            error_type="gestation_state_update_error",
+                            stack_trace=traceback.format_exc()
+                        )
+
+            # DREAMER integration with synchronization
+            if dreamer is not None:
+                try:
+                    # Clear memory before running dream cycle
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    
+                    with self._get_resource_lock('dreamer'):  # Lock access to dreamer
+                        dreamer.run_dream_cycle()
+                    if logger:
+                        logger.log_info("Dreamer cycle completed after gestation.", event_type="gestation_dreamer")
+                except Exception as e:
+                    if logger:
+                        logger.log_error(
+                            f"Error during Dreamer cycle: {str(e)}",
+                            error_type="gestation_dreamer_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                        
+            # Final memory cleanup
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+    def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
+        """Run a dream cycle with proper synchronization."""
+        with self._get_resource_lock('dreamer'):  # Lock access to dreamer
+            # Dream cycle implementation
+            dreamer = getattr(self.trainer, 'dreamer', None)
+            if dreamer is None:
+                return
+                
+            try:
+                # Implementation here
+                pass
+            except Exception as e:
+                logger = getattr(self, 'logger', None)
+                if logger:
+                    logger.log_error(
+                        f"Error during manual dream cycle: {str(e)}",
+                        error_type="manual_dream_cycle_error",
+                        stack_trace=traceback.format_exc()
+                    )
 
 # SOVLTrainer: top-level interface tying config, managers, and execution logic for end-to-end training.
 class SOVLTrainer:
@@ -1167,9 +1511,237 @@ class SOVLTrainer:
             )
             return 0.0, {"status": "unexpected_error", "error": str(e)}
     
+    def _validate_metadata_fields(self, example: Dict[str, Any]) -> Dict[str, bool]:
+        """
+        Validate key metadata fields needed for curriculum example selection.
+        
+        Args:
+            example: Training example with metadata
+            
+        Returns:
+            Dictionary of validation results for each key field
+        """
+        metadata = example.get("metadata", {})
+        content_metrics = metadata.get("content_metrics", {})
+        quality_metrics = metadata.get("quality_metrics", {})
+        
+        return {
+            "has_metadata": bool(metadata),
+            "has_content_metrics": bool(content_metrics),
+            "has_quality_metrics": bool(quality_metrics),
+            "has_word_count": "word_count" in content_metrics,
+            "has_has_code": "has_code" in quality_metrics,
+            "has_has_question": "has_question" in quality_metrics
+        }
+        
+    def _repair_metadata(
+        self, 
+        example: Dict[str, Any], 
+        validation_results: Dict[str, bool]
+    ) -> Dict[str, Any]:
+        """
+        Repair missing metadata fields with appropriate defaults.
+        
+        Args:
+            example: Training example with metadata
+            validation_results: Result of metadata validation
+            
+        Returns:
+            Example with repaired metadata
+        """
+        import copy
+        fixed_example = copy.deepcopy(example)
+        
+        # Add empty metadata if missing
+        if not validation_results["has_metadata"]:
+            fixed_example["metadata"] = {}
+        
+        metadata = fixed_example["metadata"]
+        
+        # Add empty content_metrics if missing
+        if not validation_results["has_content_metrics"]:
+            metadata["content_metrics"] = {}
+        
+        # Add empty quality_metrics if missing
+        if not validation_results["has_quality_metrics"]:
+            metadata["quality_metrics"] = {}
+            
+        content_metrics = metadata["content_metrics"]
+        quality_metrics = metadata["quality_metrics"]
+        
+        # Add word_count if missing
+        if not validation_results["has_word_count"]:
+            # Calculate word count from example content if possible
+            if "content" in example and isinstance(example["content"], str):
+                content_metrics["word_count"] = len(example["content"].split())
+            else:
+                content_metrics["word_count"] = 0
+                
+        # Add has_code if missing
+        if not validation_results["has_has_code"]:
+            # Check for code in content if possible
+            if "content" in example and isinstance(example["content"], str):
+                quality_metrics["has_code"] = ("```" in example["content"])
+            else:
+                quality_metrics["has_code"] = False
+                
+        # Add has_question if missing
+        if not validation_results["has_has_question"]:
+            # Check for questions in content if possible
+            if "content" in example and isinstance(example["content"], str):
+                quality_metrics["has_question"] = ("?" in example["content"])
+            else:
+                quality_metrics["has_question"] = False
+        
+        return fixed_example
+        
+    def _get_metadata_value(
+        self, 
+        metadata: Dict[str, Any], 
+        path: str, 
+        default_value: Any, 
+        expected_type: Optional[Type] = None
+    ) -> Any:
+        """
+        Safely extract a value from nested metadata with type checking.
+        
+        Args:
+            metadata: The metadata dictionary
+            path: Dot-separated path to the value (e.g., "content_metrics.word_count")
+            default_value: Default value if path doesn't exist
+            expected_type: Expected type of the value (optional)
+            
+        Returns:
+            The value at the path, or default_value if not found or wrong type
+        """
+        if not metadata:
+            return default_value
+            
+        try:
+            # Split path into components
+            components = path.split('.')
+            current = metadata
+            
+            # Navigate through nested dicts
+            for component in components[:-1]:
+                if not isinstance(current, dict) or component not in current:
+                    return default_value
+                current = current[component]
+                
+            # Get final value
+            final_key = components[-1]
+            if not isinstance(current, dict) or final_key not in current:
+                return default_value
+                
+            value = current[final_key]
+            
+            # Type check if requested
+            if expected_type is not None and not isinstance(value, expected_type):
+                return default_value
+                
+            return value
+        except Exception:
+            return default_value
+            
+    def _log_curriculum_selection_metrics(
+        self, 
+        training_cycle: int, 
+        stage: str,
+        all_count: int,
+        selected_count: int,
+        metadata_stats: Dict[str, int]
+    ) -> None:
+        """
+        Log detailed metrics about curriculum example selection.
+        
+        Args:
+            training_cycle: Current training cycle
+            stage: Curriculum stage (early, middle, advanced)
+            all_count: Count of all examples
+            selected_count: Count of selected examples
+            metadata_stats: Statistics about metadata fields
+        """
+        if not hasattr(self, '_logger'):
+            return
+            
+        self._logger.log_event(
+            event_type="curriculum_selection_metrics",
+            message=f"Selected {selected_count}/{all_count} examples for {stage} curriculum stage",
+            level="info",
+            additional_info={
+                "cycle": training_cycle,
+                "stage": stage,
+                "all_count": all_count,
+                "selected_count": selected_count,
+                "metadata_stats": metadata_stats,
+                "selection_ratio": selected_count / all_count if all_count > 0 else 0
+            }
+        )
+        
+    def _get_fallback_examples(
+        self, 
+        all_examples: List[Dict[str, Any]], 
+        stage: str, 
+        count: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Get fallback examples when primary selection criteria yields no results.
+        
+        Args:
+            all_examples: All available examples
+            stage: Curriculum stage (early, middle, advanced)
+            count: Number of examples to select
+            
+        Returns:
+            List of fallback examples
+        """
+        import random
+        
+        if not all_examples:
+            if hasattr(self, '_logger'):
+                self._logger.log_warning(
+                    message="No examples available for fallback selection",
+                    event_type="curriculum_fallback_empty"
+                )
+            return []
+        
+        # Strategy 1: Random selection
+        if stage == "early":
+            # For early stages, prefer shorter examples if possible
+            shorter_examples = [
+                ex for ex in all_examples 
+                if len(ex.get("content", "").split()) < 100
+            ]
+            if shorter_examples:
+                selected = random.sample(shorter_examples, min(count, len(shorter_examples)))
+            else:
+                selected = random.sample(all_examples, min(count, len(all_examples)))
+        elif stage == "advanced":
+            # For advanced stages, prefer longer or code examples if possible
+            complex_examples = [
+                ex for ex in all_examples 
+                if len(ex.get("content", "").split()) > 50 or "```" in ex.get("content", "")
+            ]
+            if complex_examples:
+                selected = random.sample(complex_examples, min(count, len(complex_examples)))
+            else:
+                selected = random.sample(all_examples, min(count, len(all_examples)))
+        else:
+            # For middle stages, just select randomly
+            selected = random.sample(all_examples, min(count, len(all_examples)))
+        
+        if hasattr(self, '_logger'):
+            self._logger.log_warning(
+                message=f"Using fallback selection for {stage} stage: {len(selected)} examples",
+                event_type="curriculum_fallback_selection",
+                additional_info={"stage": stage, "count": len(selected)}
+            )
+        
+        return selected
+    
     def _select_curriculum_examples(self, training_cycle: int, all_examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Select examples with appropriate complexity for current training cycle.
+        Select examples with appropriate complexity for current training cycle with robust validation.
         
         Args:
             training_cycle: Current training cycle
@@ -1180,22 +1752,89 @@ class SOVLTrainer:
         """
         # No metadata processor or examples
         if not hasattr(self, 'metadata_processor') or not all_examples:
+            if hasattr(self, '_logger'):
+                self._logger.log_warning(
+                    message="No metadata processor or empty examples list for curriculum selection",
+                    event_type="curriculum_selection_warning"
+                )
+            return all_examples
+        
+        # Early optimization: Check if we need to do expensive validation
+        if len(all_examples) <= 10:
+            # For small example sets, just use all examples
             return all_examples
             
+        # Validate and repair examples
+        validated_examples = []
+        invalid_examples = 0
+        repaired_examples = 0
+        
+        for ex in all_examples:
+            validation_results = self._validate_metadata_fields(ex)
+            
+            # Check if example has critical metadata issues
+            if not validation_results["has_metadata"] or not validation_results["has_content_metrics"]:
+                invalid_examples += 1
+                # Try to repair the example
+                repaired_ex = self._repair_metadata(ex, validation_results)
+                validated_examples.append(repaired_ex)
+                repaired_examples += 1
+            else:
+                # Use example as is if it has the basic metadata structure
+                validated_examples.append(ex)
+        
+        # Log metadata validation statistics
+        metadata_stats = {
+            "invalid_count": invalid_examples,
+            "repaired_count": repaired_examples,
+            "total_count": len(all_examples)
+        }
+        
+        if hasattr(self, '_logger') and (invalid_examples > 0 or repaired_examples > 0):
+            self._logger.log_warning(
+                message=f"Metadata validation: {invalid_examples} invalid examples, {repaired_examples} repaired",
+                event_type="curriculum_metadata_validation",
+                additional_info={
+                    "cycle": training_cycle,
+                    "invalid_count": invalid_examples,
+                    "repaired_count": repaired_examples,
+                    "total_count": len(all_examples)
+                }
+            )
+        
         # Early cycles (0-100): Focus on simpler examples with clear patterns
         if training_cycle < 100:
             # Filter for shorter, clearer examples
             filtered = []
-            for ex in all_examples:
+            for ex in validated_examples:
                 metadata = ex.get("metadata", {})
                 content_metrics = metadata.get("content_metrics", {})
-                word_count = content_metrics.get("word_count", 100)
+                word_count = content_metrics.get("word_count", 0)
                 
                 # Select shorter examples (< 50 words)
                 if word_count < 50:
                     filtered.append(ex)
-                    
-            return filtered if filtered else all_examples[:min(len(all_examples), 10)]
+            
+            # Log selection metrics
+            self._log_curriculum_selection_metrics(
+                training_cycle=training_cycle,
+                stage="early",
+                all_count=len(validated_examples),
+                selected_count=len(filtered),
+                metadata_stats=metadata_stats
+            )
+                
+            # Use fallback if no examples match criteria
+            if not filtered:
+                if hasattr(self, '_logger'):
+                    self._logger.log_warning(
+                        message="No short examples found for early curriculum stage, using fallback",
+                        event_type="curriculum_selection_fallback",
+                        additional_info={"cycle": training_cycle, "stage": "early"}
+                    )
+                return self._get_fallback_examples(validated_examples, "early", 10)
+                
+            return filtered
             
         # Middle cycles (100-500): Focus on medium complexity, diversity
         elif training_cycle < 500:
@@ -1204,7 +1843,7 @@ class SOVLTrainer:
             categories_seen = set()
             
             # Try to get diverse examples
-            for ex in all_examples:
+            for ex in validated_examples:
                 metadata = ex.get("metadata", {})
                 content_metrics = metadata.get("content_metrics", {})
                 quality_metrics = metadata.get("quality_metrics", {})
@@ -1228,14 +1867,33 @@ class SOVLTrainer:
                 if len(selected) >= 20:
                     break
                     
-            return selected if selected else all_examples[:min(len(all_examples), 20)]
+            # Log selection metrics
+            self._log_curriculum_selection_metrics(
+                training_cycle=training_cycle,
+                stage="middle",
+                all_count=len(validated_examples),
+                selected_count=len(selected),
+                metadata_stats=metadata_stats
+            )
+            
+            # Use fallback if no examples match criteria
+            if not selected:
+                if hasattr(self, '_logger'):
+                    self._logger.log_warning(
+                        message="No diverse examples found for middle curriculum stage, using fallback",
+                        event_type="curriculum_selection_fallback",
+                        additional_info={"cycle": training_cycle, "stage": "middle"}
+                    )
+                return self._get_fallback_examples(validated_examples, "middle", 20)
+                
+            return selected
                 
         # Later cycles (500+): Focus on complex examples
         else:
             # Filter for more complex content
             complex_examples = []
             
-            for ex in all_examples:
+            for ex in validated_examples:
                 metadata = ex.get("metadata", {})
                 content_metrics = metadata.get("content_metrics", {})
                 quality_metrics = metadata.get("quality_metrics", {})
@@ -1246,9 +1904,28 @@ class SOVLTrainer:
                 # Select longer examples or those with code
                 if word_count > 100 or has_code:
                     complex_examples.append(ex)
+            
+            # Log selection metrics
+            self._log_curriculum_selection_metrics(
+                training_cycle=training_cycle,
+                stage="advanced",
+                all_count=len(validated_examples),
+                selected_count=len(complex_examples),
+                metadata_stats=metadata_stats
+            )
                     
-            return complex_examples if complex_examples else all_examples[:min(len(all_examples), 20)]
-        
+            # Use fallback if no examples match criteria
+            if not complex_examples:
+                if hasattr(self, '_logger'):
+                    self._logger.log_warning(
+                        message="No complex examples found for advanced curriculum stage, using fallback",
+                        event_type="curriculum_selection_fallback",
+                        additional_info={"cycle": training_cycle, "stage": "advanced"}
+                    )
+                return self._get_fallback_examples(validated_examples, "advanced", 20)
+                
+            return complex_examples
+
 @dataclass
 class InterpretationConfig:
     """Configuration for metadata interpretation rules."""

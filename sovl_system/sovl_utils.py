@@ -532,3 +532,81 @@ def validate_layer_indices(
                 stack_trace=traceback.format_exc()
             )
         return False
+
+def move_batch_to_device(batch, device: "torch.device") -> Any:
+    """
+    Recursively move all tensors in a batch to the specified device.
+    Handles nested dictionaries, lists, and tuples.
+    
+    Args:
+        batch: Input data which may contain tensors (can be dict, list, tuple, tensor, or other)
+        device: torch.device to move tensors to
+    
+    Returns:
+        Same structure as input but with all tensors moved to device
+    """
+    if isinstance(batch, torch.Tensor):
+        return batch.to(device)
+    elif isinstance(batch, dict):
+        return {k: move_batch_to_device(v, device) for k, v in batch.items()}
+    elif isinstance(batch, list):
+        return [move_batch_to_device(v, device) for v in batch]
+    elif isinstance(batch, tuple):
+        return tuple(move_batch_to_device(v, device) for v in batch)
+    else:
+        return batch
+
+def validate_device_consistency(model: torch.nn.Module, batch: Any, target_device: torch.device) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that model parameters and batch tensors are on the same device.
+    
+    Args:
+        model: PyTorch model to check
+        batch: Batch data containing tensors
+        target_device: Expected device for all components
+        
+    Returns:
+        Tuple of (is_consistent, error_message) where error_message is None if consistent
+    """
+    # Check model parameters
+    model_devices = {p.device for p in model.parameters()}
+    if len(model_devices) > 1:
+        return False, f"Model parameters on multiple devices: {model_devices}"
+        
+    if len(model_devices) == 0:
+        # No parameters found - might be a wrapper or non-standard model
+        return True, None
+        
+    model_device = next(iter(model_devices))
+    if model_device != target_device:
+        return False, f"Model on {model_device}, expected {target_device}"
+    
+    # Check batch tensors recursively
+    def check_batch_device(data: Any) -> Set[torch.device]:
+        if isinstance(data, torch.Tensor):
+            return {data.device}
+        elif isinstance(data, dict):
+            devices = set()
+            for v in data.values():
+                devices.update(check_batch_device(v))
+            return devices
+        elif isinstance(data, (list, tuple)):
+            devices = set()
+            for item in data:
+                devices.update(check_batch_device(item))
+            return devices
+        return set()
+    
+    batch_devices = check_batch_device(batch)
+    if len(batch_devices) > 1:
+        return False, f"Batch tensors on multiple devices: {batch_devices}"
+    
+    if len(batch_devices) == 0:
+        # No tensors found in batch
+        return True, None
+        
+    batch_device = next(iter(batch_devices))
+    if batch_device != target_device:
+        return False, f"Batch on {batch_device}, expected {target_device}"
+    
+    return True, None

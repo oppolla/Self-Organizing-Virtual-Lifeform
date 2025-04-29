@@ -177,3 +177,84 @@ class LoraAdapterManager:
             if any(target in name for target in self.target_modules):
                 return True
         return False
+
+    def is_checkpoint_compatible(self, checkpoint_path: str, model: torch.nn.Module) -> bool:
+        """
+        Check if a LoRA checkpoint is compatible with the given model.
+        
+        Args:
+            checkpoint_path: Path to the LoRA checkpoint
+            model: Model to check compatibility with
+            
+        Returns:
+            bool: True if compatible, False otherwise
+        """
+        import os
+        try:
+            # First check if the model is LoRA compatible at all
+            if not self.is_model_compatible(model):
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_warning(
+                        message=f"Model is not compatible with LoRA configuration",
+                        event_type="lora_checkpoint_incompatible"
+                    )
+                return False
+                
+            # Check if checkpoint exists
+            if not os.path.exists(checkpoint_path):
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_warning(
+                        message=f"LoRA checkpoint not found at {checkpoint_path}",
+                        event_type="lora_checkpoint_not_found" 
+                    )
+                return False
+                
+            # Check if checkpoint has adapter_config.json
+            config_path = os.path.join(checkpoint_path, "adapter_config.json")
+            if not os.path.exists(config_path):
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_warning(
+                        message=f"LoRA adapter_config.json not found in checkpoint",
+                        event_type="lora_checkpoint_invalid"
+                    )
+                return False
+                
+            # Load and check adapter config
+            import json
+            with open(config_path, 'r') as f:
+                adapter_config = json.load(f)
+                
+            # Check if target modules match
+            checkpoint_modules = set(adapter_config.get("target_modules", []))
+            current_modules = set(self.target_modules)
+            
+            # Check basic compatibility factors
+            model_type_matches = adapter_config.get("base_model_name_or_path", "").split("/")[-1] == model.__class__.__name__.lower()
+            task_type_matches = adapter_config.get("task_type", "") == self.task_type
+            
+            # Check if checkpoint modules are a subset of available modules in the model
+            available_modules = set()
+            for name, _ in model.named_modules():
+                module_base = name.split(".")[-1]
+                available_modules.add(module_base)
+                
+            modules_available = all(module in available_modules for module in checkpoint_modules)
+                
+            if not modules_available:
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_warning(
+                        message=f"LoRA checkpoint targets modules not available in model",
+                        event_type="lora_checkpoint_incompatible_modules"
+                    )
+                return False
+                
+            return True
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                import traceback
+                self.logger.log_error(
+                    error_msg=f"Failed to check LoRA checkpoint compatibility: {str(e)}",
+                    error_type="lora_checkpoint_compatibility_error",
+                    stack_trace=traceback.format_exc()
+                )
+            return False
