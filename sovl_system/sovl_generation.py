@@ -45,7 +45,8 @@ class GenerationManager:
         device: torch.device,
         curiosity_manager: Any = None,
         generation_hooks: Dict[str, bool] = {},
-        dialogue_context_manager: Optional[Any] = None
+        dialogue_context_manager: Optional[Any] = None,
+        state_manager: Any = None
     ):
         """Initialize GenerationManager with configuration and model components."""
         # Core components
@@ -62,6 +63,7 @@ class GenerationManager:
         self.curiosity_manager = curiosity_manager
         self.device = device
         self.dialogue_context_manager = dialogue_context_manager
+        self.state_manager = state_manager or getattr(self, 'context', None) and getattr(self.context, 'state_manager', None)
 
         # Generation hooks setup
         self.generation_hooks = generation_hooks or {}
@@ -256,24 +258,34 @@ class GenerationManager:
                     'new_batch_size': self.base_batch_size
                 })
             # Temperament adjustment
-            if hasattr(self.state, 'temperament_score'):
-                old_temp = self.state.temperament_score
-                self.state.temperament_score = max(0.1, self.state.temperament_score - 0.05)
-                recovery_actions.append({
-                    'action': 'adjust_temperament',
-                    'old_temperament': old_temp,
-                    'new_temperament': self.state.temperament_score
-                })
-            # Lifecycle stage update
-            if hasattr(self.state, 'lifecycle_stage'):
-                old_stage = self.state.lifecycle_stage
-                if state_metrics and state_metrics.get('lifecycle_stage') == 'exploration':
-                    self.state.lifecycle_stage = 'consolidation'
-                    recovery_actions.append({
-                        'action': 'update_lifecycle_stage',
-                        'old_stage': old_stage,
-                        'new_stage': self.state.lifecycle_stage
-                    })
+            if self.state_manager:
+                def update_fn(state):
+                    if hasattr(state, 'temperament_score'):
+                        old_temp = state.temperament_score
+                        state.temperament_score = max(0.1, state.temperament_score - 0.05)
+                        recovery_actions.append({
+                            'action': 'adjust_temperament',
+                            'old_temperament': old_temp,
+                            'new_temperament': state.temperament_score
+                        })
+                    if hasattr(state, 'lifecycle_stage'):
+                        old_stage = state.lifecycle_stage
+                        if state_metrics and state_metrics.get('lifecycle_stage') == 'exploration':
+                            state.lifecycle_stage = 'consolidation'
+                            recovery_actions.append({
+                                'action': 'update_lifecycle_stage',
+                                'old_stage': old_stage,
+                                'new_stage': state.lifecycle_stage
+                            })
+                self.state_manager.update_state_atomic(update_fn)
+            else:
+                # fallback: log error
+                self.logger.record_event(
+                    event_type="state_driven_recovery_failed",
+                    message="StateManager not available for atomic state-driven recovery.",
+                    level="critical"
+                )
+                return
             self.logger.record_event(
                 event_type="state_driven_recovery",
                 message=f"Applied state-driven recovery for {context} error",
@@ -294,23 +306,26 @@ class GenerationManager:
     def _initialize_temperament_system(self) -> None:
         """Initialize the temperament system with validated parameters."""
         try:
-            # Get and validate parameters
             params = self._get_validated_temperament_parameters()
-            
-            # Initialize temperament state
-            if not hasattr(self.state, 'temperament_score'):
-                self.state.temperament_score = 0.5
-            if not hasattr(self.state, 'temperament_history'):
-                self.state.temperament_history = deque(maxlen=self._get_config_value("controls_config.temperament_history_maxlen", 10))
-            
-            # Log initialization
+            if self.state_manager:
+                def update_fn(state):
+                    if not hasattr(state, 'temperament_score'):
+                        state.temperament_score = 0.5
+                    if not hasattr(state, 'temperament_history'):
+                        from collections import deque
+                        state.temperament_history = deque(maxlen=self._get_config_value("controls_config.temperament_history_maxlen", 10))
+                self.state_manager.update_state_atomic(update_fn)
+            else:
+                if not hasattr(self.state, 'temperament_score'):
+                    self.state.temperament_score = 0.5
+                if not hasattr(self.state, 'temperament_history'):
+                    self.state.temperament_history = deque(maxlen=self._get_config_value("controls_config.temperament_history_maxlen", 10))
             self.logger.record_event(
                 event_type="temperament_system_initialized",
                 message="Temperament system initialized with validated parameters",
                 level="info",
                 additional_info=params
             )
-            
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"Failed to initialize temperament system: {str(e)}",
@@ -584,18 +599,36 @@ class GenerationManager:
         """Generate a response to a system error."""
         request_time = time.time()
         try:
-            temp_history = self.state.history
-            self.state.history = ConversationHistory(
-                maxlen=self.controls_config.get("conversation_history_maxlen", 10)
-            )
-            response = self.generate(
-                f"System error detected: {error_msg} What happened?",
-                max_new_tokens=self.controls_config.get("max_new_tokens", 60),
-                temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
-                top_k=self.controls_config.get("top_k", 50),
-                do_sample=True
-            )
-            self.state.history = temp_history
+            if self.state_manager:
+                temp_history = self.state.history
+                def update_fn(state):
+                    state.history = ConversationHistory(
+                        maxlen=self.controls_config.get("conversation_history_maxlen", 10)
+                    )
+                self.state_manager.update_state_atomic(update_fn)
+                response = self.generate(
+                    f"System error detected: {error_msg} What happened?",
+                    max_new_tokens=self.controls_config.get("max_new_tokens", 60),
+                    temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
+                    top_k=self.controls_config.get("top_k", 50),
+                    do_sample=True
+                )
+                def restore_fn(state):
+                    state.history = temp_history
+                self.state_manager.update_state_atomic(restore_fn)
+            else:
+                temp_history = self.state.history
+                self.state.history = ConversationHistory(
+                    maxlen=self.controls_config.get("conversation_history_maxlen", 10)
+                )
+                response = self.generate(
+                    f"System error detected: {error_msg} What happened?",
+                    max_new_tokens=self.controls_config.get("max_new_tokens", 60),
+                    temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
+                    top_k=self.controls_config.get("top_k", 50),
+                    do_sample=True
+                )
+                self.state.history = temp_history
 
             # Log the internal error reflection
             capture_scribe_event(

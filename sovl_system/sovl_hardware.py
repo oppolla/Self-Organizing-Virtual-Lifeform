@@ -82,16 +82,18 @@ class HardwareConfig:
 class HardwareManager:
     """Manages hardware access for memory and device operations."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, state_manager: Any = None):
         """
         Initialize the hardware manager.
 
         Args:
             config_manager: Configuration manager instance.
             logger: Logger for event recording.
+            state_manager: StateManager for atomic state updates.
         """
         self.config_manager = config_manager
         self.logger = logger
+        self.state_manager = state_manager or getattr(self, 'context', None) and getattr(self.context, 'state_manager', None)
         try:
             self._config = HardwareConfig.from_config_manager(config_manager)
         except Exception as e:
@@ -158,6 +160,13 @@ class HardwareManager:
             # Reset CUDA state
             self._cuda_available = self._check_cuda_availability()
             
+            # Atomically update SOVLState if needed
+            if self.state_manager:
+                def update_fn(state):
+                    if hasattr(state, 'hardware_status'):
+                        state.hardware_status = {'cuda_available': self._cuda_available}
+                self.state_manager.update_state_atomic(update_fn)
+            
             self.logger.record_event(
                 event_type="cuda_error_recovery",
                 message="Recovered from CUDA error",
@@ -183,6 +192,14 @@ class HardwareManager:
                 if current_usage > self._config.mock_memory_total_mb * 0.9:
                     new_limit = max(1024, self._config.mock_memory_total_mb * 0.8)
                     self._config.mock_memory_total_mb = new_limit
+            
+            # Atomically update SOVLState if needed
+            if self.state_manager:
+                def update_fn(state):
+                    if hasattr(state, 'hardware_status'):
+                        state.hardware_status = state.hardware_status or {}
+                        state.hardware_status['mock_memory_total_mb'] = new_limit
+                self.state_manager.update_state_atomic(update_fn)
             
             self.logger.record_event(
                 event_type="memory_allocation_recovery",
