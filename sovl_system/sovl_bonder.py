@@ -2,7 +2,7 @@ from typing import Optional
 import torch
 from threading import Lock
 from sovl_logger import Logger
-from sovl_state import SOVLState
+from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
@@ -17,23 +17,24 @@ import traceback
 class BondCalculator:
     """Calculates bonding score based on user wordprint and duration of knowing.
     Now also generates and tracks behavioral signatures for user/session identification.
-    Future-proof: accepts extra modalities via kwargs in key methods."""
+    All mutations to SOVLState must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
+    """
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger, state: Optional[object] = None):
-        """Initialize bond calculator with configuration and logging. Optionally sync with SOVLState.
-        Future-proof: accepts extra modalities via kwargs in key methods."""
+    def __init__(self, config_manager: ConfigManager, logger: Logger, state_manager: Optional[StateManager] = None):
+        """Initialize bond calculator with configuration and logging. Uses StateManager for atomic state updates."""
         if not config_manager or not logger:
             raise ValueError("config_manager and logger cannot be None")
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
         self._initialize_config()
-        # Local registry for identified users/signatures
         self.identified_users = {}  # key: signature_hash, value: user profile dict
-        self.state = state  # Reference to SOVLState or similar
-        # If state is provided and has identified_users, sync local with central
-        if self.state and hasattr(self.state, 'get_all_identified_users'):
-            self.identified_users = dict(self.state.get_all_identified_users())
+        self.state_manager = state_manager  # Reference to StateManager for atomic updates
+        # Sync local registry with central state if available
+        if self.state_manager:
+            state = self.state_manager.get_state()
+            if hasattr(state, 'get_all_identified_users'):
+                self.identified_users = dict(state.get_all_identified_users())
 
         # --- New: Bonding config parameters exposed ---
         bonding_config = self.config_manager.get_section("bonding_config", {})
@@ -188,15 +189,23 @@ class BondCalculator:
                     level="info",
                     additional_info={'signature': signature}
                 )
-                # Sync with central state
-                if self.state and hasattr(self.state, 'add_identified_user'):
-                    self.state.add_identified_user(sig_hash, profile)
+                # Sync with central state atomically
+                if self.state_manager:
+                    def update_fn(state):
+                        if hasattr(state, 'add_identified_user'):
+                            state.add_identified_user(sig_hash, profile)
+                        return state
+                    self.state_manager.update_state_atomic(update_fn)
             else:
                 self.identified_users[sig_hash]['last_seen'] = time.time()
                 self.identified_users[sig_hash]['metadata_count'] += len(metadata_entries)
-                # Sync update with central state
-                if self.state and hasattr(self.state, 'add_identified_user'):
-                    self.state.add_identified_user(sig_hash, self.identified_users[sig_hash])
+                # Sync update with central state atomically
+                if self.state_manager:
+                    def update_fn(state):
+                        if hasattr(state, 'add_identified_user'):
+                            state.add_identified_user(sig_hash, self.identified_users[sig_hash])
+                        return state
+                    self.state_manager.update_state_atomic(update_fn)
         return sig_hash
 
     def calculate_bond(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs) -> float:
@@ -239,9 +248,13 @@ class BondCalculator:
                 if sig_hash in self.identified_users:
                     self.identified_users[sig_hash]['bond_score'] = bond_score
                     self.identified_users[sig_hash]['last_seen'] = time.time()
-                    # Sync update with central state
-                    if self.state and hasattr(self.state, 'add_identified_user'):
-                        self.state.add_identified_user(sig_hash, self.identified_users[sig_hash])
+                    # Sync update with central state atomically
+                    if self.state_manager:
+                        def update_fn(state):
+                            if hasattr(state, 'add_identified_user'):
+                                state.add_identified_user(sig_hash, self.identified_users[sig_hash])
+                            return state
+                        self.state_manager.update_state_atomic(update_fn)
                 else:
                     profile = {
                         'signature': signature,
@@ -251,9 +264,13 @@ class BondCalculator:
                         'metadata_count': len(metadata_entries)
                     }
                     self.identified_users[sig_hash] = profile
-                    # Sync with central state
-                    if self.state and hasattr(self.state, 'add_identified_user'):
-                        self.state.add_identified_user(sig_hash, profile)
+                    # Sync with central state atomically
+                    if self.state_manager:
+                        def update_fn(state):
+                            if hasattr(state, 'add_identified_user'):
+                                state.add_identified_user(sig_hash, profile)
+                            return state
+                        self.state_manager.update_state_atomic(update_fn)
             # Optionally, fuse extra modalities
             bond_score = self._fuse_modalities(signature, extra_data=extra_data, bond_score=bond_score, **kwargs)
             return bond_score
@@ -332,16 +349,20 @@ class BondCalculator:
 
     def get_all_signatures(self):
         """Return all known user signatures and profiles, prefer central state if available."""
-        if self.state and hasattr(self.state, 'get_all_identified_users'):
-            return dict(self.state.get_all_identified_users())
+        if self.state_manager:
+            state = self.state_manager.get_state()
+            if hasattr(state, 'get_all_identified_users'):
+                return dict(state.get_all_identified_users())
         with self.lock:
             return dict(self.identified_users)
 
     def get_bond_score(self, signature_hash):
         """Get bond score for a given signature hash, prefer central state if available."""
-        if self.state and hasattr(self.state, 'get_identified_user'):
-            profile = self.state.get_identified_user(signature_hash)
-            return profile['bond_score'] if profile else None
+        if self.state_manager:
+            state = self.state_manager.get_state()
+            if hasattr(state, 'get_identified_user'):
+                profile = state.get_identified_user(signature_hash)
+                return profile['bond_score'] if profile else None
         with self.lock:
             profile = self.identified_users.get(signature_hash)
             return profile['bond_score'] if profile else None

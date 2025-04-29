@@ -7,7 +7,7 @@ from sovl_curiosity import CuriosityManager
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_events import MemoryEventDispatcher, MemoryEventTypes
-from sovl_state import SOVLState, StateManager
+from sovl_state import StateManager
 from sovl_error import ErrorManager
 from sovl_queue import check_scribe_queue_health
 from sovl_bonder import BondCalculator, BondModulator  # Add import

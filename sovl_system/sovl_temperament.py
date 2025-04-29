@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 import traceback
 from sovl_config import ConfigManager
-from sovl_state import SOVLState
+from sovl_state import SOVLState, StateManager
 from sovl_logger import Logger
 from sovl_events import EventDispatcher
 from sovl_trainer import TrainingCycleManager
@@ -125,28 +125,19 @@ class TemperamentConfig:
 
 class TemperamentSystem:
     """Manages the temperament state and updates."""
-    
-    def __init__(self, state: SOVLState, config_manager: ConfigManager, lifecycle_manager: Optional[Any] = None):
+    # NOTE: All mutations to SOVLState must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
+    def __init__(self, state_manager: StateManager, config_manager: ConfigManager, lifecycle_manager: Optional[Any] = None):
         """
         Initialize temperament system.
-        
-        Args:
-            state: SOVL state instance
-            config_manager: Configuration manager instance
-            lifecycle_manager: Optional LifecycleManager instance for lifecycle-based adjustments
         """
-        self.state = state
+        self.state_manager = state_manager
         self.config_manager = config_manager
         self.temperament_config = TemperamentConfig(config_manager)
         self.logger = config_manager.logger
         self.lifecycle_manager = lifecycle_manager
         self._lifecycle_stage = "initialization"
         self._last_lifecycle_update = time.time()
-        
-        # Initialize temperament pressure
         self.pressure = TemperamentPressure(config_manager)
-        
-        # Initialize lifecycle integration if available
         if self.lifecycle_manager:
             self.logger.record_event(
                 event_type="temperament_lifecycle_integration_initialized",
@@ -161,143 +152,118 @@ class TemperamentSystem:
     def update(self, new_score: float, confidence: float, lifecycle_stage: Optional[str] = None) -> None:
         """
         Update the temperament system with new values, using pressure-based adjustments.
-        
-        Args:
-            new_score: New temperament score (0.0 to 1.0)
-            confidence: Confidence level in the update (0.0 to 1.0)
-            lifecycle_stage: Optional current lifecycle stage. If None, will use lifecycle_manager if available.
         """
-        try:
-            # Validate inputs
-            if not isinstance(new_score, (int, float)) or not 0.0 <= new_score <= 1.0:
+        def update_fn(state):
+            try:
+                if not isinstance(new_score, (int, float)) or not 0.0 <= new_score <= 1.0:
+                    self.logger.record_event(
+                        event_type="temperament_update_invalid_score",
+                        message=f"Invalid temperament score: {new_score}. Ignoring update.",
+                        level="warning",
+                        additional_info={
+                            "lifecycle_stage": lifecycle_stage,
+                            "current_score": state.current_temperament
+                        }
+                    )
+                    return state
+                if not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
+                    self.logger.record_event(
+                        event_type="temperament_update_invalid_confidence",
+                        message=f"Invalid confidence: {confidence}. Ignoring update.",
+                        level="warning",
+                        additional_info={
+                            "lifecycle_stage": lifecycle_stage,
+                            "current_score": state.current_temperament
+                        }
+                    )
+                    return state
+                eager_threshold = self.temperament_config.get("temperament_config.temp_eager_threshold", 0.7)
+                pressure_drop = self.temperament_config.get("temperament_config.temperament_pressure_drop", 0.2)
+                if lifecycle_stage is None and self.lifecycle_manager:
+                    lifecycle_stage_local = self.lifecycle_manager.get_lifecycle_stage()
+                else:
+                    lifecycle_stage_local = lifecycle_stage
+                lifecycle_params = self.temperament_config.get("temperament_config.lifecycle_params", {})
+                if lifecycle_stage_local in lifecycle_params:
+                    stage_params = lifecycle_params[lifecycle_stage_local]
+                    bias = stage_params.get("bias", 0.0)
+                    decay = stage_params.get("decay", 1.0)
+                    time_since_update = time.time() - self._last_lifecycle_update
+                    decay_factor = math.exp(-decay * time_since_update)
+                    adjusted_score = (new_score + bias) * decay_factor
+                    adjusted_score = max(0.0, min(1.0, adjusted_score))
+                    self.logger.record_event(
+                        event_type="temperament_lifecycle_adjustment",
+                        message="Applied lifecycle-based temperament adjustments",
+                        level="info",
+                        additional_info={
+                            "lifecycle_stage": lifecycle_stage_local,
+                            "bias": bias,
+                            "decay": decay,
+                            "decay_factor": decay_factor,
+                            "adjusted_score": adjusted_score
+                        }
+                    )
+                else:
+                    adjusted_score = new_score
+                previous_score = state.current_temperament
+                state.update_temperament(adjusted_score)
+                pressure_threshold_met = self.pressure.should_adjust(eager_threshold)
+                if pressure_threshold_met:
+                    self.pressure.drop_pressure(pressure_drop)
+                    self.logger.record_event(
+                        event_type="temperament_pressure_threshold_met",
+                        message="Temperament pressure met threshold, pressure dropped",
+                        level="info",
+                        additional_info={
+                            "adjusted_score": adjusted_score,
+                            "confidence": confidence,
+                            "pressure_before_drop": self.pressure.current_pressure,
+                            "eager_threshold": eager_threshold,
+                            "pressure_drop_amount": pressure_drop,
+                            "new_pressure": self.pressure.current_pressure,
+                            "lifecycle_stage": lifecycle_stage_local
+                        }
+                    )
+                self._lifecycle_stage = lifecycle_stage_local
+                self._last_lifecycle_update = time.time()
                 self.logger.record_event(
-                    event_type="temperament_update_invalid_score",
-                    message=f"Invalid temperament score: {new_score}. Ignoring update.",
-                    level="warning",
-                    additional_info={
-                        "lifecycle_stage": lifecycle_stage,
-                        "current_score": self.state.current_temperament
-                    }
-                )
-                return
-
-            if not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
-                self.logger.record_event(
-                    event_type="temperament_update_invalid_confidence",
-                    message=f"Invalid confidence: {confidence}. Ignoring update.",
-                    level="warning",
-                    additional_info={
-                        "lifecycle_stage": lifecycle_stage,
-                        "current_score": self.state.current_temperament
-                    }
-                )
-                return
-                
-            # Get configuration values
-            eager_threshold = self.temperament_config.get("temperament_config.temp_eager_threshold", 0.7)
-            pressure_drop = self.temperament_config.get("temperament_config.temperament_pressure_drop", 0.2)
-            
-            # Get lifecycle stage from manager if not provided
-            if lifecycle_stage is None and self.lifecycle_manager:
-                lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage()
-            
-            # Apply lifecycle-based adjustments to score
-            lifecycle_params = self.temperament_config.get("temperament_config.lifecycle_params", {})
-            if lifecycle_stage in lifecycle_params:
-                stage_params = lifecycle_params[lifecycle_stage]
-                bias = stage_params.get("bias", 0.0)
-                decay = stage_params.get("decay", 1.0)
-                
-                # Apply bias and decay based on lifecycle stage
-                time_since_update = time.time() - self._last_lifecycle_update
-                decay_factor = math.exp(-decay * time_since_update)
-                adjusted_score = (new_score + bias) * decay_factor
-                
-                # Ensure score remains in valid range
-                adjusted_score = max(0.0, min(1.0, adjusted_score))
-                
-                # Log lifecycle adjustments
-                self.logger.record_event(
-                    event_type="temperament_lifecycle_adjustment",
-                    message="Applied lifecycle-based temperament adjustments",
+                    event_type="temperament_state_updated",
+                    message="Temperament state updated",
                     level="info",
                     additional_info={
-                        "lifecycle_stage": lifecycle_stage,
-                        "bias": bias,
-                        "decay": decay,
-                        "decay_factor": decay_factor,
-                        "adjusted_score": adjusted_score
-                    }
-                )
-            else:
-                adjusted_score = new_score
-            
-            # Always update the state with the adjusted score
-            previous_score = self.state.current_temperament
-            self.state.update_temperament(adjusted_score)
-            
-            # Check if pressure threshold was met before potential drop
-            pressure_threshold_met = self.pressure.should_adjust(eager_threshold)
-            
-            if pressure_threshold_met:
-                # If threshold was met, drop pressure and log
-                self.pressure.drop_pressure(pressure_drop)
-                self.logger.record_event(
-                    event_type="temperament_pressure_threshold_met",
-                    message="Temperament pressure met threshold, pressure dropped",
-                    level="info",
-                    additional_info={
-                        "adjusted_score": adjusted_score,
+                        "previous_score": previous_score,
+                        "new_score": state.current_temperament,
+                        "input_score": new_score,
                         "confidence": confidence,
-                        "pressure_before_drop": self.pressure.current_pressure,
-                        "eager_threshold": eager_threshold,
-                        "pressure_drop_amount": pressure_drop,
-                        "new_pressure": self.pressure.current_pressure,
-                        "lifecycle_stage": lifecycle_stage
+                        "current_pressure": self.pressure.current_pressure,
+                        "lifecycle_stage": lifecycle_stage_local,
+                        "conversation_id": getattr(state, 'conversation_id', None),
+                        "state_hash": getattr(state, 'state_hash', None),
+                        "time_since_last_lifecycle_update": time.time() - self._last_lifecycle_update,
+                        "lifecycle_params": lifecycle_params.get(lifecycle_stage_local, {})
                     }
                 )
-            
-            # Update lifecycle state tracking
-            self._lifecycle_stage = lifecycle_stage
-            self._last_lifecycle_update = time.time()
-            
-            # Log the final update details
-            self.logger.record_event(
-                event_type="temperament_state_updated",
-                message="Temperament state updated",
-                level="info",
-                additional_info={
-                    "previous_score": previous_score,
-                    "new_score": self.state.current_temperament,
-                    "input_score": new_score,
-                    "confidence": confidence,
-                    "current_pressure": self.pressure.current_pressure,
-                    "lifecycle_stage": lifecycle_stage,
-                    "conversation_id": self.state.conversation_id,
-                    "state_hash": self.state.state_hash,
-                    "time_since_last_lifecycle_update": time.time() - self._last_lifecycle_update,
-                    "lifecycle_params": lifecycle_params.get(lifecycle_stage, {})
-                }
-            )
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_update_error",
-                message=f"Failed to update temperament: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "stack_trace": traceback.format_exc(),
-                    "lifecycle_stage": lifecycle_stage,
-                    "current_score": self.state.current_temperament
-                }
-            )
-            raise
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="temperament_update_error",
+                    message=f"Failed to update temperament: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "stack_trace": traceback.format_exc(),
+                        "lifecycle_stage": lifecycle_stage,
+                        "current_score": getattr(state, 'current_temperament', None)
+                    }
+                )
+                raise
+            return state
+        self.state_manager.update_state_atomic(update_fn)
         
     @property
     def current_score(self) -> float:
         """Get the current temperament score."""
-        return self.state.current_temperament
+        return self.state_manager.get_state().current_temperament
         
     @property
     def mood_label(self) -> str:
@@ -643,7 +609,7 @@ class TemperamentAdjuster:
             
             # Create new temperament system
             self.temperament_system = TemperamentSystem(
-                state=self.state_tracker.get_state(),
+                state_manager=self.state_tracker,
                 config_manager=self.config_handler.config_manager
             )
             

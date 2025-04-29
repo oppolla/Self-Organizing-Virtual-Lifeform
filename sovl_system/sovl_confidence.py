@@ -4,7 +4,7 @@ from threading import Lock
 from collections import deque
 from sovl_logger import Logger
 import traceback
-from sovl_state import SOVLState
+from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
@@ -55,7 +55,9 @@ Primary interface: calculate_confidence_score
 
 
 class ConfidenceCalculator:
-    """Handles confidence score calculation with thread safety."""
+    """Handles confidence score calculation with thread safety.
+    All mutations to SOVLState must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
+    """
     
     def __init__(
         self, 
@@ -467,7 +469,7 @@ class ConfidenceCalculator:
         return confidence
 
     def __finalize_confidence(self, confidence: float, state: SOVLState) -> float:
-        """Finalize confidence score and update history atomically if state_manager is available."""
+        """Finalize confidence score and update history atomically using StateManager."""
         if self.state_manager:
             def update_fn(s):
                 c = max(self.min_confidence, min(self.max_confidence, confidence))
@@ -477,25 +479,16 @@ class ConfidenceCalculator:
                         s.confidence_history.popleft()
                 else:
                     s.confidence_history = deque([c], maxlen=100)
+                return s
             self.state_manager.update_state_atomic(update_fn)
             return confidence
         else:
-            with self.lock:
-                # Clamp confidence
-                confidence = max(self.min_confidence, min(self.max_confidence, confidence))
-                # Update confidence history
-                if hasattr(state, 'confidence_history') and isinstance(state.confidence_history, deque):
-                    state.confidence_history.append(confidence)
-                    # Keep history bounded
-                    while len(state.confidence_history) > 100:
-                        state.confidence_history.popleft()
-                else:
-                    # Defensive: create history if missing
-                    state.confidence_history = deque([confidence], maxlen=100)
-                return confidence
+            # Deprecated: direct mutation fallback. StateManager is required for atomic updates.
+            raise RuntimeError("StateManager is required for atomic confidence updates.")
 
     def __recover_confidence(self, error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
         """Attempt to recover confidence from history or use default, with defensive checks and logging."""
+        # No mutation to state; only reads. If mutation is needed, use atomic update.
         try:
             # Validate confidence history
             if not hasattr(state, 'confidence_history') or not isinstance(state.confidence_history, deque):

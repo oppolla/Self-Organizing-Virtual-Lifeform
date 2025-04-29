@@ -12,7 +12,6 @@ from sovl_logger import Logger
 from sovl_processor import MetadataProcessor
 from sovl_config import ConfigManager
 from sovl_memory import GPUMemoryManager, RAMManager
-from sovl_state import StateTracker
 import logging
 import sys
 import json

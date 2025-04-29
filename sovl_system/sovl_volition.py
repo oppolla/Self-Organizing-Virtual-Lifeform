@@ -13,7 +13,6 @@ import traceback
 from abc import ABC, abstractmethod
 import sovl_state
 import random
-from sovl_state import StateManager
 import concurrent.futures
 import re
 import threading

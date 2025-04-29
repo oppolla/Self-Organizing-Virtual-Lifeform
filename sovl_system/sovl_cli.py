@@ -3,6 +3,7 @@ import torch
 import traceback
 from typing import List, Dict, Tuple, Optional, Callable
 from sovl_main import SOVLSystem
+from sovl_state import StateManager
 from sovl_config import ConfigManager
 from sovl_utils import safe_compare
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
