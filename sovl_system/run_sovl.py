@@ -68,29 +68,75 @@ def error_handler(func):
     return wrapper
 
 class ResourceManager:
-    """Manages system resources with thread-safe operations."""
-    def __init__(self):
+    """Manages system resources with thread-safe operations and validation."""
+    def __init__(self, logger):
         self.resources = defaultdict(int)
         self._lock = threading.Lock()
+        self.max_resources = defaultdict(lambda: None)
+        self.logger = logger
         
     def acquire(self, resource_type: str, amount: int) -> bool:
-        """Acquire specified amount of a resource type."""
+        """Acquire specified amount of a resource type. Prevents negative resources."""
         with self._lock:
             available = self.resources[resource_type]
             if available >= amount:
                 self.resources[resource_type] = available - amount
+                if self.resources[resource_type] < 0:
+                    self.resources[resource_type] = 0
+                    self.logger.log_event(
+                        event_type="resource_negative_correction",
+                        message=f"Resource {resource_type} went negative! Corrected to 0.",
+                        level="warning"
+                    )
+                self.logger.log_event(
+                    event_type="resource_acquire",
+                    message=f"Acquired {amount} of {resource_type}. Remaining: {self.resources[resource_type]}",
+                    level="info"
+                )
                 return True
+            self.logger.log_event(
+                event_type="resource_acquire_failed",
+                message=f"Failed to acquire {amount} of {resource_type}. Available: {available}",
+                level="warning"
+            )
             return False
             
     def release(self, resource_type: str, amount: int):
-        """Release specified amount of a resource type."""
+        """Release specified amount of a resource type. Prevents over-release above max (if set) or negative."""
         with self._lock:
+            max_val = self.max_resources[resource_type]
             self.resources[resource_type] += amount
+            if max_val is not None and self.resources[resource_type] > max_val:
+                self.resources[resource_type] = max_val
+                self.logger.log_event(
+                    event_type="resource_max_correction",
+                    message=f"Resource {resource_type} exceeded max! Corrected to {max_val}.",
+                    level="warning"
+                )
+            if self.resources[resource_type] < 0:
+                self.resources[resource_type] = 0
+                self.logger.log_event(
+                    event_type="resource_negative_correction",
+                    message=f"Resource {resource_type} went negative on release! Corrected to 0.",
+                    level="warning"
+                )
+            self.logger.log_event(
+                event_type="resource_release",
+                message=f"Released {amount} of {resource_type}. Total: {self.resources[resource_type]}",
+                level="info"
+            )
             
-    def set_resource(self, resource_type: str, amount: int):
-        """Set the total amount of a resource type."""
+    def set_resource(self, resource_type: str, amount: int, max_amount: int = None):
+        """Set the total amount of a resource type. Optionally set a max."""
         with self._lock:
-            self.resources[resource_type] = amount
+            self.resources[resource_type] = max(0, amount)
+            if max_amount is not None:
+                self.max_resources[resource_type] = max_amount
+            self.logger.log_event(
+                event_type="resource_set",
+                message=f"Set {resource_type} to {self.resources[resource_type]} (max: {self.max_resources[resource_type]})",
+                level="info"
+            )
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -137,6 +183,8 @@ class SOVLRunner:
         self.scaffold_token_mapper = None
         self.cross_attention_injector = None
         self.scaffold_model = None
+        # Add checkpoint lock for concurrency protection
+        self._checkpoint_lock = threading.Lock()
         
     @staticmethod
     def _setup_logger() -> Logger:
@@ -332,26 +380,54 @@ class SOVLRunner:
             raise
     
     def _initialize_scaffold_components(self) -> None:
-        """Initialize scaffold-related components."""
+        """Initialize scaffold-related components, including scaffold_model, with resource management."""
+        resource_manager = self.components.get("resource_manager") if hasattr(self, "components") else None
+        acquired = False
         try:
+            # Example: acquire 1GB GPU memory for scaffold components (adjust as needed)
+            if resource_manager:
+                if not resource_manager.acquire("gpu_memory", amount=1024):
+                    self.logger.log_error(
+                        error_msg="Insufficient GPU memory for scaffold components",
+                        error_type="resource_error"
+                    )
+                    raise RuntimeError("Failed to acquire resources for scaffold components")
+                acquired = True
             # Initialize scaffold provider
             self.scaffold_provider = ScaffoldProvider()
             self.logger.log_event("Initialized scaffold provider", level="info")
-            
             # Initialize token mapper
             self.scaffold_token_mapper = ScaffoldTokenMapper()
             self.logger.log_event("Initialized scaffold token mapper", level="info")
-            
             # Initialize cross-attention injector
             self.cross_attention_injector = CrossAttentionInjector()
             self.logger.log_event("Initialized cross-attention injector", level="info")
-            
             # Build token mapping
             mapping = build_scaffold_token_mapping()
             self.scaffold_token_mapper.update_mapping(mapping)
             self.logger.log_event("Built scaffold token mapping", level="info")
-            
+            # Initialize scaffold model using ModelManager if available
+            model_manager = None
+            if hasattr(self, "components") and self.components and "model_manager" in self.components:
+                model_manager = self.components["model_manager"]
+            if model_manager is not None:
+                self.scaffold_model = model_manager.get_scaffold_model()
+                if self.scaffold_model is None:
+                    self.logger.log_error(error_msg="Failed to initialize scaffold model from ModelManager", error_type="scaffold_error")
+                    raise RuntimeError("Scaffold model initialization failed")
+                else:
+                    self.logger.log_event("Initialized scaffold model from ModelManager", level="info")
+            else:
+                self.logger.log_error(error_msg="ModelManager not available for scaffold model initialization", error_type="scaffold_error")
+                raise RuntimeError("ModelManager not available for scaffold model initialization")
+            # Optionally, validate compatibility with cross_attention_injector
+            if hasattr(self.cross_attention_injector, 'is_compatible'):
+                if not self.cross_attention_injector.is_compatible(self.scaffold_model):
+                    self.logger.log_error(error_msg="Scaffold model is not compatible with cross-attention injector", error_type="scaffold_error")
+                    raise RuntimeError("Incompatible scaffold model")
         except Exception as e:
+            if resource_manager and acquired:
+                resource_manager.release("gpu_memory", amount=1024)
             self.logger.log_error(f"Failed to initialize scaffold components: {str(e)}")
             raise
 
@@ -360,6 +436,7 @@ class SOVLRunner:
         """Initialize core SOVL components with proper dependency handling."""
         # Define component dependencies
         dependency_graph = {
+            "resource_manager": set(),
             "model_manager": set(),
             "state_tracker": set(),
             "error_manager": {"state_tracker"},
@@ -382,7 +459,9 @@ class SOVLRunner:
                     initialize_component(dep)
 
             # Component-specific initialization
-            if name == "model_manager":
+            if name == "resource_manager":
+                components[name] = ResourceManager(logger=context.logger)
+            elif name == "model_manager":
                 components[name] = ModelManager(
                     config_manager=context.config_manager,
                     logger=context.logger,
@@ -646,7 +725,9 @@ class SOVLRunner:
     
     @error_handler
     async def _async_save_checkpoint(self, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
-        """Asynchronously save system checkpoint."""
+        """Asynchronously save system checkpoint with concurrency protection and non-blocking I/O."""
+        import uuid
+        from concurrent.futures import ThreadPoolExecutor
         current_time = time.time()
         checkpoint_data = {
             "version": "1.0",  # Add versioning for future format changes
@@ -658,19 +739,28 @@ class SOVLRunner:
                 if self._validate_component_serialization(comp, name)
             }
         }
-        
-        # Use temporary file for atomic writes
-        temp_path = Path("checkpoints") / f"temp_{current_time}.pt"
+        temp_path = Path("checkpoints") / f"temp_{current_time}_{uuid.uuid4().hex}.pt"
         final_path = Path("checkpoints") / f"checkpoint_{current_time}.pt"
-        
-        # Save to temporary file
-        torch.save(checkpoint_data, temp_path)
-        
-        # Atomic rename
-        temp_path.rename(final_path)
-        
-        self.last_checkpoint_time = current_time
-        return True
+        loop = asyncio.get_running_loop()
+        try:
+            with self._checkpoint_lock:
+                # Save to temporary file in a thread pool
+                await loop.run_in_executor(None, torch.save, checkpoint_data, temp_path)
+                # Atomic rename in a thread pool
+                await loop.run_in_executor(None, temp_path.rename, final_path)
+                self.last_checkpoint_time = current_time
+                self.logger.log_event(
+                    event_type="checkpoint",
+                    message=f"Checkpoint saved to {final_path}",
+                    level="info"
+                )
+            return True
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to save checkpoint: {str(e)}",
+                error_type="checkpoint_save_error"
+            )
+            return False
 
     def _validate_checkpoint(self, checkpoint_data: Dict[str, Any]) -> bool:
         """Validate checkpoint data structure and compatibility."""
@@ -747,53 +837,75 @@ class SOVLRunner:
             return False
 
     def load_checkpoint(self, checkpoint_path: str, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
-        """Load system state from checkpoint."""
+        """Load system state from checkpoint (.pt file). Handles partial restoration and logs missing/incompatible fields."""
         try:
             self.logger.log_event(
                 event_type="checkpoint",
                 message=f"Loading checkpoint from {checkpoint_path}...",
                 level="info"
             )
-            
-            # Load using torch.load instead of json.load
+
+            # Load checkpoint using torch.load
             checkpoint_data = torch.load(checkpoint_path, map_location=self.context.device)
-            
-            # Validate checkpoint structure
+
+            # Explicitly check for required fields
+            required_fields = ["timestamp", "model_state"]
+            missing_fields = [f for f in required_fields if f not in checkpoint_data]
+            if missing_fields:
+                self.logger.log_error(
+                    error_msg=f"Checkpoint missing required fields: {missing_fields}",
+                    error_type="checkpoint_schema_error"
+                )
+                return False
+
+            # Validate checkpoint structure (calls _validate_checkpoint for deeper checks)
             if not self._validate_checkpoint(checkpoint_data):
                 return False
-            
-            # Load model state directly from checkpoint
+
+            # Load model state (partial if needed)
             if self.model and "model_state" in checkpoint_data:
                 success, missing_keys = self._load_partial_state(self.model, checkpoint_data["model_state"])
                 if not success:
                     self.logger.log_error(
-                        error_msg="Failed to load model state",
+                        error_msg="Failed to load model state from checkpoint.",
                         error_type="checkpoint_error"
                     )
                     return False
                 if missing_keys:
                     self.logger.log_event(
                         event_type="checkpoint_warning",
-                        message=f"Model loaded with {len(missing_keys)} missing keys",
+                        message=f"Model loaded with {len(missing_keys)} missing keys: {missing_keys}",
                         level="warning"
                     )
-            
-            # Load optimizer state if provided
-            if optimizer is not None and "optimizer_state" in checkpoint_data and checkpoint_data["optimizer_state"] is not None:
-                try:
-                    optimizer.load_state_dict(checkpoint_data["optimizer_state"])
+            else:
+                self.logger.log_error(
+                    error_msg="No model_state found in checkpoint.",
+                    error_type="checkpoint_schema_error"
+                )
+
+            # Load optimizer state if present
+            if optimizer is not None:
+                if "optimizer_state" in checkpoint_data and checkpoint_data["optimizer_state"] is not None:
+                    try:
+                        optimizer.load_state_dict(checkpoint_data["optimizer_state"])
+                        self.logger.log_event(
+                            event_type="checkpoint",
+                            message="Optimizer state loaded successfully",
+                            level="info"
+                        )
+                    except Exception as e:
+                        self.logger.log_error(
+                            error_msg=f"Failed to load optimizer state: {str(e)}",
+                            error_type="checkpoint_error"
+                        )
+                        # Continue loading without optimizer state
+                else:
                     self.logger.log_event(
-                        event_type="checkpoint",
-                        message="Optimizer state loaded successfully",
-                        level="info"
+                        event_type="checkpoint_warning",
+                        message="No optimizer_state found in checkpoint.",
+                        level="warning"
                     )
-                except Exception as e:
-                    self.logger.log_error(
-                        error_msg=f"Failed to load optimizer state: {str(e)}",
-                        error_type="checkpoint_error"
-                    )
-                    # Continue loading without optimizer state
-            
+
             # Load component states if available
             if "component_states" in checkpoint_data:
                 loaded_components = 0
@@ -808,7 +920,18 @@ class SOVLRunner:
                                 error_type="checkpoint_error"
                             )
                             # Continue with other components instead of failing completely
-            
+                self.logger.log_event(
+                    event_type="checkpoint",
+                    message=f"Loaded {loaded_components} component states from checkpoint.",
+                    level="info"
+                )
+            else:
+                self.logger.log_event(
+                    event_type="checkpoint_warning",
+                    message="No component_states found in checkpoint.",
+                    level="warning"
+                )
+
             self.last_checkpoint_time = checkpoint_data["timestamp"]
             self.logger.log_event(
                 event_type="checkpoint",
@@ -816,7 +939,7 @@ class SOVLRunner:
                 level="info"
             )
             return True
-            
+
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"Failed to load checkpoint: {str(e)}",
@@ -906,13 +1029,13 @@ class SOVLRunner:
 
     @error_handler
     def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """Prepare batch for model input with parallel processing."""
+        """Prepare batch for model input with parallel processing. Always includes labels."""
         if self.tokenizer is None:
             raise ValueError("Tokenizer not initialized")
-            
+        if not batch or "text" not in batch[0]:
+            raise ValueError("Each batch item must contain a 'text' field.")
         # Extract texts for parallel processing
         texts = [item["text"] for item in batch]
-        
         # Use thread pool for parallel tokenization
         with ThreadPoolExecutor(max_workers=4) as executor:
             tokenized = list(executor.map(
@@ -923,26 +1046,41 @@ class SOVLRunner:
                 ),
                 texts
             ))
-        
         # Find maximum sequence length in batch
         max_length = max(len(t["input_ids"]) for t in tokenized)
         batch_size = len(tokenized)
-        
         # Initialize tensors with padding
         input_ids = torch.full((batch_size, max_length), self.tokenizer.pad_token_id)
         attention_mask = torch.zeros((batch_size, max_length))
-        
         # Fill tensors with tokenized data
         for i, tokens in enumerate(tokenized):
             length = len(tokens["input_ids"])
             input_ids[i, :length] = torch.tensor(tokens["input_ids"])
             attention_mask[i, :length] = 1
-        
+        # Prepare labels
+        if "labels" in batch[0]:
+            label_texts = [item["labels"] for item in batch]
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                tokenized_labels = list(executor.map(
+                    lambda text: self.tokenizer(
+                        text,
+                        truncation=True,
+                        max_length=self.context.config_manager.get("training.max_seq_length", 512)
+                    ),
+                    label_texts
+                ))
+            labels = torch.full((batch_size, max_length), -100)  # -100 for ignored positions
+            for i, tokens in enumerate(tokenized_labels):
+                length = min(len(tokens["input_ids"]), max_length)
+                labels[i, :length] = torch.tensor(tokens["input_ids"][:length])
+        else:
+            labels = input_ids.clone()
         # Move tensors to appropriate device
         device = self.context.device
         return {
             "input_ids": input_ids.to(device),
-            "attention_mask": attention_mask.to(device)
+            "attention_mask": attention_mask.to(device),
+            "labels": labels.to(device)
         }
 
     def _calculate_loss(self, outputs: torch.Tensor, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -1006,6 +1144,7 @@ class SOVLRunner:
             if name in ["scaffold_provider", "scaffold_token_mapper", "cross_attention_injector"]:
                 if component is not None and (not hasattr(component, 'to_dict') or not hasattr(component, 'from_dict')):
                     raise ValueError(f"Scaffold component {name} missing required serialization methods")
+            
             
             self.logger.log_event(f"Validated component {name} serialization", level="info")
             
@@ -1071,18 +1210,33 @@ class SOVLRunner:
                 if not isinstance(self.model, torch.nn.Module):
                     self.logger.log_error(error_msg="Invalid model type", error_type="component_error")
                     return
-                
                 # Get the tokenizer from the model manager
                 self.tokenizer = model_manager.get_base_tokenizer()
                 if self.tokenizer is None:
-                    self.logger.log_error(error_msg="Failed to get tokenizer from model manager", error_type="tokenizer_error")
+                    # Fallback: try to initialize from transformers
+                    try:
+                        from transformers import AutoTokenizer
+                        model_name_or_path = self.context.config_manager.get("core_config.base_model_name")
+                        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+                        self.logger.log_event(
+                            event_type="tokenizer_initialization_fallback",
+                            message=f"Tokenizer initialized from pretrained: {model_name_or_path}",
+                            level="info"
+                        )
+                    except Exception as e:
+                        self.logger.log_error(error_msg=f"Failed to initialize tokenizer from pretrained: {str(e)}", error_type="tokenizer_error")
+                        return
+                else:
+                    self.logger.log_event(
+                        event_type="tokenizer_initialization",
+                        message="Tokenizer initialized successfully",
+                        level="info"
+                    )
+                # Initialize optimizer after model is ready
+                self._initialize_optimizer(self.model)
+                if self.optimizer is None:
+                    self.logger.log_error(error_msg="Optimizer initialization failed", error_type="optimizer_error")
                     return
-                    
-                self.logger.log_event(
-                    event_type="tokenizer_initialization",
-                    message="Tokenizer initialized successfully",
-                    level="info"
-                )
             else:
                 self.logger.log_error(error_msg="ModelManager not initialized", error_type="component_error")
                 return
@@ -1095,9 +1249,9 @@ class SOVLRunner:
             )
             self.state_manager.initialize_state()
             
-            optimizer = None  # Note: Optimizer should be initialized in SOVLOrchestrator or passed
+            # Always use self.optimizer for checkpoint loading
             if args.resume_from_checkpoint:
-                if not self.load_checkpoint(args.resume_from_checkpoint, optimizer):
+                if not self.load_checkpoint(args.resume_from_checkpoint, optimizer=self.optimizer):
                     self.logger.log_error(
                         error_msg="Failed to load checkpoint, starting fresh",
                         error_type="checkpoint_error"
@@ -1141,20 +1295,21 @@ class SOVLRunner:
                             message=f"Starting epoch {epoch + 1}/{args.epochs}",
                             level="info"
                         )
-                        
                         # Training phase
                         train_loss = self.orchestrator.train(
                             epochs=1,
                             batch_size=args.batch_size,
                             formatted_training_data=formatted_training_data,
                             valid_data=valid_data,
-                            checkpoint_callback=lambda: self.save_checkpoint(optimizer=optimizer),
+                            optimizer=self.optimizer,
+                            checkpoint_callback=lambda: self.save_checkpoint(optimizer=self.optimizer),
                             validate_every=args.validate_every
                         )
                         
                         # Validation phase
                         if valid_data and (epoch + 1) % args.validate_every == 0:
-                            valid_loss, metrics = self.orchestrator.validate(valid_data)
+                            metrics = self.orchestrator.validate(valid_data)
+                            valid_loss = metrics.get("loss", float("inf"))
                             self._update_metrics_history(metrics, epoch + 1)
                             self.logger.log_event(
                                 event_type="validation",
@@ -1174,7 +1329,7 @@ class SOVLRunner:
                                 )
                                 break
                         # Save checkpoint and clean up old ones
-                        self.save_checkpoint(optimizer=optimizer)
+                        self.save_checkpoint(optimizer=self.optimizer)
                         self.cleanup_old_checkpoints(args.max_checkpoints)
                 elif args.mode == 'generate':
                     self.logger.log_event(
@@ -1207,7 +1362,7 @@ class SOVLRunner:
         finally:
             # Save final checkpoint and cleanup, but guard against errors in these methods
             try:
-                self.save_checkpoint(force=True, optimizer=optimizer)
+                self.save_checkpoint(force=True, optimizer=self.optimizer)
             except Exception as e:
                 self.logger.log_error(error_msg=f"Error saving final checkpoint: {str(e)}", error_type="checkpoint_error")
             try:
