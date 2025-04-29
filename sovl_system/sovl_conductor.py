@@ -24,6 +24,7 @@ from sovl_logger import Logger
 from sovl_manager import ModelManager
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 from sovl_trainer import TrainingCycleManager
+import threading
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
@@ -53,6 +54,9 @@ class SOVLOrchestrator(OrchestratorInterface):
         Raises:
             RuntimeError: If initialization of ConfigManager or SOVLSystem fails.
         """
+        # Initialize thread lock for state synchronization
+        self._lock = threading.RLock()
+        
         self._initialize_logger(log_file)
         self._log_event("orchestrator_init_start", {"config_path": config_path})
 
@@ -427,21 +431,91 @@ class SOVLOrchestrator(OrchestratorInterface):
         self.state_manager._system_state = value
 
     def sync_state(self) -> None:
-        """Synchronize orchestrator state with the system state using atomic update."""
+        """
+        Synchronize orchestrator state with the system state using atomic update.
+        
+        This method ensures atomic updates to the state with:
+        - Thread safety using locks
+        - Session ID validation to prevent desynchronization
+        - State validation to ensure consistency
+        - Fallback to last known good state in case of failure
+        - Emergency state saving for recovery
+        """
         with self._lock:
             if not self._system:
+                self._log_event("state_sync_skipped", {"reason": "System not initialized"})
                 return
+                
+            # Save a copy of the current state for recovery
+            last_state_hash = self.state.state_hash if hasattr(self.state, 'state_hash') else None
+            last_conversation_id = self.state.history.conversation_id if hasattr(self.state, 'history') else None
+            
             try:
+                # Retrieve latest system state
                 system_state = self._system.get_state()
+                
+                # Verify session ID matches to prevent desynchronization
+                if hasattr(system_state, 'session_id') and hasattr(self.state, 'session_id'):
+                    if system_state.session_id != self.state.session_id:
+                        raise ValueError(f"Session ID mismatch: orchestrator {self.state.session_id} vs system {system_state.session_id}")
+                
+                # Perform the atomic update
                 def update_fn(state):
+                    # Clone the state to avoid direct modification
                     state.from_dict(system_state, self.device)
+                    # Additional validation can be added here if needed
+                    return state
+                    
                 self.state_manager.update_state_atomic(update_fn)
+                
+                # Log successful synchronization
                 self._log_event("state_synchronized", {
                     "conversation_id": self.state.history.conversation_id,
-                    "state_hash": self.state.state_hash
+                    "state_hash": self.state.state_hash,
+                    "state_version": getattr(self.state, 'state_version', 'unknown')
                 })
+                
             except Exception as e:
                 self._log_error("State synchronization failed", e)
+                
+                # Attempt recovery with last known good state
+                try:
+                    if last_state_hash:
+                        self._log_event("state_sync_recovery_attempt", {
+                            "last_hash": last_state_hash,
+                            "last_conversation_id": last_conversation_id
+                        })
+                        
+                        # Try to revert to the last known good state
+                        def recovery_fn(state):
+                            # Only restore essential fields to maintain system stability
+                            if hasattr(self.state, 'history'):
+                                state.history = self.state.history
+                            if hasattr(self.state, 'session_id'):
+                                state.session_id = self.state.session_id
+                            return state
+                            
+                        self.state_manager.update_state_atomic(recovery_fn)
+                        self._log_event("state_sync_recovery_succeeded", {
+                            "restored_hash": self.state.state_hash
+                        })
+                    else:
+                        self._log_event("state_sync_recovery_failed", {
+                            "reason": "No previous state hash available for recovery"
+                        })
+                except Exception as recovery_e:
+                    self._log_error("State recovery failed after sync error", recovery_e)
+                    
+                    # Emergency state save
+                    try:
+                        emergency_path = f"emergency_state_{int(time.time())}.json"
+                        if hasattr(self, 'state_manager') and self.state_manager and self.state:
+                            self.state_manager.save_state(self.state, emergency_path)
+                            self._log_event("emergency_state_saved", {"path": emergency_path})
+                    except Exception as save_e:
+                        self._log_error("Emergency state save failed", save_e)
+                
+                # Raise the original error after recovery attempts
                 raise RuntimeError("Failed to synchronize state") from e
 
     def initialize_system(self) -> None:

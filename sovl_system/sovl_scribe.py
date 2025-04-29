@@ -13,6 +13,12 @@ from sovl_logger import Logger
 from sovl_queue import ScribeEntry
 from sovl_io import JsonlWriter
 
+class StateAccessorInterface:
+    """Interface for state accessor objects to ensure proper dependency handling."""
+    def get_state(self):
+        """Get the current state"""
+        raise NotImplementedError("StateAccessor must implement get_state method")
+
 class Scriber:
     """
     Central scribing subsystem for SOVL, managing metadata processing and scribed output.
@@ -57,40 +63,84 @@ class Scriber:
         self.error_manager = error_manager
         self.metadata_processor = metadata_processor
         self.logger = logger
-        self.state_accessor = state_accessor
         self.scribe_queue = scribe_queue
-
+        self._state_accessor = None
+        
         # Setup fallback logger first (for initialization errors)
         self.fallback_logger = self._setup_fallback_logger()
+        
+        # Placeholders for delayed initialization
+        self.jsonl_writer = None
+        self._writer_thread = None
+        self._stop_event = threading.Event()
 
         try:
             # Determine scribe output path from config or explicit override
             self.scribe_path = getattr(self, 'scribe_path', None) or config_manager.get("scribed_config.output_path", "scribe/sovl_scribe.jsonl")
             os.makedirs(os.path.dirname(self.scribe_path), exist_ok=True)
-            self.jsonl_writer = JsonlWriter(
-                self.scribe_path,
-                config_manager=self.config_manager,
-                error_manager=self.error_manager,
-                logger=self.logger
-            )
-            self.logger.info(f"Scribe output file set to: {self.scribe_path}")
             
-            # Setup worker thread
-            self._stop_event = threading.Event()
-            self._writer_thread = threading.Thread(
-                target=self._process_scribe_queue,
-                name="ScriberWriterThread",
-                daemon=True
-            )
-            self._writer_thread.start()
-            
-            self.logger.info("Scriber initialized successfully with writer thread")
+            # Set the state accessor if provided during initialization
+            if state_accessor is not None:
+                self.set_state_accessor(state_accessor)
+                
+            # Log initialization
+            self.logger.info(f"Scriber initialized with output path: {self.scribe_path}")
 
         except Exception as e:
             self.fallback_logger.exception(
                 f"Failed to initialize Scriber: {str(e)}"
             )
             raise
+            
+    def _initialize_jsonl_writer(self) -> None:
+        """Initialize the JSONL writer if not already initialized."""
+        if self.jsonl_writer is None:
+            self.jsonl_writer = JsonlWriter(
+                self.scribe_path,
+                config_manager=self.config_manager,
+                error_manager=self.error_manager,
+                logger=self.logger
+            )
+            self.logger.info(f"JSONL writer initialized for: {self.scribe_path}")
+    
+    def _initialize_writer_thread(self) -> None:
+        """Initialize and start the writer thread if not already running."""
+        if self._writer_thread is None or not self._writer_thread.is_alive():
+            # Initialize the writer first
+            self._initialize_jsonl_writer()
+            
+            # Start the thread
+            self._writer_thread = threading.Thread(
+                target=self._process_scribe_queue,
+                name="ScriberWriterThread",
+                daemon=True
+            )
+            self._writer_thread.start()
+            self.logger.info("Scriber writer thread started")
+            
+    def set_state_accessor(self, state_accessor: Any) -> None:
+        """
+        Set or update the state accessor.
+        
+        Args:
+            state_accessor: Object that provides access to system state
+        """
+        if state_accessor is not None:
+            # Validate minimal state accessor interface
+            if not hasattr(state_accessor, 'state_manager'):
+                self.logger.warning("state_accessor provided does not have state_manager attribute")
+            
+        self._state_accessor = state_accessor
+        self.logger.debug("State accessor set/updated in Scriber")
+        
+    def get_state(self):
+        """Get the current state via state_accessor if available."""
+        if self._state_accessor is not None:
+            if hasattr(self._state_accessor, 'state_manager'):
+                state_manager = getattr(self._state_accessor, 'state_manager')
+                if state_manager and hasattr(state_manager, 'get_state'):
+                    return state_manager.get_state()
+        return None
 
     def _setup_fallback_logger(self) -> logging.Logger:
         """Sets up an independent logger for critical Scriber errors."""
@@ -105,10 +155,59 @@ class Scriber:
             logger.setLevel(logging.ERROR)
             logger.propagate = False
         return logger
+        
+    def scribe(self, origin: str, event_type: str, event_data: Dict[str, Any], 
+               source_metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Scribe an event to the queue and ensure the writer thread is running.
+        
+        Args:
+            origin: Source of the event
+            event_type: Type of event
+            event_data: Event data dictionary
+            source_metadata: Optional metadata
+            
+        Returns:
+            bool: Whether scribing was successful
+        """
+        # Ensure writer thread is running
+        self._ensure_writer_running()
+        
+        # Get session ID from state if available
+        session_id = None
+        if self._state_accessor and hasattr(self._state_accessor, 'session_id'):
+            session_id = self._state_accessor.session_id
+            
+        # Create the scribe entry
+        entry = ScribeEntry(
+            origin=origin,
+            event_type=event_type,
+            event_data=event_data or {},
+            source_metadata=source_metadata or {},
+            session_id=session_id,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        # Add to queue
+        try:
+            self.scribe_queue.put(entry, timeout=0.5)
+            return True
+        except queue.Full:
+            self.logger.warning(f"Scribe queue full, event type {event_type} from {origin} dropped")
+            return False
+            
+    def _ensure_writer_running(self) -> None:
+        """Ensure the writer thread is running."""
+        if self._writer_thread is None or not self._writer_thread.is_alive():
+            self._initialize_writer_thread()
 
     def _process_scribe_queue(self) -> None:
         """Worker thread function to process scribe queue and write to file."""
         self.logger.info("Scriber writer thread started.")
+        
+        # Ensure the writer is initialized
+        self._initialize_jsonl_writer()
+        
         while not self._stop_event.is_set():
             try:
                 # Wait for an item for up to 1 second

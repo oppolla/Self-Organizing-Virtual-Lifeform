@@ -61,7 +61,10 @@ class GenerationManager:
         self.curiosity_manager = curiosity_manager
         self.device = device
         self.dialogue_context_manager = dialogue_context_manager
-        self.state_manager = state_manager or getattr(self, 'context', None) and getattr(self.context, 'state_manager', None)
+        self.state_manager = state_manager
+        
+        # System context reference (will be set later)
+        self._system_context = None
 
         # Generation hooks setup
         self.generation_hooks = generation_hooks or {}
@@ -71,22 +74,18 @@ class GenerationManager:
             level="info",
             component="GenerationManager"
         )
-
-        self.primer = GenerationPrimer(
-            config_manager=self._config_manager,
-            logger=self.logger,
-            state=self.state,
-            error_manager=self.error_manager,
-            curiosity_manager=self.curiosity_manager,
-            temperament_system=getattr(self, 'temperament_system', None),
-            confidence_calculator=getattr(self, 'confidence_calculator', None),
-            bond_calculator=getattr(self, 'bond_calculator', None),
-            device=self.device,
-            lifecycle_manager=getattr(self, 'lifecycle_manager', None),
-            scaffold_manager=self.scaffold_manager,
-            memory_manager=getattr(self, 'memory_manager', None),
-            generation_hooks=self.generation_hooks  # Pass hooks explicitly
-        )
+        
+        # Lazy initialization flags
+        self._initialized_primer = False
+        self._initialized_memory_manager = False
+        self._initialized_scaffold_provider = False
+        self._initialized_bond_calculator = False
+        
+        # Lazy-loaded components
+        self.primer = None
+        self.memory_manager = None
+        self.scaffold_provider = None
+        self.bond_calculator = None
         
         # Get global session_id from config
         self.session_id = self._config_manager.get("runtime.session_id")
@@ -96,23 +95,6 @@ class GenerationManager:
         # Use state's memory managers
         self.ram_manager = state.ram_manager
         self.gpu_manager = state.gpu_manager
-        
-        # Initialize memory manager
-        self.memory_manager = GenerationMemoryManager(
-            config_manager=self._config_manager,
-            logger=self.logger,
-            ram_manager=self.ram_manager,
-            gpu_manager=self.gpu_manager
-        )
-        
-        # Initialize scaffold provider
-        self.scaffold_provider = GenerationScaffoldProvider(
-            scaffold_model=self.scaffolds[0],  # Use first scaffold model
-            scaffold_tokenizer=self.scaffold_tokenizer,
-            device=self.device,
-            logger=self.logger,
-            memory_manager=self.memory_manager
-        )
         
         # Enhanced thread safety with multiple locks
         self._locks = {
@@ -126,18 +108,9 @@ class GenerationManager:
         self._embedding_cache = {}
         self._max_cache_size = 1000
         
-        # Initialize temperament system
-        self._initialize_temperament_system()
-        
         # Initialize configuration
         self._initialize_config()
         
-        # Initialize lifecycle manager
-        self._initialize_lifecycle_manager()
-        
-        # Log initialization with config values
-        self._log_initialization()
-
         # Memory settings
         self.scaffold_unk_id = self._get_config_value("controls_config.scaffold_unk_id", scaffold_tokenizer.unk_token_id)
         self.use_token_map_memory = self._get_config_value("controls_config.use_token_map_memory", True)
@@ -151,13 +124,94 @@ class GenerationManager:
             "post_generate": []
         }
 
-        # Validate and initialize curiosity state
-        self._validate_curiosity_state()
-
-        # BondCalculator integration
-        self.bond_calculator = BondCalculator(config_manager, logger, state)
+        # Validate curiosity state if available
+        if self.curiosity_manager is not None:
+            self._validate_curiosity_state()
 
         self._last_good_memory_context = None  # Cache for fallback memory context
+        
+        # Log successful initialization
+        self.logger.log_info("GenerationManager initialized successfully (with lazy component loading)")
+    
+    def _initialize_memory_manager(self) -> None:
+        """Lazily initialize the memory manager when needed."""
+        if not self._initialized_memory_manager:
+            self.logger.log_debug("Initializing memory manager")
+            self.memory_manager = GenerationMemoryManager(
+                config_manager=self._config_manager,
+                logger=self.logger,
+                ram_manager=self.ram_manager,
+                gpu_manager=self.gpu_manager
+            )
+            self._initialized_memory_manager = True
+            
+    def _initialize_scaffold_provider(self) -> None:
+        """Lazily initialize the scaffold provider when needed."""
+        if not self._initialized_scaffold_provider:
+            self.logger.log_debug("Initializing scaffold provider")
+            # Ensure memory manager is initialized first
+            self._initialize_memory_manager()
+            
+            self.scaffold_provider = GenerationScaffoldProvider(
+                scaffold_model=self.scaffolds[0],  # Use first scaffold model
+                scaffold_tokenizer=self.scaffold_tokenizer,
+                device=self.device,
+                logger=self.logger,
+                memory_manager=self.memory_manager
+            )
+            self._initialized_scaffold_provider = True
+            
+    def _initialize_bond_calculator(self) -> None:
+        """Lazily initialize the bond calculator when needed."""
+        if not self._initialized_bond_calculator:
+            self.logger.log_debug("Initializing bond calculator")
+            self.bond_calculator = BondCalculator(
+                self._config_manager, 
+                self.logger,
+                self.state
+            )
+            self._initialized_bond_calculator = True
+            
+    def _initialize_primer(self) -> None:
+        """Lazily initialize the primer when needed."""
+        if not self._initialized_primer:
+            self.logger.log_debug("Initializing generation primer")
+            
+            # Ensure memory manager is initialized first
+            self._initialize_memory_manager()
+            
+            # Ensure bond calculator is initialized
+            self._initialize_bond_calculator()
+            
+            # Get temperament system from system context if available
+            temperament_system = None
+            confidence_calculator = None
+            lifecycle_manager = None
+            
+            if self._system_context is not None:
+                if hasattr(self._system_context, 'temperament_system'):
+                    temperament_system = self._system_context.temperament_system
+                if hasattr(self._system_context, 'confidence_calculator'):
+                    confidence_calculator = self._system_context.confidence_calculator
+                if hasattr(self._system_context, 'lifecycle_manager'):
+                    lifecycle_manager = self._system_context.lifecycle_manager
+            
+            self.primer = GenerationPrimer(
+                config_manager=self._config_manager,
+                logger=self.logger,
+                state=self.state,
+                error_manager=self.error_manager,
+                curiosity_manager=self.curiosity_manager,
+                temperament_system=temperament_system,
+                confidence_calculator=confidence_calculator,
+                bond_calculator=self.bond_calculator,
+                device=self.device,
+                lifecycle_manager=lifecycle_manager,
+                scaffold_manager=self.scaffold_manager,
+                memory_manager=self.memory_manager,
+                generation_hooks=self.generation_hooks
+            )
+            self._initialized_primer = True
 
     def _with_lock(self, lock_name: str):
         """Context manager for thread-safe operations."""
@@ -174,9 +228,9 @@ class GenerationManager:
         try:
             # Get current state metrics
             state_metrics = {
-                'memory_usage': self.memory_manager.get_memory_usage(),
+                'memory_usage': self.memory_manager.get_memory_usage() if hasattr(self, 'memory_manager') and self.memory_manager else {},
                 'confidence': self.state.confidence if hasattr(self.state, 'confidence') else 0.5,
-                'temperament_score': self.current_temperament_score,
+                'temperament_score': self.current_temperament_score if hasattr(self, 'current_temperament_score') else 0.5,
                 'lifecycle_stage': self.state.lifecycle_stage if hasattr(self.state, 'lifecycle_stage') else 'unknown'
             }
             # Merge in any extra context
@@ -200,189 +254,36 @@ class GenerationManager:
                 error_type="error_handling_error",
                 stack_trace=traceback.format_exc()
             )
-
-    @synchronized()
-    def _handle_state_driven_error(self, error: Exception, context: str) -> None:
-        """Handle errors with state-driven recovery strategies."""
-        try:
-            # Get current state metrics
-            state_metrics = {
-                'memory_usage': self.memory_manager.get_memory_usage(),
-                'confidence': self.state.confidence if hasattr(self.state, 'confidence') else 0.5,
-                'temperament_score': self.current_temperament_score,
-                'lifecycle_stage': self.state.lifecycle_stage if hasattr(self.state, 'lifecycle_stage') else 'unknown'
-            }
             
-            # Handle error with state context
-            self.error_manager.handle_generation_error(
-                error=error,
-                context=context,
-                state=self.state,
-                state_metrics=state_metrics
-            )
-            
-            # Apply state-driven recovery strategies
-            self._apply_state_driven_recovery(error, context, state_metrics)
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to handle state-driven error: {str(e)}",
-                error_type="state_driven_error_handling_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    def _apply_state_driven_recovery(self, error: Exception, context: str, state_metrics: Dict[str, Any]) -> None:
-        """Enhanced: Apply state-driven recovery strategies based on error and current state metrics."""
-        try:
-            recovery_actions = []
-            # Memory management
-            if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
-                before = self.memory_manager.get_memory_usage() if hasattr(self.memory_manager, 'get_memory_usage') else None
-                self.memory_manager.optimize_memory_usage()
-                after = self.memory_manager.get_memory_usage() if hasattr(self.memory_manager, 'get_memory_usage') else None
-                self._clear_scaffold_cache()
-                recovery_actions.append({
-                    'action': 'optimize_memory',
-                    'before': before,
-                    'after': after
-                })
-            # Batch size adjustment based on confidence
-            if state_metrics and state_metrics.get('confidence', 1.0) < 0.3:
-                old_batch_size = getattr(self, 'base_batch_size', None)
-                self.base_batch_size = max(1, self.base_batch_size // 2)
-                recovery_actions.append({
-                    'action': 'adjust_batch_size',
-                    'old_batch_size': old_batch_size,
-                    'new_batch_size': self.base_batch_size
-                })
-            # Temperament adjustment
-            if self.state_manager:
-                def update_fn(state):
-                    if hasattr(state, 'temperament_score'):
-                        old_temp = state.temperament_score
-                        state.temperament_score = max(0.1, state.temperament_score - 0.05)
-                        recovery_actions.append({
-                            'action': 'adjust_temperament',
-                            'old_temperament': old_temp,
-                            'new_temperament': state.temperament_score
-                        })
-                    if hasattr(state, 'lifecycle_stage'):
-                        old_stage = state.lifecycle_stage
-                        if state_metrics and state_metrics.get('lifecycle_stage') == 'exploration':
-                            state.lifecycle_stage = 'consolidation'
-                            recovery_actions.append({
-                                'action': 'update_lifecycle_stage',
-                                'old_stage': old_stage,
-                                'new_stage': state.lifecycle_stage
-                            })
-                self.state_manager.update_state_atomic(update_fn)
-            else:
-                # fallback: log error
-                self.logger.record_event(
-                    event_type="state_driven_recovery_failed",
-                    message="StateManager not available for atomic state-driven recovery.",
-                    level="critical"
-                )
-                return
-            self.logger.record_event(
-                event_type="state_driven_recovery",
-                message=f"Applied state-driven recovery for {context} error",
-                level="info",
-                additional_info={
-                    'error_type': type(error).__name__,
-                    'recovery_actions': recovery_actions,
-                    'state_metrics': state_metrics
-                }
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to apply state-driven recovery: {str(e)}",
-                error_type="state_driven_recovery_error",
-                stack_trace=traceback.format_exc()
-            )
-
-    def _initialize_temperament_system(self) -> None:
-        """Initialize the temperament system with validated parameters."""
-        try:
-            params = self._get_validated_temperament_parameters()
-            if self.state_manager:
-                def update_fn(state):
-                    if not hasattr(state, 'temperament_score'):
-                        state.temperament_score = 0.5
-                    if not hasattr(state, 'temperament_history'):
-                        from collections import deque
-                        state.temperament_history = deque(maxlen=self._get_config_value("controls_config.temperament_history_maxlen", 10))
-                self.state_manager.update_state_atomic(update_fn)
-            else:
-                if not hasattr(self.state, 'temperament_score'):
-                    self.state.temperament_score = 0.5
-                if not hasattr(self.state, 'temperament_history'):
-                    self.state.temperament_history = deque(maxlen=self._get_config_value("controls_config.temperament_history_maxlen", 10))
-            self.logger.record_event(
-                event_type="temperament_system_initialized",
-                message="Temperament system initialized with validated parameters",
-                level="info",
-                additional_info=params
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to initialize temperament system: {str(e)}",
-                error_type="temperament_system_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
-
-    def _get_validated_temperament_parameters(self) -> Dict[str, Any]:
-        """Get and validate temperament parameters."""
-        # Define safe parameter ranges
-        safe_ranges = {
-            "temp_smoothing_factor": (0.1, 1.0),
-            "temp_eager_threshold": (0.5, 0.9),
-            "temp_sluggish_threshold": (0.1, 0.5),
-            "temp_mood_influence": (0.1, 0.9),
-            "temp_curiosity_boost": (0.1, 0.5),
-            "temp_restless_drop": (0.1, 0.5),
-            "temp_melancholy_noise": (0.0, 0.2),
-            "conf_feedback_strength": (0.1, 0.9),
-            "temperament_decay_rate": (0.1, 0.9)
-        }
+    def _update_state_after_error(self, error: Exception, context: str):
+        """Update state after an error occurs."""
+        # Will be implemented in future update
+        pass
         
-        # Get and validate parameters
-        params = {}
-        for key, (min_val, max_val) in safe_ranges.items():
-            value = self._config_manager.get(f"controls_config.{key}", (min_val + max_val) / 2)
-            if not (min_val <= value <= max_val):
-                self.logger.record_event(
-                    event_type="temperament_parameter_warning",
-                    message=f"Parameter {key} out of safe range, clamping to bounds",
-                    level="warning",
-                    additional_info={
-                        "parameter": key,
-                        "value": value,
-                        "min": min_val,
-                        "max": max_val
-                    }
-                )
-                value = max(min_val, min(value, max_val))
-            params[key] = value
+    def set_system_context(self, system_context):
+        """Safely set the system context after initialization."""
+        self._system_context = system_context
+        self.logger.log_info("System context set in GenerationManager")
+        
+        # Update state_manager if it wasn't provided in the constructor
+        if self.state_manager is None and hasattr(system_context, 'state_manager'):
+            self.state_manager = system_context.state_manager
             
-        return params
-
+    def _validate_curiosity_state(self) -> None:
+        """Validate that curiosity manager is properly initialized."""
+        if self.curiosity_manager is None:
+            self.logger.log_warning("CuriosityManager not provided, some features may not work")
+            return
+            
+        if not hasattr(self.curiosity_manager, 'get_curiosity_score'):
+            self.logger.log_warning("CuriosityManager missing get_curiosity_score method")
+            
     @property
     def current_temperament_score(self) -> float:
         """Get the current temperament score."""
-        return self.state.temperament_score
-        
-    @property
-    def mood_label(self) -> str:
-        """Get a human-readable mood label based on the current score."""
-        score = self.current_temperament_score
-        if score < 0.3:
-            return "Cautious"
-        elif score < 0.7:
-            return "Balanced"
-        else:
-            return "Curious"
+        if self._system_context and hasattr(self._system_context, 'temperament_system'):
+            return self._system_context.temperament_system.get_current_score()
+        return 0.5  # Default balanced value
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""

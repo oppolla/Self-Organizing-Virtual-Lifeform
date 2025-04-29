@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+import threading
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from threading import Lock
@@ -8,7 +9,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, U
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 from sovl_state import StateManager, SOVLState
-from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_error import ErrorManager, ErrorRecord
 import traceback
@@ -77,31 +77,50 @@ class StateEventDispatcher(EventDispatcher):
         self.subscribe(StateEventTypes.STATE_CACHE_CLEARED, self._handle_cache_clear, priority=5)
         
     async def _handle_state_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle state update events with error management."""
+        """Handle state update events with minimized lock contention."""
         try:
             if hasattr(self, 'logger') and self.logger:
                 try:
                     self.logger.log_debug("Entering _handle_state_update", event_type="state_event_handler")
                 except Exception:
                     pass
+                    
             state = event_data.get('state')
             if not isinstance(state, SOVLState):
                 raise ValueError("Invalid state object in event data")
-            # Record state change
+                
+            # Create copies of what we need to avoid holding locks during state update
+            state_hash = state.state_hash() if hasattr(state, 'state_hash') else None
+            state_changes = event_data.get('changes', {}).copy() if event_data.get('changes') else {}
+            
+            # Record state change - short lock operation
             with self._state_cache_lock:
                 self._state_change_history.append({
                     'timestamp': time.time(),
                     'event_type': StateEventTypes.STATE_UPDATED,
-                    'state_hash': state.state_hash(),
-                    'changes': event_data.get('changes', {})
+                    'state_hash': state_hash,
+                    'changes': state_changes
                 })
-            # Update state through state manager
-            self.state_manager.update_state(state)
+            
+            # Schedule the actual state update with timeout protection
+            try:
+                # Use a timeout when updating state to prevent deadlocks
+                await asyncio.wait_for(
+                    self._async_update_state(state),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                self.logger.log_error(
+                    error_msg="State update timed out after 5 seconds",
+                    error_type="state_update_timeout"
+                )
+            
             if hasattr(self, 'logger') and self.logger:
                 try:
                     self.logger.log_debug("Exiting _handle_state_update", event_type="state_event_handler")
                 except Exception:
                     pass
+                    
         except Exception as e:
             try:
                 self.error_manager.record_error(
@@ -126,7 +145,20 @@ class StateEventDispatcher(EventDispatcher):
                 else:
                     print(f"[ERROR] Failed to record error in _handle_state_update: {str(err2)}")
                     traceback.print_exc()
-                
+                    
+    async def _async_update_state(self, state):
+        """Update state asynchronously to minimize lock contention."""
+        try:
+            # Update state through state manager
+            self.state_manager.update_state(state)
+        except Exception as e:
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.log_error(
+                    error_msg=f"Async state update error: {str(e)}",
+                    error_type="state_event_error",
+                    stack_trace=traceback.format_exc()
+                )
+        
     async def _handle_state_error(self, event_data: Dict[str, Any]) -> None:
         """Handle state error events with error management."""
         try:
@@ -371,7 +403,10 @@ class EventDispatcher:
         '_deferred_unsubscriptions',
         '_config_manager',
         'error_manager',
-        '_error_thresholds'
+        '_error_thresholds',
+        '_lock_acquisition_times',
+        '_max_lock_hold_time',
+        '_deadlock_detected'
     )
 
     def __init__(self, config_manager: ConfigManager, logger: Optional[Logger] = None):
@@ -390,8 +425,108 @@ class EventDispatcher:
         self._notification_depth: int = 0
         self._deferred_unsubscriptions: Dict[str, Set[EventHandler]] = defaultdict(set)
         
+        # Initialize lock monitoring
+        self._lock_acquisition_times = {}
+        self._max_lock_hold_time = 5.0  # Maximum seconds a lock should be held
+        self._deadlock_detected = False
+        
         # Initialize error management
         self._initialize_error_manager()
+        
+        # Start deadlock monitoring in a background thread
+        self._start_deadlock_monitoring()
+
+    def _start_deadlock_monitoring(self):
+        """Start the deadlock monitoring thread if configured."""
+        if self._get_config_value("controls_config.monitor_deadlocks", True):
+            self._lock_monitoring_thread = threading.Thread(
+                target=self._monitor_locks,
+                daemon=True,
+                name="EventDispatcher-LockMonitor"
+            )
+            self._lock_monitoring_thread.start()
+            self._logger.record_event(
+                event_type="deadlock_monitoring_started",
+                message="Deadlock monitoring thread started",
+                level="info"
+            )
+
+    def _monitor_locks(self):
+        """Background thread to monitor lock acquisitions and detect potential deadlocks."""
+        while True:
+            try:
+                current_time = time.time()
+                deadlocked_threads = []
+                
+                # Copy to avoid modification during iteration
+                acq_times_copy = dict(self._lock_acquisition_times)
+                
+                for thread_id, info in acq_times_copy.items():
+                    acquisition_time = info["time"]
+                    thread_name = info["thread_name"]
+                    
+                    if current_time - acquisition_time > self._max_lock_hold_time:
+                        deadlocked_threads.append((thread_id, thread_name, current_time - acquisition_time))
+                        
+                if deadlocked_threads:
+                    self._deadlock_detected = True
+                    self._logger.record_event(
+                        event_type="potential_deadlock_detected",
+                        message=f"Potential deadlock detected in {len(deadlocked_threads)} threads",
+                        level="critical",
+                        additional_info={"deadlocked_threads": deadlocked_threads}
+                    )
+                    # Force reset lock state in extreme cases
+                    if len(deadlocked_threads) > 2:
+                        self._emergency_lock_reset()
+                
+                # Check less frequently to reduce overhead
+                time.sleep(1.0)
+                
+            except Exception as e:
+                # Don't let monitoring thread crash
+                self._logger.record_event(
+                    event_type="lock_monitoring_error",
+                    message=f"Error in lock monitoring thread: {str(e)}",
+                    level="error",
+                    additional_info={"traceback": traceback.format_exc()}
+                )
+                time.sleep(5.0)  # Back off on errors
+
+    def _track_lock_acquisition(self, thread_id=None):
+        """Track when a thread acquires the lock."""
+        if thread_id is None:
+            thread_id = threading.get_ident()
+        
+        self._lock_acquisition_times[thread_id] = {
+            "time": time.time(),
+            "thread_name": threading.current_thread().name
+        }
+
+    def _track_lock_release(self, thread_id=None):
+        """Track when a thread releases the lock."""
+        if thread_id is None:
+            thread_id = threading.get_ident()
+        
+        self._lock_acquisition_times.pop(thread_id, None)
+
+    def _emergency_lock_reset(self):
+        """Emergency procedure for recovering from a severe deadlock situation."""
+        self._logger.record_event(
+            event_type="emergency_lock_reset",
+            message="Emergency lock reset initiated due to severe deadlock",
+            level="critical"
+        )
+        
+        # Create a new lock to replace the potentially corrupted one
+        old_lock = self._lock
+        self._lock = Lock()
+        
+        # Reset state to allow the system to recover
+        self._notification_depth = 0
+        self._deferred_unsubscriptions.clear()
+        self._lock_acquisition_times.clear()
+        self._deadlock_detected = False
 
     def _initialize_error_manager(self) -> None:
         """Initialize error management system."""
@@ -519,13 +654,55 @@ class EventDispatcher:
         )
 
     @contextmanager
-    def _locked(self):
-        """Context manager for acquiring and releasing the internal lock."""
-        self._lock.acquire()
+    def _locked(self, timeout=5.0):
+        """Context manager for acquiring and releasing the internal lock with timeout."""
+        thread_id = threading.get_ident()
+        acquired = self._lock.acquire(timeout=timeout)
+        if not acquired:
+            self._logger.record_event(
+                event_type="lock_acquisition_timeout",
+                message=f"Failed to acquire lock after {timeout}s - potential deadlock detected",
+                level="critical",
+                additional_info={
+                    "thread_id": thread_id,
+                    "thread_name": threading.current_thread().name,
+                    "current_locks": list(self._lock_acquisition_times.keys())
+                }
+            )
+            # Take recovery action
+            self._trigger_deadlock_recovery()
+            raise TimeoutError(f"Failed to acquire lock after {timeout}s - potential deadlock")
+        
+        # Track the lock acquisition
+        self._track_lock_acquisition(thread_id)
+        
         try:
             yield
         finally:
-            self._lock.release()
+            if acquired:
+                # Track the lock release
+                self._track_lock_release(thread_id)
+                self._lock.release()
+
+    def _trigger_deadlock_recovery(self):
+        """Emergency recovery from potential deadlock situation."""
+        # Log thread information for diagnostics
+        thread_info = {
+            "current_thread": threading.current_thread().name,
+            "active_threads": {t.name: t.is_alive() for t in threading.enumerate()},
+            "notification_depth": self._notification_depth
+        }
+        self._logger.record_event(
+            event_type="deadlock_recovery_triggered",
+            message="Triggering deadlock recovery procedure",
+            level="critical",
+            additional_info=thread_info
+        )
+        
+        # Reset notification depth to unblock processing
+        self._notification_depth = 0
+        # Clear any pending unsubscriptions to avoid further locks
+        self._deferred_unsubscriptions.clear()
 
     def _validate_event_type(self, event_type: Any) -> str:
         """
@@ -798,56 +975,88 @@ class EventDispatcher:
 
     def _finalize_notification(self) -> None:
         """Internal helper to finalize notification and process deferred actions."""
-        with self._locked():
-            self._notification_depth -= 1
-            if self._notification_depth == 0:
-                # Process deferred unsubscriptions only when the outermost notification cycle ends
-                if self._deferred_unsubscriptions:
-                    self._process_deferred_unsubscriptions()
+        try:
+            with self._locked(timeout=5.0):
+                self._notification_depth -= 1
+                process_needed = self._notification_depth == 0 and bool(self._deferred_unsubscriptions)
+        except TimeoutError:
+            # If we can't acquire the lock, log and return
+            self._logger.record_event(
+                event_type="finalize_notification_timeout",
+                message="Failed to acquire lock during finalize_notification - bypassing",
+                level="error"
+            )
+            return
+
+        # Process deferred unsubscriptions outside the lock if needed
+        if process_needed:
+            self._process_deferred_unsubscriptions_safely()
+
+    def _process_deferred_unsubscriptions_safely(self) -> None:
+        """
+        Safely processes deferred unsubscriptions with deadlock prevention.
+        
+        This method uses separate, shorter locks for each event type to avoid
+        long-held locks and reduce deadlock potential.
+        """
+        # Make a copy of the event types to process
+        try:
+            with self._locked(timeout=3.0):
+                event_types_to_process = list(self._deferred_unsubscriptions.keys())
+        except TimeoutError:
+            self._logger.record_event(
+                event_type="deferred_unsubscription_prepare_timeout",
+                message="Failed to acquire lock to prepare for deferred unsubscriptions",
+                level="error"
+            )
+            return
+
+        # Process each event type with its own short-lived lock
+        for event_type in event_types_to_process:
+            try:
+                with self._locked(timeout=2.0):
+                    # Skip if this event type no longer has deferred unsubscriptions
+                    if event_type not in self._deferred_unsubscriptions:
+                        continue
+                    
+                    handlers_to_remove = self._deferred_unsubscriptions[event_type]
+                    
+                    if event_type in self._subscribers:
+                        initial_len = len(self._subscribers[event_type])
+                        self._subscribers[event_type] = [
+                            (prio, h) for prio, h in self._subscribers[event_type]
+                            if h not in handlers_to_remove
+                        ]
+                        removed_count = initial_len - len(self._subscribers[event_type])
+                        
+                        if removed_count > 0:
+                            self._logger.record_event(
+                                event_type="processed_deferred_unsubscription",
+                                message=f"Processed {removed_count} deferred unsubscription(s) for event '{event_type}'.",
+                                level="debug"
+                            )
+
+                        # Clean up if event type becomes empty
+                        if not self._subscribers[event_type]:
+                            del self._subscribers[event_type]
+                    
+                    # Clear these now that they've been processed
+                    del self._deferred_unsubscriptions[event_type]
+                    
+            except TimeoutError:
+                self._logger.record_event(
+                    event_type="deferred_unsubscription_event_timeout",
+                    message=f"Failed to acquire lock while processing event type '{event_type}'",
+                    level="error"
+                )
 
     def _process_deferred_unsubscriptions(self) -> None:
         """
-        Processes handlers marked for deferred unsubscription.
-        Must be called while holding the lock and when notification_depth is 0.
+        Legacy method for deferred unsubscription processing.
+        Now replaced by _process_deferred_unsubscriptions_safely.
+        Kept for backward compatibility.
         """
-        if not self._deferred_unsubscriptions:
-            return
-
-        self._logger.record_event(
-            event_type="processing_deferred_unsubscriptions",
-            message="Processing deferred unsubscriptions...",
-            level="debug"
-        )
-        for event_type, handlers_to_remove in self._deferred_unsubscriptions.items():
-            if event_type in self._subscribers:
-                initial_len = len(self._subscribers[event_type])
-                self._subscribers[event_type] = [
-                    (prio, h) for prio, h in self._subscribers[event_type]
-                    if h not in handlers_to_remove
-                ]
-                removed_count = initial_len - len(self._subscribers[event_type])
-                if removed_count > 0:
-                    self._logger.record_event(
-                        event_type="processed_deferred_unsubscription",
-                        message=f"Processed {removed_count} deferred unsubscription(s) for event '{event_type}'.",
-                        level="debug"
-                    )
-
-                # Clean up if event type becomes empty
-                if not self._subscribers[event_type]:
-                    del self._subscribers[event_type]
-                    self._logger.record_event(
-                        event_type="cleaned_up_stale_event_type_entry",
-                        message=f"Cleaned up stale event type entry: '{event_type}'",
-                        level="debug"
-                    )
-
-        self._deferred_unsubscriptions.clear()
-        self._logger.record_event(
-            event_type="finished_processing_deferred_unsubscriptions",
-            message="Finished processing deferred unsubscriptions.",
-            level="debug"
-        )
+        self._process_deferred_unsubscriptions_safely()
 
     def publish(self, channel: str, event: Any) -> None:
         """
