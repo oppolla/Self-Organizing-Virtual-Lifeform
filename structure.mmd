@@ -169,6 +169,10 @@ graph TD
     %% Talk Generation Flow
     sovl_cli --> sovl_main --> sovl_generation
 
+    %% Entry Flow
+    run_sovl --> sovl_main
+    run_sovl --> sovl_cli
+
     %% Chronicle data flow
     sovl_scribe -- creates --> chronicle
     chronicle -- used by --> sovl_trainer
