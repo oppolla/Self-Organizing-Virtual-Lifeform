@@ -70,7 +70,7 @@ class AutonomyManager:
     - The `motivator` dependency is required for goal-driven behavior (e.g., 'explore' action).
     If these are not provided, safe no-op fallbacks are used, but full functionality is not guaranteed.
     """
-    def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref, tuner: Optional[SOVLTuner] = None, motivator=None):
+    def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref, tuner: Optional[SOVLTuner] = None, motivator=None, state_manager=None, ram_manager=None, gpu_manager=None):
         """
         Initialize the AutonomyManager.
 
@@ -81,13 +81,32 @@ class AutonomyManager:
             system_ref: Reference to SOVLSystem instance for triggering actions.
             tuner: SOVLTuner instance for dynamic parameter tuning (optional).
             motivator: Motivator instance for goal-driven behavior (optional).
+            state_manager: StateManager instance for goal persistence (optional).
+            ram_manager: Centralized RAMManager instance (optional).
+            gpu_manager: Centralized GPUMemoryManager instance (optional).
         """
         self.config_manager = config_manager
         self.logger = logger
         self.device = device
         self.system_ref = system_ref
         self.tuner = tuner if tuner is not None else NoOpTuner()
-        self.motivator = motivator if motivator is not None else NoOpMotivator()
+        self.state_manager = state_manager or getattr(system_ref, 'state_manager', None)
+        self.ram_manager = ram_manager or getattr(system_ref, 'ram_manager', None)
+        self.gpu_manager = gpu_manager or getattr(system_ref, 'gpu_manager', None)
+        if self.state_manager is None:
+            self.logger.record_event(
+                event_type="state_manager_missing",
+                message="No state_manager provided. Goal persistence may fail.",
+                level="warning"
+            )
+        self.motivator = motivator if motivator is not None else Motivator(
+            curiosity=None,
+            memory=None,
+            logger=self.logger,
+            config_manager=self.config_manager,
+            bonder=None,
+            state_manager=self.state_manager
+        )
         self.context_lock = Lock()
         # Cache configuration
         self.controls_config = config_manager.get_section("controls_config")
@@ -129,14 +148,11 @@ class AutonomyManager:
         self.last_diagnostics = None
         self.last_action_result = None
         self.action_registry = {}
+        self.resource_actions = {}  # Modular resource action registry
         self.pending_shutdown = False
         
         # Sense nodes registry: name -> SensationNode
         self.sense_nodes: dict = {}
-
-        # RAM and GPU managers
-        self.ram_manager = RAMManager()  # For advanced RAM stats
-        self.gpu_manager = GPUMemoryManager()  # Already present
 
         # --- LLM Decision Integration: Attach GenerationManager ---
         # Attempt to get a generation_manager from system_ref, else raise error on first use
@@ -163,6 +179,9 @@ class AutonomyManager:
         self._sense_cache_ttl = self.config_manager.get("sense_node_cache_ttl", 1.0)  # seconds
         self._sense_node_priority = self.config_manager.get("sense_node_priority", {})  # name -> priority (lower is higher priority)
 
+    def register_resource_action(self, name, func):
+        self.resource_actions[name] = func
+
     def collect_metrics(self) -> Dict[str, float]:
         """
         Collect system metrics for decision-making (memory usage, error rate, stability score).
@@ -178,12 +197,11 @@ class AutonomyManager:
             }
             # Memory usage with fallback
             try:
-                # Use RAMManager for RAM usage
-                ram_manager = RAMManager(self.config_manager, self.logger)
-                ram_stats = ram_manager.check_memory_health()
-                current_mem = ram_stats.get('used', 0.0)
-                total_mem = ram_stats.get('total', 0.0)
-                metrics["memory_usage"] = current_mem / total_mem if total_mem > 0 else 0.0
+                # Use centralized resource stats
+                resource_stats = self.system_ref.get_resource_stats() if hasattr(self.system_ref, 'get_resource_stats') else {}
+                current_mem = resource_stats.get('ram_used', 0.0)
+                total_mem = resource_stats.get('ram_total', 0.0)
+                metrics["memory_usage"] = current_mem / total_mem if total_mem and total_mem > 0 else 0.0
             except Exception as e:
                 self.logger.record_event(
                     event_type="memory_stats_unavailable",
@@ -550,63 +568,17 @@ class AutonomyManager:
         context["throttle_level"] = getattr(self, "throttle_level", 0)
         # Add system resource metrics (RAM, GPU)
         try:
-            # Use RAMManager for RAM usage
-            ram_manager = RAMManager(self.config_manager, self.logger)
-            ram_stats = ram_manager.check_memory_health()
-            ram_used = ram_stats.get('used', 0.0)
-            ram_total = ram_stats.get('total', None)
-            context["ram_usage"] = ram_used
-            context["ram_total"] = ram_total
-            context["ram_usage_pct"] = ram_used / ram_total if ram_total else None
-            # Add advanced RAM stats from RAMManager if available
-            if hasattr(self, "ram_manager") and self.ram_manager is not None:
-                ram_stats = self.ram_manager.get_stats() if hasattr(self.ram_manager, "get_stats") else {}
-                for k, v in ram_stats.items():
-                    context[f"rammgr_{k}"] = v
+            resource_stats = self.system_ref.get_resource_stats() if hasattr(self.system_ref, 'get_resource_stats') else {}
+            context["ram_usage"] = resource_stats.get('ram_used', None)
+            context["ram_total"] = resource_stats.get('ram_total', None)
+            context["ram_usage_pct"] = resource_stats['ram_used'] / resource_stats['ram_total'] if resource_stats.get('ram_used') is not None and resource_stats.get('ram_total') else None
+            context["gpu_mem_used"] = resource_stats.get('gpu_used', None)
+            context["gpu_mem_total"] = resource_stats.get('gpu_total', None)
+            context["gpu_mem_used_pct"] = resource_stats['gpu_used'] / resource_stats['gpu_total'] if resource_stats.get('gpu_used') is not None and resource_stats.get('gpu_total') else None
         except Exception:
             context["ram_usage"] = None
             context["ram_total"] = None
             context["ram_usage_pct"] = None
-        # GPU memory (use GPUMemoryManager for system standard)
-        try:
-            if hasattr(self, "gpu_manager") and self.gpu_manager is not None:
-                gpu_stats = self.gpu_manager.get_stats() if hasattr(self.gpu_manager, "get_stats") else {}
-                for k, v in gpu_stats.items():
-                    context[f"gpumgr_{k}"] = v
-                # For backward compatibility, also set top-level keys if present
-                if "used" in gpu_stats:
-                    context["gpu_mem_used"] = gpu_stats["used"]
-                if "total" in gpu_stats:
-                    context["gpu_mem_total"] = gpu_stats["total"]
-                if "used" in gpu_stats and "total" in gpu_stats and gpu_stats["total"]:
-                    context["gpu_mem_used_pct"] = gpu_stats["used"] / gpu_stats["total"]
-                else:
-                    context["gpu_mem_used_pct"] = None
-            else:
-                # Fallback to previous torch-based logic if no manager
-                torch_available = False
-                try:
-                    import torch
-                    torch_available = True
-                except ImportError:
-                    torch_available = False
-                device = getattr(self, "device", None)
-                if torch_available and isinstance(device, type(getattr(torch, "device", None) and torch.device("cpu"))):
-                    if device.type == "cuda" and torch.cuda.is_available():
-                        gpu_used = torch.cuda.memory_allocated(device)
-                        gpu_total = torch.cuda.get_device_properties(device).total_memory
-                        context["gpu_mem_used"] = gpu_used
-                        context["gpu_mem_total"] = gpu_total
-                        context["gpu_mem_used_pct"] = gpu_used / gpu_total if gpu_total else None
-                    else:
-                        context["gpu_mem_used"] = None
-                        context["gpu_mem_total"] = None
-                        context["gpu_mem_used_pct"] = None
-                else:
-                    context["gpu_mem_used"] = None
-                    context["gpu_mem_total"] = None
-                    context["gpu_mem_used_pct"] = None
-        except Exception:
             context["gpu_mem_used"] = None
             context["gpu_mem_total"] = None
             context["gpu_mem_used_pct"] = None
@@ -920,7 +892,76 @@ class Motivator:
         self._goal_lock = threading.Lock()
         self.load_goals_from_memory()
 
-    # --- Goal Emergence ---
+    def load_goals_from_memory(self):
+        """Load goals from state_manager atomically and safely."""
+        with self._goal_lock:
+            try:
+                def get_goals_fn(state):
+                    return state.get_goals() if hasattr(state, 'get_goals') else []
+                goal_dicts = self.state_manager.read_state_atomic(get_goals_fn)
+                loaded_goals = []
+                for g in goal_dicts:
+                    goal = Goal.from_dict(g)
+                    if goal is not None:
+                        loaded_goals.append(goal)
+                    else:
+                        self.logger.record_event(
+                            event_type="goal_load_skipped",
+                            message="Skipped invalid goal during load.",
+                            level="warning"
+                        )
+                if loaded_goals:
+                    self.goals = loaded_goals
+                self.logger.record_event(
+                    event_type="goals_loaded",
+                    message=f"Loaded {len(self.goals)} goals from state.",
+                    level="info"
+                )
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="goal_load_failed",
+                    message=f"Failed to load goals from state_manager: {str(e)}",
+                    level="error",
+                    stack_trace=traceback.format_exc()
+                )
+                # Do not overwrite self.goals with []; preserve last known good state
+
+    def persist_goals(self):
+        """Persist goals to state_manager atomically with validation."""
+        with self._goal_lock:
+            def update_fn(state):
+                try:
+                    goals_to_save = [g.to_dict() for g in self.goals]
+                    # Validate goals before saving
+                    for g in goals_to_save:
+                        if not isinstance(g, dict) or "description" not in g:
+                            raise ValueError(f"Invalid goal format: {g}")
+                    state.set_goals(goals_to_save)
+                    return state
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="goal_persist_failed",
+                        message=f"Failed to persist goals: {str(e)}",
+                        level="error",
+                        stack_trace=traceback.format_exc()
+                    )
+                    raise
+            try:
+                self.state_manager.update_state_atomic(update_fn)
+                self.logger.record_event(
+                    event_type="goals_persisted",
+                    message=f"Persisted {len(self.goals)} goals to state.",
+                    level="info"
+                )
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="goal_persist_atomic_failed",
+                    message=f"Atomic persist failed: {str(e)}",
+                    level="error",
+                    stack_trace=traceback.format_exc()
+                )
+                # Optionally: Retry or mark for recovery
+
     def consider_goal(self, description, source, context):
         with self._goal_lock:
             # Enforce max_goals limit
@@ -1000,7 +1041,6 @@ class Motivator:
         threshold = self.config_manager.get("goal_priority_threshold", 0.5)
         return priority > threshold or random.random() < priority
 
-    # --- Goal Lifecycle Management ---
     def reevaluate_goals(self):
         with self._goal_lock:
             for goal in self.goals:
@@ -1043,54 +1083,6 @@ class Motivator:
             self.logger.record_event(event_type="goal_dropped", message=goal.description, additional_info={"reason": reason})
             self.persist_goals()
 
-    # --- Persistence ---
-    def persist_goals(self):
-        with self._goal_lock:
-            def update_fn(state):
-                try:
-                    state.set_goals([g.to_dict() for g in self.goals])
-                except Exception as e:
-                    self.logger.record_event(
-                        event_type="goal_persist_failed",
-                        message=f"Failed to persist goals: {str(e)}",
-                        level="error"
-                    )
-                return state
-            try:
-                self.state_manager.update_state_atomic(update_fn)
-            except Exception as e:
-                self.logger.record_event(
-                    event_type="goal_persist_atomic_failed",
-                    message=f"Atomic persist failed: {str(e)}",
-                    level="error"
-                )
-
-    def load_goals_from_memory(self):
-        with self._goal_lock:
-            try:
-                sovl_state_instance = getattr(sovl_state, 'state', sovl_state)
-                goal_dicts = sovl_state_instance.get_goals() if hasattr(sovl_state_instance, 'get_goals') else []
-                loaded_goals = []
-                for g in goal_dicts:
-                    goal = Goal.from_dict(g)
-                    if goal is not None:
-                        loaded_goals.append(goal)
-                    else:
-                        self.logger.record_event(
-                            event_type="goal_load_skipped",
-                            message="Skipped invalid goal during load.",
-                            level="warning"
-                        )
-                self.goals = loaded_goals
-            except Exception as e:
-                self.logger.record_event(
-                    event_type="goal_load_failed",
-                    message=f"Failed to load goals from sovl_state: {str(e)}",
-                    level="error"
-                )
-                self.goals = []
-
-    # --- Reflection/Introspection (Optional) ---
     def reflect_on_goals(self):
         """
         Agent can introspect on its own motivations and progress, for self-dialogue or explanation.

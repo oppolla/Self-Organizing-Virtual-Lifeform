@@ -506,6 +506,39 @@
     "irrelevance_threshold": 0.2,
     "completion_drive": 0.7,
     "novelty_drive": 0.2
+  },
+"lifecycle_config": {
+    "gestation": {
+      "bias": 0.1,
+      "decay": 1.0
+    },
+    "active": {
+      "bias": 0.0,
+      "decay": 0.9
+    },
+    "sleep": {
+      "bias": -0.1,
+      "decay": 0.8
+    }
+  },
+  "monitoring": {
+    "enable_monitoring": true,
+    "monitor_interval": 60,
+    "metrics_to_track": ["memory_usage", "cpu_usage", "gpu_usage", "error_rate"],
+    "alert_thresholds": {
+      "memory_usage": 0.9,
+      "cpu_usage": 0.9,
+      "gpu_usage": 0.9,
+      "error_rate": 0.1
+    }
+  },
+  "dreamer_config": {
+    "enable_dreaming": true,
+    "dream_interval": 3600,
+    "dream_memory_weight": 0.03,
+    "dream_novelty_boost": 0.03,
+    "dream_memory_decay": 0.95,
+    "dream_prune_threshold": 0.1
   }
 
 }

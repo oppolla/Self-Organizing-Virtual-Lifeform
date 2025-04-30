@@ -61,7 +61,13 @@ from sovl_utils import (
     sync_component_states,
     validate_quantization_mode,
     validate_component_states,
-    check_model_health as util_check_model_health
+    check_model_health as util_check_model_health,
+    ensure_dir_exists,
+    backup_file,
+    restore_file,
+    cleanup_components,
+    atomic_file_counter,
+    safe_append_to_file
 )
 from sovl_confidence import calculate_confidence_score
 from sovl_io import  InsufficientDataError
@@ -159,16 +165,16 @@ class SystemContext:
                 # Log the initialization error
                 error_msg = f"SystemContext initialization failed: {str(e)}"
                 stack_trace = traceback.format_exc()
-                
                 # Use fallback logging if logger isn't initialized yet
                 if hasattr(self, 'logger') and self.logger:
                     self.logger.log_error(error_msg=error_msg, error_type="init_error", stack_trace=stack_trace)
                 else:
-                    print(f"ERROR: {error_msg}\n{stack_trace}")
-                
+                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {error_msg}\n{stack_trace}\n")
                 # Clean up any partially initialized resources
-                self._cleanup_partial_initialization()
-                
+                cleanup_components(self._initialized_components, self, getattr(self, 'logger', None))
+                self._initialized = False
+                self._initialization_complete.clear()
+                self._initialized_components.clear()
                 # Re-raise with additional context
                 raise SystemInitializationError(error_msg, config_path, stack_trace)
     
@@ -199,9 +205,9 @@ class SystemContext:
             self.event_dispatcher = EventDispatcher()
             self._initialized_components.add("event_dispatcher")
             # Initialize memory managers (no dependencies)
-            self.ram_manager = RAMManager()
+            self.ram_manager = RAMManager(self.config_manager, self.logger)
+            self.gpu_manager = GPUMemoryManager(self.logger)
             self._initialized_components.add("ram_manager")
-            self.gpu_manager = GPUMemoryManager()
             self._initialized_components.add("gpu_manager")
             # Acquire resources for ModelManager (example: 2GB GPU memory)
             acquired = False
@@ -246,7 +252,7 @@ class SystemContext:
             if hasattr(self, 'logger') and self.logger:
                 self.logger.log_error(error_msg=error_msg, error_type="init_core_error", stack_trace=traceback.format_exc())
             else:
-                print(f"ERROR: {error_msg}\n{traceback.format_exc()}")
+                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {error_msg}\n{traceback.format_exc()}\n")
             raise
     
     def _initialize_dependent_components(self):
@@ -323,139 +329,15 @@ class SystemContext:
             self.logger.log_error(error_msg=error_msg, error_type="init_connect_error", stack_trace=traceback.format_exc())
             raise
     
-    def _cleanup_partial_initialization(self):
-        """Clean up resources after partial initialization failure."""
-        # Clean up in reverse order of dependency
-        for component_name in reversed(list(self._initialized_components)):
-            component = getattr(self, component_name, None)
-            if component and hasattr(component, 'cleanup'):
-                try:
-                    component.cleanup()
-                    self.logger.log_info(f"Cleaned up {component_name}")
-                except Exception as e:
-                    if hasattr(self, 'logger') and self.logger:
-                        self.logger.log_error(
-                            error_msg=f"Error cleaning up {component_name}: {str(e)}",
-                            error_type="cleanup_error"
-                        )
-                    else:
-                        print(f"Error cleaning up {component_name}: {str(e)}")
-        
-        # Reset initialization flags
-        self._initialized = False
-        self._initialization_complete.clear()
-        self._initialized_components.clear()
-
-    def _ensure_session_dir(self):
-        """Ensure the session counter directory exists."""
-        try:
-            os.makedirs(SystemConstants.SESSION_COUNTER_DIR, exist_ok=True)
-        except Exception as e:
-            print(f"Error creating session counter directory: {e}", file=sys.stderr)
-            raise
-    
-    def _backup_session_counter(self):
-        """Create a backup of the session counter file."""
-        try:
-            if os.path.exists(SystemConstants.SESSION_COUNTER_FILE):
-                with open(SystemConstants.SESSION_COUNTER_FILE, 'r') as src:
-                    content = src.read()
-                with open(SystemConstants.SESSION_COUNTER_BACKUP, 'w') as dst:
-                    dst.write(content)
-        except Exception as e:
-            print(f"Warning: Could not backup session counter: {e}", file=sys.stderr)
-    
-    def _restore_session_counter(self):
-        """Restore the session counter from backup if main file is corrupted."""
-        try:
-            if os.path.exists(SystemConstants.SESSION_COUNTER_BACKUP):
-                with open(SystemConstants.SESSION_COUNTER_BACKUP, 'r') as src:
-                    content = src.read()
-                with open(SystemConstants.SESSION_COUNTER_FILE, 'w') as dst:
-                    dst.write(content)
-        except Exception as e:
-            print(f"Warning: Could not restore session counter: {e}", file=sys.stderr)
-    
     @synchronized("_session_lock")
     def _get_next_session_id(self) -> int:
         """Reads the last session ID, increments it, and writes it back atomically."""
-        self._ensure_session_dir()
-        last_id = 0
-        
-        try:
-            # Open file in read+write mode for atomic operations
-            with open(SystemConstants.SESSION_COUNTER_FILE, 'a+') as f:
-                # Use platform-specific file locking
-                try:
-                    # For Unix/Linux/Mac
-                    import fcntl
-                    fcntl.flock(f, fcntl.LOCK_EX)
-                except (ImportError, AttributeError):
-                    try:
-                        # For Windows
-                        import msvcrt
-                        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
-                    except (ImportError, AttributeError):
-                        # Fallback - we're already using a Python lock
-                        # but file operations themselves aren't atomic
-                        print("Warning: File locking not available for session counter; using synchronized lock only", 
-                              file=sys.stderr)
-                
-                try:
-                    # Read current value
-                    f.seek(0)
-                    content = f.read().strip()
-                    
-                    if content.isdigit():
-                        last_id = int(content)
-                    else:
-                        # File exists but content is invalid, try backup
-                        self._restore_session_counter()
-                        f.seek(0)
-                        content = f.read().strip()
-                        if content.isdigit():
-                            last_id = int(content)
-                    
-                    # Increment and write back atomically
-                    current_id = last_id + 1
-                    f.seek(0)
-                    f.truncate(0)
-                    f.write(str(current_id))
-                    f.flush()
-                    os.fsync(f.fileno())  # Force sync to disk
-                    
-                    # Create backup after successful update
-                    self._backup_session_counter()
-                    
-                    return current_id
-                    
-                finally:
-                    # Release lock
-                    try:
-                        # Unix/Linux/Mac
-                        fcntl.flock(f, fcntl.LOCK_UN)
-                    except (NameError, AttributeError):
-                        try:
-                            # Windows
-                            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-                        except (NameError, AttributeError):
-                            pass  # No locking, so nothing to release
-                            
-        except Exception as e:
-            print(f"Warning: Could not read/write session ID counter file: {e}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
-            
-            if hasattr(self, 'logger') and self.logger:
-                self.logger.log_error(
-                    error_msg=f"Failed to get next session ID: {str(e)}",
-                    error_type="session_id",
-                    stack_trace=traceback.format_exc()
-                )
-            
-            # Generate a random session ID as fallback to avoid collisions
-            import random
-            import time
-            return int(time.time() * 1000) % 1000000 + random.randint(1000, 9999)
+        return atomic_file_counter(
+            SystemConstants.SESSION_COUNTER_FILE,
+            SystemConstants.SESSION_COUNTER_BACKUP,
+            self._session_lock,
+            logger=getattr(self, 'logger', None)
+        )
     
     def get_session_id(self) -> int:
         """Returns the current session ID."""
@@ -490,26 +372,13 @@ class SystemContext:
                         stack_trace=traceback.format_exc()
                     )
                 except Exception as log_err:
-                    print(f"Additionally, failed to log error: {str(log_err)}", file=sys.stderr)
+                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
                     # Try to write to an emergency file
-                    try:
-                        with open("sovl_initialization_error.log", "a") as f:
-                            f.write(f"[{time.ctime()}] {log_msg}\n")
-                    except Exception:
-                        pass  # Nothing more we can do
+                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
             else:
-                print(f"Critical error during initialization (logger unavailable): {str(error)}", file=sys.stderr)
-                print(traceback.format_exc(), file=sys.stderr)
-                # Try to write to an emergency file
-                try:
-                    with open("sovl_initialization_error.log", "a") as f:
-                        f.write(f"[{time.ctime()}] {log_msg}\n")
-                except Exception:
-                    pass  # Nothing more we can do
+                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
         except Exception as e2:
-            print(f"Critical error during initialization error handling: {str(error)}", file=sys.stderr)
-            print(f"Additionally, error handler failed: {str(e2)}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
+            safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
     
     def _start_memory_monitoring(self):
         """Start proactive memory monitoring during initialization."""
@@ -542,10 +411,9 @@ class SystemContext:
                                 stack_trace=traceback.format_exc()
                             )
                         else:
-                            print(f"Error in startup memory monitor (logger unavailable): {str(e)}", file=sys.stderr)
+                            safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error in startup memory monitor (logger unavailable): {str(e)}\n")
                     except Exception as e2:
-                        print(f"Critical error in startup memory monitor exception handler: {str(e)}", file=sys.stderr)
-                        print(f"Additionally, error handler failed: {str(e2)}", file=sys.stderr)
+                        safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Critical error in startup memory monitor exception handler: {str(e)}\nAdditionally, error handler failed: {str(e2)}\n")
                     
                     time.sleep(5)  # Wait longer on error
         
@@ -562,8 +430,8 @@ class SystemContext:
                 self.logger.log_debug("Startup memory monitoring started")
                 
         except Exception as e:
-            print(f"Error starting memory monitoring: {str(e)}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
+            safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error starting memory monitoring: {str(e)}\n")
+            safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
     
     def _cleanup_old_errors(self):
         """Clean up old errors from history."""
@@ -735,11 +603,11 @@ class SystemContext:
                         stack_trace=traceback.format_exc()
                     )
                 else:
-                    print(f"Error completing SystemContext initialization sequence (logger/handler unavailable): {str(e)}", file=sys.stderr)
-                    print(traceback.format_exc(), file=sys.stderr)
+                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error completing SystemContext initialization sequence (logger/handler unavailable): {str(e)}\n")
+                    safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
             except Exception as err2:
-                print(f"Critical error in initialization completion exception handler: {str(err2)}", file=sys.stderr)
-                print(f"Original error: {str(e)}", file=sys.stderr)
+                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Critical error in initialization completion exception handler: {str(err2)}\nOriginal error: {str(e)}\n")
+                safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
 
     def add_message_to_memory(self, role: str, content: str, user_id: str = "default"):
         if self.memory_context:
@@ -932,7 +800,7 @@ class SystemContext:
             if hasattr(self, 'logger') and self.logger:
                 self.logger.log_error(error_msg=error_msg, error_type="dependency_error")
             else:
-                print(f"ERROR: {error_msg}")
+                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {error_msg}\n")
             return False
             
         try:
@@ -969,8 +837,30 @@ class SystemContext:
                     stack_trace=traceback.format_exc()
                 )
             else:
-                print(f"ERROR: {error_msg}\n{traceback.format_exc()}")
+                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {error_msg}\n{traceback.format_exc()}\n")
             return False
+
+    def get_resource_stats(self):
+        stats = {}
+        if hasattr(self, 'ram_manager') and self.ram_manager:
+            try:
+                stats.update(self.ram_manager.get_stats())
+            except Exception:
+                stats['ram_used'] = None
+                stats['ram_total'] = None
+        else:
+            stats['ram_used'] = None
+            stats['ram_total'] = None
+        if hasattr(self, 'gpu_manager') and self.gpu_manager:
+            try:
+                stats.update(self.gpu_manager.get_stats())
+            except Exception:
+                stats['gpu_used'] = None
+                stats['gpu_total'] = None
+        else:
+            stats['gpu_used'] = None
+            stats['gpu_total'] = None
+        return stats
 
 class SystemInitializationError(Exception):
     """Custom exception for system initialization failures."""
@@ -1064,12 +954,16 @@ class SOVLSystem(SystemInterface):
             )
             
             # --- Integrate AutonomyManager elegantly ---
+            self.ram_manager = getattr(context, 'ram_manager', None)
+            self.gpu_manager = getattr(context, 'gpu_manager', None)
             self.autonomy_manager = AutonomyManager(
                 config_manager=context.config_manager if hasattr(context, 'config_manager') else None,
                 logger=context.logger if hasattr(context, 'logger') else None,
                 device=getattr(model_manager, 'device', None),
                 system_ref=self,
-                tuner=getattr(context, 'tuner', None) if hasattr(context, 'tuner') else None
+                tuner=getattr(context, 'tuner', None) if hasattr(context, 'tuner') else None,
+                ram_manager=self.ram_manager,
+                gpu_manager=self.gpu_manager
             )
             # Optionally, attach to context for global access
             if not hasattr(context, 'autonomy_manager'):
@@ -1086,8 +980,8 @@ class SOVLSystem(SystemInterface):
                     error=e
                 )
             else:
-                print(f"Critical error initializing SOVLSystem (error handler unavailable): {str(e)}", file=sys.stderr)
-                print(traceback.format_exc(), file=sys.stderr)
+                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Critical error initializing SOVLSystem (error handler unavailable): {str(e)}\n")
+                safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
             raise
 
     def _initialize_component_state(self):
@@ -1460,8 +1354,8 @@ class SOVLSystem(SystemInterface):
                         error=e
                     )
                 else:
-                    print(f"Error starting SOVLSystem monitoring (handler unavailable): {str(e)}", file=sys.stderr)
-                    print(traceback.format_exc(), file=sys.stderr)
+                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error starting SOVLSystem monitoring (handler unavailable): {str(e)}\n")
+                    safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
 
     def _monitor_memory(self):
         """Main memory monitoring loop with exponential backoff and thresholds."""
@@ -1521,8 +1415,8 @@ class SOVLSystem(SystemInterface):
                         error=e
                     )
                 else:
-                    print(f"Error in SOVLSystem memory monitor loop (handler unavailable): {str(e)}", file=sys.stderr)
-                    print(traceback.format_exc(), file=sys.stderr)
+                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error in SOVLSystem memory monitor loop (handler unavailable): {str(e)}\n")
+                    safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
                 
                 # Check for threshold breach
                 if error_count >= max_consecutive_errors:
@@ -1650,8 +1544,8 @@ class SOVLSystem(SystemInterface):
                         error=e
                     )
                 else:
-                    print(f"Error stopping SOVLSystem monitoring (handler unavailable): {str(e)}", file=sys.stderr)
-                    print(traceback.format_exc(), file=sys.stderr)
+                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error stopping SOVLSystem monitoring (handler unavailable): {str(e)}\n")
+                    safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
 
     def check_monitoring_health(self) -> Dict[str, Any]:
         """Check the health of all monitoring components and their threads."""
@@ -1770,7 +1664,7 @@ class SOVLSystem(SystemInterface):
                 self.context.logger.log_critical(
                     "Performing emergency shutdown of monitoring components")
             else:
-                print("CRITICAL: Emergency shutdown of monitoring components", file=sys.stderr)
+                safe_append_to_file("sovl_initialization_error.log", "CRITICAL: Emergency shutdown of monitoring components\n")
             
             # Force terminate all monitoring threads
             if hasattr(self, '_monitor_thread') and self._monitor_thread:
@@ -1792,5 +1686,27 @@ class SOVLSystem(SystemInterface):
             
         except Exception as e:
             # Last-resort error handling - if even this fails, just print to stderr
-            print(f"CRITICAL: Failed during emergency monitoring shutdown: {str(e)}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
+            safe_append_to_file("sovl_initialization_error.log", "CRITICAL: Failed during emergency monitoring shutdown\n")
+            safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
+
+    def get_resource_stats(self):
+        stats = {}
+        if hasattr(self, 'ram_manager') and self.ram_manager:
+            try:
+                stats.update(self.ram_manager.get_stats())
+            except Exception:
+                stats['ram_used'] = None
+                stats['ram_total'] = None
+        else:
+            stats['ram_used'] = None
+            stats['ram_total'] = None
+        if hasattr(self, 'gpu_manager') and self.gpu_manager:
+            try:
+                stats.update(self.gpu_manager.get_stats())
+            except Exception:
+                stats['gpu_used'] = None
+                stats['gpu_total'] = None
+        else:
+            stats['gpu_used'] = None
+            stats['gpu_total'] = None
+        return stats

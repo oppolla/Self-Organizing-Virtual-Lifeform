@@ -12,6 +12,8 @@ from sovl_processor import MetadataProcessor
 from sovl_config import ConfigManager
 from sovl_memory import GPUMemoryManager, RAMManager
 from datetime import datetime, timezone
+import os
+import threading
 
 class NumericalGuard:
     """Context manager for numerical stability."""
@@ -722,3 +724,94 @@ def check_adaptation_dependencies(
             logger.log_error(f"Prefix tuning unavailable: {e}", error_type="dependency_error")
             result["reasons"]["prefix_tuning"] = str(e)
     return result
+
+def ensure_dir_exists(path):
+    """Ensure a directory exists."""
+    os.makedirs(path, exist_ok=True)
+
+def backup_file(src, dst):
+    """Backup a file from src to dst."""
+    if os.path.exists(src):
+        with open(src, 'r') as fsrc:
+            content = fsrc.read()
+        with open(dst, 'w') as fdst:
+            fdst.write(content)
+
+def restore_file(src, dst):
+    """Restore a file from src to dst."""
+    if os.path.exists(src):
+        with open(src, 'r') as fsrc:
+            content = fsrc.read()
+        with open(dst, 'w') as fdst:
+            fdst.write(content)
+
+def cleanup_components(component_names, context, logger=None):
+    """
+    Clean up components in reverse order by calling their cleanup() method if present.
+    Args:
+        component_names: List of attribute names (strings) to clean up.
+        context: The object holding the components as attributes.
+        logger: Optional logger for error/info reporting.
+    """
+    for name in reversed(list(component_names)):
+        component = getattr(context, name, None)
+        if component and hasattr(component, 'cleanup'):
+            try:
+                component.cleanup()
+                if logger:
+                    logger.log_info(f"Cleaned up {name}")
+            except Exception as e:
+                msg = f"Error cleaning up {name}: {str(e)}"
+                if logger:
+                    logger.log_error(error_msg=msg, error_type="cleanup_error")
+                else:
+                    print(msg)
+
+def atomic_file_counter(counter_file, backup_file, lock, logger=None):
+    """
+    Atomically increment and return a counter stored in a file, with file locking and backup/restore.
+    Args:
+        counter_file: Path to the file storing the counter.
+        backup_file: Path to the backup file.
+        lock: A threading lock for process-level atomicity.
+        logger: Optional logger for error/info reporting.
+    Returns:
+        The incremented counter value (int).
+    """
+    ensure_dir_exists(os.path.dirname(counter_file))
+    with lock:
+        try:
+            with open(counter_file, 'a+') as f:
+                # Platform-specific file locking
+                try:
+                    import fcntl
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                except (ImportError, AttributeError):
+                    try:
+                        import msvcrt
+                        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    except (ImportError, AttributeError):
+                        pass  # Already using a Python lock
+                f.seek(0)
+                content = f.read().strip()
+                last_id = int(content) if content.isdigit() else 0
+                last_id += 1
+                f.seek(0)
+                f.truncate()
+                f.write(str(last_id))
+            backup_file(counter_file, backup_file)
+            return last_id
+        except Exception as e:
+            restore_file(backup_file, counter_file)
+            if logger:
+                logger.log_error(error_msg=f"Atomic counter error: {e}", error_type="atomic_counter_error")
+            raise
+
+def safe_append_to_file(path, content, encoding="utf-8"):
+    """Append content to a file safely, with error handling."""
+    try:
+        with open(path, "a", encoding=encoding) as f:
+            f.write(content)
+        return True
+    except Exception:
+        return False

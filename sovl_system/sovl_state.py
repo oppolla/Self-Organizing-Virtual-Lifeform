@@ -1224,6 +1224,13 @@ class StateManager(StateAccessor):
             )
             return False
 
+    def read_state_atomic(self, read_fn):
+        """Safely read from state under lock using a pure function."""
+        with self._lock:
+            if self._current_state is None:
+                self._initialize_state()
+            return read_fn(self._current_state)
+
 class StateTracker(StateBase):
     """Tracks component states and their changes."""
     

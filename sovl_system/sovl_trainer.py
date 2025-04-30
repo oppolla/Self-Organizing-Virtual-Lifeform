@@ -13,7 +13,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 from transformers import get_linear_schedule_with_warmup
 from sovl_engram import LoraAdapterManager
-from sovl_io import JSONLLoader
+from sovl_io import JSONLLoader, StreamingJSONLoader
 import threading
 import gc
 
@@ -2382,29 +2382,6 @@ def move_batch_to_device(batch: dict, device: "torch.device") -> dict:
 # ================== END BATCH & TENSOR HELPERS ==================
 
 # ================== MODULAR DATA PIPELINE INTERFACES (Phase 3) ==================
-
-class StreamingJSONLoader:
-    """
-    Loads training samples from a JSONL file, yielding one sample at a time (streaming).
-    Wraps the JSONLLoader from sovl_io for thread safety and validation.
-    """
-    def __init__(self, file_path: str, config_manager: 'ConfigManager', logger: 'Logger', error_manager: 'ErrorManager'):
-        from sovl_io import JSONLLoader
-        # Always use config_manager to get the canonical data path
-        if file_path is None:
-            file_path = config_manager.get("data_provider.data_path")
-        self.loader = JSONLLoader(config_manager, logger, error_manager)
-        self.file_path = file_path
-        self.logger = logger
-
-    def __iter__(self):
-        # Stream and yield validated samples using the new streaming method
-        try:
-            for sample in self.loader.stream_jsonl(self.file_path):
-                yield sample
-        except Exception as e:
-            self.logger.log_error(f"Failed to stream JSONL data: {e}", error_type="jsonl_stream_error")
-            return
 
 class TrainingSampleEnricher:
     """

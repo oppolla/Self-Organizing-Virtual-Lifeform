@@ -944,3 +944,25 @@ class JsonlWriter:
                     "error_type": "close_error"
                 }
             )
+
+class StreamingJSONLoader:
+    """
+    Loads samples from a JSONL file, yielding one sample at a time (streaming).
+    Wraps the JSONLLoader from sovl_io for thread safety and validation.
+    """
+    def __init__(self, file_path: str, config_manager, logger, error_manager):
+        from sovl_io import JSONLLoader
+        if file_path is None:
+            file_path = config_manager.get("data_provider.data_path")
+        self.loader = JSONLLoader(config_manager, logger, error_manager)
+        self.file_path = file_path
+        self.logger = logger
+
+    def __iter__(self):
+        try:
+            for sample in self.loader.stream_jsonl(self.file_path):
+                yield sample
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Failed to stream JSONL data: {e}", error_type="jsonl_stream_error")
+            return
