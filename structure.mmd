@@ -154,6 +154,10 @@ graph TD
     sovl_volition <--> sovl_main
     sovl_gate --> sovl_volition
 
+    %% Pineal Propogation Flow
+    sovl_main <--> sovl_printer
+    sovl_main --> sovl_fuser
+
     %% Ganglial Configuring Flow
     sovl_config --> sovl_main
     sovl_config --> sovl_generation
