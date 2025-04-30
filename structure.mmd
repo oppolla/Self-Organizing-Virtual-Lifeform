@@ -63,6 +63,11 @@ graph TD
         sovl_io
     end
 
+    %% Broca
+    subgraph Broca
+        sovl_swarm
+    end
+
     %% Motor Cortex
     subgraph Motor_Cortex
         sovl_volition
@@ -75,10 +80,21 @@ graph TD
         sovl_schema
     end
 
+    %% Pineal Gland 
+    subgraph Pineal_Gland 
+        sovl_printer
+        sovl_fuser
+    end
+
     %% Glial Network
     subgraph Glial_Network
         sovl_interfaces
         sovl_hardware
+    end
+
+    %% Janus
+    subgraph Janus
+        run_sovl
     end
 
     %% Synaptic Patterns
