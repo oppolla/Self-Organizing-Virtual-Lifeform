@@ -1152,29 +1152,27 @@ class StateManager(StateAccessor):
             )
             raise
             
-    def update_state_atomic(self, update_fn) -> bool:
-        """Update state atomically using an update function.
-        
-        Args:
-            update_fn: A function that takes the current state and returns an updated state.
-            
-        Returns:
-            bool: True if update was successful, False otherwise.
+    def update_state_atomic(self, update_fn, max_retries=3) -> bool:
         """
-        with self._lock:
-            try:
+        Update state atomically using an update function, with optimistic concurrency.
+        The update function is called outside the lock. If the state changes during the update,
+        the operation is retried up to max_retries times.
+        The update function should be pure (no side effects) and fast.
+        Returns True if update was successful, False otherwise.
+        """
+        for attempt in range(max_retries):
+            with self._lock:
                 if self._current_state is None:
                     self._initialize_state()
-                    
-                # Clone current state
                 state_clone = self._current_state.clone()
-                
-                # Apply update function
-                updated_state = update_fn(state_clone)
-                
-                # Validate updated state
+                state_version = self._state_version
+            # Call update_fn outside the lock
+            updated_state = update_fn(state_clone)
+            # Validate and commit under lock, only if state hasn't changed
+            with self._lock:
+                if self._state_version != state_version:
+                    continue  # State changed, retry
                 if updated_state is not None and self.validate_state(updated_state.to_dict()):
-                    # Set updated state
                     self._current_state = updated_state
                     self._state_version += 1
                     return True
@@ -1184,14 +1182,12 @@ class StateManager(StateAccessor):
                         error_type="state_update_error"
                     )
                     return False
-            except Exception as e:
-                self.logger.log_error(
-                    f"State update failed: {str(e)}",
-                    error_type="state_update_error",
-                    stack_trace=traceback.format_exc()
-                )
-                return False
-                
+        self.logger.log_error(
+            "State update failed: state changed during update_fn, max retries exceeded",
+            error_type="state_update_error"
+        )
+        return False
+
     def validate_state(self, state: Dict[str, Any]) -> bool:
         """Validate a state dictionary.
         

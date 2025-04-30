@@ -18,13 +18,13 @@ from sovl_interfaces import OrchestratorInterface, SystemInterface, SystemMediat
 import random
 from sovl_main import SOVLSystem, SystemContext
 from sovl_curiosity import CuriosityManager
-from sovl_experience import MemoriaManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger
 from sovl_manager import ModelManager
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 from sovl_trainer import TrainingCycleManager
 import threading
+from sovl_system.run_sovl import ResourceManager  # Add this import for ResourceManager
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
@@ -66,6 +66,16 @@ class SOVLOrchestrator(OrchestratorInterface):
             self._log_error(msg, FileNotFoundError(msg))
             raise RuntimeError(msg)
 
+        # --- ResourceManager integration start ---
+        self.components = {}  # Store system components for compatibility
+        self.components["resource_manager"] = ResourceManager(logger=self.logger)
+        # Reserve 2048 MB GPU memory for ModelManager (adjust as needed)
+        gpu_mem_mb = 2048
+        acquired = self.components["resource_manager"].acquire("gpu_memory", amount=gpu_mem_mb)
+        if not acquired:
+            raise RuntimeError(f"Insufficient GPU memory for ModelManager (requested {gpu_mem_mb} MB)")
+        # --- ResourceManager integration end ---
+
         try:
             # Initialize ConfigManager with validation
             try:
@@ -104,6 +114,8 @@ class SOVLOrchestrator(OrchestratorInterface):
                     device=self.device
                 )
             except Exception as e:
+                # Release GPU memory on failure
+                self.components["resource_manager"].release("gpu_memory", amount=gpu_mem_mb)
                 self._log_error("Failed to initialize ModelManager", e)
                 self.model_manager = None
             # Initialize memory managers
@@ -781,6 +793,27 @@ class SOVLOrchestrator(OrchestratorInterface):
             )
             raise
 
+    def validate(self, valid_data) -> dict:
+        """Validate on the provided data and return metrics with at least a 'loss' key."""
+        try:
+            # Lazy initialization if not already present
+            if not hasattr(self, 'training_manager') or self.training_manager is None:
+                from sovl_trainer import TrainingCycleManager
+                self.training_manager = TrainingCycleManager(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    state_manager=self.state_manager,
+                    model_manager=self.model_manager,
+                    error_manager=self.error_manager
+                )
+            metrics = self.training_manager.validate(valid_data)
+            if not isinstance(metrics, dict) or "loss" not in metrics:
+                raise ValueError("Invalid metrics format from TrainingCycleManager")
+            return metrics
+        except Exception as e:
+            self._log_error("Validation failed", e)
+            return {"loss": float("inf")}
+
 class Conductor:
     """Orchestrates the SOVL system components."""
     
@@ -788,7 +821,6 @@ class Conductor:
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager
     ):
@@ -798,7 +830,6 @@ class Conductor:
         Args:
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
-            memoria_manager: MemoriaManager instance for core memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
         """

@@ -172,41 +172,46 @@ class SystemContext:
                 raise SystemInitializationError(error_msg, config_path, stack_trace)
     
     def _initialize_core_components(self, config_path: str):
-        """Initialize core components with minimal dependencies."""
+        """Initialize core components with minimal dependencies and resource management."""
         try:
             # Initialize session ID first
             self.session_id = self._get_next_session_id()
             self._initialized_components.add("session_id")
-            
             # Initialize configuration manager
             self.config_manager = ConfigManager(config_path)
             self._initialized_components.add("config_manager")
-            
             # Store session_id in config for other components to access
             self.config_manager.set("runtime.session_id", self.session_id)
-            
             # Initialize logger
             self.logger = Logger()
             self._initialized_components.add("logger")
-            
             # Now that logger is initialized, log the session start
             self.logger.log_info(f"Starting SOVL Session: {self.session_id}")
-            
+            # Initialize ResourceManager early for system-wide resource coordination
+            from sovl_system.run_sovl import ResourceManager
+            self.resource_manager = ResourceManager(logger=self.logger)
+            self._initialized_components.add("resource_manager")
             # Initialize error handler
             self.error_handler = ErrorManager()
             self._initialized_components.add("error_handler")
-            
             # Initialize event dispatcher
             self.event_dispatcher = EventDispatcher()
             self._initialized_components.add("event_dispatcher")
-            
             # Initialize memory managers (no dependencies)
             self.ram_manager = RAMManager()
             self._initialized_components.add("ram_manager")
-            
             self.gpu_manager = GPUMemoryManager()
             self._initialized_components.add("gpu_manager")
-            
+            # Acquire resources for ModelManager (example: 2GB GPU memory)
+            acquired = False
+            if self.resource_manager:
+                if not self.resource_manager.acquire("gpu_memory", amount=2048):
+                    self.logger.log_error(
+                        error_msg="Insufficient GPU memory for ModelManager",
+                        error_type="resource_error"
+                    )
+                    raise RuntimeError("Failed to acquire resources for ModelManager")
+                acquired = True
             # Initialize state management
             self.state_manager = StateManager(
                 config_manager=self.config_manager,
@@ -215,17 +220,26 @@ class SystemContext:
                 gpu_manager=self.gpu_manager
             )
             self._initialized_components.add("state_manager")
-            
             # Initialize state tracking
             self.state_tracker = StateTracker(
                 config_manager=self.config_manager,
                 logger=self.logger
             )
             self._initialized_components.add("state_tracker")
-            
+            # Initialize ModelManager (after resource acquisition)
+            try:
+                self.model_manager = ModelManager(
+                    config_manager=self.config_manager,
+                    logger=self.logger,
+                    device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                )
+                self._initialized_components.add("model_manager")
+            except Exception as e:
+                if self.resource_manager and acquired:
+                    self.resource_manager.release("gpu_memory", amount=2048)
+                raise
             # Log core components initialization
             self.logger.log_info("Core components initialized successfully")
-            
         except Exception as e:
             error_msg = f"Failed to initialize core components: {str(e)}"
             if hasattr(self, 'logger') and self.logger:

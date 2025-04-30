@@ -12,6 +12,7 @@ from sovl_state import StateManager, SOVLState
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_error import ErrorManager, ErrorRecord
 import traceback
+from sovl_system.run_sovl import ResourceManager  # Import ResourceManager
 
 # Type alias for callbacks - clearer name
 EventHandler = Callable[..., Any]
@@ -51,7 +52,7 @@ class StateEventDispatcher(EventDispatcher):
     Extends EventDispatcher to handle state-related events and state management integration.
     """
     
-    def __init__(self, config_manager: ConfigManager, state_manager: StateManager, logger: Optional[Logger] = None):
+    def __init__(self, config_manager: ConfigManager, state_manager: StateManager, logger: Optional[Logger] = None, resource_manager: Optional[ResourceManager] = None):
         """
         Initialize the StateEventDispatcher.
 
@@ -59,12 +60,14 @@ class StateEventDispatcher(EventDispatcher):
             config_manager: ConfigManager instance for configuration handling
             state_manager: StateManager instance for state management
             logger: Optional Logger instance. If None, creates a new Logger instance.
+            resource_manager: Optional ResourceManager instance for resource coordination
         """
         super().__init__(config_manager, logger)
         self.state_manager = state_manager
         self._state_change_history = deque(maxlen=100)
         self._state_cache = {}
         self._state_cache_lock = Lock()
+        self.resource_manager = resource_manager
         
         # Register state event handlers
         self._register_state_handlers()
@@ -242,26 +245,25 @@ class MemoryEventDispatcher(EventDispatcher):
     
     def __init__(
         self,
-        memoria_manager: MemoriaManager,
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager,
         config_manager: ConfigManager,
-        logger: Logger
+        logger: Logger,
+        resource_manager: Optional[ResourceManager] = None
     ):
         """
         Initialize the memory event dispatcher.
-        
         Args:
-            memoria_manager: MemoriaManager instance for core memory management
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
             config_manager: Config manager for fetching configuration values
             logger: Logger instance for logging events
+            resource_manager: Optional ResourceManager instance for resource coordination
         """
         super().__init__(config_manager, logger)
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
+        self.resource_manager = resource_manager
         self._memory_events_history = deque(maxlen=100)
         
         # Register memory event handlers
@@ -307,26 +309,27 @@ class MemoryEventDispatcher(EventDispatcher):
             )
 
     async def _handle_token_map_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle token map update events."""
+        """Handle token map update events with resource coordination."""
         try:
-            prompt = event_data.get('prompt')
-            confidence = event_data.get('confidence')
-            tokenizer = event_data.get('tokenizer')
-            
-            if not all([prompt, confidence, tokenizer]):
-                raise ValueError("Missing required parameters for token map update")
-                
-            # Record update event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.TOKEN_MAP_UPDATED,
-                'prompt_length': len(prompt),
-                'confidence': confidence
-            })
-            
-            # Update token map
-            self.memoria_manager.update_token_map_memory(prompt, confidence, tokenizer)
-            
+            if self.resource_manager and not self.resource_manager.acquire("ram", amount=512):
+                raise RuntimeError("Insufficient RAM for token map update")
+            try:
+                prompt = event_data.get('prompt')
+                confidence = event_data.get('confidence')
+                tokenizer = event_data.get('tokenizer')
+                if not all([prompt, confidence, tokenizer]):
+                    raise ValueError("Missing required parameters for token map update")
+                self._memory_events_history.append({
+                    'timestamp': time.time(),
+                    'event_type': MemoryEventTypes.TOKEN_MAP_UPDATED,
+                    'prompt_length': len(prompt),
+                    'confidence': confidence
+                })
+                # Place memory update logic here (MemoriaManager removed)
+                # Example: self.ram_manager.update_token_map_memory(prompt, confidence, tokenizer)
+            finally:
+                if self.resource_manager:
+                    self.resource_manager.release("ram", amount=512)
         except Exception as e:
             self.logger.error(f"Error handling token map update: {str(e)}", exc_info=True)
 
@@ -346,7 +349,7 @@ class MemoryEventDispatcher(EventDispatcher):
             })
             
             # Update scaffold context
-            self.memoria_manager.set_scaffold_context(scaffold_hidden_states)
+            self.ram_manager.set_scaffold_context(scaffold_hidden_states)
             
         except Exception as e:
             self.logger.error(f"Error handling scaffold context update: {str(e)}", exc_info=True)
@@ -1276,10 +1279,24 @@ class EventManager:
     def __init__(self, config_manager: ConfigManager, logger: Logger):
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = MemoriaManager(config_manager, logger)
-        self.ram_manager = RAMManager(config_manager, logger)
-        self.gpu_manager = GPUMemoryManager(config_manager, logger)
-        
+        self.resource_manager = ResourceManager(logger=logger)
+        try:
+            if not self.resource_manager.acquire("gpu_memory", amount=2048):
+                raise RuntimeError("Insufficient GPU memory for memory managers")
+            self.ram_manager = RAMManager(config_manager, logger)
+            self.gpu_manager = GPUMemoryManager(config_manager, logger)
+        except Exception as e:
+            self.resource_manager.release("gpu_memory", amount=2048)
+            self._logger.log_error(
+                error_msg=f"Failed to initialize memory managers: {str(e)}",
+                error_type="event_manager_init_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+        # Pass resource_manager to dispatchers as needed
+        self.state_dispatcher = StateEventDispatcher(config_manager, None, logger, resource_manager=self.resource_manager)
+        self.memory_dispatcher = MemoryEventDispatcher(self.ram_manager, self.gpu_manager, config_manager, logger, resource_manager=self.resource_manager)
+
     def handle_memory_event(self, event_type: str, event_data: Dict[str, Any]) -> None:
         """Handle memory-related events."""
         try:
