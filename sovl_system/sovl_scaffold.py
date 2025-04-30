@@ -12,13 +12,14 @@ from sovl_config import ConfigManager
 from sovl_error import ErrorManager, ScaffoldError
 from sovl_io import ConfigurationError
 from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_confidence import ConfidenceManager
 import contextlib
 import functools
 from sovl_engram import LoraAdapterManager
 import difflib
 import copy
 import threading
-from sovl_utils import check_model_health as util_check_model_health
+from sovl_utils import check_model_health as util_check_model_health, calculate_token_map_confidence
 import queue
 import numpy as np
 # Centralized handler for scaffold errors and recovery.
@@ -346,15 +347,37 @@ class ScaffoldTokenMapper:
             char_drift = 1.0 - self._char_similarity(t1n, t2n)
             t1_sub = set(self.base_tokenizer.encode(t1n, add_special_tokens=False))
             t2_sub = set(self.scaffold_tokenizer.encode(t2n, add_special_tokens=False))
-            subword_drift = 1.0
+            # Subword drift calculation (explicit fallback for empty sets)
             if t1_sub and t2_sub:
                 subword_drift = 1.0 - (len(t1_sub & t2_sub) / max(len(t1_sub | t2_sub), 1))
+            else:
+                subword_drift = 1.0  # Default to max drift for empty subword sets
             freq_drift = 0.0
+            if not hasattr(self, '_freq_drift_disabled_logged'):
+                self._freq_drift_disabled_logged = False
             try:
-                base_freq = self.base_tokenizer.get_vocab().get(t1n, 0)
-                scaf_freq = self.scaffold_tokenizer.get_vocab().get(t2n, 0)
-                freq_diff = abs(base_freq - scaf_freq)
-                freq_drift = freq_diff / (freq_diff + 1000.0)
+                base_vocab = self.base_tokenizer.get_vocab()
+                scaf_vocab = self.scaffold_tokenizer.get_vocab()
+                base_val = base_vocab.get(t1n, 0)
+                scaf_val = scaf_vocab.get(t2n, 0)
+                # Only use if values are plausible frequencies (not just token IDs)
+                if (
+                    isinstance(base_val, int) and isinstance(scaf_val, int)
+                    and (base_val > 100 or scaf_val > 100)
+                ):
+                    base_freq = base_val
+                    scaf_freq = scaf_val
+                    freq_diff = abs(base_freq - scaf_freq)
+                    freq_drift = freq_diff / (freq_diff + 1000.0)
+                else:
+                    freq_drift = 0.0
+                    if not self._freq_drift_disabled_logged:
+                        self.logger.record_event(
+                            event_type="freq_drift_disabled",
+                            message="Frequency drift disabled: vocab values are not frequencies.",
+                            level="info"
+                        )
+                        self._freq_drift_disabled_logged = True
             except Exception:
                 freq_drift = 0.0
             total_len = len(t1n) + len(t2n)
@@ -372,6 +395,22 @@ class ScaffoldTokenMapper:
                 freq_weight * freq_drift
             )
             drift = min(max(drift, 0.0), 1.0)
+            # --- Add explicit logging for heuristic-based drift ---
+            self.logger.record_event(
+                event_type="meaning_drift_fallback",
+                message=f"Heuristic-based drift for {token1} -> {token2}: {drift:.4f}",
+                level="warning" if self.embedding_available else "debug",
+                additional_info={
+                    "tokens": [token1, token2],
+                    "lev_drift": lev_drift,
+                    "char_drift": char_drift,
+                    "subword_drift": subword_drift,
+                    "freq_drift": freq_drift,
+                    "weights": [lev_w, char_w, subword_weight, freq_weight]
+                }
+            )
+            with self._metrics_lock:
+                self._drift_values.append(drift)
             self._cache_drift(cache_key, drift, cache_size)
             return drift
         except Exception as e:
@@ -627,9 +666,10 @@ class ScaffoldTokenMapper:
             )
             raise
             
-    def update_token_map_memory(self, prompt: str, confidence: float):
-        """Update token map based on prompt confidence."""
+    def update_token_map_memory(self, prompt: str, logits: torch.Tensor, source: str = "base"):
+        """Update token map based on prompt confidence, using raw base model logits only."""
         try:
+            confidence = calculate_token_map_confidence(logits, source=source, logger=self.logger)
             base_tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
             for base_id in base_tokens:
                 if base_id in self.token_map:
@@ -637,7 +677,6 @@ class ScaffoldTokenMapper:
                         self.token_map[base_id]['weight'],
                         confidence
                     )
-                    
         except Exception as e:
             self.logger.record_event(
                 event_type="token_map_update_error",
