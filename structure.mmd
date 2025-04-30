@@ -169,6 +169,10 @@ graph TD
     %% Talk Generation Flow
     sovl_cli --> sovl_main --> sovl_generation
 
+    %% Brocal Flow
+    sovl_swarm --> sovl_scaffold
+    sovl_swarm --> sovl_engram
+
     %% Entry Flow
     run_sovl --> sovl_main
     run_sovl --> sovl_cli
