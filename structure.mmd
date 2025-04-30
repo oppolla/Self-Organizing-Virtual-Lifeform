@@ -115,29 +115,29 @@ graph TD
     %% Cerebral Generation Flow 
     sovl_primer --> sovl_generation
         
-    %% Hippocampus supports Heart
-    sovl_engram --> sovl_generation
-    sovl_trainer --> sovl_generation
+    %% Hippocampal Memoria Flow
+    sovl_engram <--> sovl_scaffold
+    sovl_manager --> sovl_scaffold
+    sovl_recaller --> sovl_scaffold
 
-    %% Chronicle data flow
-    sovl_scribe -- creates --> chronicle
-    chronicle -- used by --> sovl_trainer
+    %% Insular Learning Flow
+    sovl_queue --> sovl_scribe
+    sovl_scribe --> sovl_trainer
+   
+    %% Hypothalamal Regulation Flow
+    sovl_main --> sovl_error
+    sovl_generation --> sovl_error
+    sovl_trainer --> sovl_error
+    sovl_main --> sovl_logger
+    sovl_generation --> sovl_logger
+    sovl_trainer --> sovl_logger
 
-    %% Vascular System connects to Heart and Neocortex
-    sovl_generation --> sovl_events
-    sovl_generation --> sovl_state
-    sovl_generation --> sovl_data
-    sovl_main --> sovl_events
-    sovl_main --> sovl_state
-
-    %% Sensory System reports to Neocortex and Heart
+    %% Cerebellum Sensory Flow
     sovl_monitor --> sovl_main
-    sovl_monitor --> sovl_generation
-
-    %% Immune System monitors all
-    sovl_error --> sovl_main
-    sovl_error --> sovl_generation
-    sovl_error --> sovl_manager
+    sovl_memory --> sovl_main
+    sovl_resource --> sovl_main
+    sovl_monitor --> sovl_cli
+    sovl_cli --> sovl_main
 
     %% Metabolic System supports Heart and Neocortex
     sovl_hardware --> sovl_generation
@@ -159,3 +159,7 @@ graph TD
     sovl_logger --> sovl_main
     sovl_logger --> sovl_generation
     sovl_logger --> sovl_error
+
+    %% Chronicle data flow
+    sovl_scribe -- creates --> chronicle
+    chronicle -- used by --> sovl_trainer
