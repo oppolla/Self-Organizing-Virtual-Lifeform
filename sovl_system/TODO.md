@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. Update all modules to used improved sovl_state
+1. Update all modules to replace use of calculate_confidence_score to new utility in sovl_utils calculate_token_map_confidence
 2. Disable that startup data sovl_seed part. Save it for Soulprint
 3. integrate sovl_bonder
 4. further develop initialization and startup feel
