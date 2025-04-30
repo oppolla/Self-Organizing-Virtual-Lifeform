@@ -147,14 +147,10 @@ graph TD
     sovl_config --> sovl_main
     sovl_config --> sovl_generation
     sovl_config --> sovl_trainer
-
+    sovl_schema --> sovl_config
+    
     %% Talk Generation Flow
     sovl_cli --> sovl_main --> sovl_generation
-    
-    %% Expressive System logs for all
-    sovl_logger --> sovl_main
-    sovl_logger --> sovl_generation
-    sovl_logger --> sovl_error
 
     %% Chronicle data flow
     sovl_scribe -- creates --> chronicle
