@@ -16,7 +16,9 @@ graph TD
     %% Prefrontal Cortex
     subgraph Prefrontal_Cortex
         sovl_queue
-        sovl_scribe   
+        sovl_scribe
+        sovl_config
+        sovl_schema
     end
 
     %% Limbic System
@@ -49,16 +51,10 @@ graph TD
         sovl_cli
     end
 
-    %% Immune System
-    subgraph Immune_System
-        sovl_error
-        sovl_logger
-    end
-
     %% Hypothalamus
     subgraph Hypothalamus
-        sovl_config
-        sovl_schema
+        sovl_error
+        sovl_logger
     end
 
     %% Reticular Formation
