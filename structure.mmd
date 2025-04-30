@@ -101,20 +101,20 @@ graph TD
     chronicle["chronicle.json"]
 
     %% Flows
+
+    %% Thalamus Orchestration Flow
     sovl_main <--> sovl_conductor
-    sovl_main --> sovl_scaffold
-    sovl_main --> sovl_generation
-    sovl_conductor --> sovl_trainer
-    sovl_scaffold --> sovl_engram
-    sovl_scaffold --> sovl_queue
-    sovl_scaffold --> sovl_scribe
+    sovl_main <--> sovl_events
 
-    %% Limbic System flows into Heart
-    sovl_curiosity --> sovl_generation
-    sovl_temperament --> sovl_generation
-    sovl_confidence --> sovl_generation
-    sovl_bonder --> sovl_generation
+    %% Limbic Trait Flow
+    sovl_curiosity --> sovl_primer
+    sovl_temperament --> sovl_primer
+    sovl_confidence --> sovl_primer
+    sovl_bonder --> sovl_primer
 
+    %% Cerebral Generation Flow 
+    sovl_primer --> sovl_generation
+        
     %% Hippocampus supports Heart
     sovl_engram --> sovl_generation
     sovl_trainer --> sovl_generation
