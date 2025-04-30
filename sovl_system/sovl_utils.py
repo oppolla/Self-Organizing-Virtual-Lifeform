@@ -1,5 +1,5 @@
 import torch
-from typing import Union, Tuple, Optional, List, Dict, Deque, Set, Callable, Any
+from typing import Union, Tuple, Optional, List, Dict, Deque, Set, Callable, Any, Type
 from collections import deque
 import numpy as np
 import random
@@ -535,18 +535,17 @@ def validate_layer_indices(
             )
         return False
 
-def move_batch_to_device(batch, device: "torch.device") -> Any:
+def move_batch_to_device(batch, device):
     """
     Recursively move all tensors in a batch to the specified device.
     Handles nested dictionaries, lists, and tuples.
-    
     Args:
         batch: Input data which may contain tensors (can be dict, list, tuple, tensor, or other)
         device: torch.device to move tensors to
-    
     Returns:
         Same structure as input but with all tensors moved to device
     """
+    import torch
     if isinstance(batch, torch.Tensor):
         return batch.to(device)
     elif isinstance(batch, dict):
@@ -815,3 +814,108 @@ def safe_append_to_file(path, content, encoding="utf-8"):
         return True
     except Exception:
         return False
+
+def validate_metadata_fields(example: Dict[str, Any]) -> Dict[str, bool]:
+    """
+    Validate key metadata fields needed for curriculum example selection.
+    Args:
+        example: Training example with metadata
+    Returns:
+        Dictionary of validation results for each key field
+    """
+    metadata = example.get("metadata", {})
+    content_metrics = metadata.get("content_metrics", {})
+    quality_metrics = metadata.get("quality_metrics", {})
+    return {
+        "has_metadata": bool(metadata),
+        "has_content_metrics": bool(content_metrics),
+        "has_quality_metrics": bool(quality_metrics),
+        "has_word_count": "word_count" in content_metrics,
+        "has_has_code": "has_code" in quality_metrics,
+        "has_has_question": "has_question" in quality_metrics
+    }
+
+def repair_metadata(example: Dict[str, Any], validation_results: Dict[str, bool]) -> Dict[str, Any]:
+    """
+    Repair missing metadata fields with appropriate defaults.
+    Args:
+        example: Training example with metadata
+        validation_results: Result of metadata validation
+    Returns:
+        Example with repaired metadata
+    """
+    import copy
+    fixed_example = copy.deepcopy(example)
+    if not validation_results["has_metadata"]:
+        fixed_example["metadata"] = {}
+    metadata = fixed_example["metadata"]
+    if not validation_results["has_content_metrics"]:
+        metadata["content_metrics"] = {}
+    if not validation_results["has_quality_metrics"]:
+        metadata["quality_metrics"] = {}
+    content_metrics = metadata["content_metrics"]
+    quality_metrics = metadata["quality_metrics"]
+    if not validation_results["has_word_count"]:
+        if "content" in example and isinstance(example["content"], str):
+            content_metrics["word_count"] = len(example["content"].split())
+        else:
+            content_metrics["word_count"] = 0
+    if not validation_results["has_has_code"]:
+        if "content" in example and isinstance(example["content"], str):
+            quality_metrics["has_code"] = ("```" in example["content"])
+        else:
+            quality_metrics["has_code"] = False
+    if not validation_results["has_has_question"]:
+        if "content" in example and isinstance(example["content"], str):
+            quality_metrics["has_question"] = ("?" in example["content"])
+        else:
+            quality_metrics["has_question"] = False
+    return fixed_example
+
+def get_metadata_value(metadata: Dict[str, Any], path: str, default_value: Any, expected_type: Optional[Type] = None) -> Any:
+    """
+    Safely extract a value from nested metadata with type checking.
+    Args:
+        metadata: The metadata dictionary
+        path: Dot-separated path to the value (e.g., "content_metrics.word_count")
+        default_value: Default value if path doesn't exist
+        expected_type: Expected type of the value (optional)
+    Returns:
+        The value at the path, or default_value if not found or wrong type
+    """
+    if not metadata:
+        return default_value
+    try:
+        components = path.split('.')
+        current = metadata
+        for component in components[:-1]:
+            if not isinstance(current, dict) or component not in current:
+                return default_value
+            current = current[component]
+        final_key = components[-1]
+        if not isinstance(current, dict) or final_key not in current:
+            return default_value
+        value = current[final_key]
+        if expected_type is not None and not isinstance(value, expected_type):
+            return default_value
+        return value
+    except Exception:
+        return default_value
+
+def collate_tensor_batch(batch: list, device: "torch.device") -> dict:
+    """
+    Collate a list of dicts (with tensor values) into a batch dict of stacked tensors, moved to device.
+    Args:
+        batch: List[Dict[str, torch.Tensor]]
+        device: torch.device
+    Returns:
+        Dict[str, torch.Tensor] (all tensors stacked and moved to device)
+    """
+    if not batch:
+        return {}
+    try:
+        collated = {k: torch.stack([item[k] for item in batch]) for k in batch[0] if isinstance(batch[0][k], torch.Tensor)}
+        collated = {k: v.to(device) for k, v in collated.items()}
+        return collated
+    except Exception as e:
+        raise RuntimeError(f"Failed to collate tensor batch: {e}")

@@ -16,6 +16,7 @@ from sovl_engram import LoraAdapterManager
 from sovl_io import JSONLLoader, StreamingJSONLoader
 import threading
 import gc
+from sovl_utils import validate_metadata_fields, repair_metadata, get_metadata_value, collate_tensor_batch, move_batch_to_device
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -1511,173 +1512,6 @@ class SOVLTrainer:
             )
             return 0.0, {"status": "unexpected_error", "error": str(e)}
     
-    def _validate_metadata_fields(self, example: Dict[str, Any]) -> Dict[str, bool]:
-        """
-        Validate key metadata fields needed for curriculum example selection.
-        
-        Args:
-            example: Training example with metadata
-            
-        Returns:
-            Dictionary of validation results for each key field
-        """
-        metadata = example.get("metadata", {})
-        content_metrics = metadata.get("content_metrics", {})
-        quality_metrics = metadata.get("quality_metrics", {})
-        
-        return {
-            "has_metadata": bool(metadata),
-            "has_content_metrics": bool(content_metrics),
-            "has_quality_metrics": bool(quality_metrics),
-            "has_word_count": "word_count" in content_metrics,
-            "has_has_code": "has_code" in quality_metrics,
-            "has_has_question": "has_question" in quality_metrics
-        }
-        
-    def _repair_metadata(
-        self, 
-        example: Dict[str, Any], 
-        validation_results: Dict[str, bool]
-    ) -> Dict[str, Any]:
-        """
-        Repair missing metadata fields with appropriate defaults.
-        
-        Args:
-            example: Training example with metadata
-            validation_results: Result of metadata validation
-            
-        Returns:
-            Example with repaired metadata
-        """
-        import copy
-        fixed_example = copy.deepcopy(example)
-        
-        # Add empty metadata if missing
-        if not validation_results["has_metadata"]:
-            fixed_example["metadata"] = {}
-        
-        metadata = fixed_example["metadata"]
-        
-        # Add empty content_metrics if missing
-        if not validation_results["has_content_metrics"]:
-            metadata["content_metrics"] = {}
-        
-        # Add empty quality_metrics if missing
-        if not validation_results["has_quality_metrics"]:
-            metadata["quality_metrics"] = {}
-            
-        content_metrics = metadata["content_metrics"]
-        quality_metrics = metadata["quality_metrics"]
-        
-        # Add word_count if missing
-        if not validation_results["has_word_count"]:
-            # Calculate word count from example content if possible
-            if "content" in example and isinstance(example["content"], str):
-                content_metrics["word_count"] = len(example["content"].split())
-            else:
-                content_metrics["word_count"] = 0
-                
-        # Add has_code if missing
-        if not validation_results["has_has_code"]:
-            # Check for code in content if possible
-            if "content" in example and isinstance(example["content"], str):
-                quality_metrics["has_code"] = ("```" in example["content"])
-            else:
-                quality_metrics["has_code"] = False
-                
-        # Add has_question if missing
-        if not validation_results["has_has_question"]:
-            # Check for questions in content if possible
-            if "content" in example and isinstance(example["content"], str):
-                quality_metrics["has_question"] = ("?" in example["content"])
-            else:
-                quality_metrics["has_question"] = False
-        
-        return fixed_example
-        
-    def _get_metadata_value(
-        self, 
-        metadata: Dict[str, Any], 
-        path: str, 
-        default_value: Any, 
-        expected_type: Optional[Type] = None
-    ) -> Any:
-        """
-        Safely extract a value from nested metadata with type checking.
-        
-        Args:
-            metadata: The metadata dictionary
-            path: Dot-separated path to the value (e.g., "content_metrics.word_count")
-            default_value: Default value if path doesn't exist
-            expected_type: Expected type of the value (optional)
-            
-        Returns:
-            The value at the path, or default_value if not found or wrong type
-        """
-        if not metadata:
-            return default_value
-            
-        try:
-            # Split path into components
-            components = path.split('.')
-            current = metadata
-            
-            # Navigate through nested dicts
-            for component in components[:-1]:
-                if not isinstance(current, dict) or component not in current:
-                    return default_value
-                current = current[component]
-                
-            # Get final value
-            final_key = components[-1]
-            if not isinstance(current, dict) or final_key not in current:
-                return default_value
-                
-            value = current[final_key]
-            
-            # Type check if requested
-            if expected_type is not None and not isinstance(value, expected_type):
-                return default_value
-                
-            return value
-        except Exception:
-            return default_value
-            
-    def _log_curriculum_selection_metrics(
-        self, 
-        training_cycle: int, 
-        stage: str,
-        all_count: int,
-        selected_count: int,
-        metadata_stats: Dict[str, int]
-    ) -> None:
-        """
-        Log detailed metrics about curriculum example selection.
-        
-        Args:
-            training_cycle: Current training cycle
-            stage: Curriculum stage (early, middle, advanced)
-            all_count: Count of all examples
-            selected_count: Count of selected examples
-            metadata_stats: Statistics about metadata fields
-        """
-        if not hasattr(self, '_logger'):
-            return
-            
-        self._logger.log_event(
-            event_type="curriculum_selection_metrics",
-            message=f"Selected {selected_count}/{all_count} examples for {stage} curriculum stage",
-            level="info",
-            additional_info={
-                "cycle": training_cycle,
-                "stage": stage,
-                "all_count": all_count,
-                "selected_count": selected_count,
-                "metadata_stats": metadata_stats,
-                "selection_ratio": selected_count / all_count if all_count > 0 else 0
-            }
-        )
-        
     def _get_fallback_examples(
         self, 
         all_examples: List[Dict[str, Any]], 
@@ -1770,13 +1604,13 @@ class SOVLTrainer:
         repaired_examples = 0
         
         for ex in all_examples:
-            validation_results = self._validate_metadata_fields(ex)
+            validation_results = validate_metadata_fields(ex)
             
             # Check if example has critical metadata issues
             if not validation_results["has_metadata"] or not validation_results["has_content_metrics"]:
                 invalid_examples += 1
                 # Try to repair the example
-                repaired_ex = self._repair_metadata(ex, validation_results)
+                repaired_ex = repair_metadata(ex, validation_results)
                 validated_examples.append(repaired_ex)
                 repaired_examples += 1
             else:
@@ -2349,24 +2183,6 @@ class MetadataInterpreter:
             "average_quality": self._sample_stats["avg_quality"],
             "history_size": sum(len(h) for h in self._interpretation_history.values())
         }
-
-def collate_tensor_batch(batch: list, device: "torch.device") -> dict:
-    """
-    Collate a list of dicts (with tensor values) into a batch dict of stacked tensors, moved to device.
-    Args:
-        batch: List[Dict[str, torch.Tensor]]
-        device: torch.device
-    Returns:
-        Dict[str, torch.Tensor] (all tensors stacked and moved to device)
-    """
-    if not batch:
-        return {}
-    try:
-        collated = {k: torch.stack([item[k] for item in batch]) for k in batch[0] if isinstance(batch[0][k], torch.Tensor)}
-        collated = {k: v.to(device) for k, v in collated.items()}
-        return collated
-    except Exception as e:
-        raise RuntimeError(f"Failed to collate tensor batch: {e}")
 
 def move_batch_to_device(batch: dict, device: "torch.device") -> dict:
     """
