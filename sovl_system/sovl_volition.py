@@ -16,6 +16,7 @@ import random
 import concurrent.futures
 import re
 import threading
+import numpy as np
 
 class SensationNode(ABC):
     """
@@ -791,9 +792,9 @@ class AutonomyManager:
         return 'completed'
 
 class Goal:
-    GOAL_SCHEMA_VERSION = 1
+    GOAL_SCHEMA_VERSION = 2
 
-    def __init__(self, description, source, context, priority=1.0, status='active', metadata=None, completion=0.0, ephemeral=False, soft_completed=False, last_checked=None, relevance=1.0, created_at=None, last_updated=None):
+    def __init__(self, description, source, context, priority=1.0, status='active', metadata=None, completion=0.0, ephemeral=False, ttl=None, impact=1.0, soft_completed=False, last_checked=None, relevance=1.0, created_at=None, last_updated=None):
         self.description = description
         self.source = source
         self.context = context
@@ -804,9 +805,24 @@ class Goal:
         self.last_updated = last_updated if last_updated is not None else self.created_at
         self.completion = completion
         self.ephemeral = ephemeral
+        self.ttl = ttl  # seconds, or None
+        self.impact = impact  # 0.0 (trivial) to 1.0 (critical)
         self.soft_completed = soft_completed
         self.last_checked = last_checked or time.time()
         self.relevance = relevance
+
+    @property
+    def expires_at(self):
+        return self.created_at + self.ttl if self.ttl else None
+
+    def update(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        self.last_updated = time.time()
+
+    def decay_priority(self, decay_rate, decay_multiplier, min_priority):
+        decay = decay_rate * (decay_multiplier if self.ephemeral else 1.0)
+        self.priority = max(self.priority - decay, min_priority)
 
     def to_dict(self):
         return {
@@ -821,6 +837,8 @@ class Goal:
             "last_updated": self.last_updated,
             "completion": self.completion,
             "ephemeral": self.ephemeral,
+            "ttl": self.ttl,
+            "impact": self.impact,
             "soft_completed": self.soft_completed,
             "last_checked": self.last_checked,
             "relevance": self.relevance,
@@ -829,7 +847,7 @@ class Goal:
     @classmethod
     def from_dict(cls, data):
         try:
-            version = data.get("version", 1)
+            version = data.get("version", 2)
             return cls(
                 description=data.get("description", "unknown"),
                 source=data.get("source", "unknown"),
@@ -839,6 +857,8 @@ class Goal:
                 metadata=data.get("metadata", {}),
                 completion=data.get("completion", 0.0),
                 ephemeral=data.get("ephemeral", False),
+                ttl=data.get("ttl", None),
+                impact=data.get("impact", 1.0),
                 soft_completed=data.get("soft_completed", False),
                 last_checked=data.get("last_checked", time.time()),
                 relevance=data.get("relevance", 1.0),
@@ -849,6 +869,17 @@ class Goal:
             import traceback
             print(f"Failed to load goal from dict: {e}\n{traceback.format_exc()}")
             return None
+
+# --- Goal Validation Helper ---
+def validate_goal(goal) -> bool:
+    """Ensure goal meets system invariants"""
+    checks = [
+        bool(getattr(goal, 'description', None)),
+        0 <= getattr(goal, 'priority', 0) <= 1,
+        getattr(goal, 'ttl', None) is None or getattr(goal, 'ttl', 1) > 0,
+        getattr(goal, 'impact', 0) >= 0
+    ]
+    return all(checks)
 
 class Motivator:
     """
@@ -879,8 +910,19 @@ class Motivator:
         self.config_manager = config_manager
         self.bonder = bonder
         self.state_manager = state_manager
-        self.decay_rate = decay_rate
-        self.min_priority = min_priority
+        # Ephemeral config
+        ephemeral_cfg = config_manager.get_section("motivator.ephemeral", {
+            "novelty_threshold": 0.3,
+            "impact_threshold": 0.4,
+            "decay_rate": decay_rate,
+            "decay_multiplier": 2.0,
+            "stale_threshold": 300,
+            "min_impact_to_keep": 0.2,
+            "min_priority": min_priority,
+        })
+        self.ephemeral_cfg = ephemeral_cfg
+        self.decay_rate = ephemeral_cfg["decay_rate"]
+        self.min_priority = ephemeral_cfg["min_priority"]
         self.completion_threshold = completion_threshold
         self.reevaluation_interval = reevaluation_interval
         self.memory_check_enabled = memory_check_enabled
@@ -890,7 +932,20 @@ class Motivator:
         self.max_goals = max_goals
         self.goals = []  # List[Goal]
         self._goal_lock = threading.Lock()
+        self.ttl_warning_threshold = self.ephemeral_cfg.get("ttl_warning_threshold", 60)  # seconds
         self.load_goals_from_memory()
+
+    def _is_ephemeral(self, source: str, context: dict) -> bool:
+        novelty = context.get("novelty", 0)
+        impact = context.get("impact", 1.0)
+        expires_at = context.get("expires_at")
+        if source == "curiosity" and novelty < self.ephemeral_cfg["novelty_threshold"]:
+            return True
+        if impact < self.ephemeral_cfg["impact_threshold"]:
+            return True
+        if expires_at is not None:
+            return True
+        return False
 
     def load_goals_from_memory(self):
         """Load goals from state_manager atomically and safely."""
@@ -902,7 +957,7 @@ class Motivator:
                 loaded_goals = []
                 for g in goal_dicts:
                     goal = Goal.from_dict(g)
-                    if goal is not None:
+                    if goal is not None and validate_goal(goal):
                         loaded_goals.append(goal)
                     else:
                         self.logger.record_event(
@@ -962,7 +1017,7 @@ class Motivator:
                 )
                 # Optionally: Retry or mark for recovery
 
-    def consider_goal(self, description, source, context):
+    def consider_goal(self, description, source, context, force_persistent=False):
         with self._goal_lock:
             # Enforce max_goals limit
             active_goals = [g for g in self.goals if g.status == 'active']
@@ -986,12 +1041,21 @@ class Motivator:
 
             bond = self.bonder.get_bond(context.get('user_id')) if source == 'user' and context.get('user_id') else 1.0
             priority = self.estimate_priority(description, source, context, bond)
-            if self.should_create_goal(priority):
-                goal = Goal(description, source, context, priority)
-                self.goals.append(goal)
-                self._prioritize_goals()
-                self.logger.record_event(event_type="goal_created", message=description, additional_info={"priority": priority, "source": source, "context": context})
-                self.persist_goals()
+            ephemeral = self._is_ephemeral(source, context) and not force_persistent
+            ttl = context.get("ttl")
+            impact = context.get("impact", 1.0)
+            goal = Goal(description, source, context, priority, ephemeral=ephemeral, ttl=ttl, impact=impact)
+            if not validate_goal(goal):
+                self.logger.record_event(
+                    event_type="goal_validation_failed",
+                    message=f"Goal failed validation and was not added: {description}",
+                    additional_info={"source": source, "context": context, "priority": priority, "ephemeral": ephemeral, "ttl": ttl, "impact": impact}
+                )
+                return
+            self.goals.append(goal)
+            self._prioritize_goals()
+            self.logger.record_event(event_type="goal_created", message=description, additional_info={"priority": priority, "source": source, "context": context, "ephemeral": ephemeral, "ttl": ttl, "impact": impact})
+            self.persist_goals()
 
     def _detect_goal_conflict(self, description, source, context, active_goals):
         """
@@ -1036,24 +1100,38 @@ class Motivator:
         # Add more dynamic influences here (curiosity, novelty, etc.)
         return base_priority
 
-    def should_create_goal(self, priority):
-        # Probabilistic or threshold-based decision, not hardcoded
-        threshold = self.config_manager.get("goal_priority_threshold", 0.5)
-        return priority > threshold or random.random() < priority
-
     def reevaluate_goals(self):
         with self._goal_lock:
-            for goal in self.goals:
-                goal.last_checked = time.time()
-                if goal.completion >= 0.95 and goal.status == 'active':
+            self.check_ttl_warnings()
+            now = time.time()
+            to_remove = []
+            for goal in list(self.goals):
+                goal.last_checked = now
+                # TTL enforcement
+                if goal.ephemeral and goal.ttl and (now > goal.created_at + goal.ttl):
+                    to_remove.append((goal, "ttl_expired"))
+                # Staleness
+                elif goal.ephemeral and (now - goal.last_updated) > self.ephemeral_cfg["stale_threshold"]:
+                    to_remove.append((goal, "stale"))
+                # Impact-based cleanup
+                elif goal.ephemeral and goal.impact < self.ephemeral_cfg["min_impact_to_keep"]:
+                    to_remove.append((goal, "low_impact"))
+                # Priority-based cleanup
+                elif goal.ephemeral and goal.priority <= self.ephemeral_cfg["min_priority"]:
+                    to_remove.append((goal, "priority_depleted"))
+                # Completion
+                elif goal.completion >= self.completion_threshold and goal.status == 'active':
                     goal.status = 'completed'
                     goal.soft_completed = True
                     self.logger.record_event("goal_soft_completed", message=goal.description)
-                elif goal.relevance < 0.2 or (goal.ephemeral and goal.status == 'stale'):
+                # Irrelevance
+                elif goal.relevance < self.irrelevance_threshold or (goal.ephemeral and goal.status == 'stale'):
                     goal.status = 'dropped'
                     self.logger.record_event("goal_dropped_irrelevant", message=goal.description)
                 else:
-                    goal.decay_priority()
+                    goal.decay_priority(self.decay_rate, self.ephemeral_cfg["decay_multiplier"], self.min_priority)
+            for goal, reason in to_remove:
+                self.drop_goal(goal, reason)
             self.goals = [g for g in self.goals if g.status not in ('dropped', 'completed') or g.soft_completed]
             self.persist_goals()
 
@@ -1104,3 +1182,29 @@ class Motivator:
             "completion_drive": self.completion_drive,
             "novelty_drive": self.novelty_drive,
         }
+
+    def get_ephemeral_stats(self):
+        """Return stats on ephemeral goals (count, avg_lifespan, completed, dropped)."""
+        ephemerals = [g for g in self.goals if getattr(g, 'ephemeral', False)]
+        now = time.time()
+        lifespans = [now - g.created_at for g in ephemerals]
+        return {
+            'count': len(ephemerals),
+            'avg_lifespan': float(np.mean(lifespans)) if lifespans else 0.0,
+            'completed': sum(1 for g in ephemerals if getattr(g, 'status', None) == 'completed'),
+            'dropped': sum(1 for g in ephemerals if getattr(g, 'status', None) == 'dropped')
+        }
+
+    def check_ttl_warnings(self):
+        """Log warnings for soon-to-expire ephemeral goals."""
+        now = time.time()
+        for goal in self.goals:
+            if getattr(goal, 'ephemeral', False) and getattr(goal, 'ttl', None):
+                expires_at = getattr(goal, 'created_at', 0) + getattr(goal, 'ttl', 0)
+                remaining = expires_at - now
+                if 0 < remaining < self.ttl_warning_threshold:
+                    self.logger.record_event(
+                        event_type="ephemeral_goal_expiring_soon",
+                        message=f"Ephemeral goal expiring soon: {getattr(goal, 'description', '')}",
+                        additional_info={"remaining_seconds": remaining}
+                    )
