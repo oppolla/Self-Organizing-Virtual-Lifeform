@@ -1,22 +1,15 @@
 graph TD
-    %% Autonomic System
-    subgraph autonomic_system
-        sovl_scaffold
-        sovl_trainer
+    %% Thalamus
+    subgraph Thalamus
         sovl_main
         sovl_conductor
+        sovl_events
     end
 
     %% Cerebral Cortex 
-    subgraph cerebral_cortex 
+    subgraph Cerebral_Cortex 
         sovl_generation
-    end
-
-    %% Prefrontal Cortex
-    subgraph Prefrontal_Cortex
-        sovl_engram
-        sovl_queue
-        sovl_scribe   
+        sovl_primer
     end
 
     %% Limbic System
@@ -25,45 +18,70 @@ graph TD
         sovl_temperament
         sovl_confidence
         sovl_bonder
+        sovl_meditator
+    end
+
+    %% Insula
+    subgraph Insula
+        sovl_trainer
+        sovl_queue
+        sovl_scribe
+    end
+
+    %% Hippocampus
+    subgraph Hippocampus
+        sovl_scaffold
+        sovl_engram
+        sovl_manager
+        sovl_recaller
+    end
+
+    %% Claustrum
+    subgraph Claustrum
+        sovl_records
+        sovl_data
     end
 
     %% Cerebellum
     subgraph Cerebellum
-        sovl_scaffold
-    end
-
-    %% Vascular System
-    subgraph Vascular_System
-        sovl_events
-        sovl_state
-        sovl_data
-    end
-
-    %% Interoceptive System
-    subgraph Interoceptive_System
         sovl_monitor
         sovl_memory
-    end
-
-    %% Immune System
-    subgraph Immune_System
-        sovl_error
-        sovl_logger
+        sovl_resource
+        sovl_cli
     end
 
     %% Hypothalamus
     subgraph Hypothalamus
+        sovl_error
+        sovl_logger
+    end
+
+    %% Reticular Formation
+    subgraph Reticular_Formation
+        sovl_processor
+        sovl_utils
+        sovl_io
+    end
+
+    %% Motor Cortex
+    subgraph Motor_Cortex
+        sovl_volition
+        sovl_gate
+    end
+
+    %% Prefrontal Cortex
+    subgraph Prefrontal_Cortex
         sovl_config
+        sovl_schema
     end
 
     %% Glial Network
     subgraph Glial_Network
-        sovl_manager
         sovl_interfaces
         sovl_hardware
     end
 
-    %% Hippocampus
+    %% Synaptic Patterns
     chronicle["chronicle.json"]
 
     %% Flows
