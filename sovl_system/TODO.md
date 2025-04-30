@@ -4,11 +4,12 @@
 
 1. Update all modules to replace use of calculate_confidence_score to new utility in sovl_utils calculate_token_map_confidence
 2. Disable that startup data sovl_seed part. Save it for Soulprint
-3. integrate sovl_bonder
+3. Update all modules to use sovl_resource instead of run_sovl ResourceManager
 4. further develop initialization and startup feel
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. Look into adding a module in bewteem traits and generation. Core personality module that enforces a consistant point of view. Takes weight off sovl_generation
 7. Add user_id monintoring so we see who the system likes and doesn't like
+8. complete sovl_state atomic refactors
 
 
 
