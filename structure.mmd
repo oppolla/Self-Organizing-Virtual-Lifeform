@@ -12,14 +12,6 @@ graph TD
         sovl_primer
     end
 
-    %% Prefrontal Cortex
-    subgraph Prefrontal_Cortex
-        sovl_queue
-        sovl_scribe
-        sovl_config
-        sovl_schema
-    end
-
     %% Limbic System
     subgraph Limbic_System
         sovl_curiosity
@@ -29,9 +21,11 @@ graph TD
         sovl_meditator
     end
 
-    % Insula
+    %% Insula
     subgraph Insula
         sovl_trainer
+        sovl_queue
+        sovl_scribe
     end
 
     %% Hippocampus
@@ -70,6 +64,12 @@ graph TD
     %% Motor Cortex
     subgraph Motor_Cortex
         sovl_volition
+    end
+
+    %% Prefrontal Cortex
+    subgraph Prefrontal_Cortex
+        sovl_config
+        sovl_schema
     end
 
     %% Glial Network
