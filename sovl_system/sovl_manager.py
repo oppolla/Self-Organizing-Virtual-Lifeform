@@ -14,6 +14,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ErrorRecord
 import gc
+from sovl_system.run_sovl import ResourceManager  # Import ResourceManager
 
 # Decorator function (defined outside the class for clarity)
 def _prevent_immediate_retry(recovery_func):
@@ -69,15 +70,16 @@ class ModelManager:
     """
     A module for managing model loading, initialization, and switching in the SOVL system.
     Handles base model, scaffold models, tokenizers, and related configurations.
+    Integrates ResourceManager for coordinated GPU memory management.
     """
-    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device, resource_manager: ResourceManager = None):
         """
         Initialize the ModelManager.
-
         Args:
             config_manager: ConfigManager instance for accessing configuration.
             logger: Logger instance for recording events and errors.
             device: Torch device (cuda/cpu) for model placement.
+            resource_manager: Optional ResourceManager for coordinated resource allocation.
         """
         self._config_manager = config_manager
         self._logger = logger
@@ -85,13 +87,17 @@ class ModelManager:
         self._memory_lock = Lock()
         self._gpu_lock = Lock()  # Add dedicated GPU lock
         self._last_failed_recovery_key = None  # Track last failed recovery attempt
-
+        self.components = {}  # For compatibility with other modules
+        # ResourceManager integration
+        if resource_manager is None:
+            self.resource_manager = ResourceManager(logger=self._logger)
+        else:
+            self.resource_manager = resource_manager
+        self.components["resource_manager"] = self.resource_manager
         # Initialize error manager
         self._initialize_error_manager()
-
         # Initialize configuration
         self._initialize_config()
-
         # Model storage
         self.base_model = None
         self.scaffold_models = []  # List to support multiple scaffolds
@@ -101,7 +107,6 @@ class ModelManager:
         self.base_config = None
         self.lora_managers = []
         self.active_lora_checkpoint = None
-
         # Initialize models and tokenizers
         self.load_models()
 
@@ -344,29 +349,54 @@ class ModelManager:
             )
             raise
 
+    def _estimate_model_size(self, model_name: str) -> int:
+        """Estimate model size in MB for resource acquisition."""
+        try:
+            config = AutoConfig.from_pretrained(model_name)
+            dummy_model = AutoModelForCausalLM.from_config(config)
+            param_count = sum(p.numel() for p in dummy_model.parameters())
+            # Assume fp16 (2 bytes per param) unless quantization is known
+            size_bytes = param_count * 2
+            return size_bytes // (1024 * 1024)
+        except Exception as e:
+            self._log_error(
+                f"Failed to estimate model size for {model_name}: {str(e)}",
+                error_type="model_size_estimation_error",
+                stack_trace=traceback.format_exc()
+            )
+            return 2048  # Default to 2GB if estimation fails
+
     def load_models(self, lora_checkpoint_path: str = None):
         """Load base and scaffold models along with their tokenizers.
         Optionally loads LoRA weights for scaffold models from checkpoint.
+        Acquires GPU memory via ResourceManager before loading models.
         """
         try:
             with self._memory_lock:
-                # Clear existing scaffold resources before loading
                 self._clear_scaffold_resources()
-                
-                # Load tokenizers first
                 self._load_tokenizers()
-                
-                # Load base model
-                self._load_base_model()
-                
-                # Load each scaffold model
+                # Estimate and acquire GPU memory for base model
+                model_size_mb = self._estimate_model_size(self.base_model_name)
+                if not self.resource_manager.acquire("gpu_memory", amount=model_size_mb):
+                    raise RuntimeError("Insufficient GPU memory for base model")
+                try:
+                    self._load_base_model()
+                except Exception as e:
+                    self.resource_manager.release("gpu_memory", amount=model_size_mb)
+                    raise
                 self.scaffold_models = []
                 self.lora_managers = []
                 for model_name in self.scaffold_model_names:
-                    scaffold_model, lora_manager = self._load_scaffold_model(model_name, lora_checkpoint_path)
-                    self.scaffold_models.append(scaffold_model)
-                    self.lora_managers.append(lora_manager)
-                
+                    scaffold_size_mb = self._estimate_model_size(model_name)
+                    if not self.resource_manager.acquire("gpu_memory", amount=scaffold_size_mb):
+                        raise RuntimeError(f"Insufficient GPU memory for scaffold model {model_name}")
+                    try:
+                        scaffold_model, lora_manager = self._load_scaffold_model(model_name, lora_checkpoint_path)
+                        self.scaffold_models.append(scaffold_model)
+                        self.lora_managers.append(lora_manager)
+                    except Exception as e:
+                        self.resource_manager.release("gpu_memory", amount=scaffold_size_mb)
+                        raise
                 self._log_event(
                     "model_loading",
                     "Successfully loaded all models",
@@ -384,19 +414,21 @@ class ModelManager:
                 error_type="model_loading_error",
                 severity=2,
                 additional_info={
-                    "base_model": self.base_model_name,
-                    "scaffold_models": self.scaffold_model_names,
-                    "quantization": self.quantization_mode,
+                    "base_model": getattr(self, 'base_model_name', None),
+                    "scaffold_models": getattr(self, 'scaffold_model_names', None),
+                    "quantization": getattr(self, 'quantization_mode', None),
                     "stage": "model_loading"
                 }
             )
             raise
 
     def _clear_scaffold_resources(self):
-        """Clear scaffold models and tokenizers."""
+        """Clear scaffold models and tokenizers, and release GPU memory via ResourceManager."""
         with self._memory_lock:
             if self.scaffold_models:
-                for model in self.scaffold_models:
+                for model, model_name in zip(self.scaffold_models, self.scaffold_model_names):
+                    scaffold_size_mb = self._estimate_model_size(model_name)
+                    self.resource_manager.release("gpu_memory", amount=scaffold_size_mb)
                     del model
                 self.scaffold_models = []
             self.scaffold_tokenizers = []
@@ -699,12 +731,18 @@ class ModelManager:
                 )
                 with torch.no_grad():
                     if self.base_model is not None:
+                        model_size_mb = self._estimate_model_size(self.base_model_name)
+                        self.resource_manager.release("gpu_memory", amount=model_size_mb)
                         del self.base_model
                         self.base_model = None
+                    for model, model_name in zip(self.scaffold_models, self.scaffold_model_names):
+                        scaffold_size_mb = self._estimate_model_size(model_name)
+                        self.resource_manager.release("gpu_memory", amount=scaffold_size_mb)
                     self._clear_scaffold_resources()
                 gc.collect()
                 if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                    with self._gpu_lock:
+                        torch.cuda.empty_cache()
                 gpu_mem_after = torch.cuda.memory_allocated() if torch.cuda.is_available() else None
                 self._log_event(
                     "cleanup_end",
@@ -718,7 +756,6 @@ class ModelManager:
                         f"GPU memory not fully released after cleanup. Before: {gpu_mem_before}, After: {gpu_mem_after}",
                         level="warning"
                     )
-                # Log memory usage after cleanup
                 self.report_gpu_memory_usage()
         except Exception as e:
             self.error_manager.handle_error(

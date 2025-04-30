@@ -20,6 +20,7 @@ from sovl_memory import GenerationMemoryManager
 from sovl_scaffold import GenerationScaffoldProvider
 from sovl_bonder import BondCalculator
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
+from sovl_system.run_sovl import ResourceManager  # Import ResourceManager
 
 class GenerationError(Exception):
     """Raised when text generation fails in a way that should halt upstream processing."""
@@ -44,22 +45,61 @@ class GenerationManager:
         curiosity_manager: Any = None,
         generation_hooks: Dict[str, bool] = {},
         dialogue_context_manager: Optional[Any] = None,
-        state_manager: Any = None
+        state_manager: Any = None,
+        resource_manager: ResourceManager = None  # New argument
     ):
-        """Initialize GenerationManager with configuration and model components."""
+        """Initialize GenerationManager with configuration and model components.
+        Args:
+            ...
+            resource_manager: Optional ResourceManager for coordinated resource allocation.
+        """
         # Core components
         self._config_manager = config_manager
-        self.base_model = base_model.to(device)
-        self.scaffolds = [scaffold.to(device) for scaffold in scaffolds]
+        self.logger = logger
+        self.error_manager = error_manager
+        self.device = device
+        self.components = {}  # For compatibility with other modules
+        # ResourceManager integration
+        if resource_manager is None:
+            self.resource_manager = ResourceManager(logger=self.logger)
+        else:
+            self.resource_manager = resource_manager
+        self.components["resource_manager"] = self.resource_manager
+        # Resource acquisition for base_model and scaffolds
+        try:
+            # Acquire GPU memory for base_model
+            model_size_mb = sum(p.numel() * p.element_size() for p in base_model.parameters()) // (1024 * 1024)
+            if not self.resource_manager.acquire("gpu_memory", amount=model_size_mb):
+                raise RuntimeError(f"Insufficient GPU memory for base model ({model_size_mb} MB)")
+            self.base_model = base_model.to(device)
+            self.scaffolds = []
+            for scaffold in scaffolds:
+                scaffold_size_mb = sum(p.numel() * p.element_size() for p in scaffold.parameters()) // (1024 * 1024)
+                if not self.resource_manager.acquire("gpu_memory", amount=scaffold_size_mb):
+                    # Release base_model memory before raising
+                    self.resource_manager.release("gpu_memory", amount=model_size_mb)
+                    raise RuntimeError(f"Insufficient GPU memory for scaffold model ({scaffold_size_mb} MB)")
+                self.scaffolds.append(scaffold.to(device))
+        except Exception as e:
+            # Release all acquired resources on failure
+            if hasattr(self, 'scaffolds'):
+                for scaffold in self.scaffolds:
+                    scaffold_size_mb = sum(p.numel() * p.element_size() for p in scaffold.parameters()) // (1024 * 1024)
+                    self.resource_manager.release("gpu_memory", amount=scaffold_size_mb)
+            if 'model_size_mb' in locals():
+                self.resource_manager.release("gpu_memory", amount=model_size_mb)
+            self.logger.log_error(
+                error_msg=f"GenerationManager initialization failed: {str(e)}",
+                error_type="generation_manager_init_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
         self.base_tokenizer = base_tokenizer
         self.scaffold_tokenizer = scaffold_tokenizer
         self.state = state
-        self.logger = logger
-        self.error_manager = error_manager
         self.cross_attention_injector = cross_attention_injector
         self.scaffold_manager = scaffold_manager
         self.curiosity_manager = curiosity_manager
-        self.device = device
         self.dialogue_context_manager = dialogue_context_manager
         self.state_manager = state_manager
         
@@ -141,7 +181,8 @@ class GenerationManager:
                 config_manager=self._config_manager,
                 logger=self.logger,
                 ram_manager=self.ram_manager,
-                gpu_manager=self.gpu_manager
+                gpu_manager=self.gpu_manager,
+                resource_manager=self.resource_manager  # Pass resource manager if supported
             )
             self._initialized_memory_manager = True
             
@@ -157,7 +198,8 @@ class GenerationManager:
                 scaffold_tokenizer=self.scaffold_tokenizer,
                 device=self.device,
                 logger=self.logger,
-                memory_manager=self.memory_manager
+                memory_manager=self.memory_manager,
+                resource_manager=self.resource_manager  # Pass resource manager if supported
             )
             self._initialized_scaffold_provider = True
             
@@ -816,9 +858,10 @@ class GenerationManager:
         return decorator
 
     @state_managed_operation("generate_text")
-    @GenerationManager._with_lock('generation')
     def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", metadata_entries: list = None, **kwargs) -> List[str]:
-        """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration."""
+        """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration.
+        Locking is minimized to only the model inference section to prevent deadlocks with StateManager and other modules.
+        """
         request_time = time.time()
         # --- Prompt hardening and input sanitization ---
         if not isinstance(prompt, str):
@@ -827,30 +870,23 @@ class GenerationManager:
                 error_type="invalid_prompt_type"
             )
             raise ValueError("Prompt must be a string.")
-
         import re
-        # Remove control characters and excessive whitespace
         prompt = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', prompt)
         prompt = re.sub(r'\s+', ' ', prompt).strip()
-
-        # Enforce maximum prompt length
-        max_prompt_length = 1024  # or fetch from config if needed
+        max_prompt_length = 1024
         if len(prompt) > max_prompt_length:
             self.logger.log_warning(
                 f"Prompt length {len(prompt)} exceeds max {max_prompt_length}, truncating.",
                 error_type="prompt_truncation"
             )
             prompt = prompt[:max_prompt_length]
-
-        # Optionally: filter forbidden content
-        forbidden_phrases = ["<script>", "DROP TABLE"]  # Add more as needed
+        forbidden_phrases = ["<script>", "DROP TABLE"]
         if any(phrase in prompt for phrase in forbidden_phrases):
             self.logger.log_warning(
                 "Prompt contains forbidden content.",
                 error_type="forbidden_prompt_content"
             )
             raise ValueError("Prompt contains forbidden content.")
-
         traits = None
         generated_texts = None
         error = None
@@ -894,11 +930,7 @@ class GenerationManager:
                     "No dialogue context manager available for memory retrieval",
                     error_type="missing_dialogue_context"
                 )
-
-            # --- Retrieve all trait values from GenerationPrimer ---
             traits = self.primer.prepare_for_generation(prompt, user_id=user_id, metadata_entries=metadata_entries, **kwargs)
-
-            # --- Validate and sanitize trait values ---
             def validate_trait(name, value, default, valid_range=None):
                 if value is None:
                     self.logger.log_warning(f"Trait '{name}' is None, using default value {default}")
@@ -907,7 +939,6 @@ class GenerationManager:
                     self.logger.log_warning(f"Trait '{name}' value {value} out of range {valid_range}, using default {default}")
                     return default
                 return value
-
             temperament = validate_trait("temperament", traits.get("temperament"), 0.5, (0.0, 1.0))
             curiosity = validate_trait("curiosity", traits.get("curiosity"), 0.0, (0.0, 1.0))
             bond_score = traits.get("bond")
@@ -917,14 +948,11 @@ class GenerationManager:
             bond_context = None
             if bond_score is not None:
                 bond_context = f"Bond score: {bond_score:.2f}"
-
-            # --- Compose prompt with memory and bond context ---
             composite_prompt = prompt
             if memory_context:
                 composite_prompt = f"{memory_context}\n\n{composite_prompt}"
             if bond_context:
                 composite_prompt = f"[{bond_context}]\n\n{composite_prompt}"
-
             # --- Prepare input batch ---
             inputs = self.base_tokenizer(
                 composite_prompt,
@@ -935,19 +963,14 @@ class GenerationManager:
             )
             model_device = next(self.base_model.parameters()).device
             inputs = {k: v.to(model_device) for k, v in inputs.items()}
-
-            # --- Add generation parameters and trait-driven adjustments ---
             gen_kwargs = {"num_return_sequences": num_return_sequences}
             gen_kwargs.update(kwargs)
-            # Example: adjust temperature using traits
             base_temp = gen_kwargs.get("temperature", 1.0)
             gen_kwargs["temperature"] = self.primer.adjust_parameter(base_temp, "temperature", temperament=temperament, curiosity=curiosity)
-
-            # --- Generate text ---
-            output_sequences = self.base_model.generate(**inputs, **gen_kwargs)
+            # --- Model inference under lock ---
+            with self._locks['generation']:
+                output_sequences = self.base_model.generate(**inputs, **gen_kwargs)
             generated_texts = [self.base_tokenizer.decode(seq, skip_special_tokens=True) for seq in output_sequences]
-
-            # --- Log bond score/context for this generation if present ---
             if bond_score is not None:
                 self.logger.record_event(
                     event_type="bond_modulation_applied",
@@ -960,15 +983,11 @@ class GenerationManager:
                         "metadata_entries": metadata_entries
                     }
                 )
-
-            # Prepare generation result data for logging
             generation_result = {
                 "generated_texts": generated_texts,
                 "generation_config_used": self._get_generation_config(),
                 "processing_time_ms": (time.time() - request_time) * 1000
             }
-
-            # Assemble capture data
             event_data, source_metadata = ScribeAssembler.assemble_scribe_data(
                 manager=self,
                 prompt=prompt,
@@ -977,8 +996,6 @@ class GenerationManager:
                 request_time=request_time,
                 session_id=self.session_id,
             )
-
-            # Log the event
             capture_scribe_event(
                 origin="sovl_generation",
                 event_type="base_generation",
@@ -986,17 +1003,13 @@ class GenerationManager:
                 source_metadata=source_metadata,
                 session_id=self.session_id
             )
-
             return generated_texts
-
         except (ValueError, RuntimeError, GenerationError, IndexError) as e:
             error = e
-            # Log and propagate critical errors
             self._handle_error("generate_text", e)
             raise
         except Exception as e:
             error = e
-            # Log generation error
             capture_scribe_event(
                 origin="sovl_generation",
                 event_type="generation_error",
@@ -1015,12 +1028,9 @@ class GenerationManager:
                 session_id=self.session_id,
                 timestamp=datetime.fromtimestamp(request_time)
             )
-            # Handle error through existing mechanism
             self._handle_error("generate_text", e)
-            # For broad compatibility, return a fallback error message
             return ["An error occurred during text generation"]
         finally:
-            # --- Always sync all traits to state, even on error ---
             try:
                 self.primer.update_state_after_operation(
                     context="generate_text",
@@ -1124,23 +1134,7 @@ class GenerationManager:
                 'eos_token_id': self.base_tokenizer.eos_token_id
             }
 
-    @state_managed_operation("generate_with_state_context")
-    def _generate_with_state_context(self, batch: Dict[str, Any]) -> List[str]:
-        """Generate text with state context and error handling."""
-        # Validate state consistency before generation
-        self._validate_state_consistency()
-        
-        generation_config = self._get_generation_config()
-        outputs = self.base_model.generate(**batch, **generation_config)
-        generated_texts = self.base_tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        
-        if not generated_texts or not all(isinstance(text, str) for text in generated_texts):
-            raise ValueError("Invalid generation output")
-        
-        return generated_texts
-
     @state_managed_operation("backchannel_scaffold_prompt")
-    @GenerationManager._with_lock('generation')
     def backchannel_scaffold_prompt(
         self, 
         prompt: str, 
@@ -1150,88 +1144,50 @@ class GenerationManager:
         return_hidden_states: bool = False,
         **kwargs
     ) -> Union[str, Dict[str, Any]]:
-        """Backchannel communication method to directly prompt the scaffold model."""
+        """Backchannel communication method to directly prompt the scaffold model.
+        Locking is minimized to only the model inference section to prevent deadlocks with StateManager and other modules.
+        """
         request_time = time.time()
-
+        gpu_mem_needed = 512  # Example: 512MB for generation, adjust as needed
+        acquired = False
         try:
-            # Proactive memory management: check and clear before generation
-            if not self.check_memory_health():
-                self.memory_manager.manage_memory()
-                # After managing, check again and abort if still unhealthy
-                if not self.check_memory_health():
-                    self.logger.record_event(
-                        event_type="memory_exhaustion_abort",
-                        message="Aborting scaffold generation due to persistent memory exhaustion.",
-                        level="error",
-                        additional_info={
-                            "scaffold_index": scaffold_index,
-                            "prompt_length": len(prompt),
-                            "generation_params": kwargs,
-                            "memory_usage": self.memory_manager.get_memory_usage()
-                        }
-                    )
-                    raise RuntimeError("Memory exhausted: unable to safely proceed with scaffold generation.")
-
-            # Memory optimization: Check memory health before proceeding
-            if not self.check_memory_health():
-                self.memory_manager.manage_memory()
-                # After managing, check again and abort if still unhealthy
-                if not self.check_memory_health():
-                    self.logger.record_event(
-                        event_type="memory_exhaustion_abort",
-                        message="Aborting scaffold generation due to persistent memory exhaustion.",
-                        level="error",
-                        additional_info={
-                            "scaffold_index": scaffold_index,
-                            "prompt_length": len(prompt),
-                            "generation_params": kwargs,
-                            "memory_usage": self.memory_manager.get_memory_usage()
-                        }
-                    )
-                    raise RuntimeError("Memory exhausted: unable to safely proceed with scaffold generation.")
-            
-            # Validate scaffold index and model early
-            if not (0 <= scaffold_index < len(self.scaffolds)):
-                raise IndexError(f"Invalid scaffold_index {scaffold_index}. Only {len(self.scaffolds)} scaffolds available")
-            
-            scaffold_model = self.scaffolds[scaffold_index]
-            if not scaffold_model:
-                raise RuntimeError("Scaffold model not properly initialized")
-            
-            # Optimize generation config with smart defaults
-            max_length = kwargs.get('max_length', min(512, len(prompt) + max_new_tokens))
-            generation_config = {
-                'output_scores': return_logits,
-                'output_hidden_states': return_hidden_states,
-                'return_dict_in_generate': return_logits or return_hidden_states,
-                'max_new_tokens': max_new_tokens,
-                'pad_token_id': self.scaffold_tokenizer.pad_token_id,
-                'early_stopping': kwargs.get('early_stopping', True),
-                'do_sample': kwargs.get('do_sample', True),
-                'num_beams': kwargs.get('num_beams', 1),
-                **kwargs
-            }
-
-            # Batch and device optimization
-            inputs = self.scaffold_tokenizer(
-                prompt,
-                return_tensors='pt',
-                padding=True,
-                truncation=True,
-                max_length=max_length
-            )
-            
-            # Move to device efficiently with validation
-            model_device = next(scaffold_model.parameters()).device
-            inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
-            
-            # Generation with memory optimization
-            with torch.no_grad(), self.memory_manager.track_memory("scaffold_generation"):
-                outputs = scaffold_model.generate(
-                    **inputs,
-                    **generation_config
+            if not self.resource_manager.acquire("gpu_memory", amount=gpu_mem_needed):
+                raise RuntimeError("Insufficient GPU memory for scaffold generation")
+            acquired = True
+            # --- Model inference under lock ---
+            with self._locks['generation']:
+                # Validate scaffold index and model early
+                if not (0 <= scaffold_index < len(self.scaffolds)):
+                    raise IndexError(f"Invalid scaffold_index {scaffold_index}. Only {len(self.scaffolds)} scaffolds available")
+                scaffold_model = self.scaffolds[scaffold_index]
+                if not scaffold_model:
+                    raise RuntimeError("Scaffold model not properly initialized")
+                max_length = kwargs.get('max_length', min(512, len(prompt) + max_new_tokens))
+                generation_config = {
+                    'output_scores': return_logits,
+                    'output_hidden_states': return_hidden_states,
+                    'return_dict_in_generate': return_logits or return_hidden_states,
+                    'max_new_tokens': max_new_tokens,
+                    'pad_token_id': self.scaffold_tokenizer.pad_token_id,
+                    'early_stopping': kwargs.get('early_stopping', True),
+                    'do_sample': kwargs.get('do_sample', True),
+                    'num_beams': kwargs.get('num_beams', 1),
+                    **kwargs
+                }
+                inputs = self.scaffold_tokenizer(
+                    prompt,
+                    return_tensors='pt',
+                    padding=True,
+                    truncation=True,
+                    max_length=max_length
                 )
-
+                model_device = next(scaffold_model.parameters()).device
+                inputs = {k: v.to(model_device, non_blocking=True) for k, v in inputs.items()}
+                with torch.no_grad(), self.memory_manager.track_memory("scaffold_generation"):
+                    outputs = scaffold_model.generate(
+                        **inputs,
+                        **generation_config
+                    )
             # Efficient result handling
             if return_logits or return_hidden_states:
                 result = {}
@@ -1278,7 +1234,6 @@ class GenerationManager:
                     source_metadata={
                         **result['metadata'],
                         "session_id": self.session_id,
-
                         "request_timestamp_unix": request_time
                     },
                     session_id=self.session_id,
@@ -1321,7 +1276,8 @@ class GenerationManager:
                 return generated_text
             
         except (ValueError, RuntimeError, GenerationError, IndexError) as e:
-            # Log and propagate critical errors
+            if acquired:
+                self.resource_manager.release("gpu_memory", amount=gpu_mem_needed)
             self._handle_error("backchannel_scaffold_prompt", e, {
                 'scaffold_index': scaffold_index,
                 'prompt_length': len(prompt),
@@ -1330,6 +1286,8 @@ class GenerationManager:
             })
             raise
         except Exception as e:
+            if acquired:
+                self.resource_manager.release("gpu_memory", amount=gpu_mem_needed)
             # Log error
             capture_scribe_event(
                 origin="sovl_generation",
@@ -1365,7 +1323,8 @@ class GenerationManager:
             # For broad compatibility, raise a GenerationError for upstream detection
             raise GenerationError(f"Failed in backchannel_scaffold_prompt: {e}") from e
         finally:
-            # Ensure memory cleanup
+            if acquired:
+                self.resource_manager.release("gpu_memory", amount=gpu_mem_needed)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
