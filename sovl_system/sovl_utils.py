@@ -610,3 +610,35 @@ def validate_device_consistency(model: torch.nn.Module, batch: Any, target_devic
         return False, f"Batch on {batch_device}, expected {target_device}"
     
     return True, None
+
+def check_model_health(model, injector, logger=None) -> bool:
+    """
+    Check the health of the injected model (cross-attention stability).
+    Args:
+        model: The model to check (should be the base model with injection)
+        injector: The CrossAttentionInjector or similar with verify_injection method
+        logger: Optional logger for logging results
+    Returns:
+        bool: True if model is healthy, False if instability is detected
+    """
+    try:
+        config = getattr(model, 'config', None)
+        healthy = injector.verify_injection(model, config)
+        if not healthy:
+            if logger:
+                logger.log_error(
+                    error_msg="Model health check failed: instability detected after cross-attention injection.",
+                    error_type="model_health_check",
+                )
+        else:
+            if logger:
+                logger.log_info("Model health check passed: model is stable after injection.")
+        return healthy
+    except Exception as e:
+        if logger:
+            logger.log_error(
+                error_msg=f"Exception during model health check: {str(e)}",
+                error_type="model_health_check",
+                stack_trace=traceback.format_exc()
+            )
+        return False

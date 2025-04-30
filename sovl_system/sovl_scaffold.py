@@ -10,9 +10,7 @@ import math
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_error import ErrorManager, ScaffoldError
-from sovl_confidence import ConfidenceCalculator
 from sovl_io import ConfigurationError
-from sovl_curiosity import CuriosityManager
 from sovl_memory import RAMManager, GPUMemoryManager
 import contextlib
 import functools
@@ -20,6 +18,8 @@ from sovl_engram import LoraAdapterManager
 import difflib
 import copy
 import threading
+from sovl_utils import check_model_health as util_check_model_health
+import queue
 # Centralized handler for scaffold errors and recovery.
 class ScaffoldErrorManager:
     """Centralized error handling for scaffold operations."""
@@ -451,19 +451,41 @@ class ScaffoldTokenMapper:
         return self._validate_token_maps()
         
     def tokenize_and_map(self, prompt: str) -> Tuple[List[int], List[float]]:
-        """Tokenize prompt and map to scaffold token space."""
+        """Tokenize prompt and map to scaffold token space, enforcing minimum confidence."""
         try:
             base_tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
             scaffold_ids = []
             weights = []
-            
+            low_conf_count = 0
+            min_conf = 0.5  # Minimum allowed confidence for a mapping
             for base_id in base_tokens:
                 mapping = self.token_map[base_id]
                 scaffold_ids.extend(mapping['ids'])
                 weights.extend([mapping['weight']] * len(mapping['ids']))
-                
+                if mapping['weight'] < min_conf:
+                    low_conf_count += 1
+            total = len(base_tokens) if base_tokens else 1
+            low_conf_ratio = low_conf_count / total
+            # Log mapping quality
+            self.logger.record_event(
+                event_type="token_mapping_quality",
+                message=f"Token mapping: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}",
+                level="warning" if low_conf_ratio > 0.2 else "info",
+                additional_info={
+                    "low_conf_count": low_conf_count,
+                    "total_tokens": total,
+                    "low_conf_ratio": low_conf_ratio,
+                    "min_conf": min_conf,
+                    "timestamp": time.time()
+                }
+            )
+            # Enforce threshold: if >20% of tokens are low-confidence, raise error
+            if low_conf_ratio > 0.2:
+                raise ScaffoldError(
+                    f"Too many low-confidence token mappings: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}",
+                    operation="tokenize_and_map"
+                )
             return scaffold_ids, weights
-            
         except Exception as e:
             self.logger.record_event(
                 event_type="token_mapping_error",
@@ -972,24 +994,10 @@ class CrossAttentionInjector:
             raise
 
     def _get_scaffold_output(self, scaffold_model: nn.Module, token_map: Optional[Dict], base_hidden_states: torch.Tensor) -> torch.Tensor:
-        """Generate scaffold hidden states for cross-attention.
-        
-        Args:
-            scaffold_model: The scaffold model to generate hidden states from
-            token_map: Token mapping between base and scaffold models
-            base_hidden_states: Hidden states from the base model
-            
-        Returns:
-            torch.Tensor: Hidden states from the scaffold model for cross-attention
-        """
+        """Generate scaffold hidden states for cross-attention with robust fallback/error handling."""
         try:
-            # Get device from base hidden states
             device = base_hidden_states.device
-            
-            # Extract input shape information
             batch_size, seq_len, hidden_dim = base_hidden_states.shape
-            
-            # Get scaffold embedding dimension
             scaffold_dim = None
             if hasattr(scaffold_model, 'config') and hasattr(scaffold_model.config, 'hidden_size'):
                 scaffold_dim = scaffold_model.config.hidden_size
@@ -997,95 +1005,72 @@ class CrossAttentionInjector:
                 scaffold_dim = scaffold_model.config.d_model
             elif hasattr(scaffold_model, 'hidden_size'):
                 scaffold_dim = scaffold_model.hidden_size
-            
             if scaffold_dim is None:
                 raise ValueError("Could not determine scaffold model hidden dimension")
-                
-            # Initialize scaffold output tensor
             scaffold_output = torch.zeros(batch_size, seq_len, scaffold_dim, device=device)
-            
-            # If token map is provided, use it to map base tokens to scaffold tokens
             if token_map is not None and hasattr(scaffold_model, 'get_input_embeddings'):
-                # Get the token map
                 mapping = token_map.get('base_to_scaffold', {})
-                
-                # Create scaffold input embeddings from the mapping
                 scaffold_embeddings = scaffold_model.get_input_embeddings()
-                
-                # Prepare input for scaffold model based on token mapping
-                # For simplicity, we use embedding lookup here instead of full forward pass
                 for token_id, scaffold_ids in mapping.items():
                     if isinstance(scaffold_ids, list) and len(scaffold_ids) > 0:
-                        # Use the first mapped token ID (simplification)
                         scaffold_id = scaffold_ids[0]
-                        # Get the embedding for this token
                         token_embedding = scaffold_embeddings(
                             torch.tensor([scaffold_id], device=device)
                         )
-                        # Set this embedding in the output for all positions where base token appears
-                        # Note: This is simplified - a real implementation would track positions
                         scaffold_output[:, :, :] = token_embedding
             else:
-                # If no token map, run a simple forward pass on the scaffold model
-                # with a default input (placeholder implementation)
                 default_input_ids = torch.full(
                     (batch_size, seq_len), 
                     self._scaffold_unk_id, 
                     dtype=torch.long, 
                     device=device
                 )
-                
-                # Create attention mask (all 1s for simplicity)
                 attention_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=device)
-                
-                # Run scaffold model forward pass
                 with torch.no_grad():
                     try:
-                        # Try standard transformer forward signature
                         outputs = scaffold_model(
                             input_ids=default_input_ids,
                             attention_mask=attention_mask,
                             output_hidden_states=True,
                             return_dict=True
                         )
-                        # Use last hidden state as scaffold output
                         if hasattr(outputs, 'last_hidden_state'):
                             scaffold_output = outputs.last_hidden_state
                         elif hasattr(outputs, 'hidden_states') and outputs.hidden_states:
-                            # Use the last layer's hidden states
                             scaffold_output = outputs.hidden_states[-1]
-                    except Exception:
-                        # Fallback: try a simpler forward call
-                        try:
-                            outputs = scaffold_model(default_input_ids)
-                            if isinstance(outputs, tuple) and len(outputs) > 0:
-                                scaffold_output = outputs[0]
-                            else:
-                                scaffold_output = outputs
-                        except Exception as e:
+                    except Exception as e:
+                        self._logger.record_event(
+                            event_type="scaffold_model_forward_failed",
+                            message=f"Failed to run scaffold model forward pass: {str(e)}",
+                            level="error",
+                            additional_info={"error": str(e)}
+                        )
+                        # Configurable fallback: only use noise if enabled
+                        fallback_noise = getattr(self, '_fallback_noise_enabled', False)
+                        if fallback_noise:
                             self._logger.record_event(
-                                event_type="scaffold_model_forward_failed",
-                                message=f"Failed to run scaffold model forward pass: {str(e)}",
-                                level="error",
-                                additional_info={"error": str(e)}
+                                event_type="scaffold_model_noise_fallback",
+                                message="Falling back to random noise for scaffold output due to forward failure.",
+                                level="warning",
+                                additional_info={"batch_size": batch_size, "seq_len": seq_len, "scaffold_dim": scaffold_dim}
                             )
-                            # Create random noise as fallback
                             scaffold_output = torch.randn(
                                 batch_size, seq_len, scaffold_dim, device=device
                             ) * 0.01
-            
-            # Ensure scaffold output has the right shape
+                        else:
+                            raise ScaffoldError(
+                                f"Scaffold model forward pass failed and noise fallback is disabled: {str(e)}",
+                                operation="_get_scaffold_output",
+                                context={"batch_size": batch_size, "seq_len": seq_len, "scaffold_dim": scaffold_dim}
+                            )
             if scaffold_output.shape[1] != seq_len:
-                # Resize if needed (e.g., via interpolation)
                 scaffold_output = torch.nn.functional.interpolate(
-                    scaffold_output.permute(0, 2, 1),  # [B, D, S]
+                    scaffold_output.permute(0, 2, 1),
                     size=seq_len,
                     mode='linear',
                     align_corners=False
-                ).permute(0, 2, 1)  # Back to [B, S, D]
-            
+                ).permute(0, 2, 1)
             return scaffold_output
-            
         except Exception as e:
             self._logger.record_event(
                 event_type="get_scaffold_output_failed",
@@ -1096,8 +1081,16 @@ class CrossAttentionInjector:
                     "stack_trace": traceback.format_exc()
                 }
             )
-            # Return zero tensor as fallback
-            return torch.zeros_like(base_hidden_states)
+            # Only fallback to zeros if explicitly configured, else raise
+            fallback_zeros = getattr(self, '_fallback_zeros_enabled', True)
+            if fallback_zeros:
+                self._logger.record_event(
+                    event_type="scaffold_model_zeros_fallback",
+                    message="Falling back to zeros for scaffold output due to error.",
+                    level="warning"
+                )
+                return torch.zeros_like(base_hidden_states)
+            raise
 
     def inject(
         self,
@@ -1238,9 +1231,12 @@ class CrossAttentionInjector:
                 if base_hidden_size != scaffold_hidden_size and self._scaffold_proj is None:
                     # Create projection layer if needed
                     self._scaffold_proj = nn.Linear(scaffold_hidden_size, base_hidden_size).to(model.device)
+                    nn.init.xavier_uniform_(self._scaffold_proj.weight)
+                    nn.init.zeros_(self._scaffold_proj.bias)
+                    self._scaffold_proj_norm = nn.LayerNorm(base_hidden_size).to(model.device)
                     self._logger.record_event(
                         event_type="scaffold_projection_created",
-                        message=f"Created projection layer from {scaffold_hidden_size} to {base_hidden_size}",
+                        message=f"Created projection layer from {scaffold_hidden_size} to {base_hidden_size} with Xavier init and LayerNorm",
                         level="info"
                     )
             
@@ -1365,6 +1361,8 @@ class CrossAttentionInjector:
                 # Apply projection if needed
                 if injector._scaffold_proj is not None:
                     scaffold_output = injector._scaffold_proj(scaffold_output)
+                    if hasattr(injector, '_scaffold_proj_norm') and injector._scaffold_proj_norm is not None:
+                        scaffold_output = injector._scaffold_proj_norm(scaffold_output)
                 
                 # Create dynamic factor based on strategy if needed
                 dynamic_factor = None
@@ -1406,13 +1404,58 @@ class CrossAttentionInjector:
         )()
 
     def _verify_single_layer(self, model: nn.Module, layer_idx: int) -> bool:
-        """Verify a single layer's cross-attention injection."""
+        """Verify a single layer's cross-attention injection, including forward pass stability."""
         try:
             layers, _ = self.find_model_layers(model)
             layer = layers[layer_idx]
             if not hasattr(layer, '_cross_attn'):
+                self._logger.record_event(
+                    event_type="cross_attention_verification_failed",
+                    message=f"Layer {layer_idx} missing _cross_attn attribute after injection.",
+                    level="error"
+                )
                 return False
             if layer._cross_attn._hidden_size != layer._cross_attn._q_proj.in_features:
+                self._logger.record_event(
+                    event_type="cross_attention_verification_failed",
+                    message=f"Layer {layer_idx} hidden size mismatch after injection.",
+                    level="error"
+                )
+                return False
+            # Forward pass validation
+            try:
+                # Try to infer input shape from q_proj
+                hidden_size = layer._cross_attn._q_proj.in_features
+                batch_size = 2
+                seq_len = 8
+                dummy_input = torch.randn(batch_size, seq_len, hidden_size, device=next(layer.parameters()).device)
+                # Try to run forward
+                out = layer(dummy_input)
+                if isinstance(out, tuple):
+                    out_tensor = out[0]
+                else:
+                    out_tensor = out
+                if not torch.isfinite(out_tensor).all():
+                    self._logger.record_event(
+                        event_type="cross_attention_verification_failed",
+                        message=f"Layer {layer_idx} produced NaN or Inf in forward pass.",
+                        level="error"
+                    )
+                    return False
+                norm = out_tensor.norm().item()
+                if norm > 1e4 or norm < 1e-6:
+                    self._logger.record_event(
+                        event_type="cross_attention_verification_failed",
+                        message=f"Layer {layer_idx} output norm out of range: {norm}",
+                        level="error"
+                    )
+                    return False
+            except Exception as e:
+                self._logger.record_event(
+                    event_type="cross_attention_verification_failed",
+                    message=f"Layer {layer_idx} forward pass failed: {str(e)}",
+                    level="error"
+                )
                 return False
             return True
         except Exception:
@@ -1520,6 +1563,23 @@ class CrossAttentionInjector:
             self._error_handler.handle_cross_attention_error(e)
             raise
 
+    def check_injected_model_health(self, model: nn.Module) -> bool:
+        """Check the health of the injected model using the general utility."""
+        healthy = util_check_model_health(model, self, logger=self._logger)
+        if not healthy:
+            self._logger.record_event(
+                event_type="cross_attention_model_health_failed",
+                message="Injected model failed health check after cross-attention injection.",
+                level="error"
+            )
+        else:
+            self._logger.record_event(
+                event_type="cross_attention_model_health_passed",
+                message="Injected model passed health check after cross-attention injection.",
+                level="info"
+            )
+        return healthy
+
 def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for scaffold generation."""
     try:
@@ -1554,15 +1614,18 @@ class InsufficientDataError(Exception):
 
 # High-level provider for scaffold state: init, update, validation.
 class ScaffoldProvider:
-    """Provides scaffold functionality for the SOVL system."""
+    """Provides scaffold functionality for the SOVL system with atomic, thread-safe state management."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorManager):
         self.config_manager = config_manager
         self.logger = logger
         self._error_handler = error_handler
         self._scaffold_state = None
-        self._lock = threading.RLock()  # Using RLock instead of Lock to prevent deadlocks
-        
+        self._lock = threading.RLock()
+        self._update_queue = queue.Queue()
+        self._max_retries = 10
+        self._retry_delay = 0.1  # seconds
+    
     @scaffold_operation("validate_config")
     def validate_scaffold_config(self, config: Dict[str, Any]) -> None:
         """Validate scaffold configuration."""
@@ -1582,144 +1645,143 @@ class ScaffoldProvider:
         
     @scaffold_operation("initialize")
     def initialize_scaffold_state(self, config: Dict[str, Any]) -> None:
-        """Initialize scaffold state with configuration."""
+        """Initialize scaffold state with configuration, using atomic update."""
         try:
-            # Validate outside the lock to minimize lock scope
             self.validate_scaffold_config(config)
-            
-            # Create the state object outside the lock
             new_state = {
                 "token_mapping": config["token_mapping"],
                 "attention_config": config["attention_config"],
                 "memory_config": config["memory_config"],
                 "last_updated": time.time()
             }
-            
-            # Only use lock for the actual state modification with timeout
-            acquired = self._acquire_lock_with_timeout()
-            if acquired:
-                try:
-                    self._scaffold_state = new_state
-                finally:
-                    self._lock.release()
+            for attempt in range(self._max_retries):
+                acquired = self._lock.acquire(timeout=self._retry_delay)
+                if acquired:
+                    try:
+                        self._scaffold_state = new_state
+                        break
+                    finally:
+                        self._lock.release()
+                else:
+                    self.logger.record_event(
+                        event_type="scaffold_init_lock_retry",
+                        message=f"Retry {attempt+1}/{self._max_retries} acquiring lock for state initialization.",
+                        level="warning"
+                    )
+                    time.sleep(self._retry_delay)
             else:
-                # If lock acquisition fails, log warning and still try to set state
-                # This might cause race conditions but prevents deadlocks
                 self.logger.record_event(
                     event_type="scaffold_init_lock_failed",
-                    message="Failed to acquire lock for state initialization, proceeding without lock",
-                    level="warning"
+                    message="Failed to acquire lock for state initialization after retries.",
+                    level="error"
                 )
-                self._scaffold_state = new_state
-            
-            # Log outside the lock
+                raise ScaffoldError("Failed to acquire lock for state initialization after retries.", operation="initialize_scaffold_state")
             self.logger.record_event(
                 event_type="scaffold_initialization",
                 message="Scaffold state initialized successfully",
                 level="info"
             )
-            
         except Exception as e:
-            # Error handling outside the lock
             self._error_handler.handle_error(
                 error=e,
                 operation="initialize_scaffold_state",
                 context={"config": str(config)}
             )
             raise
-            
+    
     @scaffold_operation("update")
     def update_scaffold_state(self, updates: Dict[str, Any]) -> None:
-        """Update scaffold state with new values."""
-        # Initial validation outside the lock
+        """Update scaffold state with new values, using atomic update and retry."""
         if not self._scaffold_state:
             raise ScaffoldError(
                 "Scaffold state not initialized",
                 operation="update_scaffold_state"
             )
-            
-        # Prepare updates outside the lock
         timestamp = time.time()
-        
-        # Only use lock for the actual state update with timeout
-        acquired = self._acquire_lock_with_timeout()
-        if acquired:
-            try:
-                self._scaffold_state.update(updates)
-                self._scaffold_state["last_updated"] = timestamp
-            finally:
-                self._lock.release()
+        for attempt in range(self._max_retries):
+            acquired = self._lock.acquire(timeout=self._retry_delay)
+            if acquired:
+                try:
+                    self._scaffold_state.update(updates)
+                    self._scaffold_state["last_updated"] = timestamp
+                    break
+                finally:
+                    self._lock.release()
+            else:
+                self.logger.record_event(
+                    event_type="scaffold_update_lock_retry",
+                    message=f"Retry {attempt+1}/{self._max_retries} acquiring lock for state update.",
+                    level="warning"
+                )
+                time.sleep(self._retry_delay)
         else:
-            # If lock acquisition fails, log warning and try a less safe update
-            # This might cause race conditions but prevents deadlocks
             self.logger.record_event(
                 event_type="scaffold_update_lock_failed",
-                message="Failed to acquire lock for state update, proceeding without lock",
-                level="warning"
+                message="Failed to acquire lock for state update after retries. Queuing update.",
+                level="error"
             )
-            if self._scaffold_state:  # Re-check as it might have changed
-                self._scaffold_state.update(updates)
-                self._scaffold_state["last_updated"] = timestamp
-            
-        # Log outside the lock
+            self._update_queue.put((updates, timestamp))
         self.logger.record_event(
             event_type="scaffold_update",
             message="Scaffold state updated successfully",
             level="info"
         )
-
-    def _acquire_lock_with_timeout(self, timeout=5.0):
-        """
-        Acquire lock with timeout to prevent deadlocks.
-        
-        Args:
-            timeout: Maximum time to wait for lock acquisition in seconds
-            
-        Returns:
-            bool: True if lock was acquired, False otherwise
-            
-        Note: When using this method, always use in a try-finally block:
-        ```
-        acquired = self._acquire_lock_with_timeout()
-        if acquired:
-            try:
-                # Critical section
-            finally:
-                self._lock.release()
-        ```
-        """
-        acquired = self._lock.acquire(timeout=timeout)
-        if not acquired and hasattr(self, "logger"):
-            self.logger.record_event(
-                event_type="scaffold_lock_timeout",
-                message=f"Lock acquisition timed out after {timeout}s",
-                level="warning"
-            )
-        return acquired
-        
+    
+    def process_queued_updates(self):
+        """Process any queued state updates atomically."""
+        while not self._update_queue.empty():
+            updates, timestamp = self._update_queue.get()
+            acquired = self._lock.acquire(timeout=self._retry_delay)
+            if acquired:
+                try:
+                    self._scaffold_state.update(updates)
+                    self._scaffold_state["last_updated"] = timestamp
+                finally:
+                    self._lock.release()
+            else:
+                self.logger.record_event(
+                    event_type="scaffold_update_queue_lock_failed",
+                    message="Failed to acquire lock for queued update.",
+                    level="error"
+                )
+                self._update_queue.put((updates, timestamp))
+                break
+    
     @scaffold_operation("get_state")
     def get_scaffold_state(self) -> Dict[str, Any]:
-        """Get current scaffold state."""
-        # Initial validation outside the lock
+        """Get current scaffold state, validating for corruption."""
         if not self._scaffold_state:
             raise ScaffoldError(
                 "Scaffold state not initialized",
                 operation="get_scaffold_state"
             )
-            
-        # Use timeout to prevent deadlocks
-        acquired = self._acquire_lock_with_timeout()
+        acquired = self._lock.acquire(timeout=self._retry_delay)
         if acquired:
             try:
-                # Make a copy inside the lock to avoid race conditions
                 state_copy = self._scaffold_state.copy()
             finally:
                 self._lock.release()
-            return state_copy
         else:
-            # If lock acquisition fails, return a simple copy as fallback
-            # This may have race conditions but prevents deadlocks
-            return self._scaffold_state.copy() if self._scaffold_state else {}
+            self.logger.record_event(
+                event_type="scaffold_get_state_lock_failed",
+                message="Failed to acquire lock for get_state, returning possibly stale state.",
+                level="error"
+            )
+            state_copy = self._scaffold_state.copy() if self._scaffold_state else {}
+        # Validate state integrity
+        required_fields = ["token_mapping", "attention_config", "memory_config", "last_updated"]
+        for field in required_fields:
+            if field not in state_copy:
+                self.logger.record_event(
+                    event_type="scaffold_state_corruption",
+                    message=f"Missing required field in scaffold state: {field}",
+                    level="error"
+                )
+                raise ScaffoldError(
+                    f"Scaffold state corrupted: missing {field}",
+                    operation="get_scaffold_state"
+                )
+        return state_copy
 
 # Utility function to create a scaffold model with LoRA integration
 def create_scaffold_with_adaptation(config_manager, logger, error_manager, lora_checkpoint_path=None):

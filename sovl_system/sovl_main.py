@@ -60,7 +60,8 @@ from sovl_utils import (
     initialize_component_state,
     sync_component_states,
     validate_quantization_mode,
-    validate_component_states
+    validate_component_states,
+    check_model_health as util_check_model_health
 )
 from sovl_confidence import calculate_confidence_score
 from sovl_io import  InsufficientDataError
