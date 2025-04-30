@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union, Dict, Any, Callable
-from collections import defaultdict
+from collections import defaultdict, deque
 import time
 import traceback
 from threading import Lock
@@ -20,6 +20,7 @@ import copy
 import threading
 from sovl_utils import check_model_health as util_check_model_health
 import queue
+import numpy as np
 # Centralized handler for scaffold errors and recovery.
 class ScaffoldErrorManager:
     """Centralized error handling for scaffold operations."""
@@ -101,28 +102,45 @@ class ScaffoldTokenMapper:
         self.base_model = base_model  # Optional: for embedding similarity
         self.scaffold_model = scaffold_model  # Optional: for embedding similarity
         self.mapping_strategy = mapping_strategy  # User-selectable, but defaults to None for now
-        
-        # Initialize mapping strategy parameters
         self.max_tokens_per_mapping = config.get('max_tokens_per_mapping', 3) if config else 3
         self.mapping_similarity_threshold = config.get('mapping_similarity_threshold', 0.7) if config else 0.7
         self.allow_bidirectional_mapping = config.get('allow_bidirectional_mapping', False) if config else False
         self.fallback_strategy = config.get('fallback_strategy', 'split') if config else 'split'
         self.normalization_level = config.get('normalization_level', 'basic') if config else 'basic'
-        
-        # Initialize quality control parameters
         self.min_semantic_similarity = config.get('min_semantic_similarity', 0.5) if config else 0.5
         self.max_meaning_drift = config.get('max_meaning_drift', 0.3) if config else 0.3
         self.enable_periodic_validation = config.get('enable_periodic_validation', True) if config else True
         self.conflict_resolution_strategy = config.get('conflict_resolution_strategy', 'keep_highest_conf') if config else 'keep_highest_conf'
-        
         self.token_map = defaultdict(lambda: {'ids': [scaffold_tokenizer.unk_token_id], 'weight': 1.0})
-        # Check if embedding-based similarity is available
         self.embedding_available = self._check_embedding_availability()
+        self.config = config or {}
+        # Drift config
+        self.max_drift = self.config.get('max_drift', 0.9)
+        self.cosine_weight = self.config.get('cosine_weight', 0.5)
+        self.euclidean_weight = self.config.get('euclidean_weight', 0.3)
+        self.norm_weight = self.config.get('norm_weight', 0.2)
+        self.levenshtein_weight = self.config.get('levenshtein_weight', 0.4)
+        self.char_weight = self.config.get('char_weight', 0.3)
+        self.subword_weight = self.config.get('subword_weight', 0.2)
+        self.freq_weight = self.config.get('freq_weight', 0.1)
+        self.drift_cache_size = self.config.get('drift_cache_size', 10000)
+        # Thread-safe LRU cache for drift
+        import threading
+        self._drift_cache = {}
+        self._drift_cache_order = []
+        self._drift_cache_lock = threading.Lock()
         if self.embedding_available:
             self.logger.info("Using embedding-based similarity for token mapping.")
         else:
             self.logger.warning("Falling back to character-based similarity for token mapping.")
         self._initialize_token_maps()
+        # Metric tracking for runtime monitoring
+        self._mapping_confidences = deque(maxlen=1000)
+        self._fallback_counts = defaultdict(int)
+        self._drift_values = deque(maxlen=1000)
+        self._mapping_errors = 0
+        self._mapping_latencies = deque(maxlen=1000)
+        self._metrics_lock = threading.Lock()
         
     def _check_embedding_availability(self):
         # Check if both models and their input embeddings are available
@@ -264,11 +282,114 @@ class ScaffoldTokenMapper:
         return True
         
     def _calculate_meaning_drift(self, token1: str, token2: str) -> float:
-        """Calculate semantic drift between tokens."""
-        # This is a placeholder for a more sophisticated semantic drift calculation
-        # In practice, this could use embeddings or other semantic similarity measures
-        return 1.0 - self._calculate_similarity(token1, token2)
-        
+        """
+        Compute semantic drift between two tokens using embeddings (if available)
+        or advanced heuristics. Returns a value in [0, 1], lower is better.
+        """
+        try:
+            max_drift = self.max_drift
+            cosine_weight = self.cosine_weight
+            euclidean_weight = self.euclidean_weight
+            norm_weight = self.norm_weight
+            levenshtein_weight = self.levenshtein_weight
+            char_weight = self.char_weight
+            subword_weight = self.subword_weight
+            freq_weight = self.freq_weight
+            cache_size = self.drift_cache_size
+            cache_key = (token1, token2)
+            with self._drift_cache_lock:
+                if cache_key in self._drift_cache:
+                    return self._drift_cache[cache_key]
+            # Special token handling
+            specials = set([
+                getattr(self.base_tokenizer, 'pad_token', None), getattr(self.base_tokenizer, 'unk_token', None), getattr(self.base_tokenizer, 'eos_token', None),
+                getattr(self.scaffold_tokenizer, 'pad_token', None), getattr(self.scaffold_tokenizer, 'unk_token', None), getattr(self.scaffold_tokenizer, 'eos_token', None)
+            ])
+            t1n, t2n = self._normalize_token(token1), self._normalize_token(token2)
+            if t1n in specials or t2n in specials:
+                drift = 0.0 if t1n == t2n else self.max_meaning_drift
+                self._cache_drift(cache_key, drift, cache_size)
+                return drift
+            # Embedding-based drift
+            if self.embedding_available:
+                try:
+                    id1 = self.base_tokenizer.convert_tokens_to_ids(token1)
+                    id2 = self.scaffold_tokenizer.convert_tokens_to_ids(token2)
+                    emb1 = self._get_token_embedding(self.base_model, id1)
+                    emb2 = self._get_token_embedding(self.scaffold_model, id2)
+                    if emb1 is not None and emb2 is not None:
+                        emb1 = emb1 / (emb1.norm() + 1e-8)
+                        emb2 = emb2 / (emb2.norm() + 1e-8)
+                        cosine = 1.0 - torch.nn.functional.cosine_similarity(emb1, emb2, dim=0).item()
+                        euclid = (emb1 - emb2).norm().item()
+                        euclid = euclid / (euclid + 1.0)
+                        normdiff = abs(emb1.norm().item() - emb2.norm().item())
+                        normdiff = normdiff / (normdiff + 1.0)
+                        drift = (
+                            cosine_weight * cosine +
+                            euclidean_weight * euclid +
+                            norm_weight * normdiff
+                        )
+                        drift = min(drift, max_drift)
+                        self._cache_drift(cache_key, drift, cache_size)
+                        return drift
+                except Exception as e:
+                    self.logger.record_event(
+                        event_type="meaning_drift_embedding_error",
+                        message=f"Embedding drift failed: {str(e)}",
+                        level="warning"
+                    )
+            # Heuristic fallback
+            lev = self._levenshtein_distance(t1n, t2n)
+            maxlen = max(len(t1n), len(t2n), 1)
+            lev_drift = lev / maxlen
+            char_drift = 1.0 - self._char_similarity(t1n, t2n)
+            t1_sub = set(self.base_tokenizer.encode(t1n, add_special_tokens=False))
+            t2_sub = set(self.scaffold_tokenizer.encode(t2n, add_special_tokens=False))
+            subword_drift = 1.0
+            if t1_sub and t2_sub:
+                subword_drift = 1.0 - (len(t1_sub & t2_sub) / max(len(t1_sub | t2_sub), 1))
+            freq_drift = 0.0
+            try:
+                base_freq = self.base_tokenizer.get_vocab().get(t1n, 0)
+                scaf_freq = self.scaffold_tokenizer.get_vocab().get(t2n, 0)
+                freq_diff = abs(base_freq - scaf_freq)
+                freq_drift = freq_diff / (freq_diff + 1000.0)
+            except Exception:
+                freq_drift = 0.0
+            total_len = len(t1n) + len(t2n)
+            lev_w = levenshtein_weight * (1.2 if total_len > 10 else 0.8)
+            char_w = char_weight * (0.8 if total_len > 10 else 1.2)
+            total_w = lev_w + char_w + subword_weight + freq_weight
+            lev_w /= total_w
+            char_w /= total_w
+            subword_weight /= total_w
+            freq_weight /= total_w
+            drift = (
+                lev_w * lev_drift +
+                char_w * char_drift +
+                subword_weight * subword_drift +
+                freq_weight * freq_drift
+            )
+            drift = min(max(drift, 0.0), 1.0)
+            self._cache_drift(cache_key, drift, cache_size)
+            return drift
+        except Exception as e:
+            self.logger.record_event(
+                event_type="meaning_drift_error",
+                message=f"Failed to compute meaning drift for {token1} <-> {token2}: {str(e)}",
+                level="error"
+            )
+            return self.max_meaning_drift
+
+    def _cache_drift(self, cache_key, drift, cache_size):
+        with self._drift_cache_lock:
+            self._drift_cache[cache_key] = drift
+            self._drift_cache_order.append(cache_key)
+            if len(self._drift_cache_order) > cache_size:
+                old_key = self._drift_cache_order.pop(0)
+                self._drift_cache.pop(old_key, None)
+
     def _levenshtein_distance(self, s1, s2):
         # Simple Levenshtein distance implementation
         if len(s1) < len(s2):
@@ -453,6 +574,7 @@ class ScaffoldTokenMapper:
     def tokenize_and_map(self, prompt: str) -> Tuple[List[int], List[float]]:
         """Tokenize prompt and map to scaffold token space, enforcing minimum confidence."""
         try:
+            start = time.time()
             base_tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
             scaffold_ids = []
             weights = []
@@ -462,8 +584,11 @@ class ScaffoldTokenMapper:
                 mapping = self.token_map[base_id]
                 scaffold_ids.extend(mapping['ids'])
                 weights.extend([mapping['weight']] * len(mapping['ids']))
-                if mapping['weight'] < min_conf:
-                    low_conf_count += 1
+                # --- Metrics ---
+                with self._metrics_lock:
+                    self._mapping_confidences.append(mapping['weight'])
+                    if 'fallback_type' in mapping:
+                        self._fallback_counts[mapping['fallback_type']] += 1
             total = len(base_tokens) if base_tokens else 1
             low_conf_ratio = low_conf_count / total
             # Log mapping quality
@@ -481,12 +606,19 @@ class ScaffoldTokenMapper:
             )
             # Enforce threshold: if >20% of tokens are low-confidence, raise error
             if low_conf_ratio > 0.2:
+                with self._metrics_lock:
+                    self._mapping_errors += 1
                 raise ScaffoldError(
                     f"Too many low-confidence token mappings: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}",
                     operation="tokenize_and_map"
                 )
+            end = time.time()
+            with self._metrics_lock:
+                self._mapping_latencies.append(end - start)
             return scaffold_ids, weights
         except Exception as e:
+            with self._metrics_lock:
+                self._mapping_errors += 1
             self.logger.record_event(
                 event_type="token_mapping_error",
                 message=f"Failed to map tokens: {str(e)}",
@@ -1727,9 +1859,10 @@ class ScaffoldProvider:
             level="info"
         )
     
-    def process_queued_updates(self):
-        """Process any queued state updates atomically."""
-        while not self._update_queue.empty():
+    def process_queued_updates(self, max_updates=100):
+        """Process up to max_updates queued state updates atomically."""
+        processed = 0
+        while not self._update_queue.empty() and processed < max_updates:
             updates, timestamp = self._update_queue.get()
             acquired = self._lock.acquire(timeout=self._retry_delay)
             if acquired:
@@ -1746,6 +1879,24 @@ class ScaffoldProvider:
                 )
                 self._update_queue.put((updates, timestamp))
                 break
+            processed += 1
+        queue_size = self._update_queue.qsize()
+        if queue_size >= 1000:
+            self.logger.record_event(
+                event_type="scaffold_update_queue_size_warning",
+                message=f"Scaffold update queue size high: {queue_size}",
+                level="warning"
+            )
+        else:
+            self.logger.record_event(
+                event_type="scaffold_update_queue_size_info",
+                message=f"Scaffold update queue size: {queue_size}",
+                level="info"
+            )
+
+    def get_update_queue_size(self):
+        """Return the current size of the update queue."""
+        return self._update_queue.qsize()
     
     @scaffold_operation("get_state")
     def get_scaffold_state(self) -> Dict[str, Any]:
@@ -1782,6 +1933,38 @@ class ScaffoldProvider:
                     operation="get_scaffold_state"
                 )
         return state_copy
+
+    def get_scaffold_metrics(self):
+        """Aggregate and return current scaffold mapping metrics."""
+        mapper = getattr(self, 'token_mapper', None)
+        if not mapper:
+            return {}
+        with mapper._metrics_lock:
+            metrics = {
+                "avg_confidence": float(np.mean(mapper._mapping_confidences)) if mapper._mapping_confidences else None,
+                "fallback_counts": dict(mapper._fallback_counts),
+                "avg_drift": float(np.mean(mapper._drift_values)) if mapper._drift_values else None,
+                "max_drift": float(np.max(mapper._drift_values)) if mapper._drift_values else None,
+                "mapping_errors": mapper._mapping_errors,
+                "avg_latency": float(np.mean(mapper._mapping_latencies)) if mapper._mapping_latencies else None,
+                "timestamp": time.time(),
+            }
+        return metrics
+
+    def report_metrics_to_monitor(self, system_monitor):
+        """Send current scaffold metrics to the system monitor."""
+        metrics = self.get_scaffold_metrics()
+        if hasattr(system_monitor, 'update_component_metrics'):
+            system_monitor.update_component_metrics("scaffold", metrics)
+
+    def start_metric_reporting(self, system_monitor, interval=60):
+        """Start periodic reporting of scaffold metrics to the system monitor."""
+        def report_loop():
+            while True:
+                self.report_metrics_to_monitor(system_monitor)
+                time.sleep(interval)
+        t = threading.Thread(target=report_loop, daemon=True)
+        t.start()
 
 # Utility function to create a scaffold model with LoRA integration
 def create_scaffold_with_adaptation(config_manager, logger, error_manager, lora_checkpoint_path=None):

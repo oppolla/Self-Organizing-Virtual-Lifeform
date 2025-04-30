@@ -68,6 +68,14 @@ class SystemMonitor:
             'monitoring', 'gpu_critical_threshold_percent', default=95.0
         )
         
+        self._component_metrics = {}  # Store latest metrics for each component
+        self._scaffold_confidence_threshold = self._config_manager.get_setting(
+            'monitoring', 'scaffold_confidence_threshold', default=0.6
+        )
+        self._scaffold_fallback_rate_threshold = self._config_manager.get_setting(
+            'monitoring', 'scaffold_fallback_rate_threshold', default=0.2
+        )
+        
     def _collect_metrics(self) -> Dict[str, Any]:
         """Collect system metrics."""
         try:
@@ -159,6 +167,27 @@ class SystemMonitor:
             else:
                 stats[uid] = {'latest': self.get_latest_bond_score(uid)}
         return stats
+
+    def update_component_metrics(self, component_name: str, metrics: dict):
+        """Update metrics for a component and check thresholds for alerts."""
+        self._component_metrics[component_name] = metrics
+        if component_name == "scaffold":
+            avg_conf = metrics.get("avg_confidence", 1.0)
+            fallback_counts = metrics.get("fallback_counts", {})
+            total_fallbacks = sum(fallback_counts.values())
+            unk_fallbacks = fallback_counts.get("unk", 0)
+            fallback_rate = unk_fallbacks / total_fallbacks if total_fallbacks > 0 else 0.0
+            if avg_conf < self._scaffold_confidence_threshold:
+                self._logger.log_warning(
+                    f"Scaffold mapping confidence degraded: {avg_conf:.3f}",
+                    additional_info=metrics
+                )
+            if fallback_rate > self._scaffold_fallback_rate_threshold:
+                self._logger.log_warning(
+                    f"Scaffold fallback rate high: {fallback_rate:.2%}",
+                    additional_info=metrics
+                )
+        self._logger.log_info(f"Updated metrics for {component_name}", additional_info=metrics)
 
 class MemoryMonitor:
     """Monitors system memory usage."""

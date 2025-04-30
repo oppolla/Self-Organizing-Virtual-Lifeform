@@ -676,7 +676,7 @@ scaffold models for debugging and development purposes.
             print(f"Atomic reset update failed: {e}")
 
     def do_monitor(self, arg):
-        """Show system monitoring information."""
+        """Show system monitoring information, including scaffold metrics."""
         if self.system_monitor:
             try:
                 metrics = self.system_monitor._collect_metrics()
@@ -688,6 +688,27 @@ scaffold models for debugging and development purposes.
                             print(f"  {k}: {v}")
                     else:
                         print(f"  {stats}")
+                # --- Scaffold Metrics ---
+                scaffold_provider = getattr(self.sovl_system, 'scaffold_provider', None)
+                scaffold_metrics = None
+                if scaffold_provider and hasattr(scaffold_provider, 'get_scaffold_metrics'):
+                    try:
+                        scaffold_metrics = scaffold_provider.get_scaffold_metrics()
+                    except Exception as e:
+                        print(f"Error retrieving scaffold metrics from provider: {e}")
+                # Try to get from system_monitor as well
+                monitor_metrics = getattr(self.system_monitor, '_component_metrics', {})
+                monitor_scaffold = monitor_metrics.get('scaffold', None)
+                print("\nScaffold Metrics:")
+                print("----------------")
+                if scaffold_metrics:
+                    for k, v in scaffold_metrics.items():
+                        print(f"{k}: {v}")
+                elif monitor_scaffold:
+                    for k, v in monitor_scaffold.items():
+                        print(f"{k}: {v}")
+                else:
+                    print("No scaffold metrics available.")
             except Exception as e:
                 print(f"Error displaying system monitor metrics: {e}")
         else:
