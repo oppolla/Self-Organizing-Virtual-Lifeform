@@ -642,3 +642,30 @@ def check_model_health(model, injector, logger=None) -> bool:
                 stack_trace=traceback.format_exc()
             )
         return False
+
+def calculate_token_map_confidence(logits, *, source="base", allow_scaffold=False, logger=None):
+    """
+    Calculate confidence score for updating the token map.
+    Only use with raw base model logits (not scaffold-augmented).
+    Args:
+        logits: Output logits from the base model (before any scaffold/cross-attention).
+        source: Should be 'base'. If not, logs a warning or raises.
+        allow_scaffold: If True, disables the check (for special cases).
+        logger: Optional logger for warnings.
+    Returns:
+        float: Confidence score.
+    """
+    if source != "base" and not allow_scaffold:
+        msg = "calculate_token_map_confidence called with non-base logits!"
+        if logger:
+            logger.record_event(
+                event_type="confidence_circularity_warning",
+                message=msg,
+                level="warning"
+            )
+        else:
+            print(msg)
+        raise ValueError(msg)
+    import torch
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    return probs.max(dim=-1).values.mean().item()
