@@ -164,8 +164,11 @@ class ShortTermMemory:
 class LongTermMemory:
     """
     Handles persistent, vector-searchable conversation storage using SQLite and FAISS.
+    Uses a single thread-safe SQLite connection per instance (or shared if provided),
+    with check_same_thread=False and a timeout. All DB operations use self._db_conn
+    and are protected by _read_lock and _write_lock. Connection is cleaned up on error or deletion.
     """
-    def __init__(self, db_path: str, embedding_dim: int, session_id: str, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, retention_days: Optional[int] = None, top_k: int = 5, logging_level: str = "info", max_records: int = 10000):
+    def __init__(self, db_path: str, embedding_dim: int, session_id: str, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, retention_days: Optional[int] = None, top_k: int = 5, logging_level: str = "info", max_records: int = 10000, db_conn: Optional[sqlite3.Connection] = None):
         # Use config_manager for db_path, embedding_dim, retention_days, top_k, logging_level, max_records if provided
         if config_manager is not None:
             try:
@@ -188,8 +191,16 @@ class LongTermMemory:
         self._write_lock = threading.Lock()
         self.logger = logger or Logger.get_instance()
         self.logging_level = logging_level
-        self.message_timestamps = {}  # message_id -> timestamp
+        self.message_timestamps = {}
         try:
+            if db_conn is not None:
+                self._db_conn = db_conn
+            else:
+                self._db_conn = sqlite3.connect(
+                    self.db_path,
+                    check_same_thread=False,
+                    timeout=10.0
+                )
             self._init_database()
             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
             self.message_ids = []
@@ -200,52 +211,58 @@ class LongTermMemory:
                 level=logging_level
             )
         except Exception as e:
+            self._cleanup_connection()
             self.logger.log_error(f"LongTermMemory.__init__ failed: {e}", error_type="LongTermMemoryError")
+            raise
+
+    def _cleanup_connection(self):
+        try:
+            if hasattr(self, '_db_conn') and self._db_conn:
+                self._db_conn.close()
+                self._db_conn = None
+        except Exception as e:
+            self.logger.log_error(f"Failed to close database connection: {e}", error_type="LongTermMemoryError")
+
+    def __del__(self):
+        self._cleanup_connection()
 
     def _init_database(self):
-        """Ensure the conversations table exists with the correct schema and indexes."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                # Create table if not exists
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS conversations (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        role TEXT,
-                        content TEXT,
-                        embedding BLOB,
-                        timestamp REAL,
-                        user_id TEXT,
-                        session_id TEXT
-                    )
-                """)
-                # Create indexes for performance
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_id ON conversations (session_id)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON conversations (user_id)")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON conversations (timestamp)")
-                conn.commit()
-                # Schema validation
-                cursor.execute("PRAGMA table_info(conversations)")
-                columns = {row[1] for row in cursor.fetchall()}
-                required = {"id", "role", "content", "embedding", "timestamp", "user_id", "session_id"}
-                if not required.issubset(columns):
-                    raise ConfigurationError(f"Conversations table schema invalid. Missing columns: {required - columns}")
-                # Placeholder for future migrations
-                # self._migrate_schema_if_needed(cursor)
+            cursor = self._db_conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT,
+                    content TEXT,
+                    embedding BLOB,
+                    timestamp REAL,
+                    user_id TEXT,
+                    session_id TEXT
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_id ON conversations (session_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON conversations (user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON conversations (timestamp)")
+            self._db_conn.commit()
+            cursor.execute("PRAGMA table_info(conversations)")
+            columns = {row[1] for row in cursor.fetchall()}
+            required = {"id", "role", "content", "embedding", "timestamp", "user_id", "session_id"}
+            if not required.issubset(columns):
+                raise ConfigurationError(f"Conversations table schema invalid. Missing columns: {required - columns}")
             self.logger.record_event(
                 event_type="long_term_memory_db_init",
                 message="Conversations table and indexes ensured.",
                 level="info"
             )
         except Exception as e:
+            self._cleanup_connection()
             self.logger.log_error(f"LongTermMemory._init_database failed: {e}", error_type="LongTermMemoryError")
             raise ConfigurationError(f"Failed to initialize conversations table: {e}")
 
     def rebuild_faiss_index(self):
-        """Rebuild the in-memory FAISS index and message_ids from the database."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
+            with self._read_lock:
+                cursor = self._db_conn.cursor()
                 cursor.execute("SELECT id, embedding, timestamp FROM conversations WHERE session_id = ? ORDER BY id ASC", (self.session_id,))
                 rows = cursor.fetchall()
                 if rows:
@@ -259,36 +276,9 @@ class LongTermMemory:
                     self.message_ids = []
                     self.message_timestamps = {}
         except Exception as e:
+            self._cleanup_connection()
             self.logger.log_error(f"LongTermMemory.rebuild_faiss_index failed: {e}", error_type="LongTermMemoryError")
-
-    def _count_records(self) -> int:
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM conversations WHERE session_id = ?", (self.session_id,))
-                count = cursor.fetchone()[0]
-                return count
-        except Exception as e:
-            self.logger.log_error(f"LongTermMemory._count_records failed: {e}", error_type="LongTermMemoryError")
-            return 0
-
-    def _log_db_size(self, warning_threshold_mb: int = 100):
-        try:
-            if os.path.exists(self.db_path):
-                size_mb = os.path.getsize(self.db_path) / (1024 * 1024)
-                self.logger.record_event(
-                    event_type="long_term_memory_db_size",
-                    message=f"LongTermMemory DB size: {size_mb:.2f} MB",
-                    level="info"
-                )
-                if size_mb > warning_threshold_mb:
-                    self.logger.record_event(
-                        event_type="long_term_memory_db_size_warning",
-                        message=f"LongTermMemory DB size exceeds {warning_threshold_mb} MB: {size_mb:.2f} MB",
-                        level="warning"
-                    )
-        except Exception as e:
-            self.logger.log_error(f"LongTermMemory._log_db_size failed: {e}", error_type="LongTermMemoryError")
+            raise
 
     def add(self, msg: Dict[str, Any]):
         start_wait = time.perf_counter()
@@ -299,33 +289,28 @@ class LongTermMemory:
                 message=f"Write lock acquired in {wait_time:.6f} seconds.",
                 level="debug"
             )
-            start_hold = time.perf_counter()
             self.faiss_index.add(msg["embedding"].reshape(1, -1))
-            hold_time = time.perf_counter() - start_hold
-            self.logger.record_event(
-                event_type="long_term_memory_write_lock_held",
-                message=f"Write lock held for {hold_time:.6f} seconds.",
-                level="debug"
-            )
-        # DB write and logging outside lock
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        try:
+            cursor = self._db_conn.cursor()
             cursor.execute(
                 "INSERT INTO conversations (role, content, embedding, timestamp, user_id, session_id) VALUES (?, ?, ?, ?, ?, ?)",
                 (msg["role"], msg["content"], msg["embedding"].tobytes(), msg["timestamp"], msg["user_id"], self.session_id)
             )
             msg_id = cursor.lastrowid
-            conn.commit()
-        # Update message_ids and message_timestamps in memory
-        with self._write_lock:
-            self.message_ids.append(msg_id)
-            self.message_timestamps[msg_id] = msg["timestamp"]
-        self.logger.record_event(
-            event_type="long_term_memory_add",
-            message="Message added to LongTermMemory.",
-            level=self.logging_level,
-            additional_info={"msg": msg, "msg_id": msg_id}
-        )
+            self._db_conn.commit()
+            with self._write_lock:
+                self.message_ids.append(msg_id)
+                self.message_timestamps[msg_id] = msg["timestamp"]
+            self.logger.record_event(
+                event_type="long_term_memory_add",
+                message="Message added to LongTermMemory.",
+                level=self.logging_level,
+                additional_info={"msg": msg, "msg_id": msg_id}
+            )
+        except Exception as e:
+            self._cleanup_connection()
+            self.logger.log_error(f"LongTermMemory.add failed: {e}", error_type="LongTermMemoryError")
+            raise
 
     def query(self, query_embedding: np.ndarray, user_id: Optional[str] = None, top_k: int = 5, min_timestamp: Optional[float] = None, short_term_memory: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         start_time = time.perf_counter()
@@ -337,7 +322,6 @@ class LongTermMemory:
                     level=self.logging_level
                 )
                 return []
-            # Pre-filter message_ids by min_timestamp if provided
             filtered_ids = self.message_ids
             if min_timestamp is not None:
                 filtered_ids = [mid for mid in self.message_ids if self.message_timestamps.get(mid, 0) >= min_timestamp]
@@ -349,27 +333,23 @@ class LongTermMemory:
                 )
                 return []
             k = min(top_k, len(filtered_ids))
-            # Build a filtered FAISS index if filtering, else use the main one
             if min_timestamp is not None:
-                # Stack embeddings for filtered_ids
-                with sqlite3.connect(self.db_path) as conn:
-                    cursor = conn.cursor()
-                    placeholders = ','.join('?' for _ in filtered_ids)
-                    cursor.execute(f"SELECT id, embedding FROM conversations WHERE id IN ({placeholders})", filtered_ids)
-                    rows = cursor.fetchall()
-                    if not rows:
-                        return []
-                    embeddings = np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
-                    temp_index = faiss.IndexFlatL2(self.embedding_dim)
-                    temp_index.add(embeddings)
-                    D, I = temp_index.search(query_embedding.reshape(1, -1), k)
-                    result_ids = [rows[i][0] for i in I[0]]
+                cursor = self._db_conn.cursor()
+                placeholders = ','.join('?' for _ in filtered_ids)
+                cursor.execute(f"SELECT id, embedding FROM conversations WHERE id IN ({placeholders})", filtered_ids)
+                rows = cursor.fetchall()
+                if not rows:
+                    return []
+                embeddings = np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
+                temp_index = faiss.IndexFlatL2(self.embedding_dim)
+                temp_index.add(embeddings)
+                D, I = temp_index.search(query_embedding.reshape(1, -1), k)
+                result_ids = [rows[i][0] for i in I[0]]
             else:
                 D, I = self.faiss_index.search(query_embedding.reshape(1, -1), k)
                 result_ids = [filtered_ids[i] for i in I[0]]
-        # Fetch corresponding rows from DB
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        try:
+            cursor = self._db_conn.cursor()
             placeholders = ','.join('?' for _ in result_ids)
             where = f"WHERE id IN ({placeholders}) AND session_id = ?"
             params = result_ids + [self.session_id]
@@ -390,14 +370,18 @@ class LongTermMemory:
                 }
                 for rid in result_ids if rid in id_to_row
             ]
-        query_time = time.perf_counter() - start_time
-        self.logger.record_event(
-            event_type="long_term_memory_query",
-            message=f"LongTermMemory query executed in {query_time:.6f} seconds.",
-            level=self.logging_level,
-            additional_info={"num_results": len(results)}
-        )
-        return results
+            query_time = time.perf_counter() - start_time
+            self.logger.record_event(
+                event_type="long_term_memory_query",
+                message=f"LongTermMemory query executed in {query_time:.6f} seconds.",
+                level=self.logging_level,
+                additional_info={"num_results": len(results)}
+            )
+            return results
+        except Exception as e:
+            self._cleanup_connection()
+            self.logger.log_error(f"LongTermMemory.query failed: {e}", error_type="LongTermMemoryError")
+            raise
 
     def clear(self, user_id: Optional[str] = None):
         start_wait = time.perf_counter()
@@ -411,20 +395,23 @@ class LongTermMemory:
             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
             self.message_ids = []
             self.message_timestamps = {}
-        # DB clear and logging outside lock
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
+        try:
+            cursor = self._db_conn.cursor()
             if user_id:
                 cursor.execute("DELETE FROM conversations WHERE user_id = ? AND session_id = ?", (user_id, self.session_id))
             else:
                 cursor.execute("DELETE FROM conversations WHERE session_id = ?", (self.session_id,))
-            conn.commit()
-        self.logger.record_event(
-            event_type="long_term_memory_clear",
-            message="LongTermMemory cleared.",
-            level=self.logging_level,
-            additional_info={"user_id": user_id}
-        )
+            self._db_conn.commit()
+            self.logger.record_event(
+                event_type="long_term_memory_clear",
+                message="LongTermMemory cleared.",
+                level=self.logging_level,
+                additional_info={"user_id": user_id}
+            )
+        except Exception as e:
+            self._cleanup_connection()
+            self.logger.log_error(f"LongTermMemory.clear failed: {e}", error_type="LongTermMemoryError")
+            raise
 
 class MemoryPressureError(Exception):
     """Raised when a message cannot be added due to high RAM usage, even after cleanup attempts."""
@@ -433,6 +420,7 @@ class MemoryPressureError(Exception):
 class DialogueContextManager:
     """
     Orchestrates short-term and long-term memory for a session, with optional RAM health checks.
+    Uses a shared SQLite connection for all LongTermMemory instances for the same db_path.
     """
     def __init__(
         self,
@@ -476,6 +464,8 @@ class DialogueContextManager:
             expiry_seconds=short_term_expiry_seconds,
             logging_level=memory_logging_level
         )
+        # Shared DB connection for all LongTermMemory instances for this db_path
+        self._db_conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10.0)
         self.long_term = LongTermMemory(
             db_path=self.db_path,
             embedding_dim=self.embedding_dim,
@@ -484,7 +474,8 @@ class DialogueContextManager:
             config_manager=config_manager,
             retention_days=long_term_retention_days,
             top_k=long_term_top_k,
-            logging_level=memory_logging_level
+            logging_level=memory_logging_level,
+            db_conn=self._db_conn
         )
         self.model_manager = model_manager
         if embedding_fn is not None:
@@ -497,6 +488,13 @@ class DialogueContextManager:
                 self.ram_manager = RAMManager(config_manager, self.logger)
             except Exception as e:
                 self.logger.log_error(f"DialogueContextManager: RAMManager init failed: {e}", error_type="RAMManagerInitError")
+
+    def __del__(self):
+        if hasattr(self, '_db_conn') and self._db_conn:
+            try:
+                self._db_conn.close()
+            except Exception as e:
+                self.logger.log_error(f"Failed to close database connection: {e}", error_type="DialogueContextManagerError")
 
     def _embedding_from_base_model_with_fallback(self, text: str) -> np.ndarray:
         # Try to use base model for embedding, fallback to hash-based if unavailable

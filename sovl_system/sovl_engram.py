@@ -3,6 +3,7 @@ import torch
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ScaffoldError
 from sovl_config import ConfigManager
+from sovl_utils import check_adaptation_dependencies
 
 """
 sovl_engram.py
@@ -32,15 +33,18 @@ class LoraAdapterManager:
         self.error_handler = error_handler or ErrorManager(self.logger)
         # Fetch LoRA config from system config manager
         lora_section = config_manager.get_section("lora") if hasattr(config_manager, 'get_section') else None
-        self.enabled = config_manager.get("lora.enable", True)
+        # Use the new utility for dependency/version checks
+        deps = check_adaptation_dependencies(self.logger)
+        self.enabled = deps["lora_enabled"]
+        self.enable_adapters = deps["adapters_enabled"]
+        self.enable_prefix_tuning = deps["prefix_tuning_enabled"]
+        self._dependency_reasons = deps["reasons"]
+        self.logger.log_info(f"Adaptation dependency check: {self._dependency_reasons}")
         self.rank = config_manager.get("lora.rank", 8)
         self.alpha = config_manager.get("lora.alpha", 16)
         self.dropout = config_manager.get("lora.dropout", 0.1)
         self.target_modules = config_manager.get("lora.target_modules", ["q_proj", "v_proj"])
         self.task_type = config_manager.get("lora.task_type", "CAUSAL_LM")
-        # Fallback config
-        self.enable_adapters = config_manager.get("adapters.enable", True)
-        self.enable_prefix_tuning = config_manager.get("prefix_tuning.enable", True)
         self._validate_config()
 
     def _validate_config(self):
@@ -68,6 +72,13 @@ class LoraAdapterManager:
         """
         Try to apply LoRA, then Adapters, then Prefix Tuning. Returns (model, method_used).
         """
+        # Check compatibility before applying LoRA
+        if not self.is_model_compatible(model):
+            self.logger.log_warning(
+                "Model is not compatible with LoRA. Falling back to vanilla.",
+                event_type="lora_compatibility_fallback"
+            )
+            return model, "vanilla"
         # 1. Try LoRA
         if self.enabled and LoraConfig is not None and get_peft_model is not None:
             try:
@@ -169,13 +180,24 @@ class LoraAdapterManager:
 
     def is_model_compatible(self, model: torch.nn.Module) -> bool:
         """
-        Check if the model is compatible with LoRA (i.e., has the required target modules).
+        Check if the model is compatible with LoRA (i.e., has the required target modules),
+        including wrapped layers from CrossAttentionInjector.
         """
         if not hasattr(model, "named_modules"):
             return False
         for name, module in model.named_modules():
-            if any(target in name for target in self.target_modules):
+            module_base = name.split(".")[-1]
+            if any(target in module_base for target in self.target_modules):
                 return True
+            # Check for wrapped layers from CrossAttentionInjector
+            if hasattr(module, "forward") and "WrappedLayer" in str(type(module)):
+                for subname, submodule in module.__dict__.items():
+                    if isinstance(submodule, torch.nn.Module) and any(target in subname for target in self.target_modules):
+                        return True
+        self.logger.log_warning(
+            "No compatible LoRA target modules found in model.",
+            event_type="lora_compatibility_warning"
+        )
         return False
 
     def is_checkpoint_compatible(self, checkpoint_path: str, model: torch.nn.Module) -> bool:

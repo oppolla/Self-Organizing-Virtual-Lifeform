@@ -1273,6 +1273,20 @@ class CrossAttentionInjector:
     ) -> nn.Module:
         """Inject cross-attention into the model with robust error recovery and fallback."""
         try:
+            # Strict LoRA conflict detection
+            for name, _ in base_model.named_modules():
+                if "lora" in name.lower() or "adapter" in name.lower():
+                    self._logger.log_error(
+                        "LoRA adapters detected in base model. "
+                        "LoRA must be applied before cross-attention injection to ensure compatibility.",
+                        error_type="lora_injection_conflict"
+                    )
+                    raise ScaffoldError(
+                        "LoRA adapters applied to base model after injection. "
+                        "Apply LoRA before calling CrossAttentionInjector.inject.",
+                        operation="cross_attention_injection"
+                    )
+            # --- Existing injection logic ---
             with self._lock:
                 layers, layer_names = self.find_model_layers(base_model)
                 layer_indices = self.get_cross_attention_layers(base_model, layers_to_inject)
@@ -2011,6 +2025,11 @@ def create_scaffold_with_adaptation(config_manager, logger, error_manager, lora_
     Factory for creating a scaffold model wrapped with adaptation (LoRA, Adapters, or Prefix Tuning).
     Optionally loads LoRA weights from a checkpoint path (for long-term memory).
     Returns the adapted model, the LoraAdapterManager instance, and the adaptation method used.
+
+    Notes:
+        - LoRA is applied to the scaffold model before cross-attention injection.
+        - For the base model, LoRA must be applied **before** CrossAttentionInjector.inject
+          to avoid compatibility issues with wrapped layers.
     """
     # --- Build the base scaffold model ---
     scaffold_model = ScaffoldModel(config_manager, logger, error_manager)  # Replace with your actual scaffold model class/init
