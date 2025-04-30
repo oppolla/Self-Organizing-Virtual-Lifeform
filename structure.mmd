@@ -1,8 +1,22 @@
 graph TD
-    %% Neocortex
-    subgraph Neocortex
+    %% Autonomic System
+    subgraph autonomic_system
+        sovl_scaffold
+        sovl_trainer
         sovl_main
         sovl_conductor
+    end
+
+    %% Cerebral Cortex 
+    subgraph cerebral_cortex 
+        sovl_generation
+    end
+
+    %% Prefrontal Cortex
+    subgraph Prefrontal_Cortex
+        sovl_engram
+        sovl_queue
+        sovl_scribe   
     end
 
     %% Limbic System
@@ -13,22 +27,9 @@ graph TD
         sovl_bonder
     end
 
-    %% Hippocampus
-    subgraph Hippocampus
-        sovl_engram
-        sovl_queue
-        sovl_scribe
-        sovl_trainer
-    end
-
     %% Cerebellum
     subgraph Cerebellum
         sovl_scaffold
-    end
-
-    %% Heart
-    subgraph Heart
-        sovl_generation
     end
 
     %% Vascular System
@@ -38,24 +39,20 @@ graph TD
         sovl_data
     end
 
-    %% Sensory System
-    subgraph Sensory_System
+    %% Interoceptive System
+    subgraph Interoceptive_System
         sovl_monitor
+        sovl_memory
     end
 
     %% Immune System
     subgraph Immune_System
         sovl_error
+        sovl_logger
     end
 
-    %% Metabolic System
-    subgraph Metabolic_System
-        sovl_hardware
-        sovl_memory
-    end
-
-    %% Genome
-    subgraph Genome
+    %% Hypothalamus
+    subgraph Hypothalamus
         sovl_config
     end
 
@@ -63,14 +60,10 @@ graph TD
     subgraph Glial_Network
         sovl_manager
         sovl_interfaces
+        sovl_hardware
     end
 
-    %% Expressive System
-    subgraph Expressive_System
-        sovl_logger
-    end
-
-    %% Chronicle Artifact
+    %% Hippocampus
     chronicle["chronicle.json"]
 
     %% Flows
