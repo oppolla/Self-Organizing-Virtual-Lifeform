@@ -139,6 +139,17 @@ graph TD
     sovl_monitor --> sovl_cli
     sovl_cli --> sovl_main
 
+    %% Reticular Support Flow
+    sovl_processor --> sovl_main
+    sovl_utils --> sovl_main
+    sovl_io --> sovl_main
+    sovl_processor --> sovl_generation
+    sovl_utils --> sovl_generation
+    sovl_io --> sovl_generation
+    sovl_processor --> sovl_trainer
+    sovl_utils --> sovl_trainer
+    sovl_io --> sovl_trainer
+
     %% Motor Flow
     sovl_volition <--> sovl_main
     sovl_gate --> sovl_volition
