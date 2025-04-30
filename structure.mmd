@@ -148,12 +148,9 @@ graph TD
     sovl_config --> sovl_generation
     sovl_config --> sovl_trainer
 
-    %% Glial Network ties together
-    sovl_manager --> sovl_main
-    sovl_manager --> sovl_generation
-    sovl_interfaces --> sovl_manager
-    sovl_interfaces --> sovl_main
-
+    %% Talk Generation Flow
+    sovl_cli --> sovl_main --> sovl_generation
+    
     %% Expressive System logs for all
     sovl_logger --> sovl_main
     sovl_logger --> sovl_generation
