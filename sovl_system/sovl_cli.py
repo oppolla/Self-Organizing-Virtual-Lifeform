@@ -811,13 +811,54 @@ scaffold models for debugging and development purposes.
             print_error(f"Atomic reset update failed: {e}")
 
     def do_monitor(self, arg):
-        """Show system monitoring information, including scaffold metrics."""
+        """
+        Show system monitoring information, including scaffold metrics.
+        By default, enters real-time mode (refreshes every 1s).
+        Usage:
+          /monitor           # real-time, 1s interval
+          /monitor 2         # real-time, 2s interval
+          /monitor once      # one-shot snapshot
+          /monitor snapshot  # one-shot snapshot
+        Press Ctrl+C to exit real-time mode.
+        """
+        import time, os
+        from datetime import datetime
+
         if not self.system_monitor:
             print_error("System monitor not available.")
             return
+
+        args = arg.strip().split()
+        # One-shot mode if requested
+        if args and args[0] in ("once", "snapshot"):
+            self._print_monitor_metrics()
+            return
+
+        # Parse interval if provided
+        interval = 1.0
+        if args:
+            try:
+                interval = float(args[0])
+                if interval <= 0:
+                    print_error("Interval must be positive seconds.")
+                    return
+            except ValueError:
+                pass  # Ignore if not a number, already handled above
+
+        try:
+            while True:
+                # Clear screen (cross-platform)
+                os.system('cls' if os.name == 'nt' else 'clear')
+                print(f"System Monitor (updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
+                self._print_monitor_metrics()
+                print("\n(Press Ctrl+C to exit real-time monitor mode)")
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            print_success("Exited real-time monitor mode.")
+
+    def _print_monitor_metrics(self):
         try:
             metrics = self.system_monitor._collect_metrics()
-            # Consistent section order
             section_order = ["System", "Memory", "GPU", "Scaffold", "Traits"]
             printed_sections = set()
             print_section_header("System Monitor Metrics:")
@@ -831,9 +872,8 @@ scaffold models for debugging and development purposes.
                         print_bullet_list(stats)
                     else:
                         print(f"  {stats}")
-                    print()  # Blank line between sections
+                    print()
                     printed_sections.add(section)
-            # Print any other sections not in the main order
             for section, stats in metrics.items():
                 if section in printed_sections:
                     continue
@@ -845,7 +885,6 @@ scaffold models for debugging and development purposes.
                 else:
                     print(f"  {stats}")
                 print()
-            # --- Scaffold Metrics ---
             scaffold_provider = getattr(self.sovl_system, 'scaffold_provider', None)
             scaffold_metrics = None
             if scaffold_provider and hasattr(scaffold_provider, 'get_scaffold_metrics'):
@@ -862,7 +901,6 @@ scaffold models for debugging and development purposes.
                 print_kv_table(monitor_scaffold)
             else:
                 print("  No scaffold metrics available.")
-            print_success("System monitoring information displayed.")
         except Exception as e:
             print_error(f"Error displaying system monitor metrics: {e}")
 
@@ -872,8 +910,22 @@ scaffold models for debugging and development purposes.
         if trainer and hasattr(trainer, 'run_gestation_cycle'):
             try:
                 print_section_header("Running gestation (training) cycle...")
-                trainer.run_gestation_cycle([])  # Pass empty or default as needed
-                print_success("Gestation (training) cycle completed.")
+                # Try to use stepwise progress if available
+                num_steps = None
+                if hasattr(trainer, 'get_num_steps'):
+                    num_steps = trainer.get_num_steps()
+                elif hasattr(trainer, 'num_steps'):
+                    num_steps = trainer.num_steps
+                if num_steps and hasattr(trainer, 'run_gestation_step'):
+                    for i in range(num_steps):
+                        trainer.run_gestation_step(i)
+                        progress_bar(i + 1, num_steps, prefix='Progress:', suffix='Complete')
+                    print_success("Gestation (training) cycle completed.")
+                else:
+                    # Fallback: just show a working message
+                    print("Working... (no stepwise progress available)")
+                    trainer.run_gestation_cycle([])  # Pass empty or default as needed
+                    print_success("Gestation (training) cycle completed.")
             except Exception as e:
                 print_error(f"Error during gestation cycle: {e}")
         else:
@@ -1714,18 +1766,31 @@ scaffold models for debugging and development purposes.
     
     def do_rant(self, arg):
         """
-        Rant in a comically negative way about your most recent experience
+        Rant in a comically negative way about your most recent experience. Optionally specify a timeout in seconds (e.g., /rant 90). Default is 60 seconds.
         """
         if self.is_ranting:
             print_error("Already ranting. Use /stop to end rant mode.")
             return
+        # Parse optional timeout argument
+        timeout = 60
+        arg = arg.strip()
+        if arg:
+            try:
+                timeout = int(arg)
+                if timeout <= 0:
+                    print_error("Timeout must be positive seconds.")
+                    return
+            except ValueError:
+                print_error("Invalid timeout. Usage: /rant [timeout_seconds]")
+                return
         self.is_ranting = True
-        self._rant_thread = threading.Thread(target=self._rant_sequence, args=(arg,))
+        self._rant_thread = threading.Thread(target=self._rant_sequence, args=(arg, timeout))
         self._rant_thread.daemon = True
         self._rant_thread.start()
 
-    def _rant_sequence(self, arg):
+    def _rant_sequence(self, arg, timeout):
         import asyncio, random, time
+        start_time = time.time()
         try:
             history = getattr(self.sovl_system.state_tracker.state, 'history', None)
             recent_user_message = None
@@ -1774,8 +1839,13 @@ scaffold models for debugging and development purposes.
             qas = []
             current_prompt = initial_prompt
             for i in range(max_depth):
+                # Timeout check
                 if not self.is_ranting:
                     print_error("Rant mode stopped by user.")
+                    return
+                if time.time() - start_time > timeout:
+                    print_error(f"SOVL is too exhausted to rant further. (Rant timed out after {timeout} seconds.)")
+                    self.is_ranting = False
                     return
                 step_qas = asyncio.run(introspection_manager._recursive_followup_questions(
                     current_prompt,
@@ -1879,6 +1949,7 @@ scaffold models for debugging and development purposes.
             "- Highlight key commands, their usage, and any fun or advanced features.\n"
             "- Provide example commands and expected outputs.\n"
             "- Offer tips, best practices, and warnings if relevant.\n"
+            "- Always invite the user to ask more questions at the end\n"
             "- Make the tutorial engaging and accessible, but not condescending.\n\n"
             "CONSTRAINTS:\n"
             "- Only use information you can infer from the code.\n"
