@@ -618,7 +618,7 @@ class SOVLOrchestrator(OrchestratorInterface):
                         "- The last pleasantry before the world burns"
                     )
                     greeting = system.generate(prompt, max_new_tokens=15, temperature=1.7, top_k=30, do_sample=True)
-                print(f"\n{greeting}\n")
+                system.wake_greeting = greeting  # Store for CLI
             
             self._log_event("system_initialized", {
                 "device": str(self.device),

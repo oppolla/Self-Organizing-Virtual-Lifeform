@@ -186,6 +186,9 @@ class CommandHandler(cmd.Cmd):
             level="info"
         )
         
+        if hasattr(self.sovl_system, 'wake_greeting'):
+            print(f"\n{self.sovl_system.wake_greeting}\n")
+        
     def do_help(self, arg):
         """Show this help message."""
         print("\nAvailable commands:")
