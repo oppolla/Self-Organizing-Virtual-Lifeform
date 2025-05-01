@@ -1866,7 +1866,7 @@ scaffold models for debugging and development purposes.
             answer = final.get('question', '[no rant]')
             print_success(f"SOVL (rant, {max_depth} layers deep): {answer}")
         except Exception as e:
-            print_error(f"SOVL is too flustered to rant right now! ({e})")
+            print_error(f"The system is too flustered right now to continue ranting ({e})")
         finally:
             self.is_ranting = False
 
