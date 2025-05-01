@@ -22,6 +22,8 @@ import datetime
 import re
 import difflib
 import threading
+import json
+import shutil
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -320,13 +322,192 @@ class CommandHandler(cmd.Cmd):
             print(f"{key}: {value}")
             
     def do_config(self, arg):
-        """Show current configuration."""
-        config = self.sovl_system.get_config()
-        print("\nCurrent Configuration:")
-        print("---------------------")
-        for key, value in config.items():
-            print(f"{key}: {value}")
-            
+        """
+        Interactive configuration editor for sovl_config.json.
+        Usage:
+          /config show [section[.key]]   # Show config, section, or key
+          /config set <key> <value>      # Set a config value (dot notation)
+          /config search <term>          # Search for config keys
+          /config help <key>             # Show help for a config key
+          /config reset [section]        # Reset config or section to defaults
+        """
+        import json, shutil, datetime, os
+        args = shlex.split(arg)
+        if not args or args[0] in ("show",):
+            # /config show [section[.key]]
+            section = args[1] if len(args) > 1 else None
+            config = self.sovl_system.config_handler.get_config() if hasattr(self.sovl_system, 'config_handler') else None
+            if not config:
+                print_error("Config manager not available.")
+                return
+            if not section:
+                # Show top-level sections
+                print_section_header("Config Sections:")
+                for k in config:
+                    print(f"  {k}")
+                print("\nUse '/config show <section>' to view keys in a section.")
+                return
+            # Support dot notation for deeper keys
+            parts = section.split('.')
+            node = config
+            for p in parts:
+                if isinstance(node, dict) and p in node:
+                    node = node[p]
+                else:
+                    print_error(f"Section/key '{section}' not found.")
+                    return
+            print_section_header(f"Config: {section}")
+            print(json.dumps(node, indent=2, sort_keys=True))
+            return
+        elif args[0] == "reset":
+            # /config reset [section]
+            section = args[1] if len(args) > 1 else None
+            config_handler = getattr(self.sovl_system, 'config_handler', None)
+            if not config_handler or not hasattr(config_handler, 'get_config'):
+                print_error("Config manager not available.")
+                return
+            # Confirm
+            if section:
+                prompt = f"Reset config section '{section}' to defaults? This cannot be undone. (y/n): "
+            else:
+                prompt = "Reset ALL config to defaults? This cannot be undone. (y/n): "
+            confirm = input(prompt).strip().lower()
+            if confirm != 'y':
+                print("Aborted.")
+                return
+            # Backup current config
+            config_path = getattr(config_handler, 'config_file', 'sovl_config.json')
+            if os.path.exists(config_path):
+                ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+                backup_path = f"{config_path}.bak-{ts}"
+                shutil.copy2(config_path, backup_path)
+                print_success(f"Backed up current config to {backup_path}")
+            # Load defaults
+            defaults_path = 'sovl_config.defaults.json'
+            if not os.path.exists(defaults_path):
+                print_error(f"Defaults file '{defaults_path}' not found. Cannot reset.")
+                return
+            with open(defaults_path, 'r') as f:
+                defaults = json.load(f)
+            if section:
+                # Only reset the section
+                config = config_handler.get_config()
+                if section not in defaults:
+                    print_error(f"Section '{section}' not found in defaults.")
+                    return
+                config[section] = defaults[section]
+                config_handler.save_config()
+                print_success(f"Section '{section}' reset to defaults.")
+            else:
+                # Reset all
+                config_handler.store.flat_config = defaults
+                config_handler.save_config()
+                print_success("All config reset to defaults.")
+            return
+        elif args[0] == "set" and len(args) >= 3:
+            # /config set <key> <value>
+            key = args[1]
+            value = ' '.join(args[2:])
+            config_handler = getattr(self.sovl_system, 'config_handler', None)
+            if not config_handler or not hasattr(config_handler, 'update'):
+                print_error("Config manager not available or does not support update.")
+                return
+            # Type/value validation
+            config = config_handler.get_config() if hasattr(config_handler, 'get_config') else None
+            if not config:
+                print_error("Config manager not available.")
+                return
+            parts = key.split('.')
+            node = config
+            for p in parts[:-1]:
+                if isinstance(node, dict) and p in node:
+                    node = node[p]
+                else:
+                    print_error(f"Config key '{key}' not found.")
+                    return
+            last_key = parts[-1]
+            if not (isinstance(node, dict) and last_key in node):
+                print_error(f"Config key '{key}' not found.")
+                return
+            current_value = node[last_key]
+            expected_type = type(current_value)
+            # Try to cast value to expected type
+            try:
+                if expected_type is bool:
+                    if value.lower() in ("true", "1"): value_cast = True
+                    elif value.lower() in ("false", "0"): value_cast = False
+                    else: raise ValueError
+                elif expected_type is int:
+                    value_cast = int(value)
+                elif expected_type is float:
+                    value_cast = float(value)
+                elif expected_type is type(None):
+                    value_cast = None if value.lower() == "null" else value
+                else:
+                    value_cast = value
+            except Exception:
+                print_error(f"Type mismatch: key '{key}' expects {expected_type.__name__}, but got '{value}'.")
+                return
+            # Always prompt for confirmation
+            print(f"Change '{key}' from {current_value!r} ({expected_type.__name__}) to {value_cast!r}? (y/n): ", end="")
+            confirm = input().strip().lower()
+            if confirm != 'y':
+                print("Aborted.")
+                return
+            success = config_handler.update(key, value_cast)
+            if success:
+                print_success(f"Config key '{key}' updated to {value_cast!r}.")
+            else:
+                print_error(f"Failed to update config key '{key}'.")
+            return
+        elif args[0] == "search" and len(args) > 1:
+            # /config search <term>
+            term = args[1].lower()
+            config = self.sovl_system.config_handler.get_config() if hasattr(self.sovl_system, 'config_handler') else None
+            if not config:
+                print_error("Config manager not available.")
+                return
+            def find_keys(d, prefix=""):
+                results = []
+                if isinstance(d, dict):
+                    for k, v in d.items():
+                        full = f"{prefix}.{k}" if prefix else k
+                        if term in k.lower():
+                            results.append(full)
+                        results.extend(find_keys(v, full))
+                return results
+            matches = find_keys(config)
+            if matches:
+                print_section_header(f"Config keys matching '{term}':")
+                for m in matches:
+                    print(f"  {m}")
+            else:
+                print(f"No config keys found matching '{term}'.")
+            return
+        elif args[0] == "help" and len(args) > 1:
+            # /config help <key>
+            key = args[1]
+            # Try to show value and type
+            config = self.sovl_system.config_handler.get_config() if hasattr(self.sovl_system, 'config_handler') else None
+            if not config:
+                print_error("Config manager not available.")
+                return
+            parts = key.split('.')
+            node = config
+            for p in parts:
+                if isinstance(node, dict) and p in node:
+                    node = node[p]
+                else:
+                    print_error(f"Config key '{key}' not found.")
+                    return
+            print_section_header(f"Help for config key: {key}")
+            print(f"Current value: {node!r}")
+            print(f"Type: {type(node).__name__}")
+            print("(No inline description available. See docs or sovl_config.json schema for details.)")
+            return
+        else:
+            print_error("Usage: /config show [section[.key]], /config set <key> <value>, /config search <term>, /config help <key>, /config reset [section]")
+
     def do_exit(self, arg):
         """Exit the CLI."""
         try:
@@ -1976,6 +2157,73 @@ scaffold models for debugging and development purposes.
                 print_error("No answer could be generated.")
         except Exception as e:
             print_error(f"Error generating answer: {e}")
+
+    def complete_config(self, text, line, begidx, endidx):
+        # Tab completion for /config commands: show, set, help, search
+        import re
+        config_handler = getattr(self.sovl_system, 'config_handler', None)
+        if not config_handler or not hasattr(config_handler, 'get_config'):
+            return []
+        config = config_handler.get_config()
+        args = shlex.split(line[:begidx])
+        # Find which argument we're completing
+        if len(args) < 2:
+            # Complete subcommands
+            return [c for c in ["show", "set", "search", "help"] if c.startswith(text)]
+        subcmd = args[1]
+        # For show/set/help/search, complete section/key names
+        if subcmd in ("show", "set", "help", "search") and (len(args) == 2 or (len(args) == 3 and not text)):
+            # Complete top-level sections
+            prefix = text
+            node = config
+            if '.' in prefix:
+                parts = prefix.split('.')
+                for p in parts[:-1]:
+                    if isinstance(node, dict) and p in node:
+                        node = node[p]
+                    else:
+                        return []
+                last = parts[-1]
+                completions = [f"{'.'.join(parts[:-1])}.{k}" for k in node.keys() if k.startswith(last)]
+            else:
+                completions = [k for k in node.keys() if k.startswith(prefix)]
+            return completions
+        elif subcmd in ("show", "set", "help", "search") and len(args) >= 3:
+            # Complete deeper keys
+            prefix = args[2] if len(args) > 2 else text
+            node = config
+            if '.' in prefix:
+                parts = prefix.split('.')
+                for p in parts[:-1]:
+                    if isinstance(node, dict) and p in node:
+                        node = node[p]
+                    else:
+                        return []
+                last = parts[-1]
+                completions = [f"{'.'.join(parts[:-1])}.{k}" for k in node.keys() if k.startswith(last)]
+            else:
+                completions = [k for k in node.keys() if k.startswith(prefix)]
+            return completions
+        return []
+
+    # Register tab completion for /config
+    def completenames(self, text, *ignored):
+        # Tab completion for slash commands
+        if text.startswith('/config'):
+            return [f'/config']
+        return [f'/{name[3:]}' for name in self.get_names() if name.startswith('do_') and name[3:].startswith(text[1:])]
+
+    def complete(self, text, state):
+        # Override default complete to support /config tab completion
+        import readline
+        line = readline.get_line_buffer()
+        if line.strip().startswith('/config'):
+            completions = self.complete_config(text, line, readline.get_begidx(), readline.get_endidx())
+            if state < len(completions):
+                return completions[state]
+            else:
+                return None
+        return super().complete(text, state)
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
