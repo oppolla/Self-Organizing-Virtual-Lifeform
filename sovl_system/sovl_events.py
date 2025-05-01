@@ -12,7 +12,7 @@ from sovl_state import StateManager, SOVLState
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_error import ErrorManager, ErrorRecord
 import traceback
-from sovl_system.run_sovl import ResourceManager  # Import ResourceManager
+from sovl_resource import ResourceManager
 
 # Type alias for callbacks - clearer name
 EventHandler = Callable[..., Any]

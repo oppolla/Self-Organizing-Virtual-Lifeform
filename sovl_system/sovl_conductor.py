@@ -24,7 +24,7 @@ from sovl_manager import ModelManager
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 from sovl_trainer import TrainingCycleManager
 import threading
-from sovl_system.run_sovl import ResourceManager  # Add this import for ResourceManager
+from sovl_resource import ResourceManager
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem

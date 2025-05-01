@@ -45,6 +45,7 @@ from sovl_scaffold import (
     ScaffoldProvider,
     build_scaffold_token_mapping
 )
+from sovl_resource import ResourceManager
 
 def error_handler(func):
     """Decorator for consistent error handling and logging."""
@@ -66,77 +67,6 @@ def error_handler(func):
             )
             raise
     return wrapper
-
-class ResourceManager:
-    """Manages system resources with thread-safe operations and validation."""
-    def __init__(self, logger):
-        self.resources = defaultdict(int)
-        self._lock = threading.Lock()
-        self.max_resources = defaultdict(lambda: None)
-        self.logger = logger
-        
-    def acquire(self, resource_type: str, amount: int) -> bool:
-        """Acquire specified amount of a resource type. Prevents negative resources."""
-        with self._lock:
-            available = self.resources[resource_type]
-            if available >= amount:
-                self.resources[resource_type] = available - amount
-                if self.resources[resource_type] < 0:
-                    self.resources[resource_type] = 0
-                    self.logger.log_event(
-                        event_type="resource_negative_correction",
-                        message=f"Resource {resource_type} went negative! Corrected to 0.",
-                        level="warning"
-                    )
-                self.logger.log_event(
-                    event_type="resource_acquire",
-                    message=f"Acquired {amount} of {resource_type}. Remaining: {self.resources[resource_type]}",
-                    level="info"
-                )
-                return True
-            self.logger.log_event(
-                event_type="resource_acquire_failed",
-                message=f"Failed to acquire {amount} of {resource_type}. Available: {available}",
-                level="warning"
-            )
-            return False
-            
-    def release(self, resource_type: str, amount: int):
-        """Release specified amount of a resource type. Prevents over-release above max (if set) or negative."""
-        with self._lock:
-            max_val = self.max_resources[resource_type]
-            self.resources[resource_type] += amount
-            if max_val is not None and self.resources[resource_type] > max_val:
-                self.resources[resource_type] = max_val
-                self.logger.log_event(
-                    event_type="resource_max_correction",
-                    message=f"Resource {resource_type} exceeded max! Corrected to {max_val}.",
-                    level="warning"
-                )
-            if self.resources[resource_type] < 0:
-                self.resources[resource_type] = 0
-                self.logger.log_event(
-                    event_type="resource_negative_correction",
-                    message=f"Resource {resource_type} went negative on release! Corrected to 0.",
-                    level="warning"
-                )
-            self.logger.log_event(
-                event_type="resource_release",
-                message=f"Released {amount} of {resource_type}. Total: {self.resources[resource_type]}",
-                level="info"
-            )
-            
-    def set_resource(self, resource_type: str, amount: int, max_amount: int = None):
-        """Set the total amount of a resource type. Optionally set a max."""
-        with self._lock:
-            self.resources[resource_type] = max(0, amount)
-            if max_amount is not None:
-                self.max_resources[resource_type] = max_amount
-            self.logger.log_event(
-                event_type="resource_set",
-                message=f"Set {resource_type} to {self.resources[resource_type]} (max: {self.max_resources[resource_type]})",
-                level="info"
-            )
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -460,7 +390,7 @@ class SOVLRunner:
 
             # Component-specific initialization
             if name == "resource_manager":
-                components[name] = ResourceManager(logger=context.logger)
+                components[name] = ResourceManager(logger=context.logger, error_manager=components.get("error_manager"))
             elif name == "model_manager":
                 components[name] = ModelManager(
                     config_manager=context.config_manager,

@@ -20,7 +20,7 @@ from sovl_memory import GenerationMemoryManager
 from sovl_scaffold import GenerationScaffoldProvider
 from sovl_bonder import BondCalculator
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
-from sovl_system.run_sovl import ResourceManager  # Import ResourceManager
+from sovl_resource import ResourceManager  # Import ResourceManager
 
 class GenerationError(Exception):
     """Raised when text generation fails in a way that should halt upstream processing."""

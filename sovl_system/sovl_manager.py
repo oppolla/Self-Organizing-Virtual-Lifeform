@@ -14,7 +14,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ErrorRecord
 import gc
-from sovl_system.run_sovl import ResourceManager  # Import ResourceManager
+from sovl_resource import ResourceManager  # Import ResourceManager
 
 # Decorator function (defined outside the class for clarity)
 def _prevent_immediate_retry(recovery_func):
