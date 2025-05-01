@@ -1416,8 +1416,74 @@ scaffold models for debugging and development purposes.
             print(f"Error generating complaint report: {e}")
 
     def do_ping(self, arg):
-        """/ping - Send a 'ping (respond as you wish)' prompt to the LLM and print its response with a timestamp."""
-        prompt = "ping (respond as you wish)"
+        """/ping - Send a playful, system-aware ping to the LLM and print its response with a timestamp."""
+        import datetime, time
+        # --- Gather concise system state ---
+        # Uptime
+        try:
+            start_time = getattr(self.sovl_system, 'start_time', None)
+            if not start_time:
+                # Try context
+                context = getattr(self.sovl_system, 'context', None)
+                start_time = getattr(context, 'system_state', {}).get('start_time', None)
+            if start_time:
+                uptime_seconds = int(time.time() - start_time)
+                hours, remainder = divmod(uptime_seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                uptime_str = f"{hours}h{minutes:02d}m"
+            else:
+                uptime_str = "?"
+        except Exception:
+            uptime_str = "?"
+        # RAM usage
+        try:
+            resource_stats = self.sovl_system.get_resource_stats() if hasattr(self.sovl_system, 'get_resource_stats') else {}
+            ram_used = resource_stats.get('ram_used')
+            ram_total = resource_stats.get('ram_total')
+            if ram_used is not None and ram_total:
+                ram_str = f"{ram_used:.1f}GB/{ram_total:.1f}GB"
+            else:
+                ram_str = "?"
+        except Exception:
+            ram_str = "?"
+        # Error count (recent)
+        try:
+            error_manager = getattr(self.sovl_system, 'error_manager', None)
+            error_count = error_manager.get_error_stats().get('error_count', 0) if error_manager and hasattr(error_manager, 'get_error_stats') else None
+            if error_count is None:
+                # Try context
+                context = getattr(self.sovl_system, 'context', None)
+                error_count = getattr(context, '_error_history', None)
+                if error_count is not None:
+                    error_count = len(error_count)
+            error_str = str(error_count) if error_count is not None else "?"
+        except Exception:
+            error_str = "?"
+        # Curiosity/novelty (recent)
+        try:
+            curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+            curiosity_score = None
+            if curiosity_manager and hasattr(curiosity_manager, 'get_curiosity_score'):
+                curiosity_score = curiosity_manager.get_curiosity_score()
+            if curiosity_score is not None:
+                curiosity_str = f"{curiosity_score:.2f}"
+            else:
+                curiosity_str = "?"
+        except Exception:
+            curiosity_str = "?"
+        # Compose concise state snapshot
+        state_snapshot = f"Uptime={uptime_str}, RAM={ram_str}, Errors={error_str}, Curiosity={curiosity_str}"
+        # Compose prompt with key constraints
+        prompt = (
+            f"System state: {state_snapshot}\n"
+            "Based on the state above, invent a 4-part IP address (one evocative word per part, dot-separated) and a 10-word diagnostic. Be playful, avoid tech jargon.\n"
+            "Key constraints:\n"
+            "   - IP address: Exactly 4 single words, dot-separated.\n"
+            "   - Diagnostic: Exactly 10 words.\n"
+            "   - No brackets, explanations, or tech jargon (e.g., avoid 'AI').\n"
+            "   - Use only the provided system state for context.\n"
+            "Output format: <IP> | <10-word diagnostic>. No brackets or explanations."
+        )
         try:
             generation_manager = getattr(self.sovl_system, 'generation_manager', None)
             if not generation_manager or not hasattr(generation_manager, 'generate_text'):
@@ -2124,21 +2190,31 @@ scaffold models for debugging and development purposes.
         system_prompt = (
             "SYSTEM:\n"
             "You are an expert Python developer and technical writer. Your job is to generate a clear, friendly, and accurate tutorial for the SOVL CLI system, based on the code provided below.\n\n"
-            "GOALS:\n"
-            "- Explain the main purpose and capabilities of the CLI.\n"
-            "- Guide a new user through getting started.\n"
-            "- Highlight key commands, their usage, and any fun or advanced features.\n"
-            "- Provide example commands and expected outputs.\n"
-            "- Offer tips, best practices, and warnings if relevant.\n"
-            "- Always invite the user to ask more questions at the end\n"
-            "- Make the tutorial engaging and accessible, but not condescending.\n\n"
-            "CONSTRAINTS:\n"
-            "- Only use information you can infer from the code.\n"
-            "- Do not invent features or commands not present in the code.\n"
-            "- If unsure about a feature, say so or suggest how to learn more (e.g., /help).\n"
-            "- Keep the tutorial concise but thorough.\n\n"
+            "TUTORIAL REQUIREMENTS:\n"
+            "   - Explain the main purpose and capabilities of the CLI in a concise 16 word sentence\n"
+            "   - Start with the absolute basics\n"
+            "   - Explain that typing plain text (no '/command') sends a message to the LLM, just like chatting with a person\n"
+            "   - Give a simple example: 'Hello, how are you?' → LLM responds naturally\n"
+            "   - Then introduce commands. Clarify that '/' prefixes are for special functions \n"
+            "   - Highlight key commands, their usage, and any fun or advanced features.\n"
+            "   - Provide example commands and expected outputs.\n"
+            "   - Offer tips, best practices, and warnings if relevant.\n"
+            "   - Make the tutorial engaging and accessible, but not condescending.\n\n"
+            "KEY CONSTRAINTS:\n"
+            "   - Only use information you can infer from the code.\n"
+            "   - Do not invent features or commands not present in the code.\n"
+            "   - Use sentences only. No lists. No numbered lists. No bullet points. No sections \n"
+            "   - Don't go into unneeded details. Rely on users to ask follow questions \n"
+            "   - NO jargon (e.g., don't say 'CLI'—call it 'chat interface')\n"
+            "   - Use analogies (e.g., '/commands are like keyboard shortcuts')\n"
+            "   - If unsure about a feature, say so or suggest how to learn more (e.g., /help).\n"
+            "   - Keep the tutorial concise but thorough.\n\n"
             f"USER QUESTION:\n{user_question}\n\n"
             f"CODE:\n{self.tutorial_code}\n"
+            "OUTPUT FORMAT:\n"
+            "   - Max 3 sentences per concept\n"
+            "   - Always invite the user to ask more questions at the end\n"
+            "   - Keep the tutorial concise but thorough.\n\n"
         )
         generation_manager = getattr(self.sovl_system, 'generation_manager', None)
         if not generation_manager or not hasattr(generation_manager, 'generate_text'):
