@@ -19,6 +19,7 @@ import os
 import asyncio
 import random
 import datetime
+import re
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -29,7 +30,7 @@ VALID_DATA = None
 COMMAND_CATEGORIES = {
     "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc"],
     "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain"],
-    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle"],
+    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk"],
     "Utility": ["/train", "/rewind", "/recall", "/forget", "/recap", "/echo"],
     "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
     
@@ -1136,8 +1137,78 @@ scaffold models for debugging and development purposes.
             print("Continuing trip initiation without announcement.")
         print(f"*** Trip ACTIVE for {duration:.1f} seconds. ***")
 
+    def do_drunk(self, arg):
+        """
+        Engage SOVL in drunk mode for a timed period. All user inputs will be answered with a 3-deep recursive, decaying introspection chain. Only the final answer is shown. Usage: /drunk [duration_seconds] [prompt]
+        """
+        try:
+            # Parse duration and optional prompt
+            match = re.match(r"(\d+)(?:\s+(.*))?", arg.strip())
+            if match:
+                duration = int(match.group(1))
+                prompt = match.group(2) or None
+            else:
+                duration = 30
+                prompt = None
+            if duration < 5:
+                print("Drunk mode must be at least 5 seconds.")
+                return
+            self.is_drunk = True
+            self.drunk_start_time = time.time()
+            self.drunk_duration = duration
+            self.drunk_default_prompt = prompt or "What is the meaning of recursion?"
+            print(f"*** Drunk mode engaged for {duration} seconds! ***")
+        except Exception as e:
+            print(f"Error starting drunk mode: {e}")
+
+    def _drunk_response(self, user_prompt, decay):
+        """Generate a 3-deep recursive, decaying introspection answer using IntrospectionManager."""
+        try:
+            introspection_manager = getattr(self.sovl_system, 'introspection_manager', None)
+            if not introspection_manager or not hasattr(introspection_manager, '_recursive_followup_questions'):
+                print("Drunk mode unavailable: IntrospectionManager not available.")
+                return
+            prompt = user_prompt or self.drunk_default_prompt or "What is the meaning of recursion?"
+            # Compose a more surreal prompt as decay increases
+            if decay < 0.5:
+                prompt = f"[Surreal, poetic, unfiltered] {prompt}"
+            elif decay < 0.8:
+                prompt = f"[Be creative, let your mind wander] {prompt}"
+            # Recursion: always 3 deep
+            # Optionally modulate temperature/confidence threshold by decay
+            temperature = 0.8 + 0.8 * (1.0 - decay)  # 0.8 to 1.6
+            confidence_threshold = 0.7 - 0.3 * (1.0 - decay)  # 0.7 to 0.4
+            # Run the recursive followup chain (sync wrapper for async)
+            qas = asyncio.run(introspection_manager._recursive_followup_questions(
+                prompt,
+                max_depth=3,
+                confidence_threshold=confidence_threshold
+            ))
+            if not qas or not isinstance(qas, list):
+                print("SOVL is too drunk to answer right now!")
+                return
+            final = qas[-1]
+            answer = final.get('answer', '[no answer]')
+            # Optionally, add a surreal prefix
+            print(f"SOVL (drunk, 3 layers deep): {answer}")
+        except Exception as e:
+            print(f"SOVL is too drunk to answer right now! ({e})")
+
     def default(self, line):
-        # Intercept for trip state
+        import time
+        if getattr(self, 'is_drunk', False):
+            now = time.time()
+            elapsed = now - getattr(self, 'drunk_start_time', 0)
+            duration = getattr(self, 'drunk_duration', 30)
+            decay = max(0.0, 1.0 - (elapsed / duration))
+            if elapsed > duration:
+                print("\n*** Drunk mode ended. SOVL is now sober. ***")
+                self.is_drunk = False
+                return
+            user_prompt = line.strip()
+            self._drunk_response(user_prompt, decay)
+            return
+        # Normal trip mode
         if getattr(self, 'is_tripping', False):
             now = time.time()
             elapsed = now - self.trip_start_time

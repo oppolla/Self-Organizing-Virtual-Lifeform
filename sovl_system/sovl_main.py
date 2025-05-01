@@ -939,6 +939,27 @@ class SOVLSystem(SystemInterface):
                 error_manager=self.error_manager
             )
             
+            # IntrospectionManager (for recursive introspection, meditation, etc)
+            try:
+                self.introspection_manager = IntrospectionManager(
+                    context=context,
+                    state_manager=context.state_manager,
+                    error_manager=self.error_manager,
+                    curiosity_manager=self.curiosity_manager,
+                    confidence_calculator=getattr(context, 'confidence_calculator', None),
+                    temperament_system=getattr(context, 'temperament_system', None),
+                    model_manager=self.model_manager,
+                    bond_calculator=getattr(self, 'bond_calculator', None)
+                )
+            except Exception as e:
+                self.introspection_manager = None
+                if hasattr(self, 'error_manager') and self.error_manager:
+                    self.error_manager.handle_error(
+                        error_type="introspection_manager_init",
+                        error_message=f"Failed to initialize IntrospectionManager: {str(e)}",
+                        error=e
+                    )
+            
             # Initialize component state
             self._initialize_component_state()
             
