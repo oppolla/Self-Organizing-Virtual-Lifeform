@@ -1,147 +1,118 @@
 graph TD
-    %% Thalamus
-    subgraph Thalamus
-        sovl_main
-        sovl_conductor
-        sovl_events
+    %% Subgraphs: Organized by Functional Role
+    %% Core Orchestration
+    subgraph Thalamus[Thalamus: Orchestration]
+        sovl_main[Main]
+        sovl_conductor[Conductor]
+        sovl_events[Events]
     end
 
-    %% Cerebral Cortex 
-    subgraph Cerebral_Cortex 
-        sovl_generation
-        sovl_primer
+    %% Input Processing
+    subgraph Cerebellum[Cerebellum: Sensory & Resource Management]
+        sovl_monitor[Monitor]
+        sovl_memory[Memory]
+        sovl_resource[Resource]
+        sovl_cli[CLI]
     end
 
-    %% Limbic System
-    subgraph Limbic_System
-        sovl_curiosity
-        sovl_temperament
-        sovl_confidence
-        sovl_bonder
-        sovl_meditator
+    subgraph Reticular_Formation[Reticular Formation: Support Utilities]
+        sovl_processor[Processor]
+        sovl_utils[Utils]
+        sovl_io[IO]
     end
 
-    %% Insula
-    subgraph Insula
-        sovl_trainer
-        sovl_queue
-        sovl_scribe
+    subgraph Ganglia[Ganglia: Configuration]
+        sovl_config[Config]
+        sovl_schema[Schema]
     end
 
-    %% Hippocampus
-    subgraph Hippocampus
-        sovl_scaffold
-        sovl_engram
-        sovl_manager
-        sovl_recaller
+    %% Cognitive Processing
+    subgraph Cerebral_Cortex[Cerebral Cortex: Generation]
+        sovl_generation[Generation]
+        sovl_primer[Primer]
     end
 
-    %% Claustrum
-    subgraph Claustrum
-        sovl_records
-        sovl_data
+    subgraph Limbic_System[Limbic System: Emotional Traits]
+        sovl_curiosity[Curiosity]
+        sovl_temperament[Temperament]
+        sovl_confidence[Confidence]
+        sovl_bonder[Bonder]
+        sovl_meditator[Meditator]
     end
 
-    %% Cerebellum
-    subgraph Cerebellum
-        sovl_monitor
-        sovl_memory
-        sovl_resource
-        sovl_cli
+    %% Memory and Learning
+    subgraph Hippocampus[Hippocampus: Memory]
+        sovl_scaffold[Scaffold]
+        sovl_engram[Engram]
+        sovl_manager[Manager]
+        sovl_recaller[Recaller]
     end
 
-    %% Hypothalamus
-    subgraph Hypothalamus
-        sovl_error
-        sovl_logger
+    subgraph Insula[Insula: Learning]
+        sovl_trainer[Trainer]
+        sovl_queue[Queue]
+        sovl_scribe[Scribe]
     end
 
-    %% Reticular Formation
-    subgraph Reticular_Formation
-        sovl_processor
-        sovl_utils
-        sovl_io
+    subgraph Claustrum[Claustrum: Data Storage]
+        sovl_records[Records]
+        sovl_data[Data]
     end
 
-    %% Broca
-    subgraph Broca
-        sovl_swarm
+    %% Output and Interaction
+    subgraph Motor_Cortex[Motor Cortex: Action]
+        sovl_volition[Volition]
+        sovl_gate[Gate]
     end
 
-    %% Motor Cortex
-    subgraph Motor_Cortex
-        sovl_volition
-        sovl_gate
+    subgraph Pineal_Gland[Pineal Gland: Output Propagation]
+        sovl_printer[Printer]
+        sovl_fuser[Fuser]
     end
 
-    %% Ganglia
-    subgraph Ganglia
-        sovl_config
-        sovl_schema
+    subgraph Broca[Broca: Communication]
+        sovl_swarm[Swarm]
     end
 
-    %% Pineal Gland 
-    subgraph Pineal_Gland 
-        sovl_printer
-        sovl_fuser
+    %% Regulation
+    subgraph Hypothalamus[Hypothalamus: Regulation]
+        sovl_error[Error]
+        sovl_logger[Logger]
     end
 
-    %% Glial Network
-    subgraph Glial_Network
-        sovl_interfaces
-        sovl_hardware
+    %% Infrastructure
+    subgraph Glial_Network[Glial Network: Interfaces]
+        sovl_interfaces[Interfaces]
+        sovl_hardware[Hardware]
     end
 
-    %% Janus
-    subgraph Janus
-        run_sovl
+    %% Entry Point
+    subgraph Janus[Janus: Entry]
+        run_sovl[Run SOVL]
     end
 
-    %% Synaptic Patterns
-    chronicle["chronicle.json"]
+    %% Data Store
+    chronicle[chronicle.json]
 
-    %% Flows
-
-    %% Thalamus Orchestration Flow
+    %% Flows: Grouped by Function
+    %% 1. Entry and Orchestration
+    run_sovl --> sovl_main
+    run_sovl --> sovl_cli
     sovl_main <--> sovl_conductor
     sovl_main <--> sovl_events
 
-    %% Limbic Trait Flow
-    sovl_curiosity --> sovl_primer
-    sovl_temperament --> sovl_primer
-    sovl_confidence --> sovl_primer
-    sovl_bonder --> sovl_primer
+    %% 2. Configuration
+    sovl_schema --> sovl_config
+    sovl_config --> sovl_main
+    sovl_config --> sovl_generation
+    sovl_config --> sovl_trainer
 
-    %% Cerebral Generation Flow 
-    sovl_primer --> sovl_generation
-        
-    %% Hippocampal Memoria Flow
-    sovl_engram <--> sovl_scaffold
-    sovl_manager --> sovl_scaffold
-    sovl_recaller --> sovl_scaffold
-    sovl_scaffold --> sovl_main
-
-    %% Insular Learning Flow
-    sovl_queue --> sovl_scribe
-    sovl_scribe --> sovl_trainer
-    sovl_scribe --> sovl_scaffold
-   
-    %% Hypothalamal Regulation Flow
-    sovl_main --> sovl_error
-    sovl_generation --> sovl_error
-    sovl_trainer --> sovl_error
-    sovl_main --> sovl_logger
-    sovl_generation --> sovl_logger
-    sovl_trainer --> sovl_logger
-
-    %% Cerebellum Sensory Flow
+    %% 3. Sensory and Support
     sovl_monitor --> sovl_main
     sovl_memory --> sovl_main
     sovl_resource --> sovl_main
-    sovl_monitor --> sovl_cli
     sovl_cli --> sovl_main
-
-    %% Reticular Support Flow
+    sovl_monitor --> sovl_cli
     sovl_processor --> sovl_main
     sovl_utils --> sovl_main
     sovl_io --> sovl_main
@@ -152,31 +123,37 @@ graph TD
     sovl_utils --> sovl_trainer
     sovl_io --> sovl_trainer
 
-    %% Motor Flow
+    %% 4. Emotional and Cognitive Processing
+    sovl_curiosity --> sovl_primer
+    sovl_temperament --> sovl_primer
+    sovl_confidence --> sovl_primer
+    sovl_bonder --> sovl_primer
+    sovl_primer --> sovl_generation
+    sovl_cli -->|Talk| sovl_main --> sovl_generation
+
+    %% 5. Memory and Learning
+    sovl_engram <--> sovl_scaffold
+    sovl_manager --> sovl_scaffold
+    sovl_recaller --> sovl_scaffold
+    sovl_scaffold --> sovl_main
+    sovl_queue --> sovl_scribe
+    sovl_scribe --> sovl_trainer
+    sovl_scribe --> sovl_scaffold
+    sovl_swarm --> sovl_scaffold
+    sovl_swarm --> sovl_engram
+    sovl_scribe -- creates --> chronicle
+    chronicle -- used by --> sovl_trainer
+
+    %% 6. Action and Output
     sovl_volition <--> sovl_main
     sovl_gate --> sovl_volition
-
-    %% Pineal Propogation Flow
     sovl_main <--> sovl_printer
     sovl_main --> sovl_fuser
 
-    %% Ganglial Configuring Flow
-    sovl_config --> sovl_main
-    sovl_config --> sovl_generation
-    sovl_config --> sovl_trainer
-    sovl_schema --> sovl_config
-    
-    %% Talk Generation Flow
-    sovl_cli --> sovl_main --> sovl_generation
-
-    %% Brocal Flow
-    sovl_swarm --> sovl_scaffold
-    sovl_swarm --> sovl_engram
-
-    %% Entry Flow
-    run_sovl --> sovl_main
-    run_sovl --> sovl_cli
-
-    %% Chronicle data flow
-    sovl_scribe -- creates --> chronicle
-    chronicle -- used by --> sovl_trainer
+    %% 7. Regulation
+    sovl_main --> sovl_error
+    sovl_generation --> sovl_error
+    sovl_trainer --> sovl_error
+    sovl_main --> sovl_logger
+    sovl_generation --> sovl_logger
+    sovl_trainer --> sovl_logger
