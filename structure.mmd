@@ -1,13 +1,14 @@
 graph TD
     %% Subgraphs: Organized by Functional Role
-    %% Core Orchestration
+
+    %% Thalamus
     subgraph Thalamus[Thalamus: Orchestration]
         sovl_main[Main]
         sovl_conductor[Conductor]
         sovl_events[Events]
     end
 
-    %% Input Processing
+    %% Cerebellum
     subgraph Cerebellum[Cerebellum: Sensory & Resource Management]
         sovl_monitor[Monitor]
         sovl_memory[Memory]
@@ -15,23 +16,26 @@ graph TD
         sovl_cli[CLI]
     end
 
+    
     subgraph Reticular_Formation[Reticular Formation: Support Utilities]
         sovl_processor[Processor]
         sovl_utils[Utils]
         sovl_io[IO]
     end
 
+    %% Reticular Formation
     subgraph Ganglia[Ganglia: Configuration]
         sovl_config[Config]
         sovl_schema[Schema]
     end
 
-    %% Cognitive Processing
+    %% Cerebral Cortex 
     subgraph Cerebral_Cortex[Cerebral Cortex: Generation]
         sovl_generation[Generation]
         sovl_primer[Primer]
     end
 
+    %% Limbic System
     subgraph Limbic_System[Limbic System: Emotional Traits]
         sovl_curiosity[Curiosity]
         sovl_temperament[Temperament]
@@ -40,7 +44,7 @@ graph TD
         sovl_meditator[Meditator]
     end
 
-    %% Memory and Learning
+    %% Hippocampus
     subgraph Hippocampus[Hippocampus: Memory]
         sovl_scaffold[Scaffold]
         sovl_engram[Engram]
@@ -48,45 +52,49 @@ graph TD
         sovl_recaller[Recaller]
     end
 
+    %% Insula
     subgraph Insula[Insula: Learning]
         sovl_trainer[Trainer]
         sovl_queue[Queue]
         sovl_scribe[Scribe]
     end
 
+    %% Claustrum
     subgraph Claustrum[Claustrum: Data Storage]
         sovl_records[Records]
         sovl_data[Data]
     end
 
-    %% Output and Interaction
+    %% Motor Cortex
     subgraph Motor_Cortex[Motor Cortex: Action]
         sovl_volition[Volition]
         sovl_gate[Gate]
     end
 
+    %% Pineal Gland 
     subgraph Pineal_Gland[Pineal Gland: Output Propagation]
         sovl_printer[Printer]
         sovl_fuser[Fuser]
     end
 
+    %% Broca
     subgraph Broca[Broca: Communication]
         sovl_swarm[Swarm]
     end
 
-    %% Regulation
+    %% Hypothalamus
     subgraph Hypothalamus[Hypothalamus: Regulation]
         sovl_error[Error]
         sovl_logger[Logger]
     end
 
-    %% Infrastructure
+    %% Glial Network
     subgraph Glial_Network[Glial Network: Interfaces]
         sovl_interfaces[Interfaces]
         sovl_hardware[Hardware]
     end
 
-    %% Entry Point
+    %% Janus
     subgraph Janus[Janus: Entry]
         run_sovl[Run SOVL]
     end
