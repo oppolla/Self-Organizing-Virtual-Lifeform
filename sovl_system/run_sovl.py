@@ -1307,7 +1307,13 @@ class SOVLRunner:
 def main():
     """Entry point for the SOVL system."""
     runner = SOVLRunner()
-    runner.run()
+    runner.run()  # This does all the setup and returns when ready
+
+    # After setup, launch the CLI if initialization succeeded
+    if hasattr(runner, 'context') and runner.context is not None:
+        run_cli(runner.context)
+    else:
+        print("[ERROR] System initialization failed. CLI will not be started.")
 
 if __name__ == "__main__":
     main()

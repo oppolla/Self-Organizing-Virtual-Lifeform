@@ -1052,10 +1052,10 @@ class Motivator:
                     additional_info={"source": source, "context": context, "priority": priority, "ephemeral": ephemeral, "ttl": ttl, "impact": impact}
                 )
                 return
-            self.goals.append(goal)
-            self._prioritize_goals()
+                self.goals.append(goal)
+                self._prioritize_goals()
             self.logger.record_event(event_type="goal_created", message=description, additional_info={"priority": priority, "source": source, "context": context, "ephemeral": ephemeral, "ttl": ttl, "impact": impact})
-            self.persist_goals()
+                self.persist_goals()
 
     def _detect_goal_conflict(self, description, source, context, active_goals):
         """

@@ -1152,7 +1152,7 @@ scaffold models for debugging and development purposes.
                     generation_manager = getattr(self.sovl_system, 'generation_manager', None)
                     curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
                     state = state_manager.get_state() if state_manager else None
-                    metrics = self._get_live_metrics(state) if state else {}
+                    metrics = self._get_live_metrics(state)
                     trip_params = self._calculate_trip_parameters(metrics, decay)
                     trip_context = self._generate_trip_context(metrics, decay, trip_params, curiosity_manager)
                     full_prompt = f"{trip_context} {line}"
@@ -1491,43 +1491,47 @@ scaffold models for debugging and development purposes.
         except Exception as e:
             print(f"Error communicating with scaffold model: {e}")
 
-def run_cli(config_manager_instance: Optional[ConfigManager] = None):
+def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
     try:
-        # Initialize config manager with proper error handling
-        try:
-            config_manager = config_manager_instance or ConfigManager("sovl_config.json")
-        except Exception as e:
-            print(f"Failed to initialize configuration manager: {str(e)}")
-            raise SystemInitializationError(
-                message="Configuration manager initialization failed",
-                config_path="sovl_config.json",
-                stack_trace=traceback.format_exc()
-            )
-
-        # Initialize SOVL system with proper error handling
-        try:
-            sovl_system = SOVLSystem(config_manager)
-            # Comprehensive validation of required components
-            required_components = [
-                'state_tracker', 'logger', 'generation_manager', 'config_handler',
-                'ram_manager', 'gpu_manager', 'memory_manager', 'bond_calculator',
-                'error_manager'
-            ]
-            missing = [comp for comp in required_components if not hasattr(sovl_system, comp)]
-            if missing:
+        if system_context is not None:
+            # Use the pre-initialized system/context
+            sovl_system = system_context
+        else:
+            # Initialize config manager with proper error handling
+            try:
+                config_manager = config_manager_instance or ConfigManager("sovl_config.json")
+            except Exception as e:
+                print(f"Failed to initialize configuration manager: {str(e)}")
                 raise SystemInitializationError(
-                    message=f"SOVL system initialization incomplete - missing required components: {', '.join(missing)}",
-                    config_path=config_manager.config_path,
-                    stack_trace=""
+                    message="Configuration manager initialization failed",
+                    config_path="sovl_config.json",
+                    stack_trace=traceback.format_exc()
                 )
-        except Exception as e:
-            print(f"Failed to initialize SOVL system: {str(e)}")
-            raise SystemInitializationError(
-                message="SOVL system initialization failed",
-                config_path=config_manager.config_path,
-                stack_trace=traceback.format_exc()
-            )
+
+            # Initialize SOVL system with proper error handling
+            try:
+                sovl_system = SOVLSystem(config_manager)
+                # Comprehensive validation of required components
+                required_components = [
+                    'state_tracker', 'logger', 'generation_manager', 'config_handler',
+                    'ram_manager', 'gpu_manager', 'memory_manager', 'bond_calculator',
+                    'error_manager'
+                ]
+                missing = [comp for comp in required_components if not hasattr(sovl_system, comp)]
+                if missing:
+                    raise SystemInitializationError(
+                        message=f"SOVL system initialization incomplete - missing required components: {', '.join(missing)}",
+                        config_path=config_manager.config_path,
+                        stack_trace=""
+                    )
+            except Exception as e:
+                print(f"Failed to initialize SOVL system: {str(e)}")
+                raise SystemInitializationError(
+                    message="SOVL system initialization failed",
+                    config_path=config_manager.config_path,
+                    stack_trace=traceback.format_exc()
+                )
 
         # Initialize command history and handler
         sovl_system.cmd_history = CommandHistory()

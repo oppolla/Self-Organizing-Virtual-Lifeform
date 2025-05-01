@@ -1511,7 +1511,7 @@ class SOVLTrainer:
                 additional_info={"cycle": training_cycle}
             )
             return 0.0, {"status": "unexpected_error", "error": str(e)}
-    
+        
     def _get_fallback_examples(
         self, 
         all_examples: List[Dict[str, Any]], 
