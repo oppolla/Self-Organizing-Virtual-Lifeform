@@ -152,8 +152,10 @@ class StateEventDispatcher(EventDispatcher):
     async def _async_update_state(self, state):
         """Update state asynchronously to minimize lock contention."""
         try:
-            # Update state through state manager
-            self.state_manager.update_state(state)
+            # Update state through state manager using atomic update
+            def update_fn(_):
+                return state
+            self.state_manager.update_state_atomic(update_fn)
         except Exception as e:
             if hasattr(self, 'logger') and self.logger:
                 self.logger.log_error(

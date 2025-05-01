@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from datetime import datetime
 from sovl_error import ErrorManager
-from sovl_state import SOVLState
+from sovl_state import SOVLState, StateManager
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_queue import capture_scribe_event

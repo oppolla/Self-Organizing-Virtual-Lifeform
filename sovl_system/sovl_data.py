@@ -11,6 +11,7 @@ import os
 import json
 from collections import defaultdict
 from sovl_memory import RAMManager, GPUMemoryManager
+from sovl_state import StateManager
 from threading import Lock
 from dataclasses import dataclass, field
 from sovl_monitor import MemoryMonitor
@@ -440,13 +441,21 @@ class FileDataProvider(DataProvider):
 
 class DataManager:
     """Manages data loading, validation, and statistics."""
-    def __init__(self, config_manager: ConfigManager, logger: Logger, state: Optional[SOVLState] = None):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, state_manager: Optional['StateManager'] = None):
         """Initialize the data manager."""
         self.config_manager = config_manager
         self.logger = logger
-        self.state = state
+        self.state_manager = state_manager
         self.data_stats = DataStats()
         self._lock = Lock()
+        if state_manager is not None:
+            self._warned_state = False
+        else:
+            self._warned_state = True
+            self.logger.log_warning(
+                "DataManager initialized without a StateManager. State updates will not be atomic or thread-safe.",
+                event_type="data_manager_state_warning"
+            )
         
     def load_and_split(self, data: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Load and split data into training and validation sets."""
@@ -472,17 +481,26 @@ class DataManager:
                     validation_errors=validation_errors,
                     average_entry_length=avg_entry_length
                 )
-                if self.state:
-                    try:
-                        self.state.update_data_stats({
-                            "total_entries": total_entries,
-                            "valid_entries": valid_entries,
-                            "invalid_entries": invalid_entries,
-                            "validation_errors": validation_errors,
-                            "avg_entry_length": avg_entry_length
-                        })
-                    except Exception as state_exc:
-                        self.logger.log_error(f"Failed to update state data stats: {state_exc}", error_type="data_manager_state_error")
+                if self.state_manager:
+                    def update_fn(state):
+                        try:
+                            state.update_data_stats({
+                                "total_entries": total_entries,
+                                "valid_entries": valid_entries,
+                                "invalid_entries": invalid_entries,
+                                "validation_errors": validation_errors,
+                                "avg_entry_length": avg_entry_length
+                            })
+                        except Exception as state_exc:
+                            self.logger.log_error(f"Failed to update state data stats: {state_exc}", error_type="data_manager_state_error")
+                        return state
+                    self.state_manager.update_state_atomic(update_fn)
+                elif not self._warned_state:
+                    self.logger.log_warning(
+                        "DataManager is missing a StateManager. State updates are not atomic.",
+                        event_type="data_manager_state_warning"
+                    )
+                    self._warned_state = True
                 split_ratio = self.config_manager.get("data_config.validation_split_ratio", 0.2)
                 if not (0.0 < split_ratio < 1.0):
                     self.logger.log_error(f"Invalid split ratio: {split_ratio}, using default 0.2", error_type="data_manager_split_ratio_warning")
