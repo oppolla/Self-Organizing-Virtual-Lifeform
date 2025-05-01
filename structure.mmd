@@ -16,7 +16,7 @@ graph TD
         sovl_cli[CLI]
     end
 
-    
+    %% Reticular Formation
     subgraph Reticular_Formation[Reticular Formation: Support Utilities]
         sovl_processor[Processor]
         sovl_utils[Utils]
@@ -59,12 +59,6 @@ graph TD
         sovl_scribe[Scribe]
     end
 
-    %% Claustrum
-    subgraph Claustrum[Claustrum: Data Storage]
-        sovl_records[Records]
-        sovl_data[Data]
-    end
-
     %% Motor Cortex
     subgraph Motor_Cortex[Motor Cortex: Action]
         sovl_volition[Volition]
@@ -86,12 +80,14 @@ graph TD
     subgraph Hypothalamus[Hypothalamus: Regulation]
         sovl_error[Error]
         sovl_logger[Logger]
+        sovl_records[Records]
     end
 
     %% Glial Network
     subgraph Glial_Network[Glial Network: Interfaces]
         sovl_interfaces[Interfaces]
         sovl_hardware[Hardware]
+        sovl_data[Data]
     end
 
     %% Janus
