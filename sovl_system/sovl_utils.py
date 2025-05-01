@@ -14,6 +14,7 @@ from sovl_memory import GPUMemoryManager, RAMManager
 from datetime import datetime, timezone
 import os
 import threading
+import sys
 
 class NumericalGuard:
     """Context manager for numerical stability."""
@@ -919,3 +920,55 @@ def collate_tensor_batch(batch: list, device: "torch.device") -> dict:
         return collated
     except Exception as e:
         raise RuntimeError(f"Failed to collate tensor batch: {e}")
+
+# --- CLI Feedback and Formatting Utilities ---
+def format_file_size(num_bytes: int) -> str:
+    """Return human-readable file size (e.g., 1.2 MB)."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if num_bytes < 1024.0:
+            return f"{num_bytes:.1f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.1f} PB"
+
+def format_timestamp(dt=None) -> str:
+    """Return a readable timestamp string (local time)."""
+    if dt is None:
+        dt = datetime.now()
+    elif isinstance(dt, (int, float)):
+        dt = datetime.fromtimestamp(dt)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+def print_section_header(title: str):
+    """Print a bold/underlined section header."""
+    print(f"\033[1m{title}\033[0m")
+
+def print_bullet_list(items):
+    """Print a list with bullets and indentation."""
+    for item in items:
+        print(f"  - {item}")
+
+def print_kv_table(d: dict, key_width: int = 16):
+    """Print key-value pairs in aligned columns."""
+    for k, v in d.items():
+        print(f"  {str(k):<{key_width}} {v}")
+
+def progress_bar(percent: float, width: int = 30) -> str:
+    """Return a string for a simple progress bar."""
+    percent = max(0.0, min(1.0, percent))
+    filled = int(width * percent)
+    bar = '#' * filled + '-' * (width - filled)
+    return f"[{bar}] {int(percent * 100)}%"
+
+def print_success(msg: str):
+    """Print a standardized success message (green if supported)."""
+    if sys.stdout.isatty():
+        print(f"\033[92m✔ {msg}\033[0m")
+    else:
+        print(f"SUCCESS: {msg}")
+
+def print_error(msg: str):
+    """Print a standardized error message (red if supported)."""
+    if sys.stderr.isatty():
+        print(f"\033[91m✖ {msg}\033[0m", file=sys.stderr)
+    else:
+        print(f"ERROR: {msg}", file=sys.stderr)

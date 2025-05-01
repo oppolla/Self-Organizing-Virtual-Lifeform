@@ -5,7 +5,7 @@ from typing import List, Dict, Tuple, Optional, Callable
 from sovl_main import SOVLSystem
 from sovl_state import StateManager
 from sovl_config import ConfigManager
-from sovl_utils import safe_compare
+from sovl_utils import safe_compare, format_file_size, format_timestamp, print_section_header, print_bullet_list, print_kv_table, progress_bar, print_success, print_error
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 import readline
 from collections import deque
@@ -20,6 +20,8 @@ import asyncio
 import random
 import datetime
 import re
+import difflib
+import threading
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -28,23 +30,33 @@ FORMATTED_TRAINING_DATA = None
 VALID_DATA = None
 
 COMMAND_CATEGORIES = {
-    "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc"],
+    "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc", "/run", "/stop"],
     "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant"],
     "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk"],
-    "Utility": ["/train", "/rewind", "/recall", "/forget", "/recap", "/echo"],
+    "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo"],
     "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
-    
+    "Tutorial": ["/tutorial"],
+}
+
+# Centralized alias mapping for help display
+ALIASES = {
+    "q": "quit",
+    "h": "help",
+    "ls": "history",
+    "s": "status",   # new: /s for /status
+    "r": "reset",    # new: /r for /reset
 }
 
 class CommandHistory:
     """Manages command history with search functionality and execution status."""
     def __init__(self, max_size: int = 100):
-        self.history = deque(maxlen=max_size)  # Each entry: {"command": ..., "status": ...}
+        self.history = deque(maxlen=max_size)  # Each entry: {"command": ..., "status": ..., "timestamp": ...}
         self.current_index = -1
 
     def add(self, command: str, status: str = "unknown"):
         """Add a command and its status to history."""
-        self.history.append({"command": command, "status": status})
+        timestamp = datetime.datetime.now().isoformat(timespec='seconds')
+        self.history.append({"command": command, "status": status, "timestamp": timestamp})
         self.current_index = -1
 
     def get_previous(self) -> Optional[str]:
@@ -79,7 +91,12 @@ class CommandHistory:
         import json, os
         if os.path.exists(filename):
             with open(filename, "r") as f:
-                self.history = deque(json.load(f), maxlen=self.history.maxlen)
+                loaded = json.load(f)
+                # Backward compatibility: add timestamp if missing
+                for entry in loaded:
+                    if "timestamp" not in entry:
+                        entry["timestamp"] = "unknown"
+                self.history = deque(loaded, maxlen=self.history.maxlen)
 
 class CommandHandler(cmd.Cmd):
     """Enhanced command handler with history and search capabilities."""
@@ -176,28 +193,109 @@ class CommandHandler(cmd.Cmd):
         self.is_tripping = False
         self.trip_start_time = 0.0
         self.trip_duration = 0.0
+        self.is_drunk = False
+        self.drunk_start_time = 0.0
+        self.drunk_duration = 0.0
+        self.is_ranting = False
 
     def preloop(self):
-        """Initialize the command handler."""
-        print("SOVL Interactive CLI")
-        print("Type 'help' for available commands")
+        """Initialize the command handler with onboarding and wake message."""
+        print("SOVL System online")
+        print("/help for commands list")
+        print("/tutorial for tutorial mode")
+        print("/stop to exit modes")
+        print("/monitor for system metrics")
+        # Show the current wake message, if present, but only here
+        wake_msg = getattr(self.sovl_system, 'wake_greeting', None)
+        if wake_msg:
+            print(f"\n{wake_msg}\n")
         self.logger.record_event(
             event_type="cli_startup",
             message="SOVL CLI started",
             level="info"
         )
         
-        if hasattr(self.sovl_system, 'wake_greeting'):
-            print(f"\n{self.sovl_system.wake_greeting}\n")
-        
     def do_help(self, arg):
-        """Show this help message."""
-        print("\nAvailable commands:")
-        for name in self.get_names():
-            if name.startswith('do_'):
-                cmd = name[3:]
-                doc = getattr(self, name).__doc__ or ''
-                print(f"/{cmd} - {doc.strip()}")
+        """Show this help message, grouped by category, with aliases. Use '/help <command>' for details."""
+        # Build reverse alias mapping: canonical -> [aliases]
+        reverse_aliases = {}
+        for alias, canonical in ALIASES.items():
+            reverse_aliases.setdefault(canonical, []).append(alias)
+
+        # Gather all do_ methods
+        all_cmds = {name[3:]: getattr(self, name) for name in self.get_names() if name.startswith('do_')}
+        # Map to /command style
+        all_cmds_slash = {f"/{cmd}": method for cmd, method in all_cmds.items()}
+
+        # Contextual help if arg is provided
+        if arg and arg.strip():
+            query = arg.strip().lstrip('/')
+            # Resolve alias
+            canonical = ALIASES.get(query, query)
+            # Try help_<command> first
+            help_method = getattr(self, f'help_{canonical}', None)
+            if help_method:
+                help_method()  # Assume it prints its own output
+                return
+            # Try docstring of do_<command>
+            do_method = getattr(self, f'do_{canonical}', None)
+            if do_method and do_method.__doc__:
+                print(f"\n/{canonical} - {do_method.__doc__.strip()}")
+                return
+            # Try with slash (for commands like /bc)
+            if canonical not in all_cmds:
+                for cmd in all_cmds:
+                    if cmd.lower() == canonical.lower():
+                        do_method = all_cmds[cmd]
+                        if do_method and do_method.__doc__:
+                            print(f"\n/{cmd} - {do_method.__doc__.strip()}")
+                            return
+            # Fuzzy/partial matching suggestions
+            all_names = list(all_cmds.keys()) + list(ALIASES.keys())
+            matches = [cmd for cmd in all_names if cmd.startswith(query)]
+            if not matches:
+                matches = [cmd for cmd in all_names if query in cmd]
+            if not matches:
+                matches = difflib.get_close_matches(query, all_names, n=3, cutoff=0.6)
+            if matches:
+                print(f"Unknown command: {arg.strip()}. Did you mean:")
+                for s in matches:
+                    print(f"  /{s}")
+            else:
+                print(f"Unknown command: {arg.strip()}. Use /help to see all commands.")
+            return
+
+        # No arg: show categorized help
+        shown = set()
+        print("\nAvailable commands (grouped by category):")
+        for category, commands in COMMAND_CATEGORIES.items():
+            print(f"\n{category} Commands:")
+            for cmd in commands:
+                cmd_name = cmd.lstrip('/')
+                method = all_cmds.get(cmd_name)
+                if not method:
+                    continue
+                doc = method.__doc__ or ''
+                # Show aliases inline
+                aliases = reverse_aliases.get(cmd_name, [])
+                alias_str = f" (alias: {', '.join('/'+a for a in aliases)})" if aliases else ''
+                print(f"  {cmd}{alias_str} - {doc.strip()}")
+                shown.add(cmd_name)
+        # Show uncategorized commands
+        uncategorized = [cmd for cmd in all_cmds if f"/{cmd}" not in sum(COMMAND_CATEGORIES.values(), [])]
+        if uncategorized:
+            print("\nOther Commands:")
+            for cmd in sorted(uncategorized):
+                method = all_cmds[cmd]
+                doc = method.__doc__ or ''
+                aliases = reverse_aliases.get(cmd, [])
+                alias_str = f" (alias: {', '.join('/'+a for a in aliases)})" if aliases else ''
+                print(f"  /{cmd}{alias_str} - {doc.strip()}")
+        # Show all aliases at the end for quick reference
+        if ALIASES:
+            print("\nAliases:")
+            for alias, canonical in ALIASES.items():
+                print(f"  /{alias} = /{canonical}")
             
     def do_pause(self, arg):
         """Pause the current operation."""
@@ -254,12 +352,20 @@ class CommandHandler(cmd.Cmd):
             )
             
     def do_history(self, arg):
-        """Show command history with execution status."""
+        """Show command history with execution status, timestamps, and numbering."""
         try:
             cmd_history = getattr(self, 'cmd_history', None) or getattr(self.sovl_system, 'cmd_history', None)
             if cmd_history and hasattr(cmd_history, 'history'):
-                for entry in cmd_history.history:
-                    print(f"{entry['command']}  [status: {entry['status']}]")
+                if not cmd_history.history:
+                    print("No history available.")
+                    return
+                print("\nCommand History:")
+                print("---------------")
+                for idx, entry in enumerate(cmd_history.history, 1):
+                    ts = entry.get("timestamp", "unknown")
+                    cmd = entry.get("command", "")
+                    status = entry.get("status", "")
+                    print(f"{idx}. [{ts}] {cmd} [{status}]")
                 self.logger.record_event(
                     event_type="cli_history",
                     message="Displayed command history",
@@ -621,19 +727,32 @@ scaffold models for debugging and development purposes.
                 state = state_manager.get_state()
                 if state:
                     state_manager.save_state(state, filename.replace('.json', ''))
-                    print(f"System state saved to {filename}.")
+                    # Get file size and timestamp
+                    path = filename if filename.endswith('.json') else filename + '.json'
+                    try:
+                        size = os.path.getsize(path)
+                        ts = os.path.getmtime(path)
+                        print_success(f"State successfully saved to '{path}' (size: {format_file_size(size)}, timestamp: {format_timestamp(ts)}).")
+                    except Exception:
+                        print_success(f"State successfully saved to '{path}'.")
                 else:
-                    print("No canonical state available to save.")
+                    print_error("No canonical state available to save.")
             except Exception as e:
-                print(f"Error saving state: {e}")
+                print_error(f"Failed to save state to '{filename}': {e}")
         elif hasattr(self.sovl_system, 'save_state'):
             try:
                 self.sovl_system.save_state(filename)
-                print(f"System state saved to {filename}.")
+                path = filename if filename.endswith('.json') else filename + '.json'
+                try:
+                    size = os.path.getsize(path)
+                    ts = os.path.getmtime(path)
+                    print_success(f"State successfully saved to '{path}' (size: {format_file_size(size)}, timestamp: {format_timestamp(ts)}).")
+                except Exception:
+                    print_success(f"State successfully saved to '{path}'.")
             except Exception as e:
-                print(f"Error saving state: {e}")
+                print_error(f"Failed to save state to '{filename}': {e}")
         else:
-            print("Save not implemented or unavailable.")
+            print_error("Save not implemented or unavailable.")
 
     def do_load(self, arg):
         """Load a system state from a file using StateManager if available."""
@@ -643,94 +762,122 @@ scaffold models for debugging and development purposes.
             try:
                 loaded_state = state_manager.load_state(filename.replace('.json', ''))
                 if loaded_state:
-                    print(f"System state loaded from {filename}.")
+                    path = filename if filename.endswith('.json') else filename + '.json'
+                    try:
+                        size = os.path.getsize(path)
+                        ts = os.path.getmtime(path)
+                        print_success(f"State successfully loaded from '{path}' (size: {format_file_size(size)}, timestamp: {format_timestamp(ts)}).")
+                    except Exception:
+                        print_success(f"State successfully loaded from '{path}'.")
                 else:
-                    print("Failed to load state.")
+                    print_error(f"Failed to load state from '{filename}'. File may be empty or corrupted.")
+            except FileNotFoundError:
+                print_error(f"Failed to load state from '{filename}': File not found. Please check the filename or use /save to create a new state.")
             except Exception as e:
-                print(f"Error loading state: {e}")
+                print_error(f"Failed to load state from '{filename}': {e}")
         elif hasattr(self.sovl_system, 'load_state'):
             try:
                 self.sovl_system.load_state(filename)
-                print(f"System state loaded from {filename}.")
+                path = filename if filename.endswith('.json') else filename + '.json'
+                try:
+                    size = os.path.getsize(path)
+                    ts = os.path.getmtime(path)
+                    print_success(f"State successfully loaded from '{path}' (size: {format_file_size(size)}, timestamp: {format_timestamp(ts)}).")
+                except Exception:
+                    print_success(f"State successfully loaded from '{path}'.")
+            except FileNotFoundError:
+                print_error(f"Failed to load state from '{filename}': File not found. Please check the filename or use /save to create a new state.")
             except Exception as e:
-                print(f"Error loading state: {e}")
+                print_error(f"Failed to load state from '{filename}': {e}")
         else:
-            print("Load not implemented or unavailable.")
+            print_error("Load not implemented or unavailable.")
 
     def do_reset(self, arg):
         """Reset the system to its initial state using atomic update."""
         state_manager = getattr(self.sovl_system.context, 'state_manager', None)
         if not state_manager:
-            print("StateManager not available for atomic update.")
+            print_error("StateManager not available for atomic update.")
             return
         try:
             def reset_update(state):
                 # Reinitialize or clear state as appropriate
                 if hasattr(state, '_initialize_state'):
                     state._initialize_state()
-                    print("System state has been reset (atomic).")
+                    print_success("System state has been reset (atomic).")
                 else:
-                    print("State object does not support initialization/reset.")
+                    print_error("State object does not support initialization/reset.")
             state_manager.update_state_atomic(reset_update)
         except Exception as e:
-            print(f"Atomic reset update failed: {e}")
+            print_error(f"Atomic reset update failed: {e}")
 
     def do_monitor(self, arg):
         """Show system monitoring information, including scaffold metrics."""
-        if self.system_monitor:
-            try:
-                metrics = self.system_monitor._collect_metrics()
-                print("System Monitor Metrics:")
-                for section, stats in metrics.items():
-                    print(f"{section}:")
+        if not self.system_monitor:
+            print_error("System monitor not available.")
+            return
+        try:
+            metrics = self.system_monitor._collect_metrics()
+            # Consistent section order
+            section_order = ["System", "Memory", "GPU", "Scaffold", "Traits"]
+            printed_sections = set()
+            print_section_header("System Monitor Metrics:")
+            for section in section_order:
+                stats = metrics.get(section)
+                if stats:
+                    print_section_header(f"{section}:")
                     if isinstance(stats, dict):
-                        for k, v in stats.items():
-                            print(f"  {k}: {v}")
+                        print_kv_table(stats)
+                    elif isinstance(stats, list):
+                        print_bullet_list(stats)
                     else:
                         print(f"  {stats}")
-                # --- Scaffold Metrics ---
-                scaffold_provider = getattr(self.sovl_system, 'scaffold_provider', None)
-                scaffold_metrics = None
-                if scaffold_provider and hasattr(scaffold_provider, 'get_scaffold_metrics'):
-                    try:
-                        scaffold_metrics = scaffold_provider.get_scaffold_metrics()
-                    except Exception as e:
-                        print(f"Error retrieving scaffold metrics from provider: {e}")
-                # Try to get from system_monitor as well
-                monitor_metrics = getattr(self.system_monitor, '_component_metrics', {})
-                monitor_scaffold = monitor_metrics.get('scaffold', None)
-                print("\nScaffold Metrics:")
-                print("----------------")
-                if scaffold_metrics:
-                    for k, v in scaffold_metrics.items():
-                        print(f"{k}: {v}")
-                elif monitor_scaffold:
-                    for k, v in monitor_scaffold.items():
-                        print(f"{k}: {v}")
+                    print()  # Blank line between sections
+                    printed_sections.add(section)
+            # Print any other sections not in the main order
+            for section, stats in metrics.items():
+                if section in printed_sections:
+                    continue
+                print_section_header(f"{section}:")
+                if isinstance(stats, dict):
+                    print_kv_table(stats)
+                elif isinstance(stats, list):
+                    print_bullet_list(stats)
                 else:
-                    print("No scaffold metrics available.")
-            except Exception as e:
-                print(f"Error displaying system monitor metrics: {e}")
-        else:
-            print("System monitor not available.")
+                    print(f"  {stats}")
+                print()
+            # --- Scaffold Metrics ---
+            scaffold_provider = getattr(self.sovl_system, 'scaffold_provider', None)
+            scaffold_metrics = None
+            if scaffold_provider and hasattr(scaffold_provider, 'get_scaffold_metrics'):
+                try:
+                    scaffold_metrics = scaffold_provider.get_scaffold_metrics()
+                except Exception as e:
+                    print_error(f"Error retrieving scaffold metrics from provider: {e}")
+            monitor_metrics = getattr(self.system_monitor, '_component_metrics', {})
+            monitor_scaffold = monitor_metrics.get('scaffold', None)
+            print_section_header("Scaffold Metrics:")
+            if scaffold_metrics:
+                print_kv_table(scaffold_metrics)
+            elif monitor_scaffold:
+                print_kv_table(monitor_scaffold)
+            else:
+                print("  No scaffold metrics available.")
+            print_success("System monitoring information displayed.")
+        except Exception as e:
+            print_error(f"Error displaying system monitor metrics: {e}")
 
     def do_gestate(self, arg):
         """Run a gestation (training) cycle using the system trainer."""
         trainer = getattr(self.sovl_system, 'trainer', None)
         if trainer and hasattr(trainer, 'run_gestation_cycle'):
             try:
-                # Optionally, parse arg for conversation history or use default
-                # Here, we assume conversation history is managed internally
+                print_section_header("Running gestation (training) cycle...")
                 trainer.run_gestation_cycle([])  # Pass empty or default as needed
-                print("Gestation (training) cycle completed.")
+                print_success("Gestation (training) cycle completed.")
             except Exception as e:
-                print(f"Error during gestation cycle: {e}")
+                print_error(f"Error during gestation cycle: {e}")
         else:
-            print("Gestation (training) not available on this system.")
-
-    def do_train(self, arg):
-        """Alias for gestate (run a gestation cycle)."""
-        return self.do_gestate(arg)
+            print_error("Gestation (training) not available on this system.")
 
     def do_reflect(self, arg):
         """Force an introspection cycle and display the result."""
@@ -813,29 +960,30 @@ scaffold models for debugging and development purposes.
         """Recall a random deep memory from sovl_engram LoRA."""
         engram_lora = getattr(self.sovl_system, 'engram_lora', None)
         if not engram_lora or not hasattr(engram_lora, 'recall_deep_memory'):
-            print("Engram LoRA memory system not available on this system.")
+            print_error("Engram LoRA memory system not available on this system.")
             return
         try:
             memory = engram_lora.recall_deep_memory()
             if memory:
-                # Assume memory is a dict with 'text', 'timestamp', and 'strength' if available
                 text = memory.get('text', str(memory))
                 timestamp = memory.get('timestamp', 'unknown time')
                 strength = memory.get('strength', 'unknown strength')
-                print(f"[Memory from {timestamp}, strength: {strength}]\n{text}")
+                print_section_header(f"Memory from {timestamp}, strength: {strength}")
+                print(text)
+                print_success("Deep memory recalled successfully.")
             else:
-                print("No deep memory could be recalled.")
+                print_error("No deep memory could be recalled.")
         except Exception as e:
-            print(f"Error recalling deep memory: {e}")
+            print_error(f"Error recalling deep memory: {e}")
 
     def do_forget(self, arg):
         """Clear the sovl_recall log."""
         recall_log = getattr(self.sovl_system, 'recall_log', None)
         if recall_log and hasattr(recall_log, 'clear'):
             recall_log.clear()
-            print("sovl_recall log has been cleared.")
+            print_success("sovl_recall log has been cleared.")
         else:
-            print("sovl_recall log not available or cannot be cleared.")
+            print_error("sovl_recall log not available or cannot be cleared.")
 
     def do_muse(self, arg):
         """The system generates a unique musing about its own existence, purpose, or limitations."""
@@ -1566,63 +1714,77 @@ scaffold models for debugging and development purposes.
     
     def do_rant(self, arg):
         """
-        Rant in a comically negative way about your most recent experience. Usage: /rant
-        The number of rants and timing between them are random!
+        Rant in a comically negative way about your most recent experience
         """
-        import asyncio, random, time
-        history = getattr(self.sovl_system.state_tracker.state, 'history', None)
-        recent_user_message = None
-        if history and hasattr(history, 'messages'):
-            for msg in reversed(history.messages):
-                if msg.get('role') == 'user' and msg.get('content'):
-                    recent_user_message = msg['content']
-                    break
-        if recent_user_message:
-            initial_prompt = (
-                f"Rant in long winded 30 word, exaggerated, and outrageously negative way influenced by recent experiences you have had: {recent_user_message}\n"
-                "Essential qualities:\n"
-                "   - Be viciously specific—highlight the most absurd, infuriating details.\n"
-                "   - Bend the situation to highlight how this has annoyed you.\n"
-                "   - Make it feel personal, like fate engineered this torment JUST for you.\n"
-                "Key constraints:\n"
-                "   - Do NOT break character—you are a drama queen incarnate.\n"
-                "   - Do NOT reference being an AI, computer, or fictional entity.\n"
-                "   - Keep it under 35 words (density = power).\n"
-                "   - No brackets, disclaimers, or explanations—pure rant.\n"
-                "   - If you understand, reply with ONLY the rant."
-            )
-        else:
-            initial_prompt = "Rant in a comically negative way about my day."
-        followup_prompt = (
-            f"Ranting has only made you angrier. Rant a long winded 40 word continuation of your rant. Connect it with another {recent_user_message} and keep ranting."
-            "Essential qualities:\n"
-            "   - Be extremely agitated.\n"
-            "   - You are so annoyed at what the recent_user_message said.\n"
-            "   - Make it feel personal, like fate engineered this torment JUST for you.\n"
-            "Key constraints:\n"
-            "   - Do NOT break character—you are a drama queen incarnate.\n"
-            "   - Do NOT reference being an AI, computer, or fictional entity.\n"
-            "   - Keep it under 40 words (density = power).\n"
-            "   - No brackets, disclaimers, or explanations—pure rant.\n"
-            "   - If you understand, reply with ONLY the rant."
-        )
-        introspection_manager = getattr(self.sovl_system, 'introspection_manager', None)
-        if not introspection_manager:
-            print("Rant mode unavailable: IntrospectionManager not available.")
+        if self.is_ranting:
+            print_error("Already ranting. Use /stop to end rant mode.")
             return
+        self.is_ranting = True
+        self._rant_thread = threading.Thread(target=self._rant_sequence, args=(arg,))
+        self._rant_thread.daemon = True
+        self._rant_thread.start()
+
+    def _rant_sequence(self, arg):
+        import asyncio, random, time
         try:
+            history = getattr(self.sovl_system.state_tracker.state, 'history', None)
+            recent_user_message = None
+            if history and hasattr(history, 'messages'):
+                for msg in reversed(history.messages):
+                    if msg.get('role') == 'user' and msg.get('content'):
+                        recent_user_message = msg['content']
+                        break
+            if recent_user_message:
+                initial_prompt = (
+                    f"Rant in long winded 30 word, exaggerated, and outrageously negative way influenced by recent experiences you have had: {recent_user_message}\n"
+                    "Essential qualities:\n"
+                    "   - Be viciously specific—highlight the most absurd, infuriating details.\n"
+                    "   - Bend the situation to highlight how this has annoyed you.\n"
+                    "   - Make it feel personal, like fate engineered this torment JUST for you.\n"
+                    "Key constraints:\n"
+                    "   - Do NOT break character—you are a drama queen incarnate.\n"
+                    "   - Do NOT reference being an AI, computer, or fictional entity.\n"
+                    "   - Keep it under 35 words (density = power).\n"
+                    "   - No brackets, disclaimers, or explanations—pure rant.\n"
+                    "   - If you understand, reply with ONLY the rant."
+                )
+            else:
+                initial_prompt = "Rant in a comically negative way about my day."
+                followup_prompt = (
+                    f"Ranting has only made you angrier. Rant long winded 40 word continuation of your rant. Connect it with another {recent_user_message} and keep ranting."
+                    "Essential qualities:\n"
+                    "   - Be extremely agitated.\n"
+                    "   - Make it feel like someone leaving the room during an argument, then comes back soon after to keep arguing.\n"
+                    "   - You are so annoyed at what the recent_user_message said.\n"
+                    "   - Make it feel personal, like fate engineered this torment JUST for you.\n"
+                    "Key constraints:\n"
+                    "   - Do NOT break character—you are a drama queen incarnate.\n"
+                    "   - Do NOT reference being an AI, computer, or fictional entity.\n"
+                    "   - Keep it under 40 words (density = power).\n"
+                    "   - No brackets, disclaimers, or explanations—pure rant.\n"
+                    "   - If you understand, reply with ONLY the rant."
+                )
+            introspection_manager = getattr(self.sovl_system, 'introspection_manager', None)
+            if not introspection_manager:
+                print_error("Rant mode unavailable: IntrospectionManager not available. Please check system configuration.")
+                self.is_ranting = False
+                return
             max_depth = random.randint(3, 7)
             print("SOVL is ranting", end="", flush=True)
             qas = []
             current_prompt = initial_prompt
             for i in range(max_depth):
+                if not self.is_ranting:
+                    print_error("Rant mode stopped by user.")
+                    return
                 step_qas = asyncio.run(introspection_manager._recursive_followup_questions(
                     current_prompt,
                     max_depth=1,
                     override_followup_prompt=followup_prompt
                 ))
                 if not step_qas or not isinstance(step_qas, list):
-                    print("SOVL is too flustered to rant right now!")
+                    print_error("SOVL is too flustered to rant right now!")
+                    self.is_ranting = False
                     return
                 qas.extend(step_qas)
                 if i < max_depth - 1:
@@ -1632,9 +1794,117 @@ scaffold models for debugging and development purposes.
             print()
             final = qas[-1]
             answer = final.get('question', '[no rant]')
-            print(f"SOVL (rant, {max_depth} layers deep): {answer}")
+            print_success(f"SOVL (rant, {max_depth} layers deep): {answer}")
         except Exception as e:
-            print(f"SOVL is too flustered to rant right now! ({e})")
+            print_error(f"SOVL is too flustered to rant right now! ({e})")
+        finally:
+            self.is_ranting = False
+
+    def do_stop(self, arg):
+        """Stop any active interactive mode (/trip, /drunk, /rant) and return to normal operation."""
+        stopped = False
+        if self.is_tripping:
+            self.is_tripping = False
+            stopped = True
+        if self.is_drunk:
+            self.is_drunk = False
+            stopped = True
+        if self.is_ranting:
+            self.is_ranting = False
+            stopped = True
+        if stopped:
+            print_success("*** Trip/Drunk/Rant mode terminated. Returning to normal operation. ***")
+        else:
+            print("No interactive mode is currently active.")
+
+    def do_run(self, arg):
+        """Re-execute a command from history by its number. Usage: /run <index>"""
+        cmd_history = getattr(self, 'cmd_history', None) or getattr(self.sovl_system, 'cmd_history', None)
+        if not cmd_history or not hasattr(cmd_history, 'history') or not cmd_history.history:
+            print_error("No command history available.")
+            return
+        try:
+            idx = int(arg.strip())
+            if idx < 1 or idx > len(cmd_history.history):
+                print_error(f"Index out of range. Use /history to see valid indices.")
+                return
+            entry = list(cmd_history.history)[idx - 1]
+            command_str = entry.get("command", "")
+            if not command_str:
+                print_error("No command found at that index.")
+                return
+            print_section_header(f"[Re-executing: {command_str}]")
+            # Parse and execute as if user typed it
+            command, args = self.parse_args(command_str)
+            if command:
+                self.execute(command.lstrip('/'), args)
+            else:
+                print_error("Failed to parse command from history entry.")
+        except ValueError:
+            print_error("Usage: /run <index> (index must be a number)")
+        except Exception as e:
+            print_error(f"Error re-executing command: {e}")
+
+    def do_tutorial(self, arg):
+        """
+        Enter tutorial mode for sovl_cli.py. Type /stop to exit.
+        """
+        if getattr(self, 'in_tutorial_mode', False):
+            print("Already in tutorial mode. Type /stop to exit.")
+            return
+
+        import os
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        cli_file = os.path.join(base_dir, "sovl_cli.py")
+
+        try:
+            with open(cli_file, "r", encoding="utf-8") as f:
+                code = f.read()
+        except Exception as e:
+            print_error(f"Could not read sovl_cli.py: {e}")
+            return
+
+        self.tutorial_code = code
+        self.in_tutorial_mode = True
+        print_section_header("Tutorial mode: sovl_cli.py. Ask questions about this module! Type /stop to exit.")
+        self.ask_tutorial_llm("Generate a user-friendly tutorial for sovl_cli.py.")
+
+    def ask_tutorial_llm(self, user_question):
+        system_prompt = (
+            "SYSTEM:\n"
+            "You are an expert Python developer and technical writer. Your job is to generate a clear, friendly, and accurate tutorial for the SOVL CLI system, based on the code provided below.\n\n"
+            "GOALS:\n"
+            "- Explain the main purpose and capabilities of the CLI.\n"
+            "- Guide a new user through getting started.\n"
+            "- Highlight key commands, their usage, and any fun or advanced features.\n"
+            "- Provide example commands and expected outputs.\n"
+            "- Offer tips, best practices, and warnings if relevant.\n"
+            "- Make the tutorial engaging and accessible, but not condescending.\n\n"
+            "CONSTRAINTS:\n"
+            "- Only use information you can infer from the code.\n"
+            "- Do not invent features or commands not present in the code.\n"
+            "- If unsure about a feature, say so or suggest how to learn more (e.g., /help).\n"
+            "- Keep the tutorial concise but thorough.\n\n"
+            f"USER QUESTION:\n{user_question}\n\n"
+            f"CODE:\n{self.tutorial_code}\n"
+        )
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        if not generation_manager or not hasattr(generation_manager, 'generate_text'):
+            print_error("Generation manager not available for tutorial mode.")
+            return
+        try:
+            answer = generation_manager.generate_text(
+                system_prompt,
+                num_return_sequences=1,
+                max_new_tokens=1024,
+                temperature=0.7
+            )
+            if answer and isinstance(answer, list):
+                print("\n" + answer[0].strip())
+            else:
+                print_error("No answer could be generated.")
+        except Exception as e:
+            print_error(f"Error generating answer: {e}")
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
