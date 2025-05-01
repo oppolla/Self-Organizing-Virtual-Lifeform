@@ -29,7 +29,7 @@ VALID_DATA = None
 
 COMMAND_CATEGORIES = {
     "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc"],
-    "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain"],
+    "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant"],
     "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk"],
     "Utility": ["/train", "/rewind", "/recall", "/forget", "/recap", "/echo"],
     "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
@@ -1563,6 +1563,68 @@ scaffold models for debugging and development purposes.
     def do_ls(self, arg):
         """Alias for /history"""
         return self.do_history(arg)
+    
+    def do_rant(self, arg):
+       """
+       Rant in a comically negative way about your most recent experience. Usage: /rant
+       """
+       import asyncio
+       # Try to get the most recent user message from history
+       history = getattr(self.sovl_system.state_tracker.state, 'history', None)
+       recent_user_message = None
+       if history and hasattr(history, 'messages'):
+           # Find the last message from the user
+           for msg in reversed(history.messages):
+               if msg.get('role') == 'user' and msg.get('content'):
+                   recent_user_message = msg['content']
+                   break
+       if recent_user_message:
+           initial_prompt = (
+            f"Rant in long winded 30 word, exaggerated, and outrageously negative way about one of the recent experience you have had: {recent_user_message}\n"  
+            "Essential qualities:\n"  
+            "   - Be viciously specific—highlight the most absurd, infuriating details.\n"  
+            "   - Bend the situation to highlight how this has annoyed you.\n"   
+            "   - Make it feel personal, like fate engineered this torment JUST for you.\n"  
+            "Key constraints:\n"  
+            "   - Do NOT break character—you are a drama queen incarnate.\n"  
+            "   - Do NOT reference being an AI, computer, or fictional entity.\n"  
+            "   - Keep it under 35 words (density = power).\n"  
+            "   - No brackets, disclaimers, or explanations—pure rant.\n"  
+            "   - If you understand, reply with ONLY the rant."  
+        )
+       else:
+           initial_prompt = "Rant in a comically negative way about my day."
+       followup_prompt = (
+           f"Ranting has only made you angrier. Rant a long winded 40 word continuation of your rant. Connect it with another {recent_user_message} and keep ranting."  
+            "Essential qualities:\n"  
+            "   - Be extremely agitated.\n"  
+            "   - You are so annoyed at what the recent_user_message said.\n"   
+            "   - Make it feel personal, like fate engineered this torment JUST for you.\n"  
+            "Key constraints:\n"  
+            "   - Do NOT break character—you are a drama queen incarnate.\n"  
+            "   - Do NOT reference being an AI, computer, or fictional entity.\n"  
+            "   - Keep it under 35 words (density = power).\n"  
+            "   - No brackets, disclaimers, or explanations—pure rant.\n"  
+            "   - If you understand, reply with ONLY the rant."
+       )
+       introspection_manager = getattr(self.sovl_system, 'introspection_manager', None)
+       if not introspection_manager:
+           print("Rant mode unavailable: IntrospectionManager not available.")
+           return
+       try:
+           qas = asyncio.run(introspection_manager._recursive_followup_questions(
+               initial_prompt,
+               max_depth=3,
+               override_followup_prompt=followup_prompt
+           ))
+           if not qas or not isinstance(qas, list):
+               print("SOVL is too flustered to rant right now!")
+               return
+           final = qas[-1]
+           answer = final.get('question', '[no rant]')
+           print(f"SOVL (rant, 3 layers deep): {answer}")
+       except Exception as e:
+           print(f"SOVL is too flustered to rant right now! ({e})")
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None

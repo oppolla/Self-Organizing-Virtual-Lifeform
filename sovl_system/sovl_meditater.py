@@ -602,8 +602,8 @@ class IntrospectionManager:
             })
             return []
 
-    async def _recursive_followup_questions(self, initial_question: str, max_depth: int = 3, confidence_threshold: float = None) -> list:
-        """Recursively ask follow-up questions for deepening ethical introspection."""
+    async def _recursive_followup_questions(self, initial_question: str, max_depth: int = 3, confidence_threshold: float = None, override_followup_prompt: str = None) -> list:
+        """Recursively ask follow-up questions for deepening ethical introspection, with optional override for follow-up prompt."""
         qas = []
         current_question = initial_question
         for depth in range(max_depth):
@@ -626,11 +626,22 @@ class IntrospectionManager:
             if response['confidence'] >= threshold:
                 break
             # Generate a follow-up question based on the answer
-            current_question = self._generate_followup_prompt(response, depth)
+            current_question = self._generate_followup_prompt(response, depth, override_prompt=override_followup_prompt)
         return qas
 
-    def _generate_followup_prompt(self, response: dict, depth: int) -> str:
-        """Generate a follow-up introspection question using LLM, with temperament prompt."""
+    def _generate_followup_prompt(self, response: dict, depth: int, override_prompt: str = None) -> str:
+        """Generate a follow-up introspection question using LLM, with temperament prompt. Allows override."""
+        if override_prompt is not None:
+            # Optionally format with response fields
+            try:
+                return override_prompt.format(
+                    prev_question=response.get("question", ""),
+                    answer=response.get("answer", ""),
+                    reasoning=response.get("reasoning", ""),
+                    depth=depth
+                )
+            except Exception:
+                return override_prompt  # fallback to raw string if formatting fails
         temperament_score = self.temperament_system.current_score
         temperament_prompt = f"Temperament: {temperament_score:.2f} (0 = critical, 1 = affirming). Use this to gently guide the question's tone."
         prev_question = response.get("question", "")
