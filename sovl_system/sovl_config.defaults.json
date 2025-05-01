@@ -1,0 +1,544 @@
+{
+  "core_config": {
+    "base_model_name": "SmolLM2-360M",
+    "base_model_path": null,
+    "scaffold_model_name": "SmolLM2-135M",
+    "scaffold_model_path": null,
+    "cross_attn_layers": [4, 6],
+    "use_dynamic_layers": false,
+    "layer_selection_mode": "balanced",
+    "custom_layers": null,
+    "valid_split_ratio": 0.2,
+    "random_seed": 42,
+    "quantization": "fp16",
+    "hidden_size": 768,
+    "num_heads": 12,
+    "gradient_checkpointing": true,
+    "initializer_range": 0.02,
+    "migration_mode": true,
+    "device": "cuda"
+  },
+  "model": {
+    "model_path": "/path/to/SmolLM2-360M/model",
+    "model_type": "causal_lm",
+    "quantization_mode": "fp16"
+  },
+  "controls_config": {
+    "enable_scaffold": true,
+    "scaffold_weight_cap": 0.5,
+    "scaffold_unk_id": 0,
+    "enable_cross_attention": true,
+    "enable_dynamic_cross_attention": false,
+    "injection_strategy": "sequential",
+    "blend_strength": 0.5,
+    "attention_weight": 0.5,
+    "max_tokens_per_mapping": 3,
+    "mapping_similarity_threshold": 0.7,
+    "allow_bidirectional_mapping": false,
+    "fallback_strategy": "split",
+    "normalization_level": "basic",
+    "min_semantic_similarity": 0.5,
+    "max_meaning_drift": 0.3,
+    "enable_periodic_validation": true,
+    "conflict_resolution_strategy": "keep_highest_conf"
+  },
+  "temperament_config": {
+    "mood_influence": 0.3,
+    "history_maxlen": 5,
+    "temp_eager_threshold": 0.7,
+    "temp_sluggish_threshold": 0.3,
+    "temp_mood_influence": 0.3,
+    "temp_curiosity_boost": 0.2,
+    "temp_restless_drop": 0.2,
+    "temp_melancholy_noise": 0.02,
+    "conf_feedback_strength": 0.5,
+    "temp_smoothing_factor": 0.5,
+    "temperament_decay_rate": 0.9,
+    "temperament_history_maxlen": 5,
+    "confidence_history_maxlen": 5,
+    "temperament_pressure_threshold": 0.5,
+    "temperament_max_pressure": 1.0,
+    "temperament_min_pressure": 0.0,
+    "temperament_confidence_adjustment": 0.5,
+    "temperament_pressure_drop": 0.2,
+    "lifecycle_params": {
+      "gestation": {
+        "bias": 0.1,
+        "decay": 1.0
+      },
+      "active": {
+        "bias": 0.0,
+        "decay": 0.9
+      },
+      "sleep": {
+        "bias": -0.1,
+        "decay": 0.8
+      }
+    }
+  },
+  "training_config": {
+    "model_name": "SmolLM2-360M",
+    "learning_rate": 1.5e-5,
+    "train_epochs": 1,
+    "batch_size": 2,
+    "max_seq_length": 512,
+    "sigmoid_scale": 0.5,
+    "sigmoid_shift": 3.0,
+    "lifecycle_capacity_factor": 0.01,
+    "lifecycle_curve": "sigmoid_linear",
+    "grad_accum_steps": 4,
+    "exposure_gain_eager": 2,
+    "exposure_gain_default": 2,
+    "max_patience": 2,
+    "dry_run": false,
+    "dry_run_params": {
+      "max_samples": 4,
+      "max_length": 128,
+      "validate_architecture": true,
+      "skip_training": true
+    },
+    "weight_decay": 0.01,
+    "max_grad_norm": 1.0,
+    "use_amp": true,
+    "checkpoint_interval": 1000,
+    "scheduler_type": "linear",
+    "cosine_min_lr": 1e-6,
+    "warmup_ratio": 0.1,
+    "warmup_steps": 300,
+    "total_steps": 5000,
+    "validate_every_n_steps": 100,
+    "checkpoint_path": "checkpoints/sovl_trainer",
+    "dropout_rate": 0.1,
+    "max_epochs": 1,
+    "metrics_to_track": ["loss", "accuracy", "confidence"],
+    "enable_gestation": true,
+    "enable_sleep_training": true,
+    "enable_lifecycle_weighting": true,
+    "sleep_conf_threshold": 0.7,
+    "sleep_log_min": 33,
+    "fatigue_factor_cap": 0.1,
+    "fatigue_scaling_factor": 2.0,
+    "dream_memory_weight": 0.03,
+    "enable_dreaming": true,
+    "repetition_n": 3,
+    "dream_noise_scale": 0.01,
+    "dream_prompt_weight": 0.5,
+    "dream_novelty_boost": 0.03,
+    "dream_memory_decay": 0.95,
+    "dream_prune_threshold": 0.1,
+    "enable_prompt_driven_dreams": true,
+    "dream_swing_var": 0.1,
+    "dream_lifecycle_delta": 0.1,
+    "dream_temperament_on": false,
+    "memory_threshold": 0.85,
+    "memory_decay_rate": 0.95,
+    "use_scaffold_memory": true,
+    "use_token_map_memory": true,
+    "scaffold_weight": 0.3,
+    "max_dream_memory_mb": 128,
+    "dream_memory_maxlen": 3,
+    "confidence_history_maxlen": 5,
+    "temperament_history_maxlen": 5
+  },
+  "scaffold_config": {
+    "model_path": "/path/to/SmolLM2-135M/model",
+    "model_type": "gpt2",
+    "tokenizer_path": "/path/to/SmolLM2-135M/tokenizer",
+    "quantization_mode": "int8"
+  },
+  "dynamic_weighting": {
+    "min_weight": 0.0,
+    "max_weight": 1.0,
+    "weight_decay": 0.01,
+    "momentum": 0.9,
+    "history_size": 5,
+    "enable_dynamic_scaling": true,
+    "weight_curves": ["linear", "sigmoid_linear"]
+  },
+  "curiosity_config": {
+    "enable_curiosity": true,
+    "attention_weight": 0.3,
+    "queue_maxlen": 50,
+    "novelty_history_maxlen": 20,
+    "decay_rate": 0.95,
+    "question_timeout": 1800.0,
+    "novelty_threshold_spontaneous": 0.8,
+    "novelty_threshold_response": 0.8,
+    "pressure_threshold": 0.55,
+    "pressure_drop": 0.3,
+    "silence_threshold": 20.0,
+    "question_cooldown": 60.0,
+    "weight_ignorance": 0.7,
+    "weight_novelty": 0.3,
+    "max_new_tokens": 8,
+    "base_temperature": 0.9,
+    "temperament_influence": 0.3,
+    "top_k": 30,
+    "max_memory_mb": 512.0,
+    "pressure_change_cooldown": 1.0,
+    "min_pressure": 0.1,
+    "max_pressure": 0.9,
+    "pressure_decay_rate": 0.95,
+    "metrics_maxlen": 1000,
+    "min_temperature": 0.7,
+    "max_temperature": 1.7,
+    "lifecycle_params": {
+      "gestation": {
+        "pressure_reduction": 0.5,
+        "novelty_boost": 0.1
+      },
+      "active": {
+        "pressure_reduction": 0.3,
+        "novelty_boost": 0.35
+      },
+      "sleep": {
+        "pressure_reduction": 0.1,
+        "novelty_boost": 0.2
+      }
+    }
+  },
+  "cross_attn_config": {
+    "memory_weight": 0.2
+  },
+  "logging_config": {
+    "log_dir": "logs",
+    "log_file": "sovl_logs.jsonl",
+    "log_level": "INFO",
+    "max_log_size_mb": 10,
+    "backup_count": 5
+  },
+  "error_config": {
+    "error_cooldown": 1.0,
+    "warning_threshold": 5.0,
+    "error_threshold": 7.0,
+    "critical_threshold": 10.0
+  },
+  "generation_config": {
+    "temperature": 0.7,
+    "top_p": 0.9
+  },
+  "data_config": {
+    "batch_size": 2,
+    "max_retries": 3
+  },
+  "data_provider": {
+    "provider_type": "default",
+    "data_path": "/path/to/training/data"
+  },
+  "memory_config": {
+    "memoria": {
+      "storage_path": "storage/",
+      "max_storage_mb": 5120,
+      "state_save_interval": 300,
+      "compression_enabled": true,
+      "encryption_enabled": false,
+      "max_memory_mb": 512,
+      "garbage_collection_threshold": 0.7,
+      "memory_decay_rate": 0.95,
+      "enable_memory_compression": true,
+      "compression_ratio": 0.5,
+      "max_compressed_memory_mb": 1024
+    },
+    "ram": {
+      "max_memory_mb": 1024,
+      "memory_threshold": 0.8,
+      "memory_decay_rate": 0.95,
+      "dream_memory_maxlen": 10,
+      "conversation_history_maxlen": 20,
+      "max_ram_mb": 2048,
+      "ram_threshold": 0.8,
+      "enable_ram_compression": true,
+      "ram_compression_ratio": 0.6,
+      "max_compressed_ram_mb": 4096
+    },
+    "gpu": {
+      "max_memory_mb": 2048,
+      "memory_threshold": 0.9,
+      "check_interval": 1000,
+      "batch_size_adjustment": 0.5,
+      "clear_cache_threshold": 0.95,
+      "max_gpu_memory_mb": 1024,
+      "gpu_memory_threshold": 0.85,
+      "enable_gpu_memory_compression": true,
+      "gpu_compression_ratio": 0.7,
+      "max_compressed_gpu_memory_mb": 2048
+    },
+    "manager": {
+      "enable_memoria_manager": true,
+      "enable_ram_manager": true,
+      "enable_gpu_memory_manager": true,
+      "memory_sync_interval": 60,
+      "enable_memory_monitoring": true,
+      "memory_monitoring_interval": 5
+    }
+  },
+  "io_config": {
+    "field_mapping": {
+      "response": "completion",
+      "prompt": "prompt"
+    },
+    "required_fields": [
+      "prompt",
+      "response"
+    ],
+    "min_string_length": 1,
+    "max_string_length": 10000,
+    "enable_validation": true,
+    "strict_validation": false,
+    "random_seed": 42,
+    "shuffle_data": true,
+    "seed_file": "sovl_seed.jsonl",
+    "min_training_entries": 10,
+    "valid_split_ratio": 0.2,
+    "valid_quantization_modes": [
+      "fp16",
+      "int8",
+      "int4"
+    ],
+    "default_quantization_mode": "fp16"
+  },
+  "state_config": {
+    "max_history": 500,
+    "state_file": "sovl_state.json"
+  },
+  "confidence_config": {
+    "history_maxlen": 5,
+    "weight": 0.5
+  },
+  "dream_memory_config": {
+    "max_memories": 100,
+    "base_weight": 0.1,
+    "max_weight": 1.5
+  },
+  "gestation_weighting": {
+    "metadata_fields": {
+      "quality_metrics": {
+        "code": {
+          "enabled": true,
+          "weight": 1.5
+        },
+        "url": {
+          "enabled": true,
+          "weight": 1.3
+        },
+        "question": {
+          "enabled": true,
+          "weight": 1.2
+        },
+        "exclamation": {
+          "enabled": true,
+          "weight": 1.1
+        },
+        "emoji": {
+          "enabled": true,
+          "weight": 0.9
+        }
+      },
+      "content_metrics": {
+        "word_count": 0,
+        "context_word_count": 0,
+        "avg_word_length": 0.0,
+        "sentence_count": 0,
+        "avg_sentence_length": 0.0
+      },
+      "confidence_metrics": {
+        "confidence": 0.5,
+        "temperament": 0.5
+      },
+      "context_metrics": {
+        "is_first_message": false,
+        "is_last_message": false,
+        "context_window_size": 0,
+        "response_time": 0.0
+      }
+    },
+    "content_weights": {
+      "word_count_ratio_scale": 0.5,
+      "optimal_word_length_range": {
+        "min": 4,
+        "max": 8,
+        "weight": 1.2
+      },
+      "suboptimal_word_length_weight": 0.8,
+      "optimal_sentence_count_range": {
+        "min": 2,
+        "max": 5,
+        "weight": 1.2
+      },
+      "excessive_sentence_weight": 0.9,
+      "optimal_sentence_length_range": {
+        "min": 10,
+        "max": 20,
+        "weight": 1.2
+      },
+      "excessive_sentence_length_weight": 0.9
+    },
+    "confidence_weights": {
+      "high_confidence_threshold": 0.8,
+      "high_confidence_weight": 1.3,
+      "moderate_confidence_threshold": 0.6,
+      "moderate_confidence_weight": 1.1,
+      "low_confidence_threshold": 0.4,
+      "low_confidence_weight": 0.8
+    },
+    "temperament_weights": {
+      "balanced_range": {
+        "min": 0.4,
+        "max": 0.6,
+        "weight": 1.2
+      },
+      "extreme_temperament_weight": 0.9
+    },
+    "context_weights": {
+      "first_last_message_weight": 1.2,
+      "optimal_context_range": {
+        "min": 2,
+        "max": 4,
+        "weight": 1.1
+      },
+      "excessive_context_weight": 0.9
+    },
+    "timing_weights": {
+      "max_response_time": 60,
+      "optimal_timing_weight": 1.0
+    },
+    "weight_bounds": {
+      "min": 0.1,
+      "max": 3.0
+    }
+  },
+  "metrics_config": {
+    "token_statistics": {
+      "enabled": true,
+      "ngram_sizes": [2, 3, 4],
+      "special_token_tracking": true,
+      "min_token_frequency": 2,
+      "max_tokens_to_track": 1000,
+      "token_pattern_threshold": 0.1
+    },
+    "performance_metrics": {
+      "enabled": true,
+      "track_generation_time": true,
+      "track_memory_usage": true,
+      "track_efficiency": true,
+      "memory_sample_rate": 1000,
+      "time_window_ms": 5000
+    },
+    "structure_analysis": {
+      "enabled": true,
+      "track_length_metrics": true,
+      "track_whitespace": true,
+      "min_section_length": 10,
+      "max_section_length": 1000,
+      "whitespace_ratio_threshold": 0.3
+    },
+    "relationship_context": {
+      "enabled": true,
+      "max_context_history": 100,
+      "reference_decay_rate": 0.95,
+      "temporal_window_size": 10,
+      "min_relationship_strength": 0.1
+    },
+    "helper_methods": {
+      "indentation_analysis": {
+        "enabled": true,
+        "max_indent_level": 8,
+        "tab_size": 4,
+        "mixed_indent_warning": true
+      },
+      "optimization_analysis": {
+        "enabled": true,
+        "performance_threshold": 0.8,
+        "memory_threshold": 0.9,
+        "optimization_levels": ["basic", "moderate", "aggressive"]
+      }
+    }
+  },
+  "experience_memory": {
+    "max_short_term": 50,
+    "short_term_expiry_seconds": 3600,
+    "embedding_dim": 128,
+    "long_term_top_k": 5,
+    "long_term_retention_days": 30,
+    "memory_logging_level": "info"
+  },
+  "scribed_config": {
+    "output_path": "scribe/sovl_scribe.jsonl",
+    "max_file_size_mb": 50,
+    "buffer_size": 10
+  },
+  "metadata_weighting": {
+    "internal_error_reflection": 0.2,
+    "user_message": 1.0,
+    "system_message": 0.5,
+    "dream_memory": 0.3
+  },
+  "generation_hooks": {
+    "curiosity": true,
+    "temperament": true,
+    "confidence": true,
+    "bonding": true
+  },
+  "bonding_config": {
+      "strong_bond_threshold": 0.8,
+      "weak_bond_threshold": 0.3,
+      "default_bond_score": 0.5,
+      "bond_decay_rate": 0.01,
+      "bond_memory_window": 100,
+      "interaction_weight": 1.0,
+      "modality_weights": {
+          "text": 1.0,
+          "face": 0.5,
+          "voice": 0.5
+      },
+      "context_strong": "You feel a strong, trusting connection to this user. Be warm, open, and familiar.",
+      "context_weak": "You feel distant from this user. Be formal and reserved.",
+      "context_neutral": "You feel a neutral connection to this user. Be polite and neutral.",
+      "bond_sensitivity": 1.0,
+      "enable_bonding": true
+  },
+  "motivator_config": {
+    "decay_rate": 0.01,
+    "min_priority": 0.1,
+    "completion_threshold": 0.95,
+    "reevaluation_interval": 60,
+    "memory_check_enabled": true,
+    "irrelevance_threshold": 0.2,
+    "completion_drive": 0.7,
+    "novelty_drive": 0.2
+  },
+"lifecycle_config": {
+    "gestation": {
+      "bias": 0.1,
+      "decay": 1.0
+    },
+    "active": {
+      "bias": 0.0,
+      "decay": 0.9
+    },
+    "sleep": {
+      "bias": -0.1,
+      "decay": 0.8
+    }
+  },
+  "monitoring": {
+    "enable_monitoring": true,
+    "monitor_interval": 60,
+    "metrics_to_track": ["memory_usage", "cpu_usage", "gpu_usage", "error_rate"],
+    "alert_thresholds": {
+      "memory_usage": 0.9,
+      "cpu_usage": 0.9,
+      "gpu_usage": 0.9,
+      "error_rate": 0.1
+    }
+  },
+  "dreamer_config": {
+    "enable_dreaming": true,
+    "dream_interval": 3600,
+    "dream_memory_weight": 0.03,
+    "dream_novelty_boost": 0.03,
+    "dream_memory_decay": 0.95,
+    "dream_prune_threshold": 0.1
+  }
+
+}
