@@ -7,7 +7,7 @@ from sovl_curiosity import CuriosityManager
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_events import MemoryEventDispatcher, MemoryEventTypes
-from sovl_state import StateManager
+from sovl_state import StateManager, UserProfileState
 from sovl_error import ErrorManager
 from sovl_queue import check_scribe_queue_health
 from sovl_bonder import BondCalculator, BondModulator  # Add import
@@ -38,7 +38,8 @@ class SystemMonitor:
         ram_manager: RAMManager,
         gpu_manager: GPUMemoryManager,
         error_manager: ErrorManager,
-        bond_calculator: BondCalculator = None  # Add optional bond_calculator
+        user_profile_state: UserProfileState = None,
+        bond_calculator: BondCalculator = None
     ):
         """
         Initialize system monitor.
@@ -49,6 +50,7 @@ class SystemMonitor:
             ram_manager: RAMManager instance for RAM memory management
             gpu_manager: GPUMemoryManager instance for GPU memory management
             error_manager: ErrorManager instance for error handling
+            user_profile_state: UserProfileState instance for user profile management
             bond_calculator: BondCalculator instance for bond score calculation
         """
         self._config_manager = config_manager
@@ -75,6 +77,8 @@ class SystemMonitor:
         self._scaffold_fallback_rate_threshold = self._config_manager.get_setting(
             'monitoring', 'scaffold_fallback_rate_threshold', default=0.2
         )
+        
+        self.user_profile_state = user_profile_state
         
     def _collect_metrics(self) -> Dict[str, Any]:
         """Collect system metrics."""
@@ -142,11 +146,15 @@ class SystemMonitor:
 
     def get_latest_bond_score(self, user_id):
         """Get the latest bond score for a user/session."""
-        if user_id in self._bond_score_history and self._bond_score_history[user_id]:
-            return self._bond_score_history[user_id][-1][1]
-        if self.bond_calculator:
-            return self.bond_calculator.get_bond_score_for_user(user_id)
+        if self.user_profile_state and user_id:
+            return self.user_profile_state.get_bond_score(user_id)
         return None
+
+    def get_all_user_profiles(self):
+        """Get all user profiles."""
+        if self.user_profile_state:
+            return self.user_profile_state.get_all_profiles()
+        return {}
 
     def get_bond_stats(self, user_id=None):
         """Return bond stats for a user, or all users if user_id is None."""
@@ -266,9 +274,10 @@ class TraitsMonitor:
         curiosity_manager: CuriosityManager,
         training_manager: TrainingCycleManager,
         error_manager: ErrorManager,
+        user_profile_state: UserProfileState = None,
         bond_calculator: BondCalculator = None,
         bond_modulator: BondModulator = None,
-        update_interval: float = None  # Now optional, will be fetched from config
+        update_interval: float = None
     ):
         """
         Initialize the traits monitor.
@@ -280,6 +289,7 @@ class TraitsMonitor:
             curiosity_manager: CuriosityManager for curiosity metrics
             training_manager: TrainingCycleManager for lifecycle metrics
             error_manager: ErrorManager instance for error handling
+            user_profile_state: UserProfileState instance for user profile management
             bond_calculator: BondCalculator instance for bond score calculation
             bond_modulator: BondModulator instance for bond score modulation
             update_interval: Optional override for update interval (defaults to config value)
@@ -327,6 +337,8 @@ class TraitsMonitor:
         self._monitor_thread = None
         self._display_lock = Lock()
         self._screen = None
+        
+        self.user_profile_state = user_profile_state
     
     def start(self):
         """Start the traits monitor."""
@@ -398,24 +410,31 @@ class TraitsMonitor:
                 self._logger.log_info("Curses screen cleaned up.")
 
     def _monitor_loop(self):
-        """Main monitoring loop."""
+        show_user_list = False
+        scroll_offset = 0
         while not self._stop_event.is_set():
             try:
                 traits = self._get_current_traits()
-                
                 if self._screen:
-                    self._update_display(traits)
-                    
+                    if show_user_list:
+                        self._display_user_list(scroll_offset)
+                    else:
+                        self._update_display(traits)
                     try:
                         ch = self._screen.getch()
                         if ch == ord('q'):
                             self._stop_event.set()
                             break
+                        elif ch == ord('u'):
+                            show_user_list = not show_user_list
+                            scroll_offset = 0
+                        elif show_user_list and ch == curses.KEY_DOWN:
+                            scroll_offset += 1
+                        elif show_user_list and ch == curses.KEY_UP:
+                            scroll_offset = max(0, scroll_offset - 1)
                     except curses.error:
                         pass
-                
                 self._stop_event.wait(self._update_interval)
-                
             except Exception as e:
                 self._logger.log_error(
                     error_msg=f"Error in monitor loop: {str(e)}",
@@ -424,56 +443,53 @@ class TraitsMonitor:
                 )
                 self._stop_event.wait(1.0)
 
+    def _get_current_user_id(self):
+        state = self._state_manager.get_state()
+        if hasattr(state, "history") and hasattr(state.history, "conversation_id"):
+            return state.history.conversation_id
+        return None
+
     def _get_current_traits(self) -> Dict[str, float]:
-        """Collect current values for all monitored traits, including bond score."""
-        try:
-            state = self._state_manager.get_state()
-            # Core traits and states
-            traits = {
-                'curiosity': self._curiosity_manager.get_curiosity_score(),
-                'confidence': state.get_confidence_level(),
-                'lifecycle': self._training_manager.get_lifecycle_phase(),
-                'temperament': state.get_temperament_score(),
-            }
-            # Training state metrics
-            training_state = state._training_state
-            traits.update({
-                'data_exposure': training_state.data_exposure,
-                'sleep_confidence': safe_divide(
-                    training_state.sleep_confidence_sum,
-                    training_state.sleep_confidence_count,
-                    default=0.0
-                ),
-                'data_quality': training_state.data_quality_metrics.get('avg_quality', 0.0),
-                'avg_input_length': training_state.data_quality_metrics.get('avg_input_length', 0.0),
-                'avg_output_length': training_state.data_quality_metrics.get('avg_output_length', 0.0),
-                'message_count': getattr(training_state, 'message_count', 0)
-            })
-            # Add bond score (for current user/session)
-            user_id = self._get_current_user_id() if hasattr(self, '_get_current_user_id') else None
-            bond_score = None
-            if self.bond_calculator and user_id:
-                bond_score = self.bond_calculator.get_bond_score_for_user(user_id)
-            elif self.bond_modulator and hasattr(self.bond_modulator, 'bond_calculator') and user_id:
-                bond_score = self.bond_modulator.bond_calculator.get_bond_score_for_user(user_id)
-            traits['bond_score'] = bond_score
-            # Update unified trait histories
-            for trait_name in self._trait_histories:
-                if trait_name in traits:
-                    self._trait_histories[trait_name].append(traits[trait_name])
-            self._latest_traits = traits.copy()
-            # Check for erratic behavior
-            for trait_name, history in self._trait_histories.items():
-                self._is_trait_erratic(trait_name, history)
-            return traits
-            
-        except Exception as e:
-            self._error_manager.handle_error(
-                error_type="traits",
-                error_message=f"Error collecting traits: {str(e)}",
-                context={"stack_trace": traceback.format_exc()}
-            )
-            return {trait: float('nan') for trait in self._trait_histories}
+        state = self._state_manager.get_state()
+        traits = {
+            'curiosity': self._curiosity_manager.get_curiosity_score(),
+            'confidence': state.get_confidence_level(),
+            'lifecycle': self._training_manager.get_lifecycle_phase(),
+            'temperament': state.get_temperament_score(),
+        }
+        training_state = state._training_state
+        traits.update({
+            'data_exposure': training_state.data_exposure,
+            'sleep_confidence': safe_divide(
+                training_state.sleep_confidence_sum,
+                training_state.sleep_confidence_count,
+                default=0.0
+            ),
+            'data_quality': training_state.data_quality_metrics.get('avg_quality', 0.0),
+            'avg_input_length': training_state.data_quality_metrics.get('avg_input_length', 0.0),
+            'avg_output_length': training_state.data_quality_metrics.get('avg_output_length', 0.0),
+            'message_count': getattr(training_state, 'message_count', 0)
+        })
+        user_id = self._get_current_user_id()
+        bond_score = None
+        nickname = ""
+        interactions = 0
+        if self.user_profile_state and user_id:
+            bond_score = self.user_profile_state.get_bond_score(user_id)
+            nickname = self.user_profile_state.get_nickname(user_id)
+            profile = self.user_profile_state.get(user_id)
+            interactions = profile.get("interactions", 0)
+        traits['bond_score'] = bond_score
+        traits['nickname'] = nickname
+        traits['user_id'] = user_id
+        traits['interactions'] = interactions
+        for trait_name in self._trait_histories:
+            if trait_name in traits:
+                self._trait_histories[trait_name].append(traits[trait_name])
+        self._latest_traits = traits.copy()
+        for trait_name, history in self._trait_histories.items():
+            self._is_trait_erratic(trait_name, history)
+        return traits
     
     def _is_trait_erratic(self, trait_name: str, history: deque) -> bool:
         """Check if a trait is showing erratic behavior based on variance."""
@@ -502,25 +518,16 @@ class TraitsMonitor:
             return False  # Treat calculation errors as non-erratic for safety
     
     def _update_display(self, traits: Dict[str, float]):
-        """Update the curses display with current trait values."""
         if self._screen is None:
             return
-            
         with self._display_lock:
             try:
                 self._screen.clear()
-                
-                # Display title
                 self._screen.addstr(0, 0, "SOVL Traits Monitor", curses.A_BOLD)
                 self._screen.addstr(1, 0, "=" * 50)
-                
-                # Display current time
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self._screen.addstr(2, 0, f"Last Update: {current_time}")
-                
                 row = 4
-                
-                # Core Traits
                 self._screen.addstr(row, 0, "Core Traits:", curses.A_BOLD)
                 row += 1
                 for trait_name in ['curiosity', 'confidence', 'lifecycle', 'temperament']:
@@ -529,14 +536,11 @@ class TraitsMonitor:
                     is_erratic = self._is_trait_erratic(trait_name, history)
                     color_pair = 1 if is_erratic else 2
                     color_attr = curses.color_pair(color_pair) if curses.has_colors() else curses.A_NORMAL
-
                     self._screen.addstr(row, 2, f"{trait_name.capitalize()}: ")
                     value_str = f"{value:.3f}" if not math.isnan(value) else "N/A"
                     self._screen.addstr(row, 15, value_str, color_attr)
                     self._screen.addstr(row, 25, "ERRATIC" if is_erratic else "NORMAL", color_attr)
                     row += 1
-                
-                # Training Metrics
                 row += 1
                 self._screen.addstr(row, 0, "Training Metrics:", curses.A_BOLD)
                 row += 1
@@ -553,34 +557,61 @@ class TraitsMonitor:
                     value_str = f"{value:.2f}" if not math.isnan(value) else "N/A"
                     self._screen.addstr(row, 20, value_str)
                     row += 1
-                
-                # Conversation Stats
                 row += 1
                 self._screen.addstr(row, 0, "Conversation Stats:", curses.A_BOLD)
                 row += 1
                 message_count = traits.get('message_count', 'N/A')
                 self._screen.addstr(row, 2, f"Messages: {message_count}")
-                
-                # Bond Score
                 row += 1
-                self._screen.addstr(row, 0, "Bond Score:", curses.A_BOLD)
+                self._screen.addstr(row, 0, "Current User Info:", curses.A_BOLD)
                 row += 1
-                bond_score = traits.get('bond_score', 'N/A')
-                self._screen.addstr(row, 2, f"Bond Score: {bond_score}")
-                
-                # Display instructions
+                self._screen.addstr(row, 2, f"User ID: {traits.get('user_id', 'N/A')}")
+                row += 1
+                self._screen.addstr(row, 2, f"Nickname: {traits.get('nickname', '(None)')}")
+                row += 1
+                self._screen.addstr(row, 2, f"Bond Score: {traits.get('bond_score', 'N/A')}")
+                row += 1
+                self._screen.addstr(row, 2, f"Interactions: {traits.get('interactions', 'N/A')}")
                 row += 2
                 max_y, max_x = self._screen.getmaxyx()
                 if row < max_y:
-                    self._screen.addstr(row, 0, "Press 'q' to quit")
-                
+                    self._screen.addstr(row, 0, "Press 'u' for user list, 'q' to quit")
                 self._screen.refresh()
-                
             except curses.error as e:
                 self._logger.log_warning(f"Curses display error: {e}")
             except Exception as e:
                 self._logger.log_error(
                     error_msg=f"Unexpected error in _update_display: {str(e)}",
+                    error_type="display_error",
+                    stack_trace=traceback.format_exc()
+                )
+
+    def _display_user_list(self, scroll_offset=0):
+        if self._screen is None or not self.user_profile_state:
+            return
+        with self._display_lock:
+            try:
+                self._screen.clear()
+                self._screen.addstr(0, 0, "Known Users (press 'u' to return, 'q' to quit)", curses.A_BOLD)
+                self._screen.addstr(1, 0, "=" * 50)
+                profiles = list(self.user_profile_state.get_all_profiles().items())
+                max_y, max_x = self._screen.getmaxyx()
+                header = "User ID        Nickname        Bond    Interactions"
+                self._screen.addstr(2, 0, header)
+                row = 3
+                for i in range(scroll_offset, min(len(profiles), scroll_offset + max_y - 4)):
+                    user_id, profile = profiles[i]
+                    nickname = profile.get("nickname", "")
+                    bond_score = profile.get("bond_score", 0.5)
+                    interactions = profile.get("interactions", 0)
+                    self._screen.addstr(row, 0, f"{user_id[:12]:<14}{nickname[:12]:<14}{bond_score:>6.2f}{interactions:>12}")
+                    row += 1
+                self._screen.refresh()
+            except curses.error as e:
+                self._logger.log_warning(f"Curses display error: {e}")
+            except Exception as e:
+                self._logger.log_error(
+                    error_msg=f"Unexpected error in _display_user_list: {str(e)}",
                     error_type="display_error",
                     stack_trace=traceback.format_exc()
                 )

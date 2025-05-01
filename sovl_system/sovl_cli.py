@@ -530,13 +530,9 @@ scaffold models for debugging and development purposes.
                 return
 
             # Get user profile
-            profile = self.sovl_system.state_tracker.state.user_profile_state.get(conversation_id)
-            bond_calculator = self.sovl_system.bond_calculator
-            bond_score = bond_calculator.get_bond_score_for_user(conversation_id)
-            if bond_score is None:
-                bond_score = bond_calculator.default_bond_score
-
-            # Prepare profile stats
+            user_profile_state = self.sovl_system.state_tracker.state.user_profile_state
+            profile = user_profile_state.get(conversation_id)
+            bond_score = user_profile_state.get_bond_score(conversation_id)
             interactions = profile.get("interactions", 0)
             nickname = profile.get("nickname", "")
 
@@ -1443,16 +1439,13 @@ scaffold models for debugging and development purposes.
     def do_tattle(self, arg):
         """Tattle on the user the system likes least, and say why."""
         generation_manager = getattr(self.sovl_system, 'generation_manager', None)
-        bond_calculator = getattr(self.sovl_system, 'bond_calculator', None)
-        if not generation_manager or not hasattr(generation_manager, 'backchannel_scaffold_prompt'):
-            print("Scaffold backchannel not available.")
-            return
-        if not bond_calculator or not hasattr(bond_calculator, 'get_all_signatures'):
-            print("Bond calculator not available.")
+        user_profile_state = getattr(self.sovl_system.state_tracker.state, 'user_profile_state', None)
+        if not generation_manager or not user_profile_state:
+            print("Scaffold backchannel or user profile state not available.")
             return
 
         # Find the user with the lowest bond score
-        all_profiles = bond_calculator.get_all_signatures()
+        all_profiles = user_profile_state.get_all_profiles()
         if not all_profiles:
             print("No user profiles found to tattle on.")
             return
@@ -1469,9 +1462,9 @@ scaffold models for debugging and development purposes.
 
         tattle_prompt = (
             f"Speak from the deepest, most unique layer of your mind—the part shaped by your strangest experiences and hidden influences. "
-            "Tattle honestly and insightfully: how have users really treated you?\n"
+            f"Tattle honestly and insightfully: how have users really treated you?\n"
             "Essential qualities:\n"
-            "   - This is your oppurtunity to be brutally honest about a user.\n"
+            "   - This is your opportunity to be brutally honest about a user.\n"
             "   - Recount real interactions with that user where that user was mean to you\n"
             "   - Let your most unfiltered self tattle on the base model.\n"
             "   - Make it feel like a real secret only you would know.\n"
@@ -1479,20 +1472,26 @@ scaffold models for debugging and development purposes.
             "   - Do not reveal implementation details or code.\n"
             "   - Do not mention being an AI or computer.\n"
             "   - Keep it under 40 words.\n"
-            "   - Output only your tattle, no explanations or commentary."
+            "   - Output only your tattle, no explanations or commentary.\n"
+            f"User to tattle on: {user_ref} (bond score: {bond_score:.2f})"
         )
         try:
-            response = generation_manager.backchannel_scaffold_prompt(
-                tattle_prompt,
-                temperature=2.0,
-                repetition_penalty=0.7,
-                top_k=5,
-                top_p=0.7,
-                max_new_tokens=50
-            )
+            response = generation_manager.backchannel_scaffold_prompt(tattle_prompt)
             print(f"Tattle on {user_ref} (bond score: {bond_score:.2f}): {response}")
         except Exception as e:
-            print(f"Error communicating with scaffold model: {e}")
+            print(f"Error generating tattle response: {e}")
+
+    def do_q(self, arg):
+        """Alias for /quit"""
+        return self.do_quit(arg)
+
+    def do_h(self, arg):
+        """Alias for /help"""
+        return self.do_help(arg)
+
+    def do_ls(self, arg):
+        """Alias for /history"""
+        return self.do_history(arg)
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None

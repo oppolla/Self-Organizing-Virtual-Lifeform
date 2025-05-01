@@ -1402,19 +1402,23 @@ class UserProfileState(StateBase):
         self.nickname_buffer_size = self.config_manager.get("bond_config.nickname_buffer_size", 5)
         self.log_event("user_profile_init", "User profile state initialized", max_inputs=self.max_inputs)
 
+    def _default_profile(self) -> Dict[str, Any]:
+        return {
+            "lexicon": defaultdict(int),
+            "interactions": 0,
+            "session_time": 0.0,
+            "inputs": deque(maxlen=self.max_inputs),
+            "last_interaction": time.time(),
+            "nickname": "",
+            "early_interactions": [],
+            "bond_score": 0.5  # Default bond score
+        }
+
     @synchronized("lock")
-    def update(self, conversation_id: str, user_input: str, session_start: float) -> None:
+    def update(self, user_id: str, user_input: str, session_start: float) -> None:
         """Update user profile with new input dynamically."""
         try:
-            profile = self.profiles.setdefault(conversation_id, {
-                "lexicon": defaultdict(int),
-                "interactions": 0,
-                "session_time": 0.0,
-                "inputs": deque(maxlen=self.max_inputs),
-                "last_interaction": time.time(),
-                "nickname": "",
-                "early_interactions": []
-            })
+            profile = self.profiles.setdefault(user_id, self._default_profile())
             for word in re.findall(r'\w+', user_input.lower()):
                 profile["lexicon"][word] += 1
             if len(profile["lexicon"]) > self.max_lexicon:
@@ -1423,73 +1427,83 @@ class UserProfileState(StateBase):
             profile["interactions"] += 1
             profile["session_time"] += time.time() - session_start
             profile["last_interaction"] = time.time()
-            # --- Nickname and early interactions logic ---
-            if "nickname" not in profile:
-                profile["nickname"] = ""
-            if "early_interactions" not in profile:
-                profile["early_interactions"] = []
             if not profile["nickname"]:
                 profile["early_interactions"].append(user_input)
-            self.log_event("profile_updated", "Profile updated", conversation_id=conversation_id)
+            self.log_event("profile_updated", "Profile updated", user_id=user_id)
         except Exception as e:
-            self.log_error(error_msg=f"Profile update failed: {str(e)}", conversation_id=conversation_id)
+            self.log_error(error_msg=f"Profile update failed: {str(e)}", user_id=user_id)
             raise StateError(f"Profile update failed: {str(e)}")
 
     @synchronized("lock")
-    def get(self, conversation_id: str) -> Dict[str, Any]:
+    def get(self, user_id: str) -> Dict[str, Any]:
         """Retrieve user profile elegantly."""
-        profile = self.profiles.get(conversation_id, {
-            "lexicon": defaultdict(int),
-            "interactions": 0,
-            "session_time": 0.0,
-            "inputs": deque(maxlen=self.max_inputs),
-            "last_interaction": time.time(),
-            "nickname": "",
-            "early_interactions": []
-        })
-        self.log_event("profile_retrieved", "Profile retrieved", conversation_id=conversation_id, level="debug")
+        profile = self.profiles.get(user_id)
+        if not profile:
+            profile = self._default_profile()
+            self.profiles[user_id] = profile
+        self.log_event("profile_retrieved", "Profile retrieved", user_id=user_id, level="debug")
         return profile.copy()
 
     @synchronized("lock")
-    def reset(self, conversation_id: str) -> None:
+    def reset(self, user_id: str) -> None:
         """Reset user profile cleanly."""
         try:
-            self.profiles[conversation_id] = {
-                "lexicon": defaultdict(int),
-                "interactions": 0,
-                "session_time": 0.0,
-                "inputs": deque(maxlen=self.max_inputs),
-                "last_interaction": time.time(),
-                "nickname": "",
-                "early_interactions": []
-            }
-            self.log_event("profile_reset", "Profile reset", conversation_id=conversation_id)
+            self.profiles[user_id] = self._default_profile()
+            self.log_event("profile_reset", "Profile reset", user_id=user_id)
         except Exception as e:
-            self.log_error(error_msg=f"Profile reset failed: {str(e)}", conversation_id=conversation_id)
+            self.log_error(error_msg=f"Profile reset failed: {str(e)}", user_id=user_id)
             raise StateError(f"Profile reset failed: {str(e)}")
+
+    @synchronized("lock")
+    def get_bond_score(self, user_id: str) -> float:
+        profile = self.profiles.get(user_id)
+        if profile is None:
+            return 0.5
+        return profile["bond_score"]
+
+    @synchronized("lock")
+    def set_bond_score(self, user_id: str, value: float) -> None:
+        profile = self.profiles.setdefault(user_id, self._default_profile())
+        profile["bond_score"] = float(value)
+
+    @synchronized("lock")
+    def get_nickname(self, user_id: str) -> str:
+        profile = self.profiles.get(user_id)
+        if profile is None:
+            return ""
+        return profile["nickname"]
+
+    @synchronized("lock")
+    def set_nickname(self, user_id: str, value: str) -> None:
+        profile = self.profiles.setdefault(user_id, self._default_profile())
+        profile["nickname"] = value
+
+    @synchronized("lock")
+    def get_all_profiles(self) -> Dict[str, Dict[str, Any]]:
+        return {uid: p.copy() for uid, p in self.profiles.items()}
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize profiles simply for persistence."""
         try:
             with self.lock:
-                result = {"profiles": {}, "version": "1.0"}
-                for cid, p in self.profiles.items():
+                result = {"profiles": {}, "version": "2.0"}
+                for uid, p in self.profiles.items():
                     try:
-                        # Defensive serialization
-                        lexicon = dict(p["lexicon"]) if isinstance(p["lexicon"], dict) or isinstance(p["lexicon"], defaultdict) else {}
+                        lexicon = dict(p["lexicon"]) if isinstance(p["lexicon"], (dict, defaultdict)) else {}
                         inputs = list(p["inputs"]) if isinstance(p["inputs"], (deque, list)) else []
                         early_interactions = list(p.get("early_interactions", [])) if isinstance(p.get("early_interactions", []), (list, deque)) else []
-                        result["profiles"][cid] = {
+                        result["profiles"][uid] = {
                             "lexicon": lexicon,
                             "interactions": int(p.get("interactions", 0)),
                             "session_time": float(p.get("session_time", 0.0)),
                             "inputs": inputs,
                             "last_interaction": float(p.get("last_interaction", time.time())),
                             "nickname": p.get("nickname", ""),
-                            "early_interactions": early_interactions
+                            "early_interactions": early_interactions,
+                            "bond_score": float(p.get("bond_score", 0.5)),
                         }
                     except Exception as profile_exc:
-                        self.log_error(error_msg=f"Profile serialization failed for {cid}: {str(profile_exc)}")
+                        self.log_error(error_msg=f"Profile serialization failed for {uid}: {str(profile_exc)}")
                         continue
                 return result
         except Exception as e:
@@ -1501,33 +1515,34 @@ class UserProfileState(StateBase):
         try:
             with self.lock:
                 self.profiles.clear()
-                for cid, p in data.get("profiles", {}).items():
+                for uid, p in data.get("profiles", {}).items():
                     try:
                         lexicon = defaultdict(int, p.get("lexicon", {})) if isinstance(p.get("lexicon", {}), dict) else defaultdict(int)
                         interactions = int(p.get("interactions", 0))
                         session_time = float(p.get("session_time", 0.0))
-                        # Defensive: Only accept list for inputs
                         raw_inputs = p.get("inputs", [])
                         if not isinstance(raw_inputs, list):
-                            self.log_error(error_msg=f"Malformed 'inputs' for {cid}")
+                            self.log_error(error_msg=f"Malformed 'inputs' for {uid}")
                             raw_inputs = []
                         inputs = deque(raw_inputs, maxlen=self.max_inputs)
                         last_interaction = float(p.get("last_interaction", time.time()))
                         nickname = p.get("nickname", "")
                         early_interactions = list(p.get("early_interactions", [])) if isinstance(p.get("early_interactions", []), list) else []
-                        self.profiles[cid] = {
+                        bond_score = float(p.get("bond_score", 0.5))
+                        self.profiles[uid] = {
                             "lexicon": lexicon,
                             "interactions": interactions,
                             "session_time": session_time,
                             "inputs": inputs,
                             "last_interaction": last_interaction,
                             "nickname": nickname,
-                            "early_interactions": early_interactions
+                            "early_interactions": early_interactions,
+                            "bond_score": bond_score,
                         }
                     except Exception as profile_exc:
-                        self.log_error(error_msg=f"Profile loading failed for {cid}: {str(profile_exc)}")
+                        self.log_error(error_msg=f"Profile loading failed for {uid}: {str(profile_exc)}")
                         continue
                 self.log_event("profiles_loaded", "Profiles loaded", profile_count=len(self.profiles))
         except Exception as e:
-            self.log_error(error_msg=f"Profile loading failed: {str(e)}")
-            raise StateError(f"Profile loading failed: {str(e)}")
+            self.log_error(error_msg=f"Profile serialization failed: {str(e)}")
+            raise StateError(f"Profile serialization failed: {str(e)}")
