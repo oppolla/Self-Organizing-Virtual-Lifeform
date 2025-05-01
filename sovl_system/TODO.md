@@ -10,6 +10,7 @@
 6. Look into adding a module in bewteem traits and generation. Core personality module that enforces a consistant point of view. Takes weight off sovl_generation
 7. Add user_id monintoring so we see who the system likes and doesn't like
 8. complete sovl_state atomic refactors
+9. Modularize cli commands
 
 
 
