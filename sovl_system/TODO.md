@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. complete training queue metadata tag weight customization system. maybe exposed parameters that adjust the weighting of each system like dreams higher than error messages. also append or preface logs with context like embedding error log items with with "this error happened to me <timestamp>: ". check it system prompt starting with I or You is better for system to understand its about itself
+1. complete training queue metadata tag weight customization system. maybe exposed parameters that adjust the weighting of each system like dreams higher than error messages. also append or preface logs with context like embedding error log items with with "this error happened to me <timestamp>: ". check if system prompt starting with I or You is better for system to understand its about itself
 2. Disable that startup data sovl_seed part. Save it for Soulprint
 3. 
 4. 
