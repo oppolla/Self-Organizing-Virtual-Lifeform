@@ -1094,7 +1094,7 @@ class CuriosityManager(CuriosityAccessor):
             from sovl_queue import capture_scribe_event
             capture_scribe_event(
                 origin="sovl_curiosity",
-                event_type="curiosity_question_generated",
+                event_type="curiosity_question",
                 event_data={
                     "prompt": context,
                     "question": question,
@@ -1110,7 +1110,7 @@ class CuriosityManager(CuriosityAccessor):
 
         if question and (last_exception is None or question != "What is an interesting aspect of this topic?"):
             self._record_event(
-                "curiosity_question_generated",
+                "curiosity_question",
                 "Successfully generated curiosity question",
                 level="info",
                 additional_info={
@@ -1121,7 +1121,7 @@ class CuriosityManager(CuriosityAccessor):
             )
         else:
             self._record_event(
-                "curiosity_question_generation_failed",
+                "curiosity_question_failed",
                 "Failed to generate curiosity question, using fallback",
                 level="warning",
                 additional_info={

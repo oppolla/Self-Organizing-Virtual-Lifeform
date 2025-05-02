@@ -996,7 +996,7 @@ class TemperamentManager:
                         from sovl_queue import capture_scribe_event
                         capture_scribe_event(
                             origin="sovl_temperament",
-                            event_type="internal_prompt_generated",
+                            event_type="temperament_yell",
                             event_data={
                                 "prompt": prompt,
                                 "response": response,

@@ -630,6 +630,14 @@
     "relationship_context.temporal_tracking.timestamp": 0.0,
     "relationship_context.temporal_tracking.elapsed_time": 0.0,
     "relationship_context.temporal_tracking.session_duration": 0.0
+},
+
+"event_type_weights": {
+  "error_message": 0.2,
+  "user_interaction": 1.0,
+  "curiosity_question": 0.8,
+  "dream": 1.5,
+  "meditation": 0.7
 }
 
 }

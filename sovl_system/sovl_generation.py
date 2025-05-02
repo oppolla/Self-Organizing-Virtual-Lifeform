@@ -597,20 +597,6 @@ class GenerationManager:
             return response
         except Exception as e:
             self._handle_error("handle_error_prompt", e)
-            # Log the failure to handle the error prompt
-            capture_scribe_event(
-                origin="sovl_generation",
-                event_type="internal_error_reflection_failed",
-                event_data={
-                    "triggering_error_message": error_msg,
-                    "error_message": str(e),
-                    "error_type": type(e).__name__
-                },
-                source_metadata={
-                    "internal_call": True
-                },
-                timestamp=datetime.now()
-            )
             return "An error occurred while handling the error prompt"
 
     def has_repetition(self, output_ids: torch.Tensor, n: int = 3) -> bool:
@@ -999,7 +985,7 @@ class GenerationManager:
             )
             capture_scribe_event(
                 origin="sovl_generation",
-                event_type="base_generation",
+                event_type="user_interaction",
                 event_data=event_data,
                 source_metadata=source_metadata,
                 session_id=self.session_id
@@ -1219,62 +1205,60 @@ class GenerationManager:
                     'generation_time': time.time()  # For tracking generation duration
                 }
                 
-                # Log detailed result
+                # Build event_data dynamically
+                if 'text' in result:
+                    generated_text = result['text']
+                else:
+                    generated_text = self.scaffold_tokenizer.decode(
+                        outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0],
+                        skip_special_tokens=True
+                    )
+
+                event_data = {
+                    "prompt": prompt,
+                    "scaffold_index": scaffold_index,
+                    "max_new_tokens": max_new_tokens,
+                    "generated_text": generated_text,
+                    "generation_params": generation_config
+                }
+                # Optionally add detailed fields if present
+                if return_logits and 'logits' in result:
+                    event_data["logits"] = result["logits"]
+                if return_hidden_states and 'hidden_states' in result:
+                    event_data["hidden_states"] = result["hidden_states"]
+                if 'return_logits' in locals():
+                    event_data["return_logits"] = return_logits
+                if 'return_hidden_states' in locals():
+                    event_data["return_hidden_states"] = return_hidden_states
+
+                # Build source_metadata dynamically
+                source_metadata = {
+                    "scaffold_index": scaffold_index,
+                    "model_name": self.scaffold_tokenizer.name_or_path,
+                    "input_length": len(inputs['input_ids'][0]),
+                    "output_length": len(outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0]),
+                    "memory_usage": self.memory_manager.get_memory_usage(),
+                    "generation_time": time.time() - request_time,
+                    "session_id": self.session_id,
+                    "request_timestamp_unix": request_time
+                }
+                if 'metadata' in result:
+                    source_metadata.update(result['metadata'])
+
+                # Single scribe event
                 capture_scribe_event(
                     origin="sovl_generation",
-                    event_type="backchannel_scaffold_generated",
-                    event_data={
-                        "prompt": prompt,
-                        "scaffold_index": scaffold_index,
-                        "max_new_tokens": max_new_tokens,
-                        "generated_text": result['text'],
-                        "return_logits": return_logits,
-                        "return_hidden_states": return_hidden_states,
-                        "generation_params": generation_config
-                    },
-                    source_metadata={
-                        **result['metadata'],
-                        "session_id": self.session_id,
-                        "request_timestamp_unix": request_time
-                    },
+                    event_type="backchannel_interaction",
+                    event_data=event_data,
+                    source_metadata=source_metadata,
                     session_id=self.session_id,
                     timestamp=datetime.fromtimestamp(request_time)
                 )
-                
-                return result
-            else:
-                # Fast path for text-only return
-                generated_text = self.scaffold_tokenizer.decode(
-                    outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0],
-                    skip_special_tokens=True
-                )
-                
-                # Log text-only result
-                capture_scribe_event(
-                    origin="sovl_generation",
-                    event_type="backchannel_scaffold_generated",
-                    event_data={
-                        "prompt": prompt,
-                        "scaffold_index": scaffold_index,
-                        "max_new_tokens": max_new_tokens,
-                        "generated_text": generated_text,
-                        "generation_params": generation_config
-                    },
-                    source_metadata={
-                        "scaffold_index": scaffold_index,
-                        "model_name": self.scaffold_tokenizer.name_or_path,
-                        "input_length": len(inputs['input_ids'][0]),
-                        "output_length": len(outputs[0] if isinstance(outputs, torch.Tensor) else outputs.sequences[0]),
-                        "memory_usage": self.memory_manager.get_memory_usage(),
-                        "generation_time": time.time() - request_time,
-                        "session_id": self.session_id,
-                        "request_timestamp_unix": request_time
-                    },
-                    session_id=self.session_id,
-                    timestamp=datetime.fromtimestamp(request_time)
-                )
-                
-                return generated_text
+
+                if 'text' in result:
+                    return result
+                else:
+                    return generated_text
             
         except (ValueError, RuntimeError, GenerationError, IndexError) as e:
             if acquired:
@@ -1289,31 +1273,6 @@ class GenerationManager:
         except Exception as e:
             if acquired:
                 self.resource_manager.release("gpu_memory", amount=gpu_mem_needed)
-            # Log error
-            capture_scribe_event(
-                origin="sovl_generation",
-                event_type="backchannel_scaffold_error",
-                event_data={
-                    "prompt": prompt,
-                    "scaffold_index": scaffold_index,
-                    "max_new_tokens": max_new_tokens,
-                    "return_logits": return_logits,
-                    "return_hidden_states": return_hidden_states,
-                    "error_message": str(e),
-                    "error_type": type(e).__name__,
-                    "kwargs": kwargs,
-                    "traceback": traceback.format_exc()
-                },
-                source_metadata={
-                    "scaffold_index": scaffold_index,
-                    "model_name": getattr(self.scaffold_tokenizer, "name_or_path", "unknown"),
-                    "session_id": self.session_id,
-                    "request_timestamp_unix": request_time,
-                    "memory_usage": self.memory_manager.get_memory_usage()
-                },
-                session_id=self.session_id,
-                timestamp=datetime.fromtimestamp(request_time)
-            )
             # Handle error through existing mechanism
             self._handle_error("backchannel_scaffold_prompt", e, {
                 'scaffold_index': scaffold_index,
@@ -1444,7 +1403,7 @@ class GenerationManager:
             # Log the internal thought generation
             capture_scribe_event(
                 origin="sovl_generation",
-                event_type="internal_thought_generated",
+                event_type="internal_thought",
                 event_data={
                     "prompt_used": prompt,
                     "generated_response": response
@@ -1465,20 +1424,6 @@ class GenerationManager:
             return response
         except Exception as e:
             self._handle_error("handle_internal_prompt", e)
-            # Log the failure to generate internal thought
-            capture_scribe_event(
-                origin="sovl_generation",
-                event_type="internal_thought_generation_failed",
-                event_data={
-                    "prompt_used": prompt,
-                    "error_message": str(e),
-                    "error_type": type(e).__name__
-                },
-                source_metadata={
-                    "internal_call": True
-                },
-                timestamp=datetime.now()
-            )
             return "..."
 
 class ScribeAssembler:

@@ -2048,14 +2048,28 @@ class Dreamer:
         return dreams
 
     def log_dreams(self, dreams):
+        from sovl_queue import capture_scribe_event
         for dream in dreams:
             try:
-                self.scribe_event_fn(
+                event_data = {
+                    "narration": dream["narration"],
+                    "prompt": dream["event_data"].get("prompt"),
+                    "response": dream["event_data"].get("response"),
+                    "novelty_score": dream["metadata"].get("novelty"),
+                    "confidence_score": dream["metadata"].get("confidence"),
+                }
+                source_metadata = {
+                    "dreamed_from": dream.get("dreamed_from"),
+                    "timestamp_iso": dream.get("timestamp_iso"),
+                    **dream.get("metadata", {})
+                }
+                capture_scribe_event(
+                    origin="dreamer",
                     event_type="dream",
-                    event_data={"narration": dream["narration"]},
-                    metadata=dream["metadata"],
-                    dreamed_from=dream["dreamed_from"],
-                    timestamp_iso=dream["timestamp_iso"]
+                    event_data=event_data,
+                    source_metadata=source_metadata,
+                    session_id=dream.get("session_id"),
+                    timestamp=None  # or parse from dream["timestamp_iso"] if needed
                 )
                 self.logger.info(f"Dream event logged: {dream['narration']}")
             except Exception as e:

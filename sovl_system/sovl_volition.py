@@ -471,7 +471,7 @@ class AutonomyManager:
                         if hasattr(self.curiosity, "generate_curiosity_question"):
                             question = self.curiosity.generate_curiosity_question(context="explore", spontaneous=True)
                         self.logger.record_event(
-                            event_type="curiosity_question_generated",
+                            event_type="curiosity_question",
                             message=f"Curiosity-driven question: {question}",
                             additional_info={"timestamp": time.time()}
                         )
