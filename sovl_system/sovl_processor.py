@@ -1795,7 +1795,7 @@ MEMORY_TEMPLATES = {
         "The novelty was {novelty_score}. " 
         "Your confidence was {confidence_score}. "
         "You were in your {current_lifecycle_stage} phase. "
-        "It took you {generation_time} to respond. "
+        "It took you {generation_time} to respond."
     ),
     "curiosity_question": (
         "You pondered the question: {question} at {timestamp_unix}. "
@@ -1804,7 +1804,7 @@ MEMORY_TEMPLATES = {
         "The novelty was {novelty_score}. " 
         "The confidence was {confidence_score}. "
         "You were in your {current_lifecycle_stage} phase. "
-        "It took you {generation_time} to respond. "
+        "It took you {generation_time} to respond."
     ),
     "internal_error_reflection": (
         "You thought this about: {generated_response} about this error {triggering_error_message} at {timestamp_unix}. "
@@ -1828,7 +1828,7 @@ MEMORY_TEMPLATES = {
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
         "The novelty was {novelty_score}. " 
         "The confidence was {confidence_score}. "
-        "You were in your {current_lifecycle_stage} phase. "
+        "You were in your {current_lifecycle_stage} phase."
     ),
     "generation_error": (
         "You spoke with {user_id} at {timestamp_unix}. "
@@ -1838,13 +1838,13 @@ MEMORY_TEMPLATES = {
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
         "The novelty was {novelty_score}. " 
         "The confidence was {confidence_score}. "
-        "You were in your {current_lifecycle_stage} phase. "
+        "You were in your {current_lifecycle_stage} phase."
     ),
     "backchannel_interaction": (
         "{user_id} spoke to the inner voice at {timestamp_unix}. "
         "The user said: {prompt}. "
         "The inner voice responded with: {generated_text}. "
-        "This occured the {session_id} time you awoke. "
+        "This occured the {session_id} time you awoke."
     ),
     "temperament_yell": (
         "You blurted out: {response} at {timestamp_unix} because you were upset. "
@@ -1852,7 +1852,7 @@ MEMORY_TEMPLATES = {
         "Your temperament was {temperament_score}. "
         "You felt {pressure} amount of pressure. "  
         "You unleashed at {threshold} amount of pressure. "
-        "You were in your {current_lifecycle_stage} phase. "
+        "You were in your {current_lifecycle_stage} phase."
     ),
     "dream": (
         "You had this dream: {narration} at {timestamp_unix}. "
@@ -1860,7 +1860,7 @@ MEMORY_TEMPLATES = {
         "It was the {session_id} time you awoke. "
         "The novelty was {novelty_score}. " 
         "The confidence was {confidence_score}. "
-        "You were in your {current_lifecycle_stage} phase. "
+        "You were in your {current_lifecycle_stage} phase."
     ),
     "resonator": (
         "You saw this: {full_text} at {timestamp_unix}. "
@@ -1868,7 +1868,7 @@ MEMORY_TEMPLATES = {
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
         "The novelty was {novelty_score}. " 
         "The confidence was {confidence_score}. "
-        "You were in your {current_lifecycle_stage} phase. "
+        "You were in your {current_lifecycle_stage} phase."
     ),
 }
 
@@ -1936,7 +1936,10 @@ SCRIBE_EVENT_FIELDS = {
     ],
 }
 
+config = ConfigManager()
+
 EVENT_TYPE_WEIGHTS = config.get("event_type_weights", {})
+GENERIC_TEMPLATE = "Event of type {event_type} occurred with data: {full_text}"
 
 def load_trainer_weighting(config_path="sovl_config.json"):
     import json
@@ -1971,12 +1974,11 @@ class ScribeIngestionProcessor:
                 rendered = f"[Error rendering: {e}]"
             print(f"\n[{event_type}]\n{rendered}\n")
 
-    def __init__(self, log_paths, memory_templates=None, weighting_functions=None, logger=None, config_path="sovl_config.json"):
+    def __init__(self, log_paths, memory_templates=None, logger=None, config_path="sovl_config.json"):
         if isinstance(log_paths, str):
             log_paths = [log_paths]
         self.log_paths = log_paths
         self.memory_templates = memory_templates or MEMORY_TEMPLATES
-        self.weighting_functions = weighting_functions or WEIGHTING_FUNCTIONS
         self.logger = logger
         self.trainer_weighting = load_trainer_weighting(config_path)
 

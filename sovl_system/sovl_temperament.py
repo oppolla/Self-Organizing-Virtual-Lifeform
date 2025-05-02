@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 import traceback
 from sovl_config import ConfigManager
-from sovl_state import SOVLState, StateManager
+from sovl_state import SOVLState, StateManager, StateTracker
 from sovl_logger import Logger
 from sovl_events import EventDispatcher
 from sovl_trainer import TrainingCycleManager
@@ -398,7 +398,7 @@ class TemperamentAdjuster:
     
     def __init__(
         self,
-        config_handler: ConfigHandler,
+        config_handler: ConfigManager,
         state_tracker: StateTracker,
         logger: Logger,
         event_dispatcher: EventDispatcher

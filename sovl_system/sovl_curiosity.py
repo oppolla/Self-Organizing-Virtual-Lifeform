@@ -15,6 +15,19 @@ from sovl_queue import capture_scribe_event
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_interfaces import CuriosityAccessor
 import json
+from dataclasses import dataclass
+
+@dataclass
+class CuriosityConfig:
+    max_questions: int
+    max_novelty_scores: int
+    decay_rate: float
+    hidden_size: int
+    question_timeout: float
+
+    def validate(self):
+        # Optional: add validation logic here
+        pass
 
 class Curiosity:
     """Computes curiosity scores based on ignorance and novelty."""

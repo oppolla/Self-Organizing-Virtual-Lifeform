@@ -14,6 +14,7 @@ import threading
 from datetime import datetime
 from sovl_logger import Logger
 from sovl_config import ConfigManager
+from sovl_curiosity import CuriosityConfig
 from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
 from sovl_records import ConfidenceHistory
 from sovl_memory import RAMManager, GPUMemoryManager
