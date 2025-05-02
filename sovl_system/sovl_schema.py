@@ -32,7 +32,7 @@ class ValidationSchema:
             "scribed_config": ValidationSchema._get_scribed_config_schema(),
             "io_config": ValidationSchema._get_io_config_schema(),
             "metrics_config": ValidationSchema._get_metrics_config_schema(),
-            "metadata_weighting": ValidationSchema._get_metadata_weighting_schema(),
+            "trainer_weighting": ValidationSchema._get_metadata_weighting_schema(),
             "dreamer_config": ValidationSchema._get_dreamer_config_schema(),
         }
 
@@ -676,13 +676,13 @@ class ValidationSchema:
 
     @staticmethod
     def _get_metadata_weighting_schema() -> Dict[str, ConfigSchema]:
-        """Return the metadata_weighting schema (event_type weights)."""
+        """Return the trainer_weighting schema (event_type weights)."""
         # This schema allows arbitrary event_type keys, but documents common defaults
         return {
-            "internal_error_reflection": ConfigSchema(field="metadata_weighting.internal_error_reflection", type=float, default=0.2, range=(0.0, 3.0)),
-            "user_message": ConfigSchema(field="metadata_weighting.user_message", type=float, default=1.0, range=(0.0, 3.0)),
-            "system_message": ConfigSchema(field="metadata_weighting.system_message", type=float, default=0.5, range=(0.0, 3.0)),
-            "dream_memory": ConfigSchema(field="metadata_weighting.dream_memory", type=float, default=0.3, range=(0.0, 3.0)),
+            "internal_error_reflection": ConfigSchema(field="trainer_weighting.internal_error_reflection", type=float, default=0.2, range=(0.0, 3.0)),
+            "user_message": ConfigSchema(field="trainer_weighting.user_message", type=float, default=1.0, range=(0.0, 3.0)),
+            "system_message": ConfigSchema(field="trainer_weighting.system_message", type=float, default=0.5, range=(0.0, 3.0)),
+            "dream_memory": ConfigSchema(field="trainer_weighting.dream_memory", type=float, default=0.3, range=(0.0, 3.0)),
         }
 
     @staticmethod
@@ -1021,3 +1021,119 @@ class ValidationSchema:
                 range=(0.0, 1.0)
             ),
         }
+
+METADATA_FIELDS = {
+    "Always Present": [
+        ("origin", "Source module/component name"),
+        ("timestamp_unix", "UNIX timestamp of the event"),
+        ("session_id", "Session identifier"),
+    ],
+    "Global System State": [
+        ("sovl_version", "SOVL system version"),
+        ("current_lifecycle_stage", "Current lifecycle stage of the system"),
+        ("current_temperament_score", "Current temperament score"),
+        ("current_mood_label", "Current mood label"),
+        ("current_memory_usage", "Current memory usage"),
+    ],
+    "Source Metadata": [
+        ("user_id", "User identifier"),
+        ("level", "Log level"),
+        ("stack_trace", "Stack trace"),
+        ("module", "Module name"),
+        ("generation_config", "Generation config"),
+        ("model_name", "Model name"),
+        ("device", "Device"),
+        ("internal_call", "Internal call flag"),
+        ("request_timestamp_unix", "Request timestamp"),
+        ("initial_kwargs", "Initial kwargs"),
+        ("generation_config_used", "Generation config used"),
+        ("temperament_score", "Temperament score"),
+        ("lifecycle_stage", "Lifecycle stage"),
+        ("novelty_score", "Novelty score"),
+        ("memory_usage_mb", "Memory usage (MB)"),
+        ("processing_time_ms", "Processing time (ms)"),
+        ("scaffold_index", "Scaffold index"),
+        ("input_length", "Input length"),
+        ("output_length", "Output length"),
+        ("memory_usage", "Memory usage"),
+        ("generation_time", "Generation time"),
+        ("system_device", "System device"),
+        ("pressure", "Pressure"),
+        ("threshold", "Threshold"),
+    ],
+    "Content Metrics": [
+        ("<field>_metrics.content_metrics.word_count", "Word count"),
+        ("<field>_metrics.content_metrics.sentence_count", "Sentence count"),
+        ("<field>_metrics.content_metrics.avg_word_length", "Average word length"),
+        ("<field>_metrics.content_metrics.avg_sentence_length", "Average sentence length"),
+        ("<field>_metrics.quality_metrics.has_code", "Contains code"),
+        ("<field>_metrics.quality_metrics.has_url", "Contains URL"),
+        ("<field>_metrics.quality_metrics.has_question", "Contains question"),
+        ("<field>_metrics.quality_metrics.has_exclamation", "Contains exclamation"),
+        ("<field>_metrics.quality_metrics.has_emoji", "Contains emoji"),
+        ("<field>_token_stats.basic_stats.total_tokens", "Total tokens"),
+        ("<field>_token_stats.basic_stats.unique_tokens", "Unique tokens"),
+        ("<field>_token_stats.basic_stats.token_diversity", "Token diversity"),
+        ("<field>_token_stats.pattern_stats.unique_bigrams", "Unique bigrams"),
+        ("<field>_token_stats.pattern_stats.unique_trigrams", "Unique trigrams"),
+        ("<field>_token_stats.pattern_stats.bigram_diversity", "Bigram diversity"),
+        ("<field>_token_stats.pattern_stats.trigram_diversity", "Trigram diversity"),
+        ("<field>_token_stats.special_token_stats.special_token_count", "Special token count"),
+        ("<field>_token_stats.special_token_stats.special_token_ratio", "Special token ratio"),
+        ("<field>_token_stats.special_token_stats.special_token_types", "Special token types"),
+        ("<field>_structure.length_metrics.character_count", "Character count"),
+        ("<field>_structure.length_metrics.word_count", "Word count (structure)"),
+        ("<field>_structure.length_metrics.line_count", "Line count"),
+        ("<field>_structure.length_metrics.sentence_count", "Sentence count (structure)"),
+        ("<field>_structure.length_metrics.avg_sentence_length", "Avg sentence length (structure)"),
+        ("<field>_structure.length_metrics.avg_line_length", "Avg line length"),
+        ("<field>_structure.whitespace_metrics.blank_line_count", "Blank line count"),
+        ("<field>_structure.whitespace_metrics.indentation_levels", "Indentation levels"),
+        ("<field>_structure.whitespace_metrics.whitespace_ratio", "Whitespace ratio"),
+    ],
+    "Performance Metrics": [
+        ("performance_metrics.timing.generation_time_ms", "Generation time (ms)"),
+        ("performance_metrics.timing.tokens_per_second", "Tokens per second"),
+        ("performance_metrics.timing.total_processing_time", "Total processing time"),
+        ("performance_metrics.memory.ram_mb", "RAM usage (MB)"),
+        ("performance_metrics.memory.gpu_mb", "GPU usage (MB)"),
+        ("performance_metrics.memory.peak_memory", "Peak memory"),
+        ("performance_metrics.efficiency.memory_efficiency", "Memory efficiency"),
+        ("performance_metrics.efficiency.tokens_per_mb", "Tokens per MB"),
+        ("performance_metrics.efficiency.optimization_level", "Optimization level"),
+    ],
+    "Relationship Context": [
+        ("relationship_context.conversation_tracking.conversation_id", "Conversation ID"),
+        ("relationship_context.conversation_tracking.message_index", "Message index"),
+        ("relationship_context.conversation_tracking.thread_depth", "Thread depth"),
+        ("relationship_context.reference_tracking.references", "References"),
+        ("relationship_context.reference_tracking.parent_message_id", "Parent message ID"),
+        ("relationship_context.reference_tracking.root_message_id", "Root message ID"),
+        ("relationship_context.temporal_tracking.timestamp", "Timestamp"),
+        ("relationship_context.temporal_tracking.elapsed_time", "Elapsed time"),
+        ("relationship_context.temporal_tracking.session_duration", "Session duration"),
+    ],
+}
+
+# Utility: Get all metadata fields as a flat list
+
+def get_all_metadata_fields():
+    fields = []
+    for group in METADATA_FIELDS.values():
+        for field, _ in group:
+            fields.append(field)
+    return fields
+
+# Utility: Get default weighting dict for all metadata fields
+
+def get_default_trainer_weighting(default_value=0.0):
+    """Return a dict mapping all metadata fields to a default trainer weighting."""
+    return {field: default_value for field in get_all_metadata_fields()}
+
+# Optional: Pretty-print the trainer weighting table
+
+def print_trainer_weighting_table(weighting_dict):
+    print(f"{'Field':50} | {'Weight':10}")
+    print("-" * 65)
+    for field, weight in weighting_dict.items():
+        print(f"{field:50} | {weight:10}")

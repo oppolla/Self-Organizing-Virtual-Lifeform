@@ -15,6 +15,7 @@ from sovl_records import ConfidenceHistory
 from transformers import PreTrainedTokenizer, LogitsProcessor
 from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
+from sovl_schema import get_default_trainer_weighting
 
 # Placeholder for SOVLState until we can properly import it
 try:
@@ -1784,3 +1785,229 @@ class MetadataProcessor:
                 
         return event_data, final_metadata
     
+# === SOVL MEMORY ART GALLERY ===
+# This is the heart and soul of the system.
+# Every log, every memory, every training sample is crafted here.
+# If you want to see what the system is learning, look here first.
+
+MEMORY_TEMPLATES = {
+    "user_interaction": (
+        "{origin} You spoke to {user_id} at {timestamp_unix} about {full_text}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
+        "It was the {session_id} time you spoke."
+        "The novelty was {novelty_score}." 
+        "The confidence was {confidence_score}."
+    ),
+    "curiosity_question": (
+        "{origin} You wondered about {full_text} at {timestamp_unix}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "It happened on your {session_id} session."
+    ),
+    "error_message": (
+        "{origin} You wondered about {full_text} at {timestamp_unix}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "It happened on your {session_id} session."
+    ),
+    "meditation": (
+        "{origin} You wondered about {full_text} at {timestamp_unix}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "It happened on your {session_id} session."
+    ),
+    "temperament_yell": (
+        "{origin} You wondered about {full_text} at {timestamp_unix}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "It happened on your {session_id} session."
+    ),
+    "resonator": (
+        "{origin} You wondered about {full_text} at {timestamp_unix}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "It happened on your {session_id} session."
+    ),
+    "dream": (
+        "{origin} You wondered about {full_text} at {timestamp_unix}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "It happened on your {session_id} session."
+    ),
+    # Add more event types and templates as needed
+}
+
+# --- Scribe Event Fields Template Registry ---
+# IMPORTANT: Keep this in sync with MEMORY_TEMPLATES.
+# Add a new entry here for every new event_type you add to MEMORY_TEMPLATES.
+# Each entry is a list of (field_name, description) tuples for clarity and maintainability.
+SCRIBE_EVENT_FIELDS = {
+    "user_interaction": [
+        ("origin", "Source module/component name"),
+        ("user_id", "User identifier"),
+        ("timestamp_unix", "UNIX timestamp of the event"),
+        ("full_text", "Main text content of the interaction"),
+        ("current_mood_label", "Current mood label"),
+        ("current_temperament_score", "Current temperament score"),
+        ("session_id", "Session identifier"),
+        # Add more fields as needed
+    ],
+    "curiosity_question": [
+        ("origin", "Source module/component name"),
+        ("timestamp_unix", "UNIX timestamp of the event"),
+        ("full_text", "Main text content of the question"),
+        ("current_mood_label", "Current mood label"),
+        ("current_temperament_score", "Current temperament score"),
+        ("session_id", "Session identifier"),
+        # Add more fields as needed
+    ],
+    # Add more event types here as your system grows
+    # "new_event_type": [
+    #     ("field_name", "Description"),
+    #     ...
+    # ],
+}
+
+# --- SOVL Memory Metadata Reference ---
+# This is a comprehensive list of all metadata fields available for crafting memory templates.
+# Use this as a reference when designing new MEMORY_TEMPLATES or for documentation/UI.
+
+def load_trainer_weighting(config_path="sovl_config.json"):
+    import json
+    defaults = get_default_trainer_weighting()
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        user_weights = config.get("trainer_weighting", {})
+        # Merge: config values override defaults, ignore unknowns
+        weights = {**defaults, **{k: user_weights[k] for k in user_weights if k in defaults}}
+        return weights
+    except Exception:
+        return defaults
+
+class ScribeIngestionProcessor:
+    """
+    ScribeIngestionProcessor is the heart and soul of SOVL's memory system.
+    Its primary purpose is to craft the final memory string—the 'art'—that will be seen, learned from, and remembered by the system.
+    All logic, weighting, and metadata serve this centerpiece: the final crafted output.
+    Use the memory_gallery() method to preview and obsess over the output for every event type.
+    """
+    SCRIBE_EVENT_FIELDS = SCRIBE_EVENT_FIELDS
+    MEMORY_TEMPLATES = MEMORY_TEMPLATES
+
+    @classmethod
+    def memory_gallery(cls):
+        """Prints example final outputs for all event types using sample data."""
+        print("=== SOVL Memory Gallery ===")
+        for event_type, template in cls.MEMORY_TEMPLATES.items():
+            sample = {field: f"<{field}>" for field, _ in cls.SCRIBE_EVENT_FIELDS.get(event_type, [])}
+            sample.setdefault("full_text", "<full_text>")
+            try:
+                rendered = template.format(**sample)
+            except Exception as e:
+                rendered = f"[Error rendering: {e}]"
+            print(f"\n[{event_type}]\n{rendered}\n")
+
+    def __init__(self, log_paths, memory_templates=None, weighting_functions=None, logger=None, config_path="sovl_config.json"):
+        if isinstance(log_paths, str):
+            log_paths = [log_paths]
+        self.log_paths = log_paths
+        self.memory_templates = memory_templates or MEMORY_TEMPLATES
+        self.weighting_functions = weighting_functions or WEIGHTING_FUNCTIONS
+        self.logger = logger
+        self.trainer_weighting = load_trainer_weighting(config_path)
+
+    def load_logs(self) -> list:
+        import json
+        logs = []
+        for path in self.log_paths:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                entry = json.loads(line)
+                                logs.append(entry)
+                            except Exception as e:
+                                if self.logger:
+                                    self.logger.warning(f"Failed to parse log line: {e}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Failed to load log file {path}: {e}")
+        return logs
+
+    def flatten_metadata(self, metadata: dict, parent_key: str = '', sep: str = '.') -> dict:
+        items = []
+        for k, v in metadata.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(self.flatten_metadata(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    def extract_main_text(self, event_type: str, event_data: dict) -> str:
+        # Customize this per event type if needed
+        if event_type == "user_interaction":
+            return event_data.get("prompt") or event_data.get("message") or str(event_data)
+        elif event_type == "curiosity_question":
+            return event_data.get("question") or event_data.get("prompt") or str(event_data)
+        # Add more event types as needed
+        return event_data.get("prompt") or str(event_data)
+
+    def process_entry(self, entry: dict) -> dict:
+        event_type = entry.get("event_type", "unknown")
+        template = self.memory_templates.get(event_type, GENERIC_TEMPLATE)
+        weighting_func = self.weighting_functions.get(event_type, lambda m: 1.0)
+        metadata = self.flatten_metadata(entry.get("metadata", {}))
+        event_data = entry.get("event_data", {})
+        full_text = self.extract_main_text(event_type, event_data)
+        memory = template.format(
+            origin=metadata.get("origin", "Unknown"),
+            user_id=metadata.get("user_id", "Unknown"),
+            timestamp_unix=metadata.get("timestamp_unix", "Unknown"),
+            full_text=full_text,
+            current_mood_label=metadata.get("current_mood_label", "Unknown"),
+            current_temperament_score=metadata.get("current_temperament_score", "Unknown"),
+            session_id=metadata.get("session_id", "Unknown"),
+        )
+        weight = weighting_func(metadata)
+        return {"memory": memory, "weight": weight, "metadata": metadata}
+
+    def process_all(self) -> list:
+        logs = self.load_logs()
+        return [self.process_entry(entry) for entry in logs]
+
+    # Optional: For debugging/tuning, return a breakdown of weights
+    def process_entry_with_explanation(self, entry: dict) -> dict:
+        event_type = entry.get("event_type", "unknown")
+        template = self.memory_templates.get(event_type, GENERIC_TEMPLATE)
+        weighting_func = self.weighting_functions.get(event_type, lambda m: 1.0)
+        metadata = self.flatten_metadata(entry.get("metadata", {}))
+        event_data = entry.get("event_data", {})
+        full_text = self.extract_main_text(event_type, event_data)
+        memory = template.format(
+            origin=metadata.get("origin", "Unknown"),
+            user_id=metadata.get("user_id", "Unknown"),
+            timestamp_unix=metadata.get("timestamp_unix", "Unknown"),
+            full_text=full_text,
+            current_mood_label=metadata.get("current_mood_label", "Unknown"),
+            current_temperament_score=metadata.get("current_temperament_score", "Unknown"),
+            session_id=metadata.get("session_id", "Unknown"),
+        )
+        weight = weighting_func(metadata)
+        return {
+            "memory": memory,
+            "weight": weight,
+            "metadata": metadata,
+            "event_type": event_type,
+            # Optionally add more debug info here
+        }
+
+    def calculate_weight(self, metadata):
+        weight = 1.0
+        for field, factor in self.trainer_weighting.items():
+            value = metadata.get(field)
+            if value is not None:
+                try:
+                    weight += float(value) * factor
+                except Exception:
+                    pass
+        return weight
+        
+        
+        

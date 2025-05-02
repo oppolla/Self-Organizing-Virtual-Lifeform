@@ -7,7 +7,7 @@ import queue
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from sovl_config import ConfigManager
-from sovl_processor import MetadataProcessor
+from sovl_processor import MetadataProcessor, ScribeIngestionProcessor
 from sovl_error import ErrorManager
 from sovl_logger import Logger
 from sovl_queue import ScribeEntry
@@ -73,6 +73,8 @@ class Scriber:
         self.jsonl_writer = None
         self._writer_thread = None
         self._stop_event = threading.Event()
+
+        self.scribe_ingestion_processor = ScribeIngestionProcessor(log_paths=[])
 
         try:
             # Determine scribe output path from config or explicit override
@@ -231,12 +233,19 @@ class Scriber:
                         session_id=session_id,
                     )
 
-                    # Structure the final scribe entry
-                    scribe_entry = {
-                        "timestamp_iso": timestamp.isoformat() if timestamp else datetime.now(timezone.utc).isoformat(),
+                    # Prepare event for ingestion processor
+                    event_for_ingestion = {
                         "event_type": event_type,
                         "event_data": validated_event_data,
                         "metadata": final_metadata
+                    }
+                    processed = self.scribe_ingestion_processor.process_entry(event_for_ingestion)
+
+                    # Structure the final scribe entry for the log
+                    scribe_entry = {
+                        "memory": processed["memory"],
+                        "weight": processed["weight"]
+                        # Optionally: "metadata": processed["metadata"]
                     }
 
                     # Serialize to JSON
@@ -306,12 +315,19 @@ class Scriber:
                         session_id=session_id,
                     )
 
-                    # Structure the final scribe entry
-                    scribe_entry = {
-                        "timestamp_iso": timestamp.isoformat() if timestamp else datetime.now(timezone.utc).isoformat(),
+                    # Prepare event for ingestion processor
+                    event_for_ingestion = {
                         "event_type": event_type,
                         "event_data": validated_event_data,
                         "metadata": final_metadata
+                    }
+                    processed = self.scribe_ingestion_processor.process_entry(event_for_ingestion)
+
+                    # Structure the final scribe entry for the log
+                    scribe_entry = {
+                        "memory": processed["memory"],
+                        "weight": processed["weight"]
+                        # Optionally: "metadata": processed["metadata"]
                     }
 
                     # Serialize to JSON

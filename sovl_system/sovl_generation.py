@@ -995,6 +995,7 @@ class GenerationManager:
                 generation_result=generation_result,
                 request_time=request_time,
                 session_id=self.session_id,
+                user_id=user_id,
             )
             capture_scribe_event(
                 origin="sovl_generation",
@@ -1491,6 +1492,7 @@ class ScribeAssembler:
         generation_result: Dict[str, Any],
         request_time: float,
         session_id: Optional[str],
+        user_id: Optional[str] = None,  # <-- add user_id param
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Assembles the event_data and source_metadata dictionaries for logging.
@@ -1529,6 +1531,7 @@ class ScribeAssembler:
         source_metadata = {
             # External Context
             "session_id": session_id,
+            "user_id": user_id,  # <-- add user_id to metadata
             # Request Info
             "request_timestamp_unix": request_time,
             "initial_kwargs": initial_kwargs,

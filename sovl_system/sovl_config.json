@@ -467,7 +467,7 @@
     "max_file_size_mb": 50,
     "buffer_size": 10
   },
-  "metadata_weighting": {
+  "trainer_weighting": {
     "internal_error_reflection": 0.2,
     "user_message": 1.0,
     "system_message": 0.5,
@@ -539,6 +539,97 @@
     "dream_novelty_boost": 0.03,
     "dream_memory_decay": 0.95,
     "dream_prune_threshold": 0.1
-  }
+  },
+"metadata_weighting": {
+   
+    "origin": 0.0,
+    "timestamp_unix": 0.0,
+    "session_id": 0.0,
+
+    
+    "sovl_version": 0.0,
+    "current_lifecycle_stage": 0.01,
+    "current_temperament_score": 0.03,
+    "current_mood_label": 0.03,
+    "current_memory_usage": 0.0,
+
+   
+    "user_id": 0.0,
+    "level": 0.0,
+    "stack_trace": 0.0,
+    "module": 0.0,
+    "generation_config": 0.0,
+    "model_name": 0.0,
+    "device": 0.0,
+    "internal_call": 0.0,
+    "request_timestamp_unix": 0.0,
+    "initial_kwargs": 0.0,
+    "generation_config_used": 0.0,
+    "temperament_score": 0.03,
+    "lifecycle_stage": 0.01,
+    "novelty_score": 0.20,
+    "memory_usage_mb": 0.0,
+    "processing_time_ms": -0.01,
+    "scaffold_index": 0.0,
+    "input_length": 0.02,
+    "output_length": 0.02,
+    "memory_usage": 0.0,
+    "generation_time": -0.01,
+    "system_device": 0.0,
+    "pressure": 0.0,
+    "threshold": 0.0,
+
+    
+    "<field>_metrics.content_metrics.word_count": 0.05,
+    "<field>_metrics.content_metrics.sentence_count": 0.01,
+    "<field>_metrics.content_metrics.avg_word_length": 0.01,
+    "<field>_metrics.content_metrics.avg_sentence_length": 0.01,
+    "<field>_metrics.quality_metrics.has_code": 0.03,
+    "<field>_metrics.quality_metrics.has_url": 0.01,
+    "<field>_metrics.quality_metrics.has_question": 0.02,
+    "<field>_metrics.quality_metrics.has_exclamation": 0.01,
+    "<field>_metrics.quality_metrics.has_emoji": 0.01,
+    "<field>_token_stats.basic_stats.total_tokens": 0.01,
+    "<field>_token_stats.basic_stats.unique_tokens": 0.03,
+    "<field>_token_stats.basic_stats.token_diversity": 0.07,
+    "<field>_token_stats.pattern_stats.unique_bigrams": 0.05,
+    "<field>_token_stats.pattern_stats.unique_trigrams": 0.05,
+    "<field>_token_stats.pattern_stats.bigram_diversity": 0.03,
+    "<field>_token_stats.pattern_stats.trigram_diversity": 0.03,
+    "<field>_token_stats.special_token_stats.special_token_count": 0.0,
+    "<field>_token_stats.special_token_stats.special_token_ratio": 0.0,
+    "<field>_token_stats.special_token_stats.special_token_types": 0.0,
+    "<field>_structure.length_metrics.character_count": 0.0,
+    "<field>_structure.length_metrics.word_count": 0.01,
+    "<field>_structure.length_metrics.line_count": 0.0,
+    "<field>_structure.length_metrics.sentence_count": 0.0,
+    "<field>_structure.length_metrics.avg_sentence_length": 0.0,
+    "<field>_structure.length_metrics.avg_line_length": 0.0,
+    "<field>_structure.whitespace_metrics.blank_line_count": 0.0,
+    "<field>_structure.whitespace_metrics.indentation_levels": 0.0,
+    "<field>_structure.whitespace_metrics.whitespace_ratio": 0.0,
+
+   
+    "performance_metrics.timing.generation_time_ms": -0.01,
+    "performance_metrics.timing.tokens_per_second": 0.01,
+    "performance_metrics.timing.total_processing_time": -0.01,
+    "performance_metrics.memory.ram_mb": 0.0,
+    "performance_metrics.memory.gpu_mb": 0.0,
+    "performance_metrics.memory.peak_memory": 0.0,
+    "performance_metrics.efficiency.memory_efficiency": 0.01,
+    "performance_metrics.efficiency.tokens_per_mb": 0.01,
+    "performance_metrics.efficiency.optimization_level": 0.0,
+
+    
+    "relationship_context.conversation_tracking.conversation_id": 0.0,
+    "relationship_context.conversation_tracking.message_index": 0.0,
+    "relationship_context.conversation_tracking.thread_depth": 0.0,
+    "relationship_context.reference_tracking.references": 0.0,
+    "relationship_context.reference_tracking.parent_message_id": 0.0,
+    "relationship_context.reference_tracking.root_message_id": 0.0,
+    "relationship_context.temporal_tracking.timestamp": 0.0,
+    "relationship_context.temporal_tracking.elapsed_time": 0.0,
+    "relationship_context.temporal_tracking.session_duration": 0.0
+}
 
 }
