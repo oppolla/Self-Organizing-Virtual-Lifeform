@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. complete training queue metadata tag weight customization system. maybe exposed parameters that adjust the weighting of each system like dreams higher than error messages. also aspend logs with context like appebding error with "this error happened to me <timestamp>: "
+1. complete training queue metadata tag weight customization system. maybe exposed parameters that adjust the weighting of each system like dreams higher than error messages. also aspend logs with context like appebding error with "this error happened to me <timestamp>: ". check it system prompt starting with I or You is better for system to understand its about itself
 2. Disable that startup data sovl_seed part. Save it for Soulprint
 3. 
 4. 
