@@ -1787,29 +1787,29 @@ class MetadataProcessor:
 
 MEMORY_TEMPLATES = {
     "user_interaction": (
-        "You spoke with {user_id} at {timestamp_unix}"
+        "You spoke with {user_id} at {timestamp_unix}. "
         "The user said: {prompt}"
-        "You responded with: {generated_text}"
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "Your confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
-        "It took you {generation_time} to respond."
+        "You responded with: {generated_text}. "
+        "It was the {session_id} time you awoke. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "The novelty was {novelty_score}. " 
+        "Your confidence was {confidence_score}. "
+        "You were in your {current_lifecycle_stage} phase. "
+        "It took you {generation_time} to respond. "
     ),
     "curiosity_question": (
         "You pondered the question: {question} at {timestamp_unix}. "
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
-        "It took you {generation_time} to respond."
+        "It was the {session_id} time you awoke. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "The novelty was {novelty_score}. " 
+        "The confidence was {confidence_score}. "
+        "You were in your {current_lifecycle_stage} phase. "
+        "It took you {generation_time} to respond. "
     ),
     "internal_error_reflection": (
-        "You thought this about: {generated_response} about this error {triggering_error_message} at {timestamp_unix}."
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
+        "You thought this about: {generated_response} about this error {triggering_error_message} at {timestamp_unix}. "
+        "It was the {session_id} time you awoke. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
         "The novelty was {novelty_score}." 
         "The confidence was {confidence_score}."
         "You were in your {current_lifecycle_stage} phase."
@@ -1825,55 +1825,51 @@ MEMORY_TEMPLATES = {
     "internal_thought": (
         "You had this thought: {full_text} at {timestamp_unix}. "
         "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "The novelty was {novelty_score}. " 
+        "The confidence was {confidence_score}. "
+        "You were in your {current_lifecycle_stage} phase. "
     ),
     "generation_error": (
-        "You spoke with {user_id} at {timestamp_unix}"
-        "The user said: {prompt}"
-        "You were unable to respond."
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
+        "You spoke with {user_id} at {timestamp_unix}. "
+        "The user said: {prompt}. "
+        "You were unable to respond. "
+        "It was the {session_id} time you awoke. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "The novelty was {novelty_score}. " 
+        "The confidence was {confidence_score}. "
+        "You were in your {current_lifecycle_stage} phase. "
     ),
     "backchannel_interaction": (
-        "You spoke with {user_id} at {timestamp_unix} about: {full_text}."
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
+        "{user_id} spoke to the inner voice at {timestamp_unix}. "
+        "The user said: {prompt}. "
+        "The inner voice responded with: {generated_text}. "
+        "This occured the {session_id} time you awoke. "
     ),
     "temperament_yell": (
-        "You blurted out: {full_text} at {timestamp_unix}."
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
+        "You blurted out: {response} at {timestamp_unix} because you were upset. "
+        "It was the {session_id} time you awoke. "
+        "Your temperament was {temperament_score}. "
+        "You felt {pressure} amount of pressure. "  
+        "You unleashed at {threshold} amount of pressure. "
+        "You were in your {current_lifecycle_stage} phase. "
     ),
     "dream": (
-        "You had this dream: {narration} at {timestamp_unix}."
-        "You also dreamed this: {response}."
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
+        "You had this dream: {narration} at {timestamp_unix}. "
+        "You also dreamed this: {response}. "
+        "It was the {session_id} time you awoke. "
+        "The novelty was {novelty_score}. " 
+        "The confidence was {confidence_score}. "
+        "You were in your {current_lifecycle_stage} phase. "
     ),
     "resonator": (
-        "You saw this: {full_text} at {timestamp_unix}."
-        "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
-        "You were in your {current_lifecycle_stage} phase."
+        "You saw this: {full_text} at {timestamp_unix}. "
+        "It was the {session_id} time you awoke. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "The novelty was {novelty_score}. " 
+        "The confidence was {confidence_score}. "
+        "You were in your {current_lifecycle_stage} phase. "
     ),
-    # Add more event types and templates as needed
 }
 
 # --- Scribe Event Fields Template Registry ---
@@ -1938,18 +1934,9 @@ SCRIBE_EVENT_FIELDS = {
         ("current_temperament_score", "Current temperament score"),
         ("session_id", "Session identifier"),
     ],
-    # Add more event types here as your system grows
-    # "new_event_type": [
-    #     ("field_name", "Description"),
-    #     ...
-    # ],
 }
 
-# --- Event Type Weights ---
 EVENT_TYPE_WEIGHTS = config.get("event_type_weights", {})
-# --- SOVL Memory Metadata Reference ---
-# This is a comprehensive list of all metadata fields available for crafting memory templates.
-# Use this as a reference when designing new MEMORY_TEMPLATES or for documentation/UI.
 
 def load_trainer_weighting(config_path="sovl_config.json"):
     import json
@@ -2031,27 +2018,29 @@ class ScribeIngestionProcessor:
         # Add more event types as needed
         return event_data.get("prompt") or str(event_data)
 
+    def safe_format(self, template, values):
+        fields = set(re.findall(r"{(\w+)}", template))
+        safe_values = {}
+        for field in fields:
+            value = values.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                safe_values[field] = "unknown"
+            else:
+                safe_values[field] = value
+        return template.format(**safe_values)
+
     def process_entry(self, entry: dict) -> dict:
         event_type = entry.get("event_type", "unknown")
         template = self.memory_templates.get(event_type, GENERIC_TEMPLATE)
-
-        # --- Event type weighting ---
-        base_weight = EVENT_TYPE_WEIGHTS.get(event_type, 1.0)  # Default to 1.0 if not found
-        weight = base_weight
-
         metadata = self.flatten_metadata(entry.get("metadata", {}))
         event_data = entry.get("event_data", {})
         full_text = self.extract_main_text(event_type, event_data)
-        memory = template.format(
-            origin=metadata.get("origin", "Unknown"),
-            user_id=metadata.get("user_id", "Unknown"),
-            timestamp_unix=metadata.get("timestamp_unix", "Unknown"),
-            full_text=full_text,
-            current_mood_label=metadata.get("current_mood_label", "Unknown"),
-            current_temperament_score=metadata.get("current_temperament_score", "Unknown"),
-            session_id=metadata.get("session_id", "Unknown"),
-        )
-        return {"memory": memory, "weight": weight, "metadata": metadata}
+        format_values = dict(metadata)
+        format_values.update(event_data)
+        format_values["full_text"] = full_text
+        memory = self.safe_format(template, format_values)
+        weight = self.calculate_weight(metadata)
+        return {"memory": memory, "weight": weight}
 
     def process_all(self) -> list:
         logs = self.load_logs()
@@ -2064,22 +2053,16 @@ class ScribeIngestionProcessor:
         metadata = self.flatten_metadata(entry.get("metadata", {}))
         event_data = entry.get("event_data", {})
         full_text = self.extract_main_text(event_type, event_data)
-        memory = template.format(
-            origin=metadata.get("origin", "Unknown"),
-            user_id=metadata.get("user_id", "Unknown"),
-            timestamp_unix=metadata.get("timestamp_unix", "Unknown"),
-            full_text=full_text,
-            current_mood_label=metadata.get("current_mood_label", "Unknown"),
-            current_temperament_score=metadata.get("current_temperament_score", "Unknown"),
-            session_id=metadata.get("session_id", "Unknown"),
-        )
-        weight = EVENT_TYPE_WEIGHTS.get(event_type, 1.0)  # Default to 1.0 if not found
+        format_values = dict(metadata)
+        format_values.update(event_data)
+        format_values["full_text"] = full_text
+        memory = self.safe_format(template, format_values)
+        weight = EVENT_TYPE_WEIGHTS.get(event_type, 1.0)
         return {
             "memory": memory,
             "weight": weight,
             "metadata": metadata,
             "event_type": event_type,
-            # Optionally add more debug info here
         }
 
     def calculate_weight(self, metadata):
