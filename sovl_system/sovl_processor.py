@@ -1792,16 +1792,22 @@ class MetadataProcessor:
 
 MEMORY_TEMPLATES = {
     "user_interaction": (
-        "{origin} You spoke to {user_id} at {timestamp_unix} about {full_text}. "
+        "You spoke to {user_id} at {timestamp_unix} about {full_text}. "
+        "It was the {session_id} time you awoke."
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "It was the {session_id} time you spoke."
         "The novelty was {novelty_score}." 
         "The confidence was {confidence_score}."
+        "You were in your {current_lifecycle_stage} phase."
+        "It took you {generation_time} to respond."
     ),
     "curiosity_question": (
-        "{origin} You wondered about {full_text} at {timestamp_unix}. "
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
-        "It happened on your {session_id} session."
+        "You wondered about {full_text} at {timestamp_unix}. "
+        "It wondered this on the {session_id} you awoke."
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
+        "The novelty was {novelty_score}." 
+        "The confidence was {confidence_score}."
+        "You were in your {current_lifecycle_stage} phase."
+        "It took you {generation_time} to respond."
     ),
     "error_message": (
         "{origin} You wondered about {full_text} at {timestamp_unix}. "

@@ -540,7 +540,7 @@
     "dream_memory_decay": 0.95,
     "dream_prune_threshold": 0.1
   },
-"metadata_weighting": {
+"trainer_weighting": {
    
     "origin": 0.0,
     "timestamp_unix": 0.0,
