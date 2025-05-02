@@ -4,7 +4,7 @@
 
 1. complete training queue metadata tag weight customization system. maybe exposed parameters that adjust the weighting of each system like dreams higher than error messages. also append or preface logs with context like embedding error log items with with "this error happened to me <timestamp>: ". check if system prompt starting with I or You is better for system to understand its about itself. for meditation system preface "You thought this"
 2. Disable that startup data sovl_seed part. Save it for Soulprint
-3. 
+3. System should know unix time at initialization or always
 4. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. 
