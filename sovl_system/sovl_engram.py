@@ -1,9 +1,10 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 import torch
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ScaffoldError
 from sovl_config import ConfigManager
 from sovl_utils import check_adaptation_dependencies
+from sovl_scaffold import CrossAttentionInjector
 
 """
 sovl_engram.py
@@ -280,3 +281,90 @@ class LoraAdapterManager:
                     stack_trace=traceback.format_exc()
                 )
             return False
+
+class SOVLCompositeModel(torch.nn.Module):
+    """
+    Composite model: frozen base model + one or more scaffold models (with LoRA).
+    """
+    def __init__(
+        self,
+        base_model: torch.nn.Module,
+        scaffold_models: List[torch.nn.Module],
+        config_manager: Any,
+        logger: Any,
+        error_manager: Any,
+        device: Optional[torch.device] = None,
+        layers_to_inject: Optional[List[int]] = None,
+        injection_strategy: str = 'sequential'
+    ):
+        super().__init__()
+        self.base = base_model
+        self.scaffolds = torch.nn.ModuleList(scaffold_models)
+        self.config_manager = config_manager
+        self.logger = logger
+        self.error_manager = error_manager
+        self.device = device or next(base_model.parameters()).device
+
+        self._move_to_device(self.device)
+        self._freeze_base()
+        self._inject_scaffolds(layers_to_inject, injection_strategy)
+
+    def _move_to_device(self, device):
+        self.base.to(device)
+        for scaffold in self.scaffolds:
+            scaffold.to(device)
+        self.logger.log_info(f"Moved base and scaffolds to device: {device}", event_type="device_placement")
+
+    def _freeze_base(self):
+        for param in self.base.parameters():
+            param.requires_grad = False
+        self.logger.log_info("Base model parameters frozen.", event_type="freeze_base")
+
+    def _inject_scaffolds(self, layers_to_inject, injection_strategy):
+        injector = CrossAttentionInjector(self.config_manager, self.logger)
+        # TODO: In future, inject all scaffolds (swarm); for now, just the first
+        scaffold = self.scaffolds[0]
+        if layers_to_inject is None:
+            total_layers = injector._get_total_layers(self.base)
+            layers_to_inject = [total_layers // 2]
+        injector.inject(self.base, scaffold, layers_to_inject, injection_strategy)
+        self.logger.log_info(f"Injected scaffold into base model at layers {layers_to_inject}", event_type="scaffold_injection")
+
+    def forward(self, *args, scaffold_index: int = 0, **kwargs):
+        """
+        Forward pass through the composite model.
+        For now, just forwards through the base model (scaffold is injected).
+        In future, could select/aggregate scaffolds by index or strategy.
+        """
+        return self.base(*args, **kwargs)
+
+    def trainable_parameters(self, as_dict: bool = False) -> Any:
+        """
+        Returns all trainable parameters from all scaffolds.
+        If as_dict is True, returns a dict for advanced optimizer configs.
+        """
+        if as_dict:
+            return {f"scaffold_{i}": [p for p in scaffold.parameters() if p.requires_grad]
+                    for i, scaffold in enumerate(self.scaffolds)}
+        params = []
+        for scaffold in self.scaffolds:
+            params.extend([p for p in scaffold.parameters() if p.requires_grad])
+        return params
+
+# Factory function to build the composite model
+
+def build_sovl_composite_model(
+    base_model: torch.nn.Module,
+    scaffold_model: torch.nn.Module,
+    config_manager: Any,
+    logger: Any,
+    error_manager: Any,
+    device: Optional[torch.device] = None,
+    layers_to_inject: Optional[List[int]] = None,
+    injection_strategy: str = 'sequential'
+) -> SOVLCompositeModel:
+    """
+    Build a SOVLCompositeModel from a base model and a scaffold model.
+    For now, only a single scaffold is supported, but the design is swarm-ready.
+    """
+    return SOVLCompositeModel(base_model, [scaffold_model], config_manager, logger, error_manager, device, layers_to_inject, injection_strategy)

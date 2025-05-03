@@ -971,13 +971,12 @@ class ScribeJSONLBatchLoader:
     """
     Loads and batches scribe-formatted JSONL data for training.
     Each batch yields:
-      - batch_texts: List[Dict[str, str]] with 'prompt' and 'response'
-      - batch_weights: List[float] (from 'confidence_score' or default 1.0)
+      - batch_texts: List[Dict[str, str]] with 'memory'
+      - batch_weights: List[float] (from 'weight', or default 1.0)
     """
-    def __init__(self, file_path: str, batch_size: int = 32, weight_field: str = "confidence_score", default_weight: float = 1.0):
+    def __init__(self, file_path: str, batch_size: int = 32, default_weight: float = 1.0):
         self.file_path = file_path
         self.batch_size = batch_size
-        self.weight_field = weight_field
         self.default_weight = default_weight
 
     def __iter__(self):
@@ -990,19 +989,17 @@ class ScribeJSONLBatchLoader:
                     continue
                 try:
                     entry = json.loads(line)
-                    prompt = entry.get("prompt")
-                    response = entry.get("response")
-                    weight = float(entry.get(self.weight_field, self.default_weight))
-                    if not isinstance(prompt, str) or not isinstance(response, str):
+                    memory = entry.get("memory")
+                    weight = float(entry.get("weight", self.default_weight))
+                    if not isinstance(memory, str):
                         continue  # Skip invalid entries
-                    batch_texts.append({"prompt": prompt, "response": response})
+                    batch_texts.append({"memory": memory})
                     batch_weights.append(weight)
                     if len(batch_texts) == self.batch_size:
                         yield batch_texts, batch_weights
                         batch_texts = []
                         batch_weights = []
-                except Exception as e:
-                    # Optionally log or handle parse errors
+                except Exception:
                     continue
         if batch_texts:
             yield batch_texts, batch_weights

@@ -537,6 +537,8 @@ class SOVLState(StateBase):
             self.curiosity_exploration_queue = deque(maxlen=self.config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
             
             self.version = self.STATE_VERSION
+            self.mode = "online"  # online, gestating, offline
+            self.gestation_progress: float = 0.0  # 0.0 to 1.0
             
             self.log_event(
                 "state_initialized",
@@ -797,6 +799,8 @@ class SOVLState(StateBase):
                     # Curiosity state additions
                     "curiosity_metrics": {k: list(v) for k, v in getattr(self, "curiosity_metrics", {}).items()},
                     "curiosity_exploration_queue": list(getattr(self, "curiosity_exploration_queue", [])),
+                    "mode": self.mode,
+                    "gestation_progress": self.gestation_progress
                 }
                 if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
                     state_data['short_term_memory'] = self.short_term_memory.to_dict()
@@ -857,6 +861,12 @@ class SOVLState(StateBase):
             # Load short term memory
             if 'short_term_memory' in data and hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'from_dict'):
                 self.short_term_memory.from_dict(data['short_term_memory'])
+            
+            # Load mode
+            self.mode = data.get("mode", "online")
+            
+            # Load gestation progress
+            self.gestation_progress = float(data.get("gestation_progress", 0.0))
             
             # Validate loaded state
             self._validate_state()
@@ -937,7 +947,9 @@ class SOVLState(StateBase):
             "total_dream_memory_mb": self.total_dream_memory_mb,
             "training_state": self._training_state.__dict__,
             "conversation_metadata": self._conversation_metadata,
-            "goals": [goal.copy() for goal in self.goals]
+            "goals": [goal.copy() for goal in self.goals],
+            "mode": self.mode,
+            "gestation_progress": self.gestation_progress
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
@@ -1246,6 +1258,27 @@ class StateManager(StateAccessor):
             if self._current_state is None:
                 self._initialize_state()
             return read_fn(self._current_state)
+
+    def set_mode(self, new_mode: str):
+        with self._lock:
+            if self._current_state:
+                self._current_state.mode = new_mode
+                self._state_version += 1
+    def get_mode(self) -> str:
+        with self._lock:
+            if self._current_state and hasattr(self._current_state, 'mode'):
+                return self._current_state.mode
+            return "online"
+
+    def set_gestation_progress(self, value: float):
+        with self._lock:
+            if self._current_state:
+                self._current_state.gestation_progress = value
+    def get_gestation_progress(self) -> float:
+        with self._lock:
+            if self._current_state and hasattr(self._current_state, 'gestation_progress'):
+                return self._current_state.gestation_progress
+            return 0.0
 
 class StateTracker(StateBase):
     """Tracks component states and their changes."""

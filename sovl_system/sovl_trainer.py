@@ -13,7 +13,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
 from transformers import get_linear_schedule_with_warmup
 from sovl_engram import LoraAdapterManager
-from sovl_io import JSONLLoader, StreamingJSONLoader
+from sovl_io import JSONLLoader, StreamingJSONLoader, ScribeJSONLBatchLoader
 import threading
 import gc
 from sovl_utils import validate_metadata_fields, repair_metadata, get_metadata_value, collate_tensor_batch, move_batch_to_device
@@ -1013,6 +1013,13 @@ class TrainingWorkflowManager:
             import traceback
             import torch
 
+            # Set mode to 'gestating' at the start
+            state_manager = getattr(self.trainer, 'state_manager', None)
+            if state_manager and hasattr(state_manager, 'set_mode'):
+                state_manager.set_mode('gestating')
+            if state_manager and hasattr(state_manager, 'set_gestation_progress'):
+                state_manager.set_gestation_progress(0.0)
+
             # Use modular pipeline for metadata enrichment and batch preparation
             metadata_processor = getattr(self.trainer, 'metadata_processor', None)
             tokenizer = getattr(self.trainer, 'tokenizer', None)
@@ -1269,6 +1276,12 @@ class TrainingWorkflowManager:
             gc.collect()
             torch.cuda.empty_cache()
             
+            # Set mode back to 'online' at the end
+            if state_manager and hasattr(state_manager, 'set_mode'):
+                state_manager.set_mode('online')
+            if state_manager and hasattr(state_manager, 'set_gestation_progress'):
+                state_manager.set_gestation_progress(1.0)
+            
     def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Run a dream cycle with proper synchronization."""
         with self._get_resource_lock('dreamer'):  # Lock access to dreamer
@@ -1420,6 +1433,218 @@ class SOVLTrainer:
                 stack_trace=traceback.format_exc()
             )
             return 1  # Return minimum batch size on error
+
+    def load_scribe_batches(self, scribe_path: str, batch_size: int = 32):
+        """
+        Loads batches from a scribe journal JSONL file, tokenizes the 'memory' field, and yields (inputs, weights).
+        """
+        loader = ScribeJSONLBatchLoader(scribe_path, batch_size=batch_size)
+        for batch_texts, batch_weights in loader:
+            memory_texts = [entry["memory"] for entry in batch_texts]
+            # Tokenize memory strings
+            inputs = self.tokenizer(memory_texts, return_tensors="pt", padding=True, truncation=True, max_length=getattr(self.tokenizer, 'model_max_length', 512))
+            # Move to device
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            yield inputs, batch_weights
+
+    # Example usage in training loop:
+    # for inputs, weights in self.load_scribe_batches("scribe_journal.jsonl", batch_size=32):
+    #     outputs = self.model(**inputs)
+    #     # Use weights for loss scaling if supported
+    #     ...
+
+    def train_from_scribe_journal(self, scribe_path: str, batch_size: int = 32, val_split: float = 0.1, patience_limit: int = 5):
+        """
+        Main training loop using scribe_journal.jsonl. Handles batching, weighted loss, validation, checkpointing, and logging.
+        Returns a dict of training/validation losses for analysis.
+        """
+        import os
+        import json
+        import torch
+        from tqdm import tqdm
+        from sklearn.model_selection import train_test_split
+
+        # Device check
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            self._logger.log_event("device_warning", "CUDA not available, switching to CPU.", level="warning")
+            self.device = torch.device("cpu")
+
+        # Load all entries for optional validation split
+        with open(scribe_path, 'r', encoding='utf-8') as f:
+            all_lines = [line.strip() for line in f if line.strip()]
+        if val_split > 0.0:
+            train_lines, val_lines = train_test_split(all_lines, test_size=val_split, random_state=42)
+        else:
+            train_lines, val_lines = all_lines, []
+
+        def batch_loader(lines, batch_size):
+            batch_texts, batch_weights = [], []
+            skipped = 0
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                    memory = entry["memory"]
+                    weight = float(entry.get("weight", 1.0))
+                    batch_texts.append(memory)
+                    batch_weights.append(weight)
+                except Exception as e:
+                    skipped += 1
+                    self._logger.log_error(f"Failed to parse line: {e}", error_type="data_parse_error")
+                if len(batch_texts) == batch_size:
+                    yield batch_texts, batch_weights
+                    batch_texts, batch_weights = [], []
+            if batch_texts:
+                yield batch_texts, batch_weights
+            return skipped
+
+        # Prepare optimizer, scheduler, etc.
+        model = self.model
+        device = self.device
+        optimizer = self.training_manager.optimizer
+        scheduler = self.training_manager.scheduler
+        scaler = self.training_manager.scaler
+        tokenizer = self.tokenizer
+        grad_accum_steps = self.config.optimizer.grad_accum_steps
+        max_epochs = self.config.params.max_epochs
+        validate_every = self.config.params.validate_every_n_steps
+        checkpoint_interval = self.config.params.checkpoint_interval
+        checkpoint_path = self.config.params.checkpoint_path
+        use_amp = self.config.memory.use_amp
+
+        global_step = 0
+        best_val_loss = float('inf')
+        patience = 0
+        train_losses = []
+        val_losses = []
+        skipped_train = 0
+        skipped_val = 0
+        for epoch in range(max_epochs):
+            model.train()
+            epoch_loss = 0.0
+            num_batches = 0
+            pbar = tqdm(batch_loader(train_lines, batch_size), desc=f"Epoch {epoch+1}/{max_epochs}")
+            for batch_texts, batch_weights in pbar:
+                # Tokenize
+                inputs = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=getattr(tokenizer, 'model_max_length', 512))
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                labels = inputs["input_ids"].clone()
+                batch_weights_tensor = torch.tensor(batch_weights, dtype=torch.float32, device=device)
+                # Forward pass
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    outputs = model(**inputs, labels=labels)
+                    # Per-sample loss (assume CrossEntropyLoss with reduction='none')
+                    if hasattr(outputs, 'loss') and outputs.loss is not None:
+                        if outputs.loss.dim() == 0:
+                            loss = outputs.loss
+                        else:
+                            # Weighted mean
+                            loss = (outputs.loss * batch_weights_tensor).mean() / grad_accum_steps
+                    else:
+                        continue
+                # Backward
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                # Optimizer step
+                if (global_step + 1) % grad_accum_steps == 0:
+                    if scaler is not None:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.optimizer.max_grad_norm)
+                    if scaler is not None:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                    optimizer.zero_grad(set_to_none=True)
+                epoch_loss += loss.item() * grad_accum_steps
+                num_batches += 1
+                global_step += 1
+                # Logging
+                if global_step % 10 == 0:
+                    self._logger.log_event("train_progress", f"Step {global_step} | Loss: {loss.item():.4f}", level="info")
+                # Validation
+                if val_lines and global_step % validate_every == 0:
+                    val_loss, skipped_val = self._run_validation(val_lines, batch_size, tokenizer, device, use_amp)
+                    val_losses.append(val_loss)
+                    self._logger.log_event("val_progress", f"Step {global_step} | Val Loss: {val_loss:.4f}", level="info")
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        patience = 0
+                        self.save_checkpoint(f"{checkpoint_path}_best.pt")
+                    else:
+                        patience += 1
+                        if patience >= patience_limit:
+                            self._logger.log_event("early_stopping", f"Early stopping at step {global_step} due to no improvement.", level="info")
+                            break
+                # Checkpointing
+                if global_step % checkpoint_interval == 0:
+                    self.save_checkpoint(f"{checkpoint_path}_step{global_step}.pt")
+                pbar.set_postfix({"loss": loss.item()})
+            # End of epoch checkpoint
+            self.save_checkpoint(f"{checkpoint_path}_epoch{epoch+1}.pt")
+            avg_loss = epoch_loss / max(1, num_batches)
+            train_losses.append(avg_loss)
+            self._logger.log_event("epoch_end", f"Epoch {epoch+1} complete. Avg Loss: {avg_loss:.4f}", level="info")
+            if patience >= patience_limit:
+                break
+        # Save final model
+        self.save_checkpoint(f"{checkpoint_path}_final.pt")
+        save_dir = os.path.dirname(checkpoint_path) or "."
+        os.makedirs(save_dir, exist_ok=True)
+        if hasattr(tokenizer, 'save_pretrained'):
+            tokenizer.save_pretrained(save_dir)
+        self._logger.log_event("training_complete", f"Training complete. Skipped {skipped_train} train lines, {skipped_val} val lines.", level="info")
+        return {"train_losses": train_losses, "val_losses": val_losses, "skipped_train": skipped_train, "skipped_val": skipped_val}
+
+    def _run_validation(self, val_lines, batch_size, tokenizer, device, use_amp):
+        import torch
+        from tqdm import tqdm
+        total_loss = 0.0
+        num_batches = 0
+        skipped = 0
+        self.model.eval()
+        with torch.no_grad():
+            pbar = tqdm(self._batch_loader(val_lines, batch_size), desc="Validation", leave=False)
+            for batch_texts, batch_weights in pbar:
+                try:
+                    inputs = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=getattr(tokenizer, 'model_max_length', 512))
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    labels = inputs["input_ids"].clone()
+                    batch_weights_tensor = torch.tensor(batch_weights, dtype=torch.float32, device=device)
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                        outputs = self.model(**inputs, labels=labels)
+                        if hasattr(outputs, 'loss') and outputs.loss is not None:
+                            if outputs.loss.dim() == 0:
+                                loss = outputs.loss
+                            else:
+                                loss = (outputs.loss * batch_weights_tensor).mean()
+                            total_loss += loss.item()
+                            num_batches += 1
+                except Exception as e:
+                    skipped += 1
+                    self._logger.log_error(f"Validation batch error: {e}", error_type="val_batch_error")
+        self.model.train()
+        return total_loss / max(1, num_batches), skipped
+
+    def _batch_loader(self, lines, batch_size):
+        batch_texts, batch_weights = [], []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+                memory = entry["memory"]
+                weight = float(entry.get("weight", 1.0))
+                batch_texts.append(memory)
+                batch_weights.append(weight)
+            except Exception:
+                continue
+            if len(batch_texts) == batch_size:
+                yield batch_texts, batch_weights
+                batch_texts, batch_weights = [], []
+        if batch_texts:
+            yield batch_texts, batch_weights
 
 @dataclass
 class InterpretationConfig:
