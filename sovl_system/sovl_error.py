@@ -48,7 +48,7 @@ class ErrorManager(IErrorHandler):
         self.context = context
         self.state_tracker = state_tracker
         self.config_manager = config_manager
-        self.logger = context.logger
+        self.logger = Logger.get_instance()
         
         # Initialize configuration
         self._initialize_config()

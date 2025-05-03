@@ -1855,6 +1855,8 @@ MEMORY_TEMPLATES = {
         "You were in your {current_lifecycle_stage} phase."
     ),
     "dream": (
+        "This overall dream is called : {dream_album_name}. "
+        "This dream sequence is called : {dream_song_name}. "
         "You dreamed: {dream1} in {musical_key} at {timestamp_unix}. "
         "You dreamed: {dream2} in {musical_key} at {timestamp_unix}. "
         "You dreamed: {dream3} in {musical_key} at {timestamp_unix}. "
