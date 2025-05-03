@@ -25,9 +25,20 @@ class NumericalGuard:
     def __exit__(self, exc_type, exc_val, exc_tb):
         torch.set_grad_enabled(True)
 
-def safe_divide(numerator: float, denominator: float, default: float = 0.0) -> float:
-    """Safely divide two numbers, returning default if denominator is zero."""
-    return numerator / denominator if denominator != 0 else default
+def safe_divide(numerator, denominator, default=0.0):
+    """
+    Safely divide two numbers, returning a default value if denominator is zero or on error.
+    Args:
+        numerator: The numerator.
+        denominator: The denominator.
+        default: Value to return if denominator is zero or error occurs.
+    Returns:
+        The result of numerator / denominator, or default if denominator is zero or error.
+    """
+    try:
+        return numerator / denominator if denominator else default
+    except Exception:
+        return default
 
 def safe_compare(a: float, b: float, tolerance: float = 1e-6) -> bool:
     """Safely compare two floating point numbers."""

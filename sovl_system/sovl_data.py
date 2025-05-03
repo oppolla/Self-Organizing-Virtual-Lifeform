@@ -15,6 +15,7 @@ from sovl_state import StateManager
 from threading import Lock
 from dataclasses import dataclass, field
 from sovl_monitor import MemoryMonitor
+from sovl_utils import safe_divide
 
 @dataclass
 class DataStats:
