@@ -116,7 +116,7 @@ class DreamNarrationStrategy:
         raise NotImplementedError
 
 class SurrealNarrationStrategy(DreamNarrationStrategy):
-    """Surreal narration blending prompt and response with dream-like phrases."""
+    """Surreal narration blending two memory fragments with dream-like phrases."""
     def get_llm_dreamlike_phrase(self, generation_manager):
         prompt = (
             "Invent a short, surreal, poetic phrase (max 8 words) that could appear in a dream. "
@@ -126,22 +126,39 @@ class SurrealNarrationStrategy(DreamNarrationStrategy):
 
     def narrate(self, dream_event: Dict[str, Any], noise_level: float, generation_manager=None) -> str:
         """
-        Compose a short, surreal, dreamlike narration blending two dream fragments
+        Compose a short, surreal, dreamlike narration blending two memory fragments
         """
-        prompt = (
-            "Essential qualities:\n"
-            "  - Compose a short, surreal, dreamlike narration (max 2 sentences) that blends the following two dream fragments.\n"
-            "  - The narration should be vivid, mysterious, and evocative of a dream.\n"
-            "  - You may optionally end with a brief, surreal phrase.\n"
-            "Fragments:\n"
-            f"  - Fragment 1: {dream_event['event_data'].get('prompt', '')}\n"
-            f"  - Fragment 2: {dream_event['event_data'].get('response', '')}\n"
-            "Key constraints:\n"
-            "  - Output only your narration, no explanations or commentary.\n"
-            "  - Do not reference music, songs, or lyrics directly.\n"
-            "  - Do not refer to the specific key, scale, or tempo.\n"
-            "  - Do not include dialogue or meta-commentary.\n"
-        )
+        memory1 = dream_event['event_data'].get('memory1', '')
+        memory2 = dream_event['event_data'].get('memory2', '')
+        if memory1 and memory2 and memory1 != memory2:
+            prompt = (
+                "Essential qualities:\n"
+                "  - Compose a short, surreal, dreamlike narration (max 2 sentences) that blends the following two dream fragments.\n"
+                "  - The narration should be vivid, mysterious, and evocative of a dream.\n"
+                "  - You may optionally end with a brief, surreal phrase.\n"
+                "Fragments:\n"
+                f"  - Fragment 1: {memory1}\n"
+                f"  - Fragment 2: {memory2}\n"
+                "Key constraints:\n"
+                "  - Output only your narration, no explanations or commentary.\n"
+                "  - Do not reference music, songs, or lyrics directly.\n"
+                "  - Do not refer to the specific key, scale, or tempo.\n"
+                "  - Do not include dialogue or meta-commentary.\n"
+            )
+        else:
+            prompt = (
+                "Essential qualities:\n"
+                "  - Compose a short, surreal, dreamlike narration (max 2 sentences) inspired by the following dream fragment.\n"
+                "  - The narration should be vivid, mysterious, and evocative of a dream.\n"
+                "  - You may optionally end with a brief, surreal phrase.\n"
+                "Fragment:\n"
+                f"  - Fragment: {memory1 or memory2}\n"
+                "Key constraints:\n"
+                "  - Output only your narration, no explanations or commentary.\n"
+                "  - Do not reference music, songs, or lyrics directly.\n"
+                "  - Do not refer to the specific key, scale, or tempo.\n"
+                "  - Do not include dialogue or meta-commentary.\n"
+            )
         narration = generation_manager.generate_text(prompt, num_return_sequences=1)[0].strip()
         return narration
 
@@ -186,8 +203,8 @@ class DreamEventSelector:
                 message=f"Error in extract_last_active_period: {str(e)}",
                 level="error",
                 additional_info=context,
-                    stack_trace=traceback.format_exc()
-                )
+                stack_trace=traceback.format_exc()
+            )
         return []
 
     def score_and_select_dreams(self, events: List[Dict]) -> List[Dict]:
@@ -286,20 +303,38 @@ class DreamGenerator:
             meta["confidence"] += random.uniform(-0.1, 0.1) * self.noise_level
         return dream_event
 
-    def generate_dream_events(self, dream_candidates: List[Dict]) -> List[Dict]:
-        """Generate dream events with narration."""
+    def generate_dream_events(self, dream_candidates: List[Dict], generation_manager=None) -> List[Dict]:
+        """Generate dream events with playoff-style memory pairings and narration, using only the top half of memories."""
         dreams = []
         now = datetime.now().isoformat()
+        # Extract memory strings from each candidate
+        memories = []
         for event in dream_candidates:
+            mem = event.get('memory')
+            if mem is None:
+                mem = event.get('event_data', {}).get('memory')
+            if mem is not None:
+                memories.append(mem)
+        n = len(memories)
+        # Only use the top half (round up if odd)
+        half = n // 2 if n % 2 == 0 else (n // 2) + 1
+        top_half = memories[:half]
+        # Playoff-style pairing within top_half
+        pairs = []
+        for i in range((half + 1) // 2):
+            j = half - 1 - i
+            pairs.append((top_half[i], top_half[j]))
+        for idx, (mem1, mem2) in enumerate(pairs):
+            event_data = {'memory1': mem1, 'memory2': mem2}
             dream_event = {
                 "timestamp_iso": now,
                 "event_type": "dream",
-                "event_data": event.get("event_data", {}),
-                "metadata": event.get("metadata", {}),
-                "dreamed_from": event.get("event_type", "unknown")
+                "event_data": event_data,
+                "metadata": {},
+                "dreamed_from": "dream_pairing"
             }
             dream_event = self.apply_dream_noise(dream_event)
-            narration = self.narration_strategy.narrate(dream_event, self.noise_level)
+            narration = self.narration_strategy.narrate(dream_event, self.noise_level, generation_manager=generation_manager)
             dream_event["narration"] = narration
             dreams.append(dream_event)
         return dreams
@@ -480,59 +515,59 @@ class DreamAlbumGenerator:
                     # Generate narration fragments for the section
                     narration = self.generate_section_narration(section, song, motif_memory, memories, generation_manager)
                     section_narrations.append(narration)
-                    prog_roman = [" ".join(bar) for bar in section.progression.progression]
-                    prog_in_key = [" ".join(section.key.get_chord(c) for c in bar) for bar in section.progression.progression]
-                    bars = len(section.progression.progression)
-                    repeats = section.repeats
-                    label = f"Section {section.name} ({section.key.tonic}, {song.get_tempo()})"
-                    musical_details = {
-                        "key": str(section.key),
-                        "scale": section.key.scale_type,
-                        "tempo": song.get_tempo_desc(),
-                        "progression_roman": prog_roman,
-                        "progression_in_key": prog_in_key,
-                        "bars": bars,
-                        "repeats": repeats
-                    }
-                    score_lines.append(f"{label}: ║: {' | '.join(prog_roman)} :║ x{repeats}")
-                    song_sections.append({
-                        "label": label,
-                        "narration": narration,
-                        "musical_details": musical_details
-                    })
-                song_title = self._clean_title(list(section_motifs.values())[0], max_length=48)
-                poetic_score = "\n".join(score_lines)
-                # Each dreamN is a full section narration
-                event_data = {
-                    f"dream{i+1}": section_narrations[i] for i in range(len(section_narrations))
+                prog_roman = [" ".join(bar) for bar in section.progression.progression]
+                prog_in_key = [" ".join(section.key.get_chord(c) for c in bar) for bar in section.progression.progression]
+                bars = len(section.progression.progression)
+                repeats = section.repeats
+                label = f"Section {section.name} ({section.key.tonic}, {song.get_tempo()})"
+                musical_details = {
+                    "key": str(section.key),
+                    "scale": section.key.scale_type,
+                    "tempo": song.get_tempo_desc(),
+                    "progression_roman": prog_roman,
+                    "progression_in_key": prog_in_key,
+                    "bars": bars,
+                    "repeats": repeats
                 }
-                event_data["musical_key"] = str(song.key)
-                event_data["timestamp_unix"] = int(time.time())
-                song_entry = {
-                    "dream_album_name": album_title,
-                    "dream_song_name": song_title,
-                    "musical_key": str(song.key),
-                    "timestamp_unix": int(time.time()),
-                }
-                # Add dreamN fields
-                for i in range(len(section_narrations)):
-                    song_entry[f"dream{i+1}"] = section_narrations[i]
-                album.append(song_entry)
-                # Process with ScribeIngestionProcessor
-                metadata = {"motif": motif, "album_title": album_title}
-                processed = ScribeIngestionProcessor(log_paths=[self.scribe_path], logger=self.logger).process_entry({
-                    "event_type": "dream",
-                    "event_data": event_data,
-                    "metadata": metadata
+                score_lines.append(f"{label}: ║: {' | '.join(prog_roman)} :║ x{repeats}")
+                song_sections.append({
+                    "label": label,
+                    "narration": narration,
+                    "musical_details": musical_details
                 })
-                self.scribe_event_fn(
-                        origin="dreamer",
-                        event_type="dream",
-                    event_data={"memory": processed["memory"]},
-                    source_metadata=metadata,
-                    session_id=None,
-                    timestamp=datetime.now()
-                )
+                song_title = self._clean_title(list(section_motifs.values())[0], max_length=48)
+            poetic_score = "\n".join(score_lines)
+            # Each dreamN is a full section narration
+            event_data = {
+                f"dream{i+1}": section_narrations[i] for i in range(len(section_narrations))
+            }
+            event_data["musical_key"] = str(song.key)
+            event_data["timestamp_unix"] = int(time.time())
+            song_entry = {
+                "dream_album_name": album_title,
+                "dream_song_name": song_title,
+                "musical_key": str(song.key),
+                "timestamp_unix": int(time.time()),
+            }
+            # Add dreamN fields
+            for i in range(len(section_narrations)):
+                song_entry[f"dream{i+1}"] = section_narrations[i]
+            album.append(song_entry)
+            # Process with ScribeIngestionProcessor
+            metadata = {"motif": motif, "album_title": album_title}
+            processed = ScribeIngestionProcessor(log_paths=[self.scribe_path], logger=self.logger).process_entry({
+                "event_type": "dream",
+                "event_data": event_data,
+                "metadata": metadata
+            })
+            self.scribe_event_fn(
+                origin="dreamer",
+                event_type="dream",
+                event_data={"memory": processed["memory"]},
+                source_metadata=metadata,
+                session_id=None,
+                timestamp=datetime.now()
+            )
             logger.info(f"Dream album generated with {self.num_songs} songs.")
             return {
                 "dream_album_name": album_title,

@@ -2059,11 +2059,11 @@ class ScribeIngestionProcessor:
             memory = build_dynamic_dream_entry(event_data)
         else:
             template = self.memory_templates.get(event_type, GENERIC_TEMPLATE)
-            full_text = self.extract_main_text(event_type, event_data)
-            format_values = dict(metadata)
-            format_values.update(event_data)
-            format_values["full_text"] = full_text
-            memory = self.safe_format(template, format_values)
+        full_text = self.extract_main_text(event_type, event_data)
+        format_values = dict(metadata)
+        format_values.update(event_data)
+        format_values["full_text"] = full_text
+        memory = self.safe_format(template, format_values)
         weight = self.calculate_weight(metadata)
         return {"memory": memory, "weight": weight}
 
