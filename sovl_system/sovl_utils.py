@@ -972,3 +972,15 @@ def print_error(msg: str):
         print(f"\033[91m✖ {msg}\033[0m", file=sys.stderr)
     else:
         print(f"ERROR: {msg}", file=sys.stderr)
+
+def cosine_similarity(a, b, dim=-1, eps=1e-8):
+    """
+    Compute cosine similarity between two tensors.
+    Args:
+        a, b: torch.Tensor
+        dim: dimension along which to compute similarity
+        eps: small value to avoid division by zero
+    Returns:
+        torch.Tensor of similarities
+    """
+    return torch.nn.functional.cosine_similarity(a, b, dim=dim, eps=eps)

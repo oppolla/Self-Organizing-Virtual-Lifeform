@@ -5,7 +5,7 @@ import threading
 from collections import defaultdict, deque
 from contextlib import contextmanager
 from threading import Lock
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, Union, cast, AsyncGenerator
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 from sovl_state import StateManager, SOVLState
@@ -13,6 +13,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_error import ErrorManager, ErrorRecord
 import traceback
 from sovl_resource import ResourceManager
+from dataclasses import dataclass
 
 # Type alias for callbacks - clearer name
 EventHandler = Callable[..., Any]
@@ -47,336 +48,11 @@ class MemoryEventTypes:
     CONVERSATION_STARTED = "conversation_started"
     MEMORY_ERROR = "memory_error"
 
-class StateEventDispatcher(EventDispatcher):
-    """
-    Extends EventDispatcher to handle state-related events and state management integration.
-    """
-    
-    def __init__(self, config_manager: ConfigManager, state_manager: StateManager, logger: Optional[Logger] = None, resource_manager: Optional[ResourceManager] = None):
-        """
-        Initialize the StateEventDispatcher.
-
-        Args:
-            config_manager: ConfigManager instance for configuration handling
-            state_manager: StateManager instance for state management
-            logger: Optional Logger instance. If None, creates a new Logger instance.
-            resource_manager: Optional ResourceManager instance for resource coordination
-        """
-        super().__init__(config_manager, logger)
-        self.state_manager = state_manager
-        self._state_change_history = deque(maxlen=100)
-        self._state_cache = {}
-        self._state_cache_lock = Lock()
-        self.resource_manager = resource_manager
-        
-        # Register state event handlers
-        self._register_state_handlers()
-        
-    def _register_state_handlers(self) -> None:
-        """Register default handlers for state events."""
-        self.subscribe(StateEventTypes.STATE_UPDATED, self._handle_state_update, priority=10)
-        self.subscribe(StateEventTypes.STATE_ERROR, self._handle_state_error, priority=10)
-        self.subscribe(StateEventTypes.STATE_CACHE_UPDATED, self._handle_cache_update, priority=5)
-        self.subscribe(StateEventTypes.STATE_CACHE_CLEARED, self._handle_cache_clear, priority=5)
-        
-    async def _handle_state_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle state update events with minimized lock contention."""
-        try:
-            if hasattr(self, 'logger') and self.logger:
-                try:
-                    self.logger.log_debug("Entering _handle_state_update", event_type="state_event_handler")
-                except Exception:
-                    pass
-                    
-            state = event_data.get('state')
-            if not isinstance(state, SOVLState):
-                raise ValueError("Invalid state object in event data")
-                
-            # Create copies of what we need to avoid holding locks during state update
-            state_hash = state.state_hash() if hasattr(state, 'state_hash') else None
-            state_changes = event_data.get('changes', {}).copy() if event_data.get('changes') else {}
-            
-            # Record state change - short lock operation
-            with self._state_cache_lock:
-                self._state_change_history.append({
-                    'timestamp': time.time(),
-                    'event_type': StateEventTypes.STATE_UPDATED,
-                    'state_hash': state_hash,
-                    'changes': state_changes
-                })
-            
-            # Schedule the actual state update with timeout protection
-            try:
-                # Use a timeout when updating state to prevent deadlocks
-                await asyncio.wait_for(
-                    self._async_update_state(state),
-                    timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                self.logger.log_error(
-                    error_msg="State update timed out after 5 seconds",
-                    error_type="state_update_timeout"
-                )
-            
-            if hasattr(self, 'logger') and self.logger:
-                try:
-                    self.logger.log_debug("Exiting _handle_state_update", event_type="state_event_handler")
-                except Exception:
-                    pass
-                    
-        except Exception as e:
-            try:
-                self.error_manager.record_error(
-                    error=e,
-                    error_type="state_event_error",
-                    context={
-                        "event_type": StateEventTypes.STATE_UPDATED,
-                        "event_data": event_data
-                    }
-                )
-            except Exception as err2:
-                if hasattr(self, 'logger') and self.logger:
-                    try:
-                        self.logger.log_error(
-                            error_msg=f"Failed to record error in _handle_state_update: {str(err2)}",
-                            error_type="state_event_error",
-                            stack_trace=traceback.format_exc()
-                        )
-                    except Exception:
-                        print(f"[ERROR] Failed to record error and log in _handle_state_update: {str(err2)}")
-                        traceback.print_exc()
-                else:
-                    print(f"[ERROR] Failed to record error in _handle_state_update: {str(err2)}")
-                    traceback.print_exc()
-                    
-    async def _async_update_state(self, state):
-        """Update state asynchronously to minimize lock contention."""
-        try:
-            # Update state through state manager using atomic update
-            def update_fn(_):
-                return state
-            self.state_manager.update_state_atomic(update_fn)
-        except Exception as e:
-            if hasattr(self, 'logger') and self.logger:
-                self.logger.log_error(
-                    error_msg=f"Async state update error: {str(e)}",
-                    error_type="state_event_error",
-                    stack_trace=traceback.format_exc()
-                )
-        
-    async def _handle_state_error(self, event_data: Dict[str, Any]) -> None:
-        """Handle state error events with error management."""
-        try:
-            error_msg = event_data.get('error_msg', 'Unknown state error')
-            error_type = event_data.get('error_type', 'state_error')
-            
-            self.error_manager.record_error(
-                error=Exception(error_msg),
-                error_type=error_type,
-                context={
-                    "event_type": StateEventTypes.STATE_ERROR,
-                    "error_data": event_data
-                }
-            )
-            
-        except Exception as e:
-            self.error_manager.record_error(
-                error=e,
-                error_type="state_error_handling_error",
-                context={"event_data": event_data}
-            )
-        
-    async def _handle_cache_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle state cache update events."""
-        with self._state_cache_lock:
-            key = event_data.get('key')
-            value = event_data.get('value')
-            if key is not None:
-                self._state_cache[key] = value
-                
-    async def _handle_cache_clear(self, event_data: Dict[str, Any]) -> None:
-        """Handle state cache clear events."""
-        with self._state_cache_lock:
-            self._state_cache.clear()
-            
-    def get_state_change_history(self) -> List[Dict[str, Any]]:
-        """Get recent state change history."""
-        return list(self._state_change_history)
-        
-    async def validate_state_consistency(self) -> bool:
-        """Validate that event history matches current state."""
-        current_state = self.state_manager.get_state()
-        last_change = self._state_change_history[-1] if self._state_change_history else None
-        
-        return (last_change and 
-                last_change['state_hash'] == current_state.state_hash())
-                
-    async def dispatch_state_event(self, event_type: str, state_change: Dict[str, Any]) -> None:
-        """
-        Dispatch events related to state changes.
-        
-        Args:
-            event_type: Type of state event
-            state_change: Dictionary containing state change information
-        """
-        try:
-            # Validate event type
-            if not hasattr(StateEventTypes, event_type.upper()):
-                raise ValueError(f"Invalid state event type: {event_type}")
-                
-            # Create event data
-            event_data = {
-                'type': event_type,
-                'timestamp': time.time(),
-                'state': self.state_manager.get_state(),
-                'changes': state_change
-            }
-            
-            # Dispatch event
-            await self.async_notify(event_type, event_data)
-            
-        except Exception as e:
-            self._log_error(
-                Exception(f"Failed to dispatch state event: {str(e)}"),
-                "state_event_dispatch",
-                traceback.format_exc()
-            )
-
-class MemoryEventDispatcher(EventDispatcher):
-    """Dispatches memory-related events to registered handlers."""
-    
-    def __init__(
-        self,
-        ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager,
-        config_manager: ConfigManager,
-        logger: Logger,
-        resource_manager: Optional[ResourceManager] = None
-    ):
-        """
-        Initialize the memory event dispatcher.
-        Args:
-            ram_manager: RAMManager instance for RAM memory management
-            gpu_manager: GPUMemoryManager instance for GPU memory management
-            config_manager: Config manager for fetching configuration values
-            logger: Logger instance for logging events
-            resource_manager: Optional ResourceManager instance for resource coordination
-        """
-        super().__init__(config_manager, logger)
-        self.ram_manager = ram_manager
-        self.gpu_manager = gpu_manager
-        self.resource_manager = resource_manager
-        self._memory_events_history = deque(maxlen=100)
-        
-        # Register memory event handlers
-        self._register_default_handlers()
-
-    def _register_default_handlers(self) -> None:
-        """Register default handlers for memory events."""
-        self.subscribe(MemoryEventTypes.MEMORY_INITIALIZED, self._handle_memory_initialized, priority=10)
-        self.subscribe(MemoryEventTypes.MEMORY_CONFIG_UPDATED, self._handle_config_update, priority=10)
-        self.subscribe(MemoryEventTypes.MEMORY_THRESHOLD_REACHED, self._handle_memory_threshold, priority=20)
-        self.subscribe(MemoryEventTypes.MEMORY_ERROR, self._handle_memory_error, priority=30)
-        self.subscribe(MemoryEventTypes.TOKEN_MAP_UPDATED, self._handle_token_map_update, priority=15)
-        self.subscribe(MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED, self._handle_scaffold_context_update, priority=15)
-        self.subscribe(MemoryEventTypes.CONVERSATION_STARTED, self._handle_conversation_started, priority=15)
-
-    async def _handle_memory_threshold(self, event: MemoryEvent) -> None:
-        """Handle memory threshold events with error management."""
-        try:
-            # Record memory event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
-                'memory_type': event.memory_type,
-                'threshold': event.threshold
-            })
-            
-            # Handle memory threshold
-            if event.memory_type == 'ram':
-                await self.ram_manager.handle_threshold(event.threshold)
-            elif event.memory_type == 'gpu':
-                await self.gpu_manager.handle_threshold(event.threshold)
-            else:
-                raise ValueError(f"Unknown memory type: {event.memory_type}")
-                
-        except Exception as e:
-            self.error_manager.record_error(
-                error=e,
-                error_type="memory_event_error",
-                context={
-                    "event_type": MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
-                    "event": event.__dict__
-                }
-            )
-
-    async def _handle_token_map_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle token map update events with resource coordination."""
-        try:
-            if self.resource_manager and not self.resource_manager.acquire("ram", amount=512):
-                raise RuntimeError("Insufficient RAM for token map update")
-            try:
-                prompt = event_data.get('prompt')
-                confidence = event_data.get('confidence')
-                tokenizer = event_data.get('tokenizer')
-                if not all([prompt, confidence, tokenizer]):
-                    raise ValueError("Missing required parameters for token map update")
-                self._memory_events_history.append({
-                    'timestamp': time.time(),
-                    'event_type': MemoryEventTypes.TOKEN_MAP_UPDATED,
-                    'prompt_length': len(prompt),
-                    'confidence': confidence
-                })
-                # Place memory update logic here (MemoriaManager removed)
-                # Example: self.ram_manager.update_token_map_memory(prompt, confidence, tokenizer)
-            finally:
-                if self.resource_manager:
-                    self.resource_manager.release("ram", amount=512)
-        except Exception as e:
-            self.logger.error(f"Error handling token map update: {str(e)}", exc_info=True)
-
-    async def _handle_scaffold_context_update(self, event_data: Dict[str, Any]) -> None:
-        """Handle scaffold context update events."""
-        try:
-            scaffold_hidden_states = event_data.get('scaffold_hidden_states')
-            
-            if scaffold_hidden_states is None:
-                raise ValueError("No scaffold hidden states provided")
-                
-            # Record update event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED,
-                'tensor_shape': scaffold_hidden_states.shape
-            })
-            
-            # Update scaffold context
-            self.ram_manager.set_scaffold_context(scaffold_hidden_states)
-            
-        except Exception as e:
-            self.logger.error(f"Error handling scaffold context update: {str(e)}", exc_info=True)
-
-    async def _handle_conversation_started(self, event_data: Dict[str, Any]) -> None:
-        """Handle conversation started events."""
-        try:
-            conversation_id = event_data.get('conversation_id')
-            
-            if conversation_id is None:
-                raise ValueError("No conversation ID provided")
-                
-            # Record conversation started event
-            self._memory_events_history.append({
-                'timestamp': time.time(),
-                'event_type': MemoryEventTypes.CONVERSATION_STARTED,
-                'conversation_id': conversation_id
-            })
-            
-        except Exception as e:
-            self.logger.error(f"Error handling conversation started event: {str(e)}", exc_info=True)
-
-    def get_memory_events_history(self) -> List[Dict[str, Any]]:
-        """Get recent memory events history."""
-        return list(self._memory_events_history)
+@dataclass
+class MemoryEvent:
+    memory_type: str
+    threshold: float
+    # Add more fields here if your events need them
 
 class EventDispatcher:
     """
@@ -1080,7 +756,7 @@ class EventDispatcher:
                 level="debug"
             )
 
-    async def subscribe_channel(self, channel: str) -> Generator[Any, None, None]:
+    async def subscribe_channel(self, channel: str) -> AsyncGenerator[Any, None]:
         """
         Subscribe to a specific channel and yield events.
 
@@ -1276,6 +952,337 @@ class EventDispatcher:
                 "error",
                 {"original_error": str(record.error)}
             )
+
+class StateEventDispatcher(EventDispatcher):
+    """
+    Extends EventDispatcher to handle state-related events and state management integration.
+    """
+    
+    def __init__(self, config_manager: ConfigManager, state_manager: StateManager, logger: Optional[Logger] = None, resource_manager: Optional[ResourceManager] = None):
+        """
+        Initialize the StateEventDispatcher.
+
+        Args:
+            config_manager: ConfigManager instance for configuration handling
+            state_manager: StateManager instance for state management
+            logger: Optional Logger instance. If None, creates a new Logger instance.
+            resource_manager: Optional ResourceManager instance for resource coordination
+        """
+        super().__init__(config_manager, logger)
+        self.state_manager = state_manager
+        self._state_change_history = deque(maxlen=100)
+        self._state_cache = {}
+        self._state_cache_lock = Lock()
+        self.resource_manager = resource_manager
+        
+        # Register state event handlers
+        self._register_state_handlers()
+        
+    def _register_state_handlers(self) -> None:
+        """Register default handlers for state events."""
+        self.subscribe(StateEventTypes.STATE_UPDATED, self._handle_state_update, priority=10)
+        self.subscribe(StateEventTypes.STATE_ERROR, self._handle_state_error, priority=10)
+        self.subscribe(StateEventTypes.STATE_CACHE_UPDATED, self._handle_cache_update, priority=5)
+        self.subscribe(StateEventTypes.STATE_CACHE_CLEARED, self._handle_cache_clear, priority=5)
+        
+    async def _handle_state_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle state update events with minimized lock contention."""
+        try:
+            if hasattr(self, 'logger') and self.logger:
+                try:
+                    self.logger.log_debug("Entering _handle_state_update", event_type="state_event_handler")
+                except Exception:
+                    pass
+                    
+            state = event_data.get('state')
+            if not isinstance(state, SOVLState):
+                raise ValueError("Invalid state object in event data")
+                
+            # Create copies of what we need to avoid holding locks during state update
+            state_hash = state.state_hash() if hasattr(state, 'state_hash') else None
+            state_changes = event_data.get('changes', {}).copy() if event_data.get('changes') else {}
+            
+            # Record state change - short lock operation
+            with self._state_cache_lock:
+                self._state_change_history.append({
+                    'timestamp': time.time(),
+                    'event_type': StateEventTypes.STATE_UPDATED,
+                    'state_hash': state_hash,
+                    'changes': state_changes
+                })
+            
+            # Schedule the actual state update with timeout protection
+            try:
+                # Use a timeout when updating state to prevent deadlocks
+                await asyncio.wait_for(
+                    self._async_update_state(state),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                self.logger.log_error(
+                    error_msg="State update timed out after 5 seconds",
+                    error_type="state_update_timeout"
+                )
+            
+            if hasattr(self, 'logger') and self.logger:
+                try:
+                    self.logger.log_debug("Exiting _handle_state_update", event_type="state_event_handler")
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            try:
+                self.error_manager.record_error(
+                    error=e,
+                    error_type="state_event_error",
+                    context={
+                        "event_type": StateEventTypes.STATE_UPDATED,
+                        "event_data": event_data
+                    }
+                )
+            except Exception as err2:
+                if hasattr(self, 'logger') and self.logger:
+                    try:
+                        self.logger.log_error(
+                            error_msg=f"Failed to record error in _handle_state_update: {str(err2)}",
+                            error_type="state_event_error",
+                            stack_trace=traceback.format_exc()
+                        )
+                    except Exception:
+                        print(f"[ERROR] Failed to record error and log in _handle_state_update: {str(err2)}")
+                        traceback.print_exc()
+                else:
+                    print(f"[ERROR] Failed to record error in _handle_state_update: {str(err2)}")
+                    traceback.print_exc()
+                    
+    async def _async_update_state(self, state):
+        """Update state asynchronously to minimize lock contention."""
+        try:
+            # Update state through state manager using atomic update
+            def update_fn(_):
+                return state
+            self.state_manager.update_state_atomic(update_fn)
+        except Exception as e:
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.log_error(
+                    error_msg=f"Async state update error: {str(e)}",
+                    error_type="state_event_error",
+                    stack_trace=traceback.format_exc()
+                )
+        
+    async def _handle_state_error(self, event_data: Dict[str, Any]) -> None:
+        """Handle state error events with error management."""
+        try:
+            error_msg = event_data.get('error_msg', 'Unknown state error')
+            error_type = event_data.get('error_type', 'state_error')
+            
+            self.error_manager.record_error(
+                error=Exception(error_msg),
+                error_type=error_type,
+                context={
+                    "event_type": StateEventTypes.STATE_ERROR,
+                    "error_data": event_data
+                }
+            )
+            
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="state_error_handling_error",
+                context={"event_data": event_data}
+            )
+        
+    async def _handle_cache_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle state cache update events."""
+        with self._state_cache_lock:
+            key = event_data.get('key')
+            value = event_data.get('value')
+            if key is not None:
+                self._state_cache[key] = value
+                
+    async def _handle_cache_clear(self, event_data: Dict[str, Any]) -> None:
+        """Handle state cache clear events."""
+        with self._state_cache_lock:
+            self._state_cache.clear()
+            
+    def get_state_change_history(self) -> List[Dict[str, Any]]:
+        """Get recent state change history."""
+        return list(self._state_change_history)
+        
+    async def validate_state_consistency(self) -> bool:
+        """Validate that event history matches current state."""
+        current_state = self.state_manager.get_state()
+        last_change = self._state_change_history[-1] if self._state_change_history else None
+        
+        return (last_change and 
+                last_change['state_hash'] == current_state.state_hash())
+                
+    async def dispatch_state_event(self, event_type: str, state_change: Dict[str, Any]) -> None:
+        """
+        Dispatch events related to state changes.
+        
+        Args:
+            event_type: Type of state event
+            state_change: Dictionary containing state change information
+        """
+        try:
+            # Validate event type
+            if not hasattr(StateEventTypes, event_type.upper()):
+                raise ValueError(f"Invalid state event type: {event_type}")
+                
+            # Create event data
+            event_data = {
+                'type': event_type,
+                'timestamp': time.time(),
+                'state': self.state_manager.get_state(),
+                'changes': state_change
+            }
+            
+            # Dispatch event
+            await self.async_notify(event_type, event_data)
+            
+        except Exception as e:
+            self._log_error(
+                Exception(f"Failed to dispatch state event: {str(e)}"),
+                "state_event_dispatch",
+                traceback.format_exc()
+            )
+
+class MemoryEventDispatcher(EventDispatcher):
+    """Dispatches memory-related events to registered handlers."""
+    
+    def __init__(
+        self,
+        ram_manager: RAMManager,
+        gpu_manager: GPUMemoryManager,
+        config_manager: ConfigManager,
+        logger: Logger,
+        resource_manager: Optional[ResourceManager] = None
+    ):
+        """
+        Initialize the memory event dispatcher.
+        Args:
+            ram_manager: RAMManager instance for RAM memory management
+            gpu_manager: GPUMemoryManager instance for GPU memory management
+            config_manager: Config manager for fetching configuration values
+            logger: Logger instance for logging events
+            resource_manager: Optional ResourceManager instance for resource coordination
+        """
+        super().__init__(config_manager, logger)
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
+        self.resource_manager = resource_manager
+        self._memory_events_history = deque(maxlen=100)
+        
+        # Register memory event handlers
+        self._register_default_handlers()
+
+    def _register_default_handlers(self) -> None:
+        """Register default handlers for memory events."""
+        self.subscribe(MemoryEventTypes.MEMORY_INITIALIZED, self._handle_memory_initialized, priority=10)
+        self.subscribe(MemoryEventTypes.MEMORY_CONFIG_UPDATED, self._handle_config_update, priority=10)
+        self.subscribe(MemoryEventTypes.MEMORY_THRESHOLD_REACHED, self._handle_memory_threshold, priority=20)
+        self.subscribe(MemoryEventTypes.MEMORY_ERROR, self._handle_memory_error, priority=30)
+        self.subscribe(MemoryEventTypes.TOKEN_MAP_UPDATED, self._handle_token_map_update, priority=15)
+        self.subscribe(MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED, self._handle_scaffold_context_update, priority=15)
+        self.subscribe(MemoryEventTypes.CONVERSATION_STARTED, self._handle_conversation_started, priority=15)
+
+    async def _handle_memory_threshold(self, event: MemoryEvent) -> None:
+        """Handle memory threshold events with error management."""
+        try:
+            # Record memory event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
+                'memory_type': event.memory_type,
+                'threshold': event.threshold
+            })
+            
+            # Handle memory threshold
+            if event.memory_type == 'ram':
+                await self.ram_manager.handle_threshold(event.threshold)
+            elif event.memory_type == 'gpu':
+                await self.gpu_manager.handle_threshold(event.threshold)
+            else:
+                raise ValueError(f"Unknown memory type: {event.memory_type}")
+                
+        except Exception as e:
+            self.error_manager.record_error(
+                error=e,
+                error_type="memory_event_error",
+                context={
+                    "event_type": MemoryEventTypes.MEMORY_THRESHOLD_REACHED,
+                    "event": event.__dict__
+                }
+            )
+
+    async def _handle_token_map_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle token map update events with resource coordination."""
+        try:
+            if self.resource_manager and not self.resource_manager.acquire("ram", amount=512):
+                raise RuntimeError("Insufficient RAM for token map update")
+            try:
+                prompt = event_data.get('prompt')
+                confidence = event_data.get('confidence')
+                tokenizer = event_data.get('tokenizer')
+                if not all([prompt, confidence, tokenizer]):
+                    raise ValueError("Missing required parameters for token map update")
+                self._memory_events_history.append({
+                    'timestamp': time.time(),
+                    'event_type': MemoryEventTypes.TOKEN_MAP_UPDATED,
+                    'prompt_length': len(prompt),
+                    'confidence': confidence
+                })
+                # Place memory update logic here (MemoriaManager removed)
+                # Example: self.ram_manager.update_token_map_memory(prompt, confidence, tokenizer)
+            finally:
+                if self.resource_manager:
+                    self.resource_manager.release("ram", amount=512)
+        except Exception as e:
+            self.logger.error(f"Error handling token map update: {str(e)}", exc_info=True)
+
+    async def _handle_scaffold_context_update(self, event_data: Dict[str, Any]) -> None:
+        """Handle scaffold context update events."""
+        try:
+            scaffold_hidden_states = event_data.get('scaffold_hidden_states')
+            
+            if scaffold_hidden_states is None:
+                raise ValueError("No scaffold hidden states provided")
+                
+            # Record update event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.SCAFFOLD_CONTEXT_UPDATED,
+                'tensor_shape': scaffold_hidden_states.shape
+            })
+            
+            # Update scaffold context
+            self.ram_manager.set_scaffold_context(scaffold_hidden_states)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling scaffold context update: {str(e)}", exc_info=True)
+
+    async def _handle_conversation_started(self, event_data: Dict[str, Any]) -> None:
+        """Handle conversation started events."""
+        try:
+            conversation_id = event_data.get('conversation_id')
+            
+            if conversation_id is None:
+                raise ValueError("No conversation ID provided")
+                
+            # Record conversation started event
+            self._memory_events_history.append({
+                'timestamp': time.time(),
+                'event_type': MemoryEventTypes.CONVERSATION_STARTED,
+                'conversation_id': conversation_id
+            })
+            
+        except Exception as e:
+            self.logger.error(f"Error handling conversation started event: {str(e)}", exc_info=True)
+
+    def get_memory_events_history(self) -> List[Dict[str, Any]]:
+        """Get recent memory events history."""
+        return list(self._memory_events_history)
 
 class EventManager:
     def __init__(self, config_manager: ConfigManager, logger: Logger):

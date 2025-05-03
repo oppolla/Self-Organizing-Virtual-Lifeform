@@ -281,40 +281,6 @@ class FileHandler:
         )
         return False
 
-# ConfigKeys provides type-safe keys for accessing configuration values.
-class ConfigKeys:
-    """Type-safe configuration keys."""
-    # Processor Config
-    PROCESSOR_MIN_REP_LENGTH = ConfigKey("processor_config", "min_rep_length")
-    
-    # Controls Config
-    CONTROLS_MEMORY_THRESHOLD = ConfigKey("controls_config", "memory_threshold")
-    CONTROLS_BLEND_STRENGTH = ConfigKey("controls_config", "blend_strength")
-    CONTROLS_ATTENTION_WEIGHT = ConfigKey("controls_config", "attention_weight")
-    CONTROLS_TEMP_EAGER_THRESHOLD = ConfigKey("controls_config", "temp_eager_threshold")
-    
-    # Model Config
-    MODEL_PATH = ConfigKey("model", "model_path")
-    MODEL_TYPE = ConfigKey("model", "model_type")
-    MODEL_QUANTIZATION_MODE = ConfigKey("model", "quantization_mode")
-    
-    # Data Provider Config
-    DATA_PROVIDER_TYPE = ConfigKey("data_provider", "provider_type")
-    DATA_PROVIDER_PATH = ConfigKey("data_provider", "data_path")
-    
-    # Training Config
-    TRAINING_GRAD_ACCUM_STEPS = ConfigKey("training_config", "grad_accum_steps")
-    TRAINING_MODEL_NAME = ConfigKey("training_config", "model_name")
-    
-    # Dream Memory Config
-    DREAM_MEMORY_MAX_MEMORIES = ConfigKey("dream_memory_config", "max_memories")
-    
-    # Curiosity Config
-    CURIOSITY_MAX_MEMORY_MB = ConfigKey("curiosity_config", "max_memory_mb")
-    
-    # Hardware Config
-    HARDWARE_MAX_SCAFFOLD_MEMORY_MB = ConfigKey("hardware", "max_scaffold_memory_mb")
-
 class ConfigNamespace:
     """Wraps a config dictionary to provide dot-access (attribute) and dict-style access."""
     def __init__(self, data):
@@ -335,15 +301,7 @@ class ConfigNamespace:
 
 # ConfigManager orchestrates configuration lifecycle: loading, validation, updates, notifications, and persistence.
 class ConfigManager:
-    """Manages SOVLSystem configuration with validation, thread safety, and persistence.
-    
-    Example usage:
-        # Old way (string literals)
-        min_rep_length = config_manager.get("processor_config.min_rep_length")
-        
-        # New way (type-safe)
-        from sovl_config import ConfigKeys
-        min_rep_length = config_manager.get(ConfigKeys.PROCESSOR_MIN_REP_LENGTH)
+    """Manages SOVLSystem configuration with validation, thread safety, and persistence.       
     """
 
     def __init__(self, config_file: str, logger: Logger):
@@ -426,11 +384,9 @@ class ConfigManager:
             self._frozen = False
             self._log_event("config_unfrozen", "Configuration unfrozen", "info", {"timestamp": time.time()})
 
-    def get(self, key: Union[str, ConfigKey], default: Any = None) -> Any:
-        """Get a configuration value with type-safe key support."""
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a configuration value by key."""
         with self.lock:
-            if isinstance(key, ConfigKey):
-                key = str(key)
             value = self.store.get_value(key, default)
             if value == {} or value is None:
                 self._log_event("config_warning", f"Key '{key}' is empty or missing. Using default: {default}", "warning", {

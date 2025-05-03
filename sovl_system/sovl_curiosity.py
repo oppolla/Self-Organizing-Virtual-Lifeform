@@ -16,6 +16,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_interfaces import CuriosityAccessor
 import json
 from dataclasses import dataclass
+from sovl_utils import cosine_similarity
 
 @dataclass
 class CuriosityConfig:
@@ -792,17 +793,16 @@ class CuriosityManager(CuriosityAccessor):
     def _get_valid_memory_embeddings(self, state: SOVLState) -> List[torch.Tensor]:
         """Get valid memory embeddings with memory constraints."""
         try:
-            # Process embeddings in batches to manage memory
             valid_embeddings = []
             batch_size = self.curiosity.batch_size
-            
+
+            embeddings = state.embeddings
+
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i + batch_size]
-                
                 valid_embeddings.extend(batch)
-            
+
             return valid_embeddings
-            
         except Exception as e:
             self._record_error(f"Failed to get valid memory embeddings: {str(e)}")
             return []

@@ -990,6 +990,21 @@ class SOVLState(StateBase):
     # All updates to SOVLState should go through StateManager, use state_version for concurrency control,
     # and call validate() after every update to ensure consistency.
 
+    @property
+    def embeddings(self) -> list:
+        """
+        Return a list of all memory embeddings from short-term and dream memory.
+        Extend this to include other sources as needed.
+        """
+        result = []
+        # Short-term memory (if available and structured as a list of dicts with 'embedding')
+        if hasattr(self, "short_term_memory"):
+            result.extend([msg["embedding"] for msg in self.short_term_memory if "embedding" in msg])
+        # Dream memory (if available)
+        if hasattr(self, "dream_memory"):
+            result.extend(list(self.dream_memory))
+        return result
+
 class StateManager(StateAccessor):
     """Manages the global state with thread-safe operations.
     Implements the StateAccessor interface to provide a standard way to access state.
