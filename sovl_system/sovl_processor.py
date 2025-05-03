@@ -1857,18 +1857,14 @@ MEMORY_TEMPLATES = {
     "dream": (
         "This overall dream is called : {dream_album_name}. "
         "This dream sequence is called : {dream_song_name}. "
-        "You dreamed: {dream1} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream2} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream3} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream4} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream5} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream6} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream7} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream8} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream9} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream10} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream11} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}. "
-        "You dreamed: {dream12} in the key of {musical_key} at tempo {bpm} at {timestamp_unix}."
+        "You dreamed: {dream1} at {timestamp_unix}. "
+        "You dreamed: {dream2} at {timestamp_unix}. "
+        "You dreamed: {dream3} at {timestamp_unix}. "
+        "You dreamed: {dream4} at {timestamp_unix}. "
+        "You dreamed: {dream5} at {timestamp_unix}. "
+        "You dreamed: {dream6} at {timestamp_unix}. "
+        "You dreamed: {dream7} at {timestamp_unix}."
+        
     ),
     "resonator": (
         "You saw this: {full_text} at {timestamp_unix}. "
@@ -1962,6 +1958,22 @@ def load_trainer_weighting(config_path="sovl_config.json"):
     except Exception:
         return defaults
 
+def build_dynamic_dream_entry(event_data):
+    lines = [
+        f"This overall dream is called: {event_data.get('dream_album_name', 'unknown')}.",
+        f"This dream sequence is called: {event_data.get('dream_song_name', 'unknown')}."
+    ]
+    # Find all dreamN fields, sorted by N
+    dream_fields = sorted(
+        (k for k in event_data if k.startswith("dream")),
+        key=lambda x: int(x.replace("dream", ""))
+    )
+    for dream_field in dream_fields:
+        lines.append(
+            f"You dreamed: {event_data[dream_field]} at {event_data.get('timestamp_unix', 'unknown')}."
+        )
+    return " ".join(lines)
+
 class ScribeIngestionProcessor:
     """
     ScribeIngestionProcessor's primary purpose is to craft the final memory string to be put in the scribe journal
@@ -2041,14 +2053,17 @@ class ScribeIngestionProcessor:
 
     def process_entry(self, entry: dict) -> dict:
         event_type = entry.get("event_type", "unknown")
-        template = self.memory_templates.get(event_type, GENERIC_TEMPLATE)
-        metadata = self.flatten_metadata(entry.get("metadata", {}))
         event_data = entry.get("event_data", {})
-        full_text = self.extract_main_text(event_type, event_data)
-        format_values = dict(metadata)
-        format_values.update(event_data)
-        format_values["full_text"] = full_text
-        memory = self.safe_format(template, format_values)
+        metadata = self.flatten_metadata(entry.get("metadata", {}))
+        if event_type == "dream":
+            memory = build_dynamic_dream_entry(event_data)
+        else:
+            template = self.memory_templates.get(event_type, GENERIC_TEMPLATE)
+            full_text = self.extract_main_text(event_type, event_data)
+            format_values = dict(metadata)
+            format_values.update(event_data)
+            format_values["full_text"] = full_text
+            memory = self.safe_format(template, format_values)
         weight = self.calculate_weight(metadata)
         return {"memory": memory, "weight": weight}
 

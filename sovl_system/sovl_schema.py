@@ -1051,6 +1051,94 @@ class ValidationSchema:
                 range=(0.0, 1.0)
             ),
         }
+    
+    @staticmethod
+    def _get_dreamer_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the dreamer_config schema for the Dreamer class."""
+        return {
+            "max_events_per_cycle": ConfigSchema(
+                field="dreamer_config.max_events_per_cycle",
+                type=int,
+                default=5,
+                range=(1, 100),
+                required=True
+            ),
+            "novelty_weight": ConfigSchema(
+                field="dreamer_config.novelty_weight",
+                type=float,
+                default=1.0,
+                range=(0.0, 10.0),
+                required=True
+            ),
+            "confidence_weight": ConfigSchema(
+                field="dreamer_config.confidence_weight",
+                type=float,
+                default=0.0,
+                range=(0.0, 10.0),
+                required=True
+            ),
+            "selection_strategy": ConfigSchema(
+                field="dreamer_config.selection_strategy",
+                type=str,
+                default="top",
+                validator=lambda x: x in ["top", "random"],
+                required=True
+            ),
+            "noise_level": ConfigSchema(
+                field="dreamer_config.noise_level",
+                type=float,
+                default=0.2,
+                range=(0.0, 1.0),
+                required=True
+            ),
+            "num_songs_per_album": ConfigSchema(
+                field="dreamer_config.num_songs_per_album",
+                type=int,
+                default=3,
+                range=(1, 10),
+                required=True
+            ),
+            "chord_functions": ConfigSchema(
+                field="dreamer_config.chord_functions",
+                type=dict,
+                default={
+                    "I": "home and safety",
+                    "IV": "expansion and openness",
+                    "V": "tension and anticipation",
+                    "vi": "nostalgia and longing",
+                    "ii": "subtle unease",
+                    "vii°": "instability and surrealism"
+                },
+                required=True
+            ),
+            "section_count_min": ConfigSchema(
+                field="dreamer_config.section_count_min",
+                type=int,
+                default=3,
+                range=(1, 12),
+                required=False
+            ),
+            "section_count_max": ConfigSchema(
+                field="dreamer_config.section_count_max",
+                type=int,
+                default=7,
+                range=(1, 20),
+                required=False
+            ),
+            "bar_count_weights": ConfigSchema(
+                field="dreamer_config.bar_count_weights",
+                type=dict,
+                default={"2": 0.5, "4": 0.4, "6": 0.1},
+                required=False
+            ),
+            "title_max_length": ConfigSchema(
+                field="dreamer_config.title_max_length",
+                type=int,
+                default=48,
+                range=(8, 128),
+                required=False
+            ),
+        }
 
 METADATA_FIELDS = {
     "Always Present": [
