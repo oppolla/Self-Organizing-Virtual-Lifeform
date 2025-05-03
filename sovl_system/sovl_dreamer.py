@@ -14,6 +14,7 @@ from sovl_error import ErrorManager, ScaffoldError
 from sovl_queue import get_scribe_queue, capture_scribe_event
 from sovl_processor import ScribeIngestionProcessor
 from sovl_schema import ConfigSchema
+import tracemalloc
 
 """
 Handles all dream generation, dream structure, narration, and scribe journal integration for SOVL
@@ -421,94 +422,115 @@ class DreamAlbumGenerator:
 
     def run_dream_album_cycle(self, generation_manager, memories: Optional[List[str]] = None) -> Optional[Dict]:
         """Generate a dream album with songs and sections."""
-        if memories is None:
-            memories = self.load_memories()
-        if not memories:
-            raise ScaffoldError(
-                message="No memories available for dream album",
-                operation="validate_memories",
-                context={}
-            )
-        motif = memories[0]
-        album_title = self._clean_title(motif, max_length=48)
-        album = []
-        for song_idx in range(self.num_songs):
-            song = self.Song(self)  # Markov structure
-            song_sections = []
-            score_lines = [f"Key: {song.key} | Tempo: {song.get_tempo_desc()} | Time Sig: {song.time_signature}"]
-            section_motifs = {}
-            section_narrations = []
-            for section in song.overall_sections:
-                if section.name not in section_motifs:
-                    section_motifs[section.name] = memories[(song_idx + ord(section.name[0])) % len(memories)]
-                motif_memory = section_motifs[section.name]
-                # Generate narration fragments for the section
-                narration = self.generate_section_narration(section, song, motif_memory, memories, generation_manager)
-                section_narrations.append(narration)
-                prog_roman = [" ".join(bar) for bar in section.progression.progression]
-                prog_in_key = [" ".join(section.key.get_chord(c) for c in bar) for bar in section.progression.progression]
-                bars = len(section.progression.progression)
-                repeats = section.repeats
-                label = f"Section {section.name} ({section.key.tonic}, {song.get_tempo()})"
-                musical_details = {
-                    "key": str(section.key),
-                    "scale": section.key.scale_type,
-                    "tempo": song.get_tempo_desc(),
-                    "progression_roman": prog_roman,
-                    "progression_in_key": prog_in_key,
-                    "bars": bars,
-                    "repeats": repeats
-                }
-                score_lines.append(f"{label}: ║: {' | '.join(prog_roman)} :║ x{repeats}")
-                song_sections.append({
-                    "label": label,
-                    "narration": narration,
-                    "musical_details": musical_details
-                })
-            song_title = self._clean_title(list(section_motifs.values())[0], max_length=48)
-            poetic_score = "\n".join(score_lines)
-            # Each dreamN is a full section narration
-            event_data = {
-                f"dream{i+1}": section_narrations[i] for i in range(len(section_narrations))
-            }
-            event_data["musical_key"] = str(song.key)
-            event_data["timestamp_unix"] = int(time.time())
-            song_entry = {
-                "dream_album_name": album_title,
-                "dream_song_name": song_title,
-                "musical_key": str(song.key),
-                "timestamp_unix": int(time.time()),
-            }
-            # Add dreamN fields
-            for i in range(len(section_narrations)):
-                song_entry[f"dream{i+1}"] = section_narrations[i]
-            album.append(song_entry)
-            # Process with ScribeIngestionProcessor
-            metadata = {"motif": motif, "album_title": album_title}
-            processed = ScribeIngestionProcessor(log_paths=[self.scribe_path], logger=self.logger).process_entry({
-                "event_type": "dream",
-                "event_data": event_data,
-                "metadata": metadata
-            })
-            self.scribe_event_fn(
-                    origin="dreamer",
-                    event_type="dream",
-                event_data={"memory": processed["memory"]},
-                source_metadata=metadata,
-                session_id=None,
-                timestamp=datetime.now()
-            )
-        self.logger.record_event(
-            event_type="dream_album_generated",
-            message=f"Dream album generated with {self.num_songs} songs",
-            level="info",
-            additional_info={"album_title": album_title}
+        logger = Logger.get_instance()
+        logger.info("Starting dream album cycle generation...")
+        import time
+        start_time = time.perf_counter()
+        tracemalloc.start()
+        start_snapshot = tracemalloc.take_snapshot()
+        try:
+            if memories is None:
+                logger.debug("No memories provided, loading from scribe journal...")
+                memories = self.load_memories()
+            if not memories:
+                logger.error("No memories available for dream album, aborting.")
+                raise ScaffoldError(
+                    message="No memories available for dream album",
+                    operation="validate_memories",
+                    context={}
                 )
-        return {
-            "dream_album_name": album_title,
-            "motif": motif,
-            "songs": album
-        }
+            motif = memories[0]
+            album_title = self._clean_title(motif, max_length=48)
+            album = []
+            logger.info(f"Dream album title: {album_title}")
+            for song_idx in range(self.num_songs):
+                logger.info(f"Generating song {song_idx+1}/{self.num_songs}...")
+                song = self.Song(self)  # Markov structure
+                song_sections = []
+                score_lines = [f"Key: {song.key} | Tempo: {song.get_tempo_desc()} | Time Sig: {song.time_signature}"]
+                section_motifs = {}
+                section_narrations = []
+                for section in song.overall_sections:
+                    logger.debug(f"Generating section '{section.name}' for song {song_idx+1}...")
+                    if section.name not in section_motifs:
+                        section_motifs[section.name] = memories[(song_idx + ord(section.name[0])) % len(memories)]
+                    motif_memory = section_motifs[section.name]
+                    # Generate narration fragments for the section
+                    narration = self.generate_section_narration(section, song, motif_memory, memories, generation_manager)
+                    section_narrations.append(narration)
+                    prog_roman = [" ".join(bar) for bar in section.progression.progression]
+                    prog_in_key = [" ".join(section.key.get_chord(c) for c in bar) for bar in section.progression.progression]
+                    bars = len(section.progression.progression)
+                    repeats = section.repeats
+                    label = f"Section {section.name} ({section.key.tonic}, {song.get_tempo()})"
+                    musical_details = {
+                        "key": str(section.key),
+                        "scale": section.key.scale_type,
+                        "tempo": song.get_tempo_desc(),
+                        "progression_roman": prog_roman,
+                        "progression_in_key": prog_in_key,
+                        "bars": bars,
+                        "repeats": repeats
+                    }
+                    score_lines.append(f"{label}: ║: {' | '.join(prog_roman)} :║ x{repeats}")
+                    song_sections.append({
+                        "label": label,
+                        "narration": narration,
+                        "musical_details": musical_details
+                    })
+                song_title = self._clean_title(list(section_motifs.values())[0], max_length=48)
+                poetic_score = "\n".join(score_lines)
+                # Each dreamN is a full section narration
+                event_data = {
+                    f"dream{i+1}": section_narrations[i] for i in range(len(section_narrations))
+                }
+                event_data["musical_key"] = str(song.key)
+                event_data["timestamp_unix"] = int(time.time())
+                song_entry = {
+                    "dream_album_name": album_title,
+                    "dream_song_name": song_title,
+                    "musical_key": str(song.key),
+                    "timestamp_unix": int(time.time()),
+                }
+                # Add dreamN fields
+                for i in range(len(section_narrations)):
+                    song_entry[f"dream{i+1}"] = section_narrations[i]
+                album.append(song_entry)
+                # Process with ScribeIngestionProcessor
+                metadata = {"motif": motif, "album_title": album_title}
+                processed = ScribeIngestionProcessor(log_paths=[self.scribe_path], logger=self.logger).process_entry({
+                    "event_type": "dream",
+                    "event_data": event_data,
+                    "metadata": metadata
+                })
+                self.scribe_event_fn(
+                        origin="dreamer",
+                        event_type="dream",
+                    event_data={"memory": processed["memory"]},
+                    source_metadata=metadata,
+                    session_id=None,
+                    timestamp=datetime.now()
+                )
+            logger.info(f"Dream album generated with {self.num_songs} songs.")
+            return {
+                "dream_album_name": album_title,
+                "motif": motif,
+                "songs": album
+            }
+        except Exception as e:
+            logger.error(f"Exception during dream album cycle: {e}", exc_info=True)
+            raise
+        finally:
+            end_time = time.perf_counter()
+            end_snapshot = tracemalloc.take_snapshot()
+            tracemalloc.stop()
+            elapsed = end_time - start_time
+            stats = end_snapshot.compare_to(start_snapshot, 'lineno')
+            top_stats = stats[:5]  # Top 5 memory consumers
+            logger.info(f"Dream album cycle completed in {elapsed:.2f} seconds.")
+            logger.info("Top memory usage during cycle:")
+            for stat in top_stats:
+                logger.info(stat)
 
     def clear_scribe_memory_cache(self):
         """Clear the cached scribe memories (call if journal is updated)."""
