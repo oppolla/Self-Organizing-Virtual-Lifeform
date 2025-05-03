@@ -26,7 +26,7 @@ class ValidationSchema:
             "memory_config": ValidationSchema._get_memory_config_schema(),
             "state_config": ValidationSchema._get_state_config_schema(),
             "confidence_config": ValidationSchema._get_confidence_config_schema(),
-            "lifecycle_config": ValidationSchema._get_lifecycle_config_schema(),
+            "gestation_config": ValidationSchema._get_gestation_config_schema(),
             "gestation_weighting": ValidationSchema._get_gestation_weighting_schema(),
             "monitoring": ValidationSchema._get_monitoring_schema(),
             "scribed_config": ValidationSchema._get_scribed_config_schema(),
@@ -34,7 +34,7 @@ class ValidationSchema:
             "metrics_config": ValidationSchema._get_metrics_config_schema(),
             "trainer_weighting": ValidationSchema._get_metadata_weighting_schema(),
             "dreamer_config": ValidationSchema._get_dreamer_config_schema(),
-            "gestation_config": ValidationSchema._get_gestation_config_schema(),
+            "gestation_weighting": ValidationSchema._get_gestation_weighting_schema(),
         }
 
     @staticmethod
@@ -405,39 +405,68 @@ class ValidationSchema:
         }
 
     @staticmethod
-    def _get_dream_memory_config_schema() -> Dict[str, ConfigSchema]:
-        """Deprecated: Dream memory config is no longer used. Kept for backward compatibility."""
-        return {}
-
-    @staticmethod
-    def _get_lifecycle_config_schema() -> Dict[str, ConfigSchema]:
-        """Return the lifecycle_config schema."""
+    def _get_gestation_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the gestation_config schema (tiredness/sleep/gestation parameters)."""
         return {
-            "enable_gestation": ConfigSchema(field="lifecycle_config.enable_gestation", type=bool, default=True),
-            "enable_sleep_training": ConfigSchema(field="lifecycle_config.enable_sleep_training", type=bool, default=True),
-            "enable_lifecycle_weighting": ConfigSchema(field="lifecycle_config.enable_lifecycle_weighting", type=bool, default=True),
-            "lifecycle_capacity_factor": ConfigSchema(field="lifecycle_config.lifecycle_capacity_factor", type=float, default=0.01, range=(0.0, 1.0)),
-            "lifecycle_curve": ConfigSchema(field="lifecycle_config.lifecycle_curve", type=str, default="sigmoid_linear", validator=lambda x: x in ["sigmoid_linear", "exponential"]),
-            "sleep_conf_threshold": ConfigSchema(field="lifecycle_config.sleep_conf_threshold", type=float, default=0.7, range=(0.0, 1.0)),
-            "sleep_log_min": ConfigSchema(field="lifecycle_config.sleep_log_min", type=int, default=10, range=(1, None)),
-            "exposure_gain_eager": ConfigSchema(field="lifecycle_config.exposure_gain_eager", type=int, default=3, range=(1, None)),
-            "exposure_gain_default": ConfigSchema(field="lifecycle_config.exposure_gain_default", type=int, default=2, range=(1, None)),
-            "fatigue_factor_cap": ConfigSchema(field="lifecycle_config.fatigue_factor_cap", type=float, default=0.2, range=(0.0, 0.5)),
-            "fatigue_scaling_factor": ConfigSchema(field="lifecycle_config.fatigue_scaling_factor", type=float, default=2.0, range=(1.0, 5.0)),
-        }
-    
-    @staticmethod
-    def _get_monitoring_schema() -> Dict[str, ConfigSchema]:
-        """Return the monitoring schema."""
-        return {
-            "ram_critical_threshold_percent": ConfigSchema(field="monitoring.ram_critical_threshold_percent", type=float, default=90.0, range=(0.0, 100.0)),
-            "gpu_critical_threshold_percent": ConfigSchema(field="monitoring.gpu_critical_threshold_percent", type=float, default=95.0, range=(0.0, 100.0)),
-            "ram_critical_usage_mb": ConfigSchema(field="monitoring.ram_critical_usage_mb", type=int, default=8192, range=(1, None)),
-            "gpu_critical_usage_mb": ConfigSchema(field="monitoring.gpu_critical_usage_mb", type=int, default=4096, range=(1, None)),
-            "traits_update_interval_seconds": ConfigSchema(field="monitoring.traits_update_interval_seconds", type=float, default=0.5, range=(0.1, 10.0)),
-            "trait_history_size": ConfigSchema(field="monitoring.trait_history_size", type=int, default=100, range=(10, 1000)),
-            "min_samples_for_variance": ConfigSchema(field="monitoring.min_samples_for_variance", type=int, default=10, range=(2, 100)),
-            "trait_variance_thresholds": ConfigSchema(field="monitoring.trait_variance_thresholds", type=dict, default={"default": 0.1}, validator=lambda x: all(0 <= v <= 1 for v in x.values())),
+            "tiredness_threshold": ConfigSchema(
+                field="gestation_config.tiredness_threshold",
+                type=float,
+                default=0.7,
+                range=(0.0, 1.0)
+            ),
+            "tiredness_check_interval": ConfigSchema(
+                field="gestation_config.tiredness_check_interval",
+                type=int,
+                default=10,
+                range=(1, 3600)
+            ),
+            "tiredness_decay_k": ConfigSchema(
+                field="gestation_config.tiredness_decay_k",
+                type=float,
+                default=0.01,
+                range=(0.0001, 1.0)
+            ),
+            "sleep_log_min": ConfigSchema(
+                field="gestation_config.sleep_log_min",
+                type=int,
+                default=10,
+                range=(1, 10000)
+            ),
+            "gestation_countdown_seconds": ConfigSchema(
+                field="gestation_config.gestation_countdown_seconds",
+                type=int,
+                default=30,
+                range=(1, 600)
+            ),
+            "tiredness_weights": ConfigSchema(
+                field="gestation_config.tiredness_weights",
+                type=dict,
+                default={"log": 0.4, "confidence": 0.3, "time": 0.3},
+                validator=lambda x: all(k in x for k in ["log", "confidence", "time"])
+            ),
+            "min_awake_seconds": ConfigSchema(
+                field="gestation_config.min_awake_seconds",
+                type=int,
+                default=60,
+                range=(1, 86400)
+            ),
+            "max_awake_seconds": ConfigSchema(
+                field="gestation_config.max_awake_seconds",
+                type=int,
+                default=7200,
+                range=(1, 86400)
+            ),
+            "post_abort_cooldown_seconds": ConfigSchema(
+                field="gestation_config.post_abort_cooldown_seconds",
+                type=int,
+                default=120,
+                range=(1, 86400)
+            ),
+            "dream_after_gestation": ConfigSchema(
+                field="gestation_config.dream_after_gestation",
+                type=bool,
+                default=True
+            ),
         }
 
     @staticmethod
@@ -754,48 +783,6 @@ class ValidationSchema:
             )
         }
     
-    @staticmethod
-    def _get_gestation_config_schema() -> Dict[str, ConfigSchema]:
-        """Return the gestation_config schema (tiredness/sleep/gestation parameters)."""
-        return {
-            "tiredness_threshold": ConfigSchema(
-                field="gestation_config.tiredness_threshold",
-                type=float,
-                default=0.7,
-                range=(0.0, 1.0)
-            ),
-            "tiredness_check_interval": ConfigSchema(
-                field="gestation_config.tiredness_check_interval",
-                type=int,
-                default=10,
-                range=(1, 3600)
-            ),
-            "tiredness_decay_k": ConfigSchema(
-                field="gestation_config.tiredness_decay_k",
-                type=float,
-                default=0.01,
-                range=(0.0001, 1.0)
-            ),
-            "sleep_log_min": ConfigSchema(
-                field="gestation_config.sleep_log_min",
-                type=int,
-                default=10,
-                range=(1, 10000)
-            ),
-            "gestation_countdown_seconds": ConfigSchema(
-                field="gestation_config.gestation_countdown_seconds",
-                type=int,
-                default=30,
-                range=(1, 600)
-            ),
-            "tiredness_weights": ConfigSchema(
-                field="gestation_config.tiredness_weights",
-                type=dict,
-                default={"log": 0.4, "confidence": 0.3, "time": 0.3},
-                validator=lambda x: all(k in x for k in ["log", "confidence", "time"])
-            ),
-        }
-
     @staticmethod
     def _get_metrics_config_schema() -> Dict[str, ConfigSchema]:
         """Return the metrics_config schema."""

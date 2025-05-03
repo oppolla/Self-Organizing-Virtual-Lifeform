@@ -9,6 +9,7 @@ import time
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
 from sovl_error import ErrorManager, ConfigurationError
+import shutil
 
 class InsufficientDataError(Exception):
     """Raised when loaded data doesn't meet minimum entry requirements."""
@@ -1003,3 +1004,51 @@ class ScribeJSONLBatchLoader:
                     continue
         if batch_texts:
             yield batch_texts, batch_weights
+
+MAX_BACKUP_SIZE_MB = 50
+BACKUP_DIR = "scribe_backups"
+MAX_BACKUPS = 5
+
+def backup_if_large(file_path, max_size_mb=MAX_BACKUP_SIZE_MB, backup_dir=BACKUP_DIR, max_backups=MAX_BACKUPS):
+    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    if size_mb >= max_size_mb:
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        base = os.path.basename(file_path)
+        backup_path = os.path.join(backup_dir, f"{base}.bak.{timestamp}")
+        shutil.copy2(file_path, backup_path)
+        # Prune old backups
+        backups = sorted(
+            [f for f in os.listdir(backup_dir) if f.startswith(base)],
+            reverse=True
+        )
+        for old in backups[max_backups:]:
+            os.remove(os.path.join(backup_dir, old))
+        return backup_path
+    return None
+
+def prune_scribe_journal(trained_memories: set, scribe_path: str, backup: bool = True):
+    """
+    Remove entries from the scribe journal whose 'memory' field is in trained_memories.
+    Optionally back up the original file before overwriting.
+    Handles malformed lines gracefully.
+    """
+    if backup and os.path.exists(scribe_path):
+        backup_if_large(scribe_path)
+    # Read all entries
+    with open(scribe_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    # Filter out trained entries
+    pruned_lines = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+            if entry.get("memory") not in trained_memories:
+                pruned_lines.append(line)
+        except Exception:
+            pruned_lines.append(line)  # Keep malformed lines
+    # Write back pruned file
+    with open(scribe_path, "w", encoding="utf-8") as f:
+        f.writelines(pruned_lines)

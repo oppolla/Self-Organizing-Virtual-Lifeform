@@ -1855,12 +1855,18 @@ MEMORY_TEMPLATES = {
         "You were in your {current_lifecycle_stage} phase."
     ),
     "dream": (
-        "You had this dream: {narration} at {timestamp_unix}. "
-        "You also dreamed this: {response}. "
-        "It was the {session_id} time you awoke. "
-        "The novelty was {novelty_score}. " 
-        "The confidence was {confidence_score}. "
-        "You were in your {current_lifecycle_stage} phase."
+        "You dreamed: {dream1} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream2} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream3} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream4} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream5} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream6} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream7} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream8} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream9} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream10} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream11} in {musical_key} at {timestamp_unix}. "
+        "You dreamed: {dream12} in {musical_key} at {timestamp_unix}."
     ),
     "resonator": (
         "You saw this: {full_text} at {timestamp_unix}. "

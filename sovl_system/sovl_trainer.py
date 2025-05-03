@@ -17,6 +17,7 @@ from sovl_io import JSONLLoader, StreamingJSONLoader, ScribeJSONLBatchLoader
 import threading
 import gc
 from sovl_utils import validate_metadata_fields, repair_metadata, get_metadata_value, collate_tensor_batch, move_batch_to_device
+from sovl_dreamer import Dreamer
 
 # TrainingConfig: holds all training-related configuration groups loaded from ConfigManager.
 @dataclass
@@ -634,6 +635,33 @@ class SOVLTrainer:
             }
         )
 
+    def train_on_scribe_journal(self, scribe_path: str, batch_size: int = 32, default_weight: float = 1.0, epochs: int = 1):
+        """
+        Train on batches from the scribe journal, tracking all 'memory' fields used for training.
+        Returns the set of trained memory strings.
+        """
+        from sovl_io import ScribeJSONLBatchLoader
+        trained_memories = set()
+        loader = ScribeJSONLBatchLoader(scribe_path, batch_size, default_weight)
+        self.model.train()
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config.optimizer.learning_rate)
+        for epoch in range(epochs):
+            for batch_texts, batch_weights in loader:
+                # Track all memory strings in this batch
+                for entry in batch_texts:
+                    if 'memory' in entry:
+                        trained_memories.add(entry['memory'])
+                # Prepare batch for model (assume batch_preparer handles 'memory' field)
+                batch = self.batch_preparer.prepare(batch_texts)
+                batch = move_batch_to_device(batch, self.device)
+                optimizer.zero_grad()
+                outputs = self.model(**batch)
+                loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                # Apply per-sample weighting if needed (not shown here)
+                loss.backward()
+                optimizer.step()
+        return trained_memories
+
 @dataclass
 class InterpretationConfig:
     """Configuration for metadata interpretation rules."""
@@ -1124,175 +1152,3 @@ class BatchPreparer:
             encoded = {k: v.squeeze(0) if v.dim() == 2 and v.size(0) == 1 else v for k, v in encoded.items()}
             batch.append(encoded)
         return collate_tensor_batch(batch, self.device)
-
-import json
-from datetime import datetime
-import random
-
-class Dreamer:
-    """
-    Dream system for SOVL: selects, generates, and logs dream events from the last active period.
-    Each dream is a surreal narration, with optional dream noise for creativity.
-    """
-    def __init__(self, config_manager, scribe_path, logger, metadata_processor, scribe_event_fn, error_manager=None):
-        self.config_manager = config_manager
-        self.scribe_path = scribe_path
-        self.logger = logger
-        self.metadata_processor = metadata_processor
-        self.scribe_event_fn = scribe_event_fn  # Function to log a scribe event (e.g., capture_scribe_event)
-        self.error_manager = error_manager
-        # Configurable dream parameters
-        self.max_dreams = config_manager.get("dream_max_events_per_cycle", 5)
-        self.novelty_weight = config_manager.get("dream_novelty_weight", 1.0)
-        self.confidence_weight = config_manager.get("dream_confidence_weight", 0.0)
-        self.selection_strategy = config_manager.get("dream_selection_strategy", "top")
-        self.dream_noise_level = config_manager.get("dream_noise_level", 0.2)
-
-    def extract_last_active_period(self):
-        """
-        Extract events from the last active period (since last 'wake' event).
-        Returns: List of scribe log event dicts.
-        """
-        events = []
-        try:
-            loader = JSONLLoader(self.config_manager, self.logger, self.error_manager) if self.error_manager else JSONLLoader(self.config_manager, self.logger, None)
-
-            # First pass: Find the index of the last 'wake' event
-            last_wake_idx = None
-            current_idx = 0
-            for entry in loader.stream_jsonl(self.scribe_path):
-                if entry.get("event_type") == "wake":
-                    last_wake_idx = current_idx
-                current_idx += 1
-
-            # Second pass: Collect events from last_wake_idx (or start) using streaming
-            current_idx = 0
-            for entry in loader.stream_jsonl(self.scribe_path):
-                if last_wake_idx is None or current_idx > last_wake_idx:
-                    events.append(entry)
-                current_idx += 1
-
-        except Exception as e:
-            if self.logger:
-                self.logger.log_error(
-                    f"Failed to stream scribe log with JSONLLoader: {str(e)}",
-                    error_type="scribe_stream_error",
-                    stack_trace=traceback.format_exc()
-                )
-
-        return events
-
-    def score_and_select_dreams(self, events):
-        """
-        Score and select dream candidates based on novelty/confidence.
-        Returns: List of selected dream event dicts.
-        """
-        scored = []
-        for event in events:
-            meta = event.get("metadata", {})
-            novelty = meta.get("novelty", 0)
-            confidence = meta.get("confidence", 1)
-            score = self.novelty_weight * novelty - self.confidence_weight * confidence
-            scored.append((score, event))
-        scored.sort(reverse=True, key=lambda x: x[0])
-        if self.selection_strategy == "top":
-            selected = [e for (_, e) in scored[:self.max_dreams]]
-        elif self.selection_strategy == "random":
-            selected = [e for (_, e) in random.sample(scored, min(self.max_dreams, len(scored)))]
-        else:
-            selected = [e for (_, e) in scored[:self.max_dreams]]
-        return selected
-
-    def add_dream_noise(self, dream_event):
-        noise_level = self.dream_noise_level
-        ed = dream_event["event_data"].copy()
-        # Shuffle words or insert random tokens in text fields
-        for key, value in ed.items():
-            if isinstance(value, str) and random.random() < noise_level:
-                words = value.split()
-                if words:
-                    random.shuffle(words)
-                    if random.random() < noise_level:
-                        words.insert(
-                            random.randint(0, len(words)),
-                            random.choice(["???", "dream", "echo", "phantom", "mist", "fragment"])
-                        )
-                    ed[key] = " ".join(words)
-        # Mutate metadata
-        meta = dream_event["metadata"].copy()
-        if "novelty" in meta:
-            meta["novelty"] += random.uniform(-0.1, 0.1) * noise_level
-        if "confidence" in meta:
-            meta["confidence"] += random.uniform(-0.1, 0.1) * noise_level
-        dream_event["event_data"] = ed
-        dream_event["metadata"] = meta
-        return dream_event
-
-    def narrate_dream(self, dream_event):
-        """
-        Generate a surreal narrative for the dream event.
-        """
-        prompt = dream_event["event_data"].get("prompt", "")
-        response = dream_event["event_data"].get("response", "")
-        # Simple surreal narration: merge, shuffle, and add dream-like phrases
-        parts = [prompt, response]
-        random.shuffle(parts)
-        narration = f"In the midst of swirling thoughts, a dream emerged: {parts[0]} ... Suddenly, {parts[1]} ... The boundaries of meaning blurred."
-        if random.random() < self.dream_noise_level:
-            narration += f" {random.choice(['A phantom word echoed.', 'Mist enveloped the memory.', 'Fragments danced in the void.'])}"
-        return narration.strip()
-
-    def generate_dream_events(self, dream_candidates):
-        dreams = []
-        now = datetime.now().isoformat()
-        for event in dream_candidates:
-            dream_event = {
-                "timestamp_iso": now,
-                "event_type": "dream",
-                "event_data": event.get("event_data", {}),
-                "metadata": event.get("metadata", {}),
-                "dreamed_from": event.get("event_type", "unknown")
-            }
-            dream_event = self.add_dream_noise(dream_event)
-            narration = self.narrate_dream(dream_event)
-            # Only the narration is logged as the main dream content
-            dream_event["narration"] = narration
-            dreams.append(dream_event)
-        return dreams
-
-    def log_dreams(self, dreams):
-        from sovl_queue import capture_scribe_event
-        for dream in dreams:
-            try:
-                event_data = {
-                    "narration": dream["narration"],
-                    "prompt": dream["event_data"].get("prompt"),
-                    "response": dream["event_data"].get("response"),
-                    "novelty_score": dream["metadata"].get("novelty"),
-                    "confidence_score": dream["metadata"].get("confidence"),
-                }
-                source_metadata = {
-                    "dreamed_from": dream.get("dreamed_from"),
-                    "timestamp_iso": dream.get("timestamp_iso"),
-                    **dream.get("metadata", {})
-                }
-                capture_scribe_event(
-                    origin="dreamer",
-                    event_type="dream",
-                    event_data=event_data,
-                    source_metadata=source_metadata,
-                    session_id=dream.get("session_id"),
-                    timestamp=None  # or parse from dream["timestamp_iso"] if needed
-                )
-                self.logger.info(f"Dream event logged: {dream['narration']}")
-            except Exception as e:
-                self.logger.log_error(f"Failed to log dream event: {e}")
-
-    def run_dream_cycle(self):
-        """
-        Main entry: extract, select, generate, and log dreams.
-        """
-        events = self.extract_last_active_period()
-        dream_candidates = self.score_and_select_dreams(events)
-        dreams = self.generate_dream_events(dream_candidates)
-        self.log_dreams(dreams)

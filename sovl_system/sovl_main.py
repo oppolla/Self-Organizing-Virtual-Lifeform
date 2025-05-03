@@ -8,6 +8,7 @@ from collections import deque, defaultdict
 from threading import Lock, RLock, Event, Thread
 import math
 import threading
+import select
 
 # Third-party imports
 import torch
@@ -72,7 +73,7 @@ from sovl_utils import (
     safe_append_to_file
 )
 from sovl_confidence import calculate_confidence_score
-from sovl_io import  InsufficientDataError
+from sovl_io import  InsufficientDataError, prune_scribe_journal
 from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
 
 # Type checking imports
@@ -1022,14 +1023,25 @@ class SOVLSystem(SystemInterface):
                 context.autonomy_manager = self.autonomy_manager
             
             # --- Autonomous Tiredness & Sleep Logic ---
-            # --- Load lifecycle_config parameters from config ---
-            lifecycle_cfg = self.config_handler.get('lifecycle_config', {}) if self.config_handler else {}
-            self.tiredness_threshold = lifecycle_cfg.get('tiredness_threshold', 0.7)
-            self.tiredness_check_interval = lifecycle_cfg.get('tiredness_check_interval', 10)
-            self.tiredness_decay_k = lifecycle_cfg.get('tiredness_decay_k', 0.01)
-            self.sleep_log_min = lifecycle_cfg.get('sleep_log_min', 10)
-            self.gestation_countdown_seconds = lifecycle_cfg.get('gestation_countdown_seconds', 30)
-            self.tiredness_weights = lifecycle_cfg.get('tiredness_weights', {"log": 0.4, "confidence": 0.3, "time": 0.3})
+            # --- Load gestation_config parameters from config ---
+            gestation_cfg = self.config_handler.get('gestation_config', {}) if self.config_handler else {}
+            self.tiredness_threshold = gestation_cfg.get('tiredness_threshold', 0.7)
+            self.tiredness_check_interval = gestation_cfg.get('tiredness_check_interval', 10)
+            self.tiredness_decay_k = gestation_cfg.get('tiredness_decay_k', 0.01)
+            self.sleep_log_min = gestation_cfg.get('sleep_log_min', 10)
+            self.gestation_countdown_seconds = gestation_cfg.get('gestation_countdown_seconds', 30)
+            self.tiredness_weights = gestation_cfg.get('tiredness_weights', {"log": 0.4, "confidence": 0.3, "time": 0.3})
+            self.min_awake_seconds = gestation_cfg.get('min_awake_seconds', 60)
+            self.max_awake_seconds = gestation_cfg.get('max_awake_seconds', 7200)
+            self.post_abort_cooldown_seconds = gestation_cfg.get('post_abort_cooldown_seconds', 120)
+            # --- State for gestation logic ---
+            self.last_gestation_time = time.time()  # Set to now on startup
+            self.last_gestation_abort_time = 0.0
+            self.current_tiredness_threshold = self.tiredness_threshold
+            self._pending_gestation_start = None
+            self._gestating_start = None
+            self._last_gestation_reason = None
+            self._gestation_event_log = []
             self._tiredness_monitor_thread = threading.Thread(target=self._tiredness_monitor_loop, daemon=True)
             self._tiredness_monitor_thread.start()
             
@@ -1778,20 +1790,186 @@ class SOVLSystem(SystemInterface):
     def _tiredness_monitor_loop(self):
         while True:
             try:
+                now = time.time()
                 tiredness = compute_tiredness(self, self.context.logger, self.context.state_manager)
                 # Expose tiredness in state
                 if hasattr(self.context, 'state_manager') and hasattr(self.context.state_manager, 'set_tiredness'):
                     self.context.state_manager.set_tiredness(tiredness)
-                # Only trigger if online and not already pending/gestating
                 mode = self.context.state_manager.get_mode() if hasattr(self.context, 'state_manager') else 'online'
-                if (
-                    tiredness > getattr(self, 'tiredness_threshold', 0.7)
-                    and mode == 'online'
-                ):
-                    print("System is getting tired... preparing to sleep.")
-                    self.context.state_manager.set_mode('pending_gestation')
-                    if hasattr(self.context.state_manager, 'set_gestation_countdown'):
-                        self.context.state_manager.set_gestation_countdown(getattr(self, 'gestation_countdown_seconds', 30))
+                # --- Edge case: stuck in pending/gestating ---
+                stuck_limit = 2 * self.gestation_countdown_seconds
+                if mode == 'pending_gestation':
+                    if self._pending_gestation_start is None:
+                        self._pending_gestation_start = now
+                    elif now - self._pending_gestation_start > stuck_limit:
+                        print("[WARN] Stuck in pending_gestation, resetting to online.")
+                        self.context.state_manager.set_mode('online')
+                        self._pending_gestation_start = None
+                        continue
+                else:
+                    self._pending_gestation_start = None
+                if mode == 'gestating':
+                    if self._gestating_start is None:
+                        self._gestating_start = now
+                    elif now - self._gestating_start > stuck_limit:
+                        print("[WARN] Stuck in gestating, resetting to online.")
+                        self.context.state_manager.set_mode('online')
+                        self._gestating_start = None
+                        continue
+                else:
+                    self._gestating_start = None
+                # --- Minimum awake time ---
+                if now - self.last_gestation_time < self.min_awake_seconds:
+                    time.sleep(self.tiredness_check_interval)
+                    continue
+                # --- Cooldown after abort ---
+                if now - self.last_gestation_abort_time < self.post_abort_cooldown_seconds:
+                    time.sleep(self.tiredness_check_interval)
+                    continue
+                # --- Maximum awake time ---
+                if now - self.last_gestation_time >= self.max_awake_seconds:
+                    reason = "max_awake_time"
+                    self._trigger_gestation(now, tiredness, reason)
+                    time.sleep(self.tiredness_check_interval)
+                    continue
+                # --- Dynamic threshold adjustment ---
+                # Lower threshold if awake much longer than min_awake_seconds
+                awake_time = now - self.last_gestation_time
+                if awake_time > 2 * self.min_awake_seconds:
+                    self.current_tiredness_threshold = max(0.3, self.current_tiredness_threshold - 0.01)
+                else:
+                    self.current_tiredness_threshold = self.tiredness_threshold
+                # --- Tiredness threshold ---
+                if tiredness > self.current_tiredness_threshold and mode == 'online':
+                    reason = "tiredness"
+                    self._trigger_gestation(now, tiredness, reason)
+                time.sleep(self.tiredness_check_interval)
             except Exception as e:
                 print(f"Tiredness monitor error: {e}")
-            time.sleep(getattr(self, 'tiredness_check_interval', 10))
+                time.sleep(self.tiredness_check_interval)
+
+    def _trigger_gestation(self, now, tiredness, reason):
+        print(f"System is getting tired... preparing to sleep. Reason: {reason}")
+        self.context.state_manager.set_mode('pending_gestation')
+        if hasattr(self.context.state_manager, 'set_gestation_countdown'):
+            self.context.state_manager.set_gestation_countdown(self.gestation_countdown_seconds)
+        # Log event
+        log_entry = {
+            "event": "gestation_triggered",
+            "reason": reason,
+            "tiredness": tiredness,
+            "threshold": self.current_tiredness_threshold,
+            "timestamp": now,
+            "mode": self.context.state_manager.get_mode(),
+            "min_awake_seconds": self.min_awake_seconds,
+            "max_awake_seconds": self.max_awake_seconds,
+            "post_abort_cooldown_seconds": self.post_abort_cooldown_seconds
+        }
+        self._gestation_event_log.append(log_entry)
+        if hasattr(self.context, 'logger') and hasattr(self.context.logger, 'write'):
+            self.context.logger.write(log_entry)
+        # Reset abort cooldown (will be set if user aborts)
+        self._last_gestation_reason = reason
+
+    # Call this when gestation completes
+    def on_gestation_complete(self):
+        self.last_gestation_time = time.time()
+        self.current_tiredness_threshold = self.tiredness_threshold
+        self._pending_gestation_start = None
+        self._gestating_start = None
+        self._last_gestation_reason = None
+
+    # Call this when gestation is aborted
+    def on_gestation_abort(self):
+        self.last_gestation_abort_time = time.time()
+        self._pending_gestation_start = None
+        self._gestating_start = None
+        # Raise threshold a bit after abort
+        self.current_tiredness_threshold = min(1.0, self.current_tiredness_threshold + 0.05)
+
+    def run_gestation_and_dream_cycle(self, *args, **kwargs):
+        """Run gestation, then (optionally) a fast, abortable dream cycle as a system state."""
+        self.state_manager.set_mode('gestating')
+        # --- Begin: Training and Pruning ---
+        # Assume self.trainer is an instance of SOVLTrainer
+        scribe_path = getattr(self, 'scribe_path', 'scribe/sovl_scribe.jsonl')
+        batch_size = getattr(self, 'batch_size', 32)
+        epochs = getattr(self, 'train_epochs', 1)
+        trained_memories = set()
+        if hasattr(self, 'trainer') and self.trainer is not None:
+            trained_memories = self.trainer.train_on_scribe_journal(scribe_path, batch_size=batch_size, epochs=epochs)
+        if trained_memories:
+            prune_scribe_journal(trained_memories, scribe_path, backup=True)
+        # --- End: Training and Pruning ---
+        # Check config if we should dream after gestation
+        dream_after_gestation = getattr(self, 'dream_after_gestation', True)
+        if hasattr(self, 'config_handler'):
+            dream_after_gestation = self.config_handler.get('gestation_config.dream_after_gestation', True)
+        if dream_after_gestation:
+            self.run_dream_cycle_with_abort()
+        else:
+            self.state_manager.set_mode('online')
+
+    def run_dream_cycle_with_abort(self):
+        """Set mode to 'dreaming', run Dreamer, allow abort, then return to 'online'."""
+        import time
+        import sys
+        import select
+        from threading import Thread
+        self.state_manager.set_mode('dreaming')
+        logger = getattr(self, 'logger', None)
+        dreamer = getattr(self, 'dreamer', None)
+        if dreamer is None:
+            # Instantiate Dreamer if not present
+            dreamer = Dreamer(
+                self.config_handler,
+                self.config_handler.get('scribe_path', 'scribe/sovl_scribe.jsonl'),
+                logger,
+                getattr(self, 'metadata_processor', None),
+                getattr(self, 'scribe_event_fn', None),
+                getattr(self, 'error_manager', None)
+            )
+            self.dreamer = dreamer
+        dream_done = [False]
+        abort_flag = [False]
+        def dream_thread():
+            try:
+                dreamer.run_dream_cycle()
+                dream_done[0] = True
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"Dreamer failed: {e}")
+                dream_done[0] = True
+        t = Thread(target=dream_thread)
+        t.start()
+        try:
+            while not dream_done[0]:
+                # Non-blocking keypress check (works on Unix)
+                print("\rDreaming... (press any key to abort)", end="", flush=True)
+                if sys.platform.startswith('win'):
+                    time.sleep(0.5)
+                else:
+                    dr, _, _ = select.select([sys.stdin], [], [], 0.5)
+                    if dr:
+                        print("\nAre you sure you want to abort dreaming? (y/N): ", end="", flush=True)
+                        ans = sys.stdin.readline().strip().lower()
+                        if ans == 'y':
+                            abort_flag[0] = True
+                            if logger:
+                                logger.info("Dreaming aborted by user.")
+                            break
+                        else:
+                            print("Resuming dreaming...")
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\nAre you sure you want to abort dreaming? (y/N): ", end="", flush=True)
+            ans = sys.stdin.readline().strip().lower()
+            if ans == 'y':
+                abort_flag[0] = True
+                if logger:
+                    logger.info("Dreaming aborted by user (KeyboardInterrupt).")
+            else:
+                print("Resuming dreaming...")
+        finally:
+            self.state_manager.set_mode('online')
+            print("\nDreaming complete. Returning to online mode.")

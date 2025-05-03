@@ -537,7 +537,7 @@ class SOVLState(StateBase):
             self.curiosity_exploration_queue = deque(maxlen=self.config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
             
             self.version = self.STATE_VERSION
-            self.mode = "online"  # online, gestating, offline
+            self.mode: str = "online"  # online, gestating, offline, pending_gestation, dreaming
             self.gestation_progress: float = 0.0  # 0.0 to 1.0
             
             self.log_event(
