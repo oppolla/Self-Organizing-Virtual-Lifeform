@@ -966,3 +966,43 @@ class StreamingJSONLoader:
             if self.logger:
                 self.logger.log_error(f"Failed to stream JSONL data: {e}", error_type="jsonl_stream_error")
             return
+        
+class ScribeJSONLBatchLoader:
+    """
+    Loads and batches scribe-formatted JSONL data for training.
+    Each batch yields:
+      - batch_texts: List[Dict[str, str]] with 'prompt' and 'response'
+      - batch_weights: List[float] (from 'confidence_score' or default 1.0)
+    """
+    def __init__(self, file_path: str, batch_size: int = 32, weight_field: str = "confidence_score", default_weight: float = 1.0):
+        self.file_path = file_path
+        self.batch_size = batch_size
+        self.weight_field = weight_field
+        self.default_weight = default_weight
+
+    def __iter__(self):
+        batch_texts = []
+        batch_weights = []
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            for line_number, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    prompt = entry.get("prompt")
+                    response = entry.get("response")
+                    weight = float(entry.get(self.weight_field, self.default_weight))
+                    if not isinstance(prompt, str) or not isinstance(response, str):
+                        continue  # Skip invalid entries
+                    batch_texts.append({"prompt": prompt, "response": response})
+                    batch_weights.append(weight)
+                    if len(batch_texts) == self.batch_size:
+                        yield batch_texts, batch_weights
+                        batch_texts = []
+                        batch_weights = []
+                except Exception as e:
+                    # Optionally log or handle parse errors
+                    continue
+        if batch_texts:
+            yield batch_texts, batch_weights
