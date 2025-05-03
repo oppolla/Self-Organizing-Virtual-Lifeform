@@ -1924,8 +1924,6 @@ class SOVLSystem(SystemInterface):
             dreamer = Dreamer(
                 self.config_handler,
                 self.config_handler.get('scribe_path', 'scribe/sovl_scribe.jsonl'),
-                logger,
-                getattr(self, 'metadata_processor', None),
                 getattr(self, 'scribe_event_fn', None),
                 getattr(self, 'error_manager', None)
             )

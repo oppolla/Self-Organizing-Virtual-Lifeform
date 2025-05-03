@@ -16,14 +16,7 @@ from sovl_processor import ScribeIngestionProcessor
 from sovl_schema import ConfigSchema
 
 """
-sovl_dreamer.py
-
-All dream-related logic for SOVL, including:
-- Dream event selection and scoring
-- Dream narration and noise
-- Dream album and song generation with musical structure
-- All music-structured dream logic (Song, Section, Progression, etc.)
-- Event queuing and output for scribe_journal
+Handles all dream generation, dream structure, narration, and scribe journal integration for SOVL
 """
 
 # Configuration schema for dream_memory_config
@@ -272,6 +265,29 @@ class DreamGenerator:
 
 class DreamAlbumGenerator:
     """Generates dream albums with musical structure and narration."""
+    class Song:
+        """Represents a song with musical structure."""
+        def __init__(self, album_generator):
+            self.key = album_generator._generate_key()
+            self.time_signature = album_generator._generate_time_signature()
+            self.tempo = album_generator._generate_bpm()
+            self.sections = album_generator._generate_sections(self)
+            self.overall_sections = self.sections
+        def get_tempo(self):
+            return self.tempo
+        def get_tempo_desc(self):
+            return f"{self.tempo} bpm"
+    class Section:
+        """Represents a section of a song (A, B, etc.)."""
+        def __init__(self, name, key, album_generator):
+            self.name = name
+            self.key = key
+            self.progression = album_generator.Progression(album_generator)
+            self.repeats = random.choice([1, 2, 4])
+    class Progression:
+        """Represents a chord progression for a section."""
+        def __init__(self, album_generator):
+            self.progression = album_generator._generate_progression()
     def __init__(
         self,
         config_manager: ConfigManager,
@@ -325,11 +341,22 @@ class DreamAlbumGenerator:
                 memory = motif_memory if random.random() < 0.5 else random.choice(memories)
                 chord_desc = self.chord_functions.get(chord, "mystery and transformation")
                 prompt = (
-                    f"You are composing a surreal dream inspired by music. "
-                    f"The current section is in the {section.key.scale} scale, key {section.key}. "
-                    f"This moment corresponds to the '{chord}' chord, which creates a feeling of {chord_desc}. "
-                    f"Here is a memory fragment to use: '{memory}'. "
-                    f"Write a single, vivid, poetic sentence that blends the memory with the chord's feeling."
+                    "Essential qualities:\n"
+                    f"  - You are composing a surreal dream inspired by the lyrics music. "
+                    f"  - The current section is in the {section.key.scale} scale, key {section.key}. Let the musicality guide your writing."
+                    f"  - This moment corresponds to the '{chord}' chord, which creates a feeling of {chord_desc}. "
+                    f"  - The tempo is {song.tempo} bpm. Let this tempo influence the energy and rhythm of your lyric.\n"
+                    f"  - Here is a memory fragment to use: '{memory}'. "
+                     "  - Format your words as if they are song lyrics. Follow lyric conventions closely. "
+                     "  - Let the musical indicators like key and tempo and modulation to guide your journey and shape your flow. "
+                    f"  - Write 50 word single, vivid, poetic sentence that blends the memory with the chord's feeling."
+                    "Key constraints:\n"
+                     "   - Output only your lyric, no explanations or commentary.\n"
+                     "   - Do not ever reference songs or music directly.\n"
+                     "   - Do not refer to the specific key or scale or tempo. Only allow it to guide the tone of your lyrics\n"
+                     "   - Do not include dialogue or meta-commentary.\n"
+                     "   - Keep it to a single poetic sentence, under 50 words.\n"
+                     "   - Must use first- or second-person perspective.\n"
                 )
                 prompts.append(prompt)
         try:
@@ -357,17 +384,18 @@ class DreamAlbumGenerator:
         album_title = self._clean_title(motif, max_length=48)
         album = []
         for song_idx in range(self.num_songs):
-            song = Song()  # Markov structure
+            song = self.Song(self)  # Markov structure
             song_sections = []
             score_lines = [f"Key: {song.key} | Tempo: {song.get_tempo_desc()} | Time Sig: {song.time_signature}"]
             section_motifs = {}
-            narration_fragments = []
+            section_narrations = []
             for section in song.overall_sections:
                 if section.name not in section_motifs:
                     section_motifs[section.name] = memories[(song_idx + ord(section.name[0])) % len(memories)]
                 motif_memory = section_motifs[section.name]
+                # Generate narration fragments for the section
                 narration = self.generate_section_narration(section, song, motif_memory, memories, generation_manager)
-                narration_fragments.append(narration)
+                section_narrations.append(narration)
                 prog_roman = [" ".join(bar) for bar in section.progression.progression]
                 prog_in_key = [" ".join(section.key.get_chord(c) for c in bar) for bar in section.progression.progression]
                 bars = len(section.progression.progression)
@@ -390,20 +418,21 @@ class DreamAlbumGenerator:
                 })
             song_title = self._clean_title(list(section_motifs.values())[0], max_length=48)
             poetic_score = "\n".join(score_lines)
-            # Format dream event to match MEMORY_TEMPLATES
+            # Each dreamN is a full section narration
             event_data = {
-                f"dream{i+1}": frag for i, frag in enumerate(narration_fragments[:12])
+                f"dream{i+1}": section_narrations[i] for i in range(min(len(section_narrations), 12))
             }
             event_data["musical_key"] = str(song.key)
             event_data["timestamp_unix"] = int(time.time())
             song_entry = {
                 "dream_album_name": album_title,
                 "dream_song_name": song_title,
-                "sections": song_sections,
-                "poetic_score": poetic_score,
                 "musical_key": str(song.key),
-                "timestamp_unix": int(time.time())
+                "timestamp_unix": int(time.time()),
             }
+            # Add dreamN fields
+            for i in range(min(len(section_narrations), 12)):
+                song_entry[f"dream{i+1}"] = section_narrations[i]
             album.append(song_entry)
             # Process with ScribeIngestionProcessor
             metadata = {"motif": motif, "album_title": album_title}
@@ -448,6 +477,25 @@ class DreamAlbumGenerator:
                         )
                     ed[key] = " ".join(words)
         return dream_event
+
+    def _generate_key(self):
+        # Placeholder: return a random key
+        return random.choice(["C", "G", "D", "A", "E", "F", "Bb"])
+
+    def _generate_time_signature(self):
+        return random.choice(["4/4", "3/4"])
+
+    def _generate_bpm(self):
+        return random.randint(60, 140)
+
+    def _generate_sections(self, song):
+        section_names = ["A", "B", "C"]
+        return [self.Section(name, song.key, self) for name in section_names]
+
+    def _generate_progression(self):
+        # Placeholder: return a list of lists of chords
+        chords = ["I", "IV", "V", "vi", "ii"]
+        return [[random.choice(chords) for _ in range(4)] for _ in range(2)]
 
 class Dreamer:
     """Dream system for SOVL: generates and logs dream events and albums."""
