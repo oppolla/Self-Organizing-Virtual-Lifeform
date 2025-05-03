@@ -191,21 +191,43 @@ class DreamEventSelector:
         return []
 
     def score_and_select_dreams(self, events: List[Dict]) -> List[Dict]:
-        """Score events by novelty/confidence and select candidates."""
+        """Select events based on weight, with a pinch of randomization."""
         try:
-            scored = []
+            # Extract weights, prefer event['weight'], fallback to event['event_data']['weight']
+            weighted_events = []
             for event in events:
-                meta = event.get("metadata", {})
-                novelty = meta.get("novelty", 0.0)
-                confidence = meta.get("confidence", 1.0)
-                score = self.novelty_weight * novelty - self.confidence_weight * confidence
-                scored.append((score, event))
-            scored.sort(reverse=True, key=lambda x: x[0])
-            if self.selection_strategy == "top":
-                return [e for _, e in scored[:self.max_dreams]]
-            elif self.selection_strategy == "random":
-                return [e for _, e in random.sample(scored, min(self.max_dreams, len(scored)))]
-            return [e for _, e in scored[:self.max_dreams]]
+                weight = event.get('weight')
+                if weight is None:
+                    # Try event_data['weight']
+                    event_data = event.get('event_data', {})
+                    weight = event_data.get('weight', 1.0)
+                weighted_events.append((weight, event))
+            # Sort by weight descending
+            weighted_events.sort(reverse=True, key=lambda x: x[0])
+            # Top-N pool (2x max_dreams or all if fewer)
+            pool_size = min(len(weighted_events), max(self.max_dreams * 2, self.max_dreams))
+            candidate_pool = weighted_events[:pool_size]
+            # Prepare for weighted random selection
+            weights = [max(0.01, w) for w, _ in candidate_pool]  # Avoid zero weights
+            events_only = [e for _, e in candidate_pool]
+            # Randomly select up to max_dreams, weighted by weight, no repeats
+            selected = []
+            selected_indices = set()
+            attempts = 0
+            while len(selected) < self.max_dreams and attempts < pool_size * 3:
+                idx = random.choices(range(len(events_only)), weights=weights, k=1)[0]
+                if idx not in selected_indices:
+                    selected.append(events_only[idx])
+                    selected_indices.add(idx)
+                attempts += 1
+            # If not enough unique, fill with more from pool
+            if len(selected) < self.max_dreams:
+                for i, e in enumerate(events_only):
+                    if i not in selected_indices:
+                        selected.append(e)
+                    if len(selected) == self.max_dreams:
+                        break
+            return selected
         except Exception as e:
             error_type = f"dreamer_score_and_select_dreams_error"
             context = {"function": "score_and_select_dreams"}
