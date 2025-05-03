@@ -7,8 +7,6 @@ from typing import List, Dict, Optional, Any
 from functools import wraps
 from copy import deepcopy
 import hashlib
-import logging
-
 from sovl_io import JSONLLoader
 from sovl_config import ConfigManager
 from sovl_logger import Logger
