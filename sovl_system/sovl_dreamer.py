@@ -39,25 +39,15 @@ class Dreamer:
         Extract events from the last active period (since last 'wake' event).
         Returns: List of scribe log event dicts.
         """
-        events = []
         try:
             loader = JSONLLoader(self.config_manager, self.logger, self.error_manager) if self.error_manager else JSONLLoader(self.config_manager, self.logger, None)
-
-            # First pass: Find the index of the last 'wake' event
-            last_wake_idx = None
-            current_idx = 0
-            for entry in loader.stream_jsonl(self.scribe_path):
+            buffer = []
+            last_wake_idx = -1
+            for idx, entry in enumerate(loader.stream_jsonl(self.scribe_path)):
+                buffer.append(entry)
                 if entry.get("event_type") == "wake":
-                    last_wake_idx = current_idx
-                current_idx += 1
-
-            # Second pass: Collect events from last_wake_idx (or start) using streaming
-            current_idx = 0
-            for entry in loader.stream_jsonl(self.scribe_path):
-                if last_wake_idx is None or current_idx > last_wake_idx:
-                    events.append(entry)
-                current_idx += 1
-
+                    last_wake_idx = idx
+            return buffer[last_wake_idx+1:] if last_wake_idx != -1 else buffer
         except Exception as e:
             if self.logger:
                 self.logger.log_error(
@@ -65,8 +55,7 @@ class Dreamer:
                     error_type="scribe_stream_error",
                     stack_trace=traceback.format_exc()
                 )
-
-        return events
+        return []
 
     def score_and_select_dreams(self, events):
         """
@@ -91,7 +80,9 @@ class Dreamer:
 
     def add_dream_noise(self, dream_event):
         noise_level = self.dream_noise_level
-        ed = dream_event["event_data"].copy()
+        ed = dream_event["event_data"]
+        ed_mutated = False
+        ed_new = ed
         # Shuffle words or insert random tokens in text fields
         for key, value in ed.items():
             if isinstance(value, str) and random.random() < noise_level:
@@ -103,15 +94,28 @@ class Dreamer:
                             random.randint(0, len(words)),
                             random.choice(["???", "dream", "echo", "phantom", "mist", "fragment"])
                         )
-                    ed[key] = " ".join(words)
+                    if not ed_mutated:
+                        ed_new = ed.copy()
+                        ed_mutated = True
+                    ed_new[key] = " ".join(words)
         # Mutate metadata
-        meta = dream_event["metadata"].copy()
+        meta = dream_event["metadata"]
+        meta_mutated = False
+        meta_new = meta
         if "novelty" in meta:
-            meta["novelty"] += random.uniform(-0.1, 0.1) * noise_level
+            if not meta_mutated:
+                meta_new = meta.copy()
+                meta_mutated = True
+            meta_new["novelty"] += random.uniform(-0.1, 0.1) * noise_level
         if "confidence" in meta:
-            meta["confidence"] += random.uniform(-0.1, 0.1) * noise_level
-        dream_event["event_data"] = ed
-        dream_event["metadata"] = meta
+            if not meta_mutated:
+                meta_new = meta.copy()
+                meta_mutated = True
+            meta_new["confidence"] += random.uniform(-0.1, 0.1) * noise_level
+        if ed_mutated:
+            dream_event["event_data"] = ed_new
+        if meta_mutated:
+            dream_event["metadata"] = meta_new
         return dream_event
 
     def narrate_dream(self, dream_event):
@@ -149,17 +153,19 @@ class Dreamer:
     def log_dreams(self, dreams):
         for dream in dreams:
             try:
+                event_data_dict = dream["event_data"]
+                metadata_dict = dream["metadata"]
                 event_data = {
                     "narration": dream["narration"],
-                    "prompt": dream["event_data"].get("prompt"),
-                    "response": dream["event_data"].get("response"),
-                    "novelty_score": dream["metadata"].get("novelty"),
-                    "confidence_score": dream["metadata"].get("confidence"),
+                    "prompt": event_data_dict.get("prompt"),
+                    "response": event_data_dict.get("response"),
+                    "novelty_score": metadata_dict.get("novelty"),
+                    "confidence_score": metadata_dict.get("confidence"),
                 }
                 source_metadata = {
                     "dreamed_from": dream.get("dreamed_from"),
                     "timestamp_iso": dream.get("timestamp_iso"),
-                    **dream.get("metadata", {})
+                    **metadata_dict
                 }
                 self.scribe_event_fn(
                     origin="dreamer",
