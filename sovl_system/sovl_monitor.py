@@ -197,6 +197,32 @@ class SystemMonitor:
                 )
         self._logger.log_info(f"Updated metrics for {component_name}", additional_info=metrics)
 
+    def set_state_manager(self, state_manager):
+        self.state_manager = state_manager
+
+    def get_gestation_status(self) -> dict:
+        mode = None
+        progress = None
+        if hasattr(self, 'state_manager') and self.state_manager:
+            mode = self.state_manager.get_mode()
+            if mode == 'gestating':
+                progress = self.state_manager.get_gestation_progress()
+        return {
+            'mode': mode,
+            'progress': progress,
+        }
+
+    def get_gestation_message(self, dot_count=1):
+        status = self.get_gestation_status()
+        mode = status.get('mode', 'unknown')
+        progress = status.get('progress', None)
+        percent = int(progress * 100) if progress is not None else None
+        dots = '.' * dot_count
+        if percent is not None:
+            return f"{mode.capitalize()}{dots:<3} {percent}%"
+        else:
+            return f"{mode.capitalize()}{dots:<3}"
+
 class MemoryMonitor:
     """Monitors system memory usage."""
     

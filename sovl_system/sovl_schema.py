@@ -34,6 +34,7 @@ class ValidationSchema:
             "metrics_config": ValidationSchema._get_metrics_config_schema(),
             "trainer_weighting": ValidationSchema._get_metadata_weighting_schema(),
             "dreamer_config": ValidationSchema._get_dreamer_config_schema(),
+            "gestation_config": ValidationSchema._get_gestation_config_schema(),
         }
 
     @staticmethod
@@ -752,6 +753,48 @@ class ValidationSchema:
                 required=False
             )
         }
+    
+    @staticmethod
+    def _get_gestation_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the gestation_config schema (tiredness/sleep/gestation parameters)."""
+        return {
+            "tiredness_threshold": ConfigSchema(
+                field="gestation_config.tiredness_threshold",
+                type=float,
+                default=0.7,
+                range=(0.0, 1.0)
+            ),
+            "tiredness_check_interval": ConfigSchema(
+                field="gestation_config.tiredness_check_interval",
+                type=int,
+                default=10,
+                range=(1, 3600)
+            ),
+            "tiredness_decay_k": ConfigSchema(
+                field="gestation_config.tiredness_decay_k",
+                type=float,
+                default=0.01,
+                range=(0.0001, 1.0)
+            ),
+            "sleep_log_min": ConfigSchema(
+                field="gestation_config.sleep_log_min",
+                type=int,
+                default=10,
+                range=(1, 10000)
+            ),
+            "gestation_countdown_seconds": ConfigSchema(
+                field="gestation_config.gestation_countdown_seconds",
+                type=int,
+                default=30,
+                range=(1, 600)
+            ),
+            "tiredness_weights": ConfigSchema(
+                field="gestation_config.tiredness_weights",
+                type=dict,
+                default={"log": 0.4, "confidence": 0.3, "time": 0.3},
+                validator=lambda x: all(k in x for k in ["log", "confidence", "time"])
+            ),
+        }
 
     @staticmethod
     def _get_metrics_config_schema() -> Dict[str, ConfigSchema]:
@@ -1137,3 +1180,5 @@ def print_trainer_weighting_table(weighting_dict):
     print("-" * 65)
     for field, weight in weighting_dict.items():
         print(f"{field:50} | {weight:10}")
+
+    

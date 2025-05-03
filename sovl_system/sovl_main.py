@@ -6,6 +6,8 @@ import os
 import sys
 from collections import deque, defaultdict
 from threading import Lock, RLock, Event, Thread
+import math
+import threading
 
 # Third-party imports
 import torch
@@ -109,6 +111,35 @@ class SystemConstants:
     # Logging
     LOG_BUFFER_SIZE = 1000
     LOG_FLUSH_INTERVAL = 5.0  # seconds
+
+# --- Autonomous Tiredness & Sleep Logic ---
+TIREDNESS_THRESHOLD = 0.7  # Tune as needed
+TIREDNESS_CHECK_INTERVAL = 10  # seconds
+
+def compute_tiredness(system, logger, state_manager):
+    """Compute system tiredness based on log size, confidence, exposure, and time since last sleep."""
+    # 1. New journal entries (normalized)
+    try:
+        log_entries = logger.read()
+    except Exception:
+        log_entries = []
+    new_entries = len(log_entries)
+    log_factor = min(1.0, new_entries / getattr(system, 'sleep_log_min', 10))
+    # 2. Confidence (lower = more tired)
+    conf_hist = getattr(system, 'confidence_history', [])
+    conf = 1.0 - (sum(conf_hist) / len(conf_hist) if conf_hist else 0.5)
+    # 3. Data exposure (old age: higher = less tired)
+    k = getattr(system, 'tiredness_decay_k', 0.01)
+    data_exposure = getattr(system, 'data_exposure', 0.0)
+    exposure_factor = math.exp(-k * data_exposure)
+    # 4. Time since last sleep (normalized, 0-1 over 2 hours)
+    last_trained = getattr(system, 'last_trained', 0)
+    time_since_sleep = (time.time() - last_trained) / 3600.0 if last_trained else 0.0
+    time_factor = min(1.0, time_since_sleep / 2.0)
+    # Weighted sum, modulated by exposure
+    weights = getattr(system, 'tiredness_weights', {"log": 0.4, "confidence": 0.3, "time": 0.3})
+    tiredness = (weights.get("log", 0.4) * log_factor + weights.get("confidence", 0.3) * conf + weights.get("time", 0.3) * time_factor) * exposure_factor
+    return tiredness
 
 class SystemContext:
     """Manages system-wide context and resources."""
@@ -990,6 +1021,18 @@ class SOVLSystem(SystemInterface):
             if not hasattr(context, 'autonomy_manager'):
                 context.autonomy_manager = self.autonomy_manager
             
+            # --- Autonomous Tiredness & Sleep Logic ---
+            # --- Load lifecycle_config parameters from config ---
+            lifecycle_cfg = self.config_handler.get('lifecycle_config', {}) if self.config_handler else {}
+            self.tiredness_threshold = lifecycle_cfg.get('tiredness_threshold', 0.7)
+            self.tiredness_check_interval = lifecycle_cfg.get('tiredness_check_interval', 10)
+            self.tiredness_decay_k = lifecycle_cfg.get('tiredness_decay_k', 0.01)
+            self.sleep_log_min = lifecycle_cfg.get('sleep_log_min', 10)
+            self.gestation_countdown_seconds = lifecycle_cfg.get('gestation_countdown_seconds', 30)
+            self.tiredness_weights = lifecycle_cfg.get('tiredness_weights', {"log": 0.4, "confidence": 0.3, "time": 0.3})
+            self._tiredness_monitor_thread = threading.Thread(target=self._tiredness_monitor_loop, daemon=True)
+            self._tiredness_monitor_thread.start()
+            
         except Exception as e:
             if hasattr(self, 'error_manager') and self.error_manager:
                 self.error_manager.handle_error(
@@ -1731,3 +1774,24 @@ class SOVLSystem(SystemInterface):
             stats['gpu_used'] = None
             stats['gpu_total'] = None
         return stats
+
+    def _tiredness_monitor_loop(self):
+        while True:
+            try:
+                tiredness = compute_tiredness(self, self.context.logger, self.context.state_manager)
+                # Expose tiredness in state
+                if hasattr(self.context, 'state_manager') and hasattr(self.context.state_manager, 'set_tiredness'):
+                    self.context.state_manager.set_tiredness(tiredness)
+                # Only trigger if online and not already pending/gestating
+                mode = self.context.state_manager.get_mode() if hasattr(self.context, 'state_manager') else 'online'
+                if (
+                    tiredness > getattr(self, 'tiredness_threshold', 0.7)
+                    and mode == 'online'
+                ):
+                    print("System is getting tired... preparing to sleep.")
+                    self.context.state_manager.set_mode('pending_gestation')
+                    if hasattr(self.context.state_manager, 'set_gestation_countdown'):
+                        self.context.state_manager.set_gestation_countdown(getattr(self, 'gestation_countdown_seconds', 30))
+            except Exception as e:
+                print(f"Tiredness monitor error: {e}")
+            time.sleep(getattr(self, 'tiredness_check_interval', 10))

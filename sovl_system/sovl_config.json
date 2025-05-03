@@ -23,6 +23,18 @@
     "model_type": "causal_lm",
     "quantization_mode": "fp16"
   },
+  "gestation_config": {
+  "tiredness_threshold": 0.7,
+  "tiredness_check_interval": 10,
+  "tiredness_decay_k": 0.01,
+  "sleep_log_min": 10,
+  "gestation_countdown_seconds": 30,
+  "tiredness_weights": {
+    "log": 0.4,
+    "confidence": 0.3,
+    "time": 0.3
+  }
+},
   "controls_config": {
     "enable_scaffold": true,
     "scaffold_weight_cap": 0.5,

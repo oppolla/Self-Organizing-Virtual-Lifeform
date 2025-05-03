@@ -206,21 +206,21 @@ class CommandHandler(cmd.Cmd):
         self._mode_monitor_thread.start()
 
     def _monitor_mode(self):
+        dot_count = 1
         while True:
             try:
                 state_manager = getattr(self.sovl_system, 'state_manager', None)
+                system_monitor = getattr(self, 'system_monitor', None)
                 if state_manager and hasattr(state_manager, 'get_mode'):
                     mode = state_manager.get_mode()
                     if mode != self._last_mode:
                         self._handle_mode_change(mode)
                         self._last_mode = mode
                         self._last_progress = None  # Reset progress on mode change
-                    if mode == 'gestating' and hasattr(state_manager, 'get_gestation_progress'):
-                        progress = state_manager.get_gestation_progress()
-                        if progress != self._last_progress:
-                            bar = self._progress_bar(progress)
-                            print(f"\r[GESTATING] {bar}", end="")
-                            self._last_progress = progress
+                    if mode == 'gestating' and system_monitor and hasattr(system_monitor, 'get_gestation_message'):
+                        message = system_monitor.get_gestation_message(dot_count)
+                        print(f"\r{message}", end="")
+                        dot_count = dot_count % 3 + 1
             except Exception:
                 pass
             time.sleep(1)
@@ -1125,37 +1125,14 @@ scaffold models for debugging and development purposes.
             print_error(f"Error displaying system monitor metrics: {e}")
 
     def do_gestate(self, arg):
-        """Run a gestation (training) cycle using the system trainer with simple percent feedback and flickering ellipsis, with abort confirmation."""
-        import time
+        """Run a gestation (training) cycle using the system trainer. Progress is now displayed by the background monitor."""
         trainer = getattr(self.sovl_system, 'trainer', None)
         state_manager = getattr(self.sovl_system, 'state_manager', None)
         if trainer and hasattr(trainer, 'run_gestation_cycle') and state_manager:
             try:
                 print_section_header("Running gestation (training) cycle...")
                 trainer.run_gestation_cycle([])  # Pass empty or default as needed
-                dot_count = 1
-                while True:
-                    try:
-                        mode = state_manager.get_mode()
-                        if mode != 'gestating':
-                            break
-                        progress = state_manager.get_gestation_progress()
-                        percent = int(progress * 100)
-                        dots = '.' * dot_count
-                        print(f"\rGestating{dots:<3} {percent}%", end="")
-                        dot_count = dot_count % 3 + 1
-                        if progress >= 1.0:
-                            break
-                        time.sleep(0.5)
-                    except KeyboardInterrupt:
-                        confirm = input('\nAre you sure you want to abort? (y/N): ').strip().lower()
-                        if confirm == 'y':
-                            print('Gestation feedback interrupted by user.')
-                            return
-                        else:
-                            print('Continuing gestation...')
-                            continue
-                print_success("\nGestation (training) cycle completed.")
+                print_success("Gestation (training) cycle started. Progress will be displayed above.")
             except Exception as e:
                 print_error(f"Error during gestation cycle: {e}")
         else:

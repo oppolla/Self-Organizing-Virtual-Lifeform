@@ -281,627 +281,6 @@ class TrainingConfig:
                 traceback.format_exc()
             )
 
-# TrainingManager: sets up optimizer and scheduler, prepares batches, and runs train/validate steps.
-class TrainingManager:
-    """Manages core training operations."""
-    
-    def __init__(
-        self,
-        config: TrainingConfig,
-        model: torch.nn.Module,
-        device: torch.device,
-        config_manager: Optional[ConfigManager] = None,
-        logger: Optional[Logger] = None,
-        error_manager: Optional[ErrorManager] = None
-    ):
-        self.config = config
-        self.model = model
-        self.device = device
-        self.config_manager = config_manager
-        self.logger = logger
-        self.error_manager = error_manager
-        # LoRA manager is used ONLY for checkpointing and optimizer param selection
-        self.lora_manager = None
-        lora_enabled = False
-        if self.config_manager and self.logger and self.error_manager:
-            self.lora_manager = LoraAdapterManager(self.config_manager, self.logger, self.error_manager)
-            lora_enabled = self.lora_manager.enabled
-
-        # Require LoRA dependencies if LoRA is enabled in config
-        if lora_enabled and not (self.config_manager and self.logger and self.error_manager):
-            raise ValueError("LoRA requires config_manager, logger, and error_manager")
-
-        # Validate model compatibility for LoRA
-        if self.lora_manager and self.lora_manager.enabled:
-            if not self.lora_manager.is_model_compatible(self.model):
-                raise ValueError("Model is not compatible with LoRA configuration")
-            params = self.lora_manager.lora_parameters(self.model)
-        else:
-            # Validate model has trainable parameters
-            params = list(self.model.parameters())
-            if not params:
-                raise ValueError("Model has no trainable parameters")
-        # Validate model is on the correct device
-        for p in self.model.parameters():
-            if p.device != self.device:
-                raise ValueError(f"Model parameter not on device {self.device}: found {p.device}")
-
-        self.optimizer = self._create_optimizer(params)
-        self.scheduler = self._create_scheduler()
-        self.scaler = torch.cuda.amp.GradScaler() if self.config.memory.use_amp and torch.cuda.is_available() else None
-        self.step_count = 0
-        self.epoch_count = 0
-        self.optimizer_step_count = 0
-        self.best_metrics = {}
-        self.metrics_history = defaultdict(list)
-        
-    def _create_optimizer(self, params: List[torch.nn.Parameter]) -> torch.optim.Optimizer:
-        """Create optimizer based on configuration."""
-        optimizer_type = self.config.optimizer.type.lower()
-        if optimizer_type == "adamw":
-            return torch.optim.AdamW(
-                params,
-                lr=self.config.optimizer.learning_rate,
-                weight_decay=self.config.optimizer.weight_decay
-            )
-        elif optimizer_type == "adam":
-            return torch.optim.Adam(
-                params,
-                lr=self.config.optimizer.learning_rate,
-                weight_decay=self.config.optimizer.weight_decay
-            )
-        else:
-            raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
-            
-    def _create_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
-        """Create learning rate scheduler based on configuration."""
-        scheduler_type = self.config.scheduler.type.lower()
-        if scheduler_type == "linear":
-            return torch.optim.lr_scheduler.LinearLR(
-                self.optimizer,
-                start_factor=1.0,
-                end_factor=0.5,  # Decay to 50% of initial learning rate
-                total_iters=self.config.scheduler.total_steps
-            )
-        elif scheduler_type == "cosine":
-            return torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.config.scheduler.total_steps,
-                eta_min=self.config.scheduler.cosine_min_lr
-            )
-        elif scheduler_type == "constant":
-            return torch.optim.lr_scheduler.ConstantLR(
-                self.optimizer,
-                factor=1.0,  # Maintain constant learning rate
-                total_iters=self.config.scheduler.total_steps
-            )
-        else:
-            raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
-            
-    @torch.no_grad()
-    def _prepare_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Prepare batch for training with memory optimization and robust device handling."""
-        # Validate and update device if needed
-        device = self.device
-        if device.type == "cuda" and not torch.cuda.is_available():
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_warning(
-                    message=f"CUDA device requested but is not available. Falling back to CPU.",
-                    event_type="device_warning"
-                )
-            device = torch.device("cpu")
-            self.device = device  # Update instance device
-        
-        # Truncate sequence lengths if needed
-        max_length = self.config.memory.max_seq_length
-        truncated_batch = {}
-        for key, tensor in batch.items():
-            if not isinstance(tensor, torch.Tensor):
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.log_warning(
-                        message=f"Non-tensor value for key {key} in batch",
-                        event_type="batch_preparation_warning"
-                    )
-                truncated_batch[key] = tensor
-                continue
-            
-            # Truncate sequences if needed
-            if key in ["input_ids", "attention_mask"] and tensor.size(1) > max_length:
-                truncated_batch[key] = tensor[:, :max_length]
-            else:
-                truncated_batch[key] = tensor
-        
-        # Move entire batch to device recursively using enhanced utility
-        from sovl_utils import move_batch_to_device, validate_device_consistency
-        
-        try:
-            prepared_batch = move_batch_to_device(truncated_batch, device)
-            
-            # Validate device consistency with model
-            is_consistent, error_msg = validate_device_consistency(self.model, prepared_batch, device)
-            if not is_consistent and hasattr(self, "logger") and self.logger:
-                self.logger.log_warning(
-                    message=f"Device inconsistency: {error_msg}",
-                    event_type="device_consistency_warning"
-                )
-                # Try to fix the issue by moving the model to the correct device
-                if device != next(self.model.parameters()).device:
-                    self.model.to(device)
-                    
-            return prepared_batch
-        except Exception as e:
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_error(
-                    error_msg=f"Failed to prepare batch: {str(e)}",
-                    error_type="batch_preparation_error"
-                )
-            raise
-        
-    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """Perform a single training step with gradient accumulation and mixed precision."""
-        self.model.train()
-        metrics = {}
-        
-        # Prepare batch
-        batch = self._prepare_batch(batch)
-        
-        # Check device state periodically
-        if self.step_count % 100 == 0:
-            self._monitor_device_state()
-        
-        # Determine if we should use AMP
-        use_amp = self.config.memory.use_amp and self.scaler is not None
-        
-        # Forward pass with mixed precision
-        with torch.cuda.amp.autocast(enabled=use_amp):
-            # Ensure labels are present if needed
-            if "labels" not in batch and "input_ids" in batch:
-                batch["labels"] = batch["input_ids"].clone()
-            
-            outputs = self.model(**batch)
-            
-            # Check for loss
-            if not hasattr(outputs, 'loss') or outputs.loss is None:
-                return {"loss": 0.0}  # Return default metrics if no loss
-                
-            loss = outputs.loss / self.config.optimizer.grad_accum_steps
-        
-        # Backward pass with gradient scaling
-        if self.scaler is not None:
-            self.scaler.scale(loss).backward()
-        else:
-            loss.backward()
-            
-        # Gradient accumulation
-        if (self.step_count + 1) % self.config.optimizer.grad_accum_steps == 0:
-            # Clip gradients
-            if self.scaler is not None:
-                self.scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                self.config.optimizer.max_grad_norm
-            )
-            
-            # Update weights
-            if self.scaler is not None:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                self.optimizer.step()
-                
-            # Update learning rate
-            if self.scheduler is not None:
-                self.scheduler.step()
-                
-            # Zero gradients
-            self.optimizer.zero_grad(set_to_none=True)
-            
-            # Increment optimizer step count and set data_exposure
-            self.optimizer_step_count += 1
-            metrics["data_exposure"] = float(self.optimizer_step_count)
-            
-        # Update metrics
-        metrics["loss"] = loss.item() * self.config.optimizer.grad_accum_steps
-        
-        # Calculate accuracy if possible
-        if hasattr(outputs, "logits") and "labels" in batch:
-            try:
-                logits = outputs.logits.detach()
-                labels = batch["labels"].detach()
-                
-                # Ensure labels are on the same device as logits
-                if labels.device != logits.device:
-                    labels = labels.to(logits.device)
-                    
-                # Handle different tensor dimensions
-                if logits.dim() == 3 and labels.dim() == 2:  # Sequence model
-                    # Ignore padding index (-100)
-                    active_loss = labels.view(-1) != -100
-                    active_logits = logits.view(-1, logits.size(-1))[active_loss]
-                    active_labels = labels.view(-1)[active_loss]
-                    if active_labels.numel() > 0:
-                        metrics["accuracy"] = (active_logits.argmax(dim=-1) == active_labels).float().mean().item()
-                    else:
-                        metrics["accuracy"] = 0.0
-                elif logits.dim() == 2 and labels.dim() == 1:  # Classification
-                    metrics["accuracy"] = (logits.argmax(dim=-1) == labels).float().mean().item()
-                else:
-                    metrics["accuracy"] = 0.0
-            except Exception as e:
-                metrics["accuracy"] = 0.0
-                
-        self.step_count += 1
-        return metrics
-        
-    @torch.no_grad()
-    def validate(self, val_loader: 'StreamingJSONLoader') -> Dict[str, float]:
-        """Run validation with memory optimization."""
-        self.model.eval()
-        metrics = defaultdict(float)
-        num_batches = 0
-        
-        # Monitor device state before validation
-        self._monitor_device_state()
-        
-        for batch in val_loader:
-            # Prepare batch
-            batch = self._prepare_batch(batch)
-            
-            # Determine if we should use AMP
-            use_amp = self.config.memory.use_amp and self.scaler is not None
-            
-            # Forward pass with mixed precision
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                # Ensure labels are present if needed
-                if "labels" not in batch and "input_ids" in batch:
-                    batch["labels"] = batch["input_ids"].clone()
-                    
-                outputs = self.model(**batch)
-                
-                # Update metrics
-                if hasattr(outputs, 'loss') and outputs.loss is not None:
-                    metrics["loss"] += outputs.loss.item()
-                    
-                if hasattr(outputs, "logits") and "labels" in batch:
-                    try:
-                        logits = outputs.logits.detach()
-                        labels = batch["labels"].detach()
-                        
-                        # Ensure labels are on the same device as logits
-                        if labels.device != logits.device:
-                            labels = labels.to(logits.device)
-                            
-                        # Handle different tensor dimensions
-                        if logits.dim() == 3 and labels.dim() == 2:  # Sequence model
-                            active_loss = labels.view(-1) != -100
-                            active_logits = logits.view(-1, logits.size(-1))[active_loss]
-                            active_labels = labels.view(-1)[active_loss]
-                            if active_labels.numel() > 0:
-                                metrics["accuracy"] += (active_logits.argmax(dim=-1) == active_labels).float().mean().item()
-                        elif logits.dim() == 2 and labels.dim() == 1:  # Classification
-                            metrics["accuracy"] += (logits.argmax(dim=-1) == labels).float().mean().item()
-                    except Exception as e:
-                        pass  # Skip accuracy calculation on error
-                        
-            num_batches += 1
-            
-        # Average metrics only if we have batches
-        if num_batches > 0:
-            metrics = {k: v / num_batches for k, v in metrics.items()}
-        else:
-            metrics = {k: 0.0 for k in metrics.keys()}
-            
-        # Update best metrics based on primary metric (loss)
-        primary_metric = "loss"
-        if primary_metric in metrics:
-            current_best = self.best_metrics.get(primary_metric, float('inf'))
-            if metrics[primary_metric] < current_best:
-                self.best_metrics[primary_metric] = metrics[primary_metric]
-                
-        # Update metrics history
-        for metric_name, value in metrics.items():
-            self.metrics_history[metric_name].append(value)
-            
-        return metrics
-        
-    def save_checkpoint(self, path: Optional[str] = None) -> str:
-        """
-        Save model checkpoint with optimizer and training state.
-        Includes LoRA-aware functionality.
-        
-        Args:
-            path: Path to save checkpoint or None for default
-            
-        Returns:
-            str: Path where checkpoint was saved
-        """
-        path = path or f"{self.config.params.checkpoint_path}_step{self.step_count}"
-        
-        # Create directory if it doesn't exist
-        import os
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        checkpoint = {
-            "model_state": self.model.state_dict(),
-            "optimizer_state": self.optimizer.state_dict(),
-            "step_count": self.step_count,
-            "optimizer_step_count": self.optimizer_step_count,
-            "epoch_count": self.epoch_count,
-            "best_metrics": self.best_metrics,
-            "metrics_history": dict(self.metrics_history),
-            "checkpoint_date": int(time.time())
-        }
-        
-        # Add scheduler state if available
-        if self.scheduler is not None:
-            checkpoint["scheduler_state"] = self.scheduler.state_dict()
-        
-        # Add scaler state if available
-        if self.scaler is not None:
-            checkpoint["scaler_state"] = self.scaler.state_dict()
-        
-        try:
-            torch.save(checkpoint, path)
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_training_event(
-                    event_type="checkpoint_saved",
-                    message=f"Checkpoint saved to {path}",
-                    additional_info={
-                        "step": self.step_count,
-                        "epoch": self.epoch_count
-                    }
-                )
-                
-            # Try to save LoRA checkpoint if available
-            if self.lora_manager:
-                try:
-                    lora_path = f"{path}_lora"
-                    success = self.save_lora_checkpoint(lora_path)
-                    if success and hasattr(self, "logger") and self.logger:
-                        self.logger.log_info(
-                            message=f"Saved specialized LoRA checkpoint to {lora_path}",
-                            event_type="lora_checkpoint_saved"
-                        )
-                except Exception as e:
-                    # Non-fatal error for LoRA checkpoint failure
-                    if hasattr(self, "logger") and self.logger:
-                        self.logger.log_warning(
-                            message=f"LoRA checkpoint save failed, continuing with regular checkpoint: {str(e)}",
-                            event_type="lora_save_warning"
-                        )
-                    
-            return path
-        except Exception as e:
-            error_msg = f"Failed to save checkpoint to {path}: {e}"
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_training_event(
-                    event_type="checkpoint_save_failed",
-                    message=error_msg,
-                    level="error"
-                )
-            raise RuntimeError(error_msg)
-
-    def load_checkpoint(self, path: str) -> None:
-        """
-        Load model checkpoint with optimizer and training state.
-        Includes LoRA-aware functionality.
-        
-        Args:
-            path: Path to load checkpoint from
-        """
-        import os
-        try:
-            if not os.path.exists(path):
-                raise RuntimeError(f"Checkpoint file not found: {path}")
-                
-            checkpoint = torch.load(path, map_location=self.device)
-            
-            # Load model state
-            try:
-                missing, unexpected = self.model.load_state_dict(checkpoint["model_state"], strict=False)
-                if missing and hasattr(self, "logger") and self.logger:
-                    self.logger.log_warning(
-                        message=f"Missing keys in model state: {missing[:5]}{'...' if len(missing) > 5 else ''}",
-                        event_type="checkpoint_load_warning"
-                    )
-            except Exception as e:
-                raise RuntimeError(f"Could not load model state: {e}")
-
-            # Load optimizer state
-            try:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-            except Exception as e:
-                raise RuntimeError(f"Could not load optimizer state: {e}")
-
-            # Load scheduler state if available
-            if self.scheduler and checkpoint.get("scheduler_state"):
-                try:
-                    self.scheduler.load_state_dict(checkpoint["scheduler_state"])
-                except Exception as e:
-                    raise RuntimeError(f"Failed to load scheduler state: {e}")
-
-            # Load scaler state if available
-            if self.scaler and checkpoint.get("scaler_state"):
-                try:
-                    self.scaler.load_state_dict(checkpoint["scaler_state"])
-                except Exception as e:
-                    raise RuntimeError(f"Failed to load scaler state: {e}")
-
-            # Load training state
-            self.step_count = checkpoint["step_count"]
-            self.optimizer_step_count = checkpoint.get("optimizer_step_count", 0)
-            self.epoch_count = checkpoint["epoch_count"]
-            self.best_metrics = checkpoint.get("best_metrics", {})
-            self.metrics_history = defaultdict(list, checkpoint.get("metrics_history", {}))
-            
-            # Try loading LoRA checkpoint if available
-            lora_path = f"{path}_lora"
-            if os.path.exists(lora_path) and self.lora_manager:
-                try:
-                    success = self.load_lora_checkpoint(lora_path)
-                    if success and hasattr(self, "logger") and self.logger:
-                        self.logger.log_info(
-                            message=f"Loaded specialized LoRA checkpoint from {lora_path}",
-                            event_type="lora_checkpoint_loaded"
-                        )
-                except Exception as e:
-                    # Non-fatal error - log but continue with regular checkpoint
-                    if hasattr(self, "logger") and self.logger:
-                        self.logger.log_warning(
-                            message=f"LoRA checkpoint loading failed, continuing with standard model: {str(e)}",
-                            event_type="lora_load_warning"
-                        )
-            
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_training_event(
-                    event_type="checkpoint_loaded",
-                    message=f"Checkpoint loaded from {path}",
-                    additional_info={
-                        "step": self.step_count,
-                        "epoch": self.epoch_count
-                    }
-                )
-                
-        except Exception as e:
-            error_msg = f"Failed to load checkpoint from {path}: {e}"
-            if hasattr(self, "logger") and self.logger:
-                import traceback
-                self.logger.log_error(
-                    error_msg=error_msg,
-                    error_type="checkpoint_load_error",
-                    stack_trace=traceback.format_exc()
-                )
-            raise RuntimeError(error_msg)
-
-    def save_lora_checkpoint(self, path: str) -> bool:
-        """
-        Save LoRA weights to checkpoint with error handling.
-        
-        Args:
-            path: Path to save checkpoint
-            
-        Returns:
-            bool: True if successfully saved, False if LoRA unavailable
-        """
-        if not self.lora_manager:
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_warning(
-                    message="LoRA manager not available. Skipping LoRA checkpoint save.",
-                    event_type="lora_checkpoint_warning"
-                )
-            return False
-            
-        try:
-            self.lora_manager.save_lora_weights(self.model, path)
-            
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_info(
-                    message=f"LoRA checkpoint saved to {path}",
-                    event_type="lora_checkpoint_saved"
-                )
-            return True
-        except Exception as e:
-            if hasattr(self, "logger") and self.logger:
-                import traceback
-                self.logger.log_error(
-                    error_msg=f"Failed to save LoRA checkpoint: {str(e)}",
-                    error_type="lora_checkpoint_error",
-                    stack_trace=traceback.format_exc()
-                )
-            # Re-raise the exception for caller handling
-            raise
-
-    def load_lora_checkpoint(self, path: str) -> bool:
-        """
-        Load LoRA weights from checkpoint with compatibility validation.
-        
-        Args:
-            path: Path to load checkpoint from
-            
-        Returns:
-            bool: True if successfully loaded, False if LoRA unavailable
-        """
-        import os
-        if not self.lora_manager:
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_warning(
-                    message="LoRA manager not available. Skipping LoRA checkpoint load.",
-                    event_type="lora_checkpoint_warning"
-                )
-            return False
-            
-        try:
-            # Check if checkpoint exists
-            if not os.path.exists(path):
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.log_warning(
-                        message=f"LoRA checkpoint not found at {path}",
-                        event_type="lora_checkpoint_not_found"
-                    )
-                return False
-                
-            # Validate checkpoint compatibility
-            if not self.lora_manager.is_checkpoint_compatible(path, self.model):
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.log_warning(
-                        message=f"LoRA checkpoint at {path} is incompatible with current model",
-                        event_type="lora_checkpoint_incompatible"
-                    )
-                return False
-                
-            # Load weights
-            self.model = self.lora_manager.load_lora_weights(self.model, path)
-            
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_info(
-                    message=f"LoRA checkpoint loaded from {path}",
-                    event_type="lora_checkpoint_loaded"
-                )
-            return True
-        except Exception as e:
-            if hasattr(self, "logger") and self.logger:
-                import traceback
-                self.logger.log_error(
-                    error_msg=f"Failed to load LoRA checkpoint: {str(e)}",
-                    error_type="lora_checkpoint_error",
-                    stack_trace=traceback.format_exc()
-                )
-            # Re-raise the exception for caller handling
-            raise
-
-    def _monitor_device_state(self) -> None:
-        """Monitor device state for debugging purposes."""
-        if not hasattr(self, "logger") or not self.logger:
-            return
-            
-        try:
-            # Check model device
-            model_devices = {str(p.device) for p in self.model.parameters()}
-            
-            # Check optimizer device
-            optimizer_devices = set()
-            for param_group in self.optimizer.param_groups:
-                for p in param_group['params']:
-                    optimizer_devices.add(str(p.device))
-                    
-            # Log device state
-            self.logger.log_info(
-                message=f"Device state - Target: {self.device}, Model: {model_devices}, Optimizer: {optimizer_devices}",
-                event_type="device_monitor",
-                additional_info={
-                    "target_device": str(self.device),
-                    "model_devices": list(model_devices),
-                    "optimizer_devices": list(optimizer_devices),
-                    "cuda_available": torch.cuda.is_available(),
-                    "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0
-                }
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Error monitoring device state: {str(e)}",
-                error_type="device_monitor_error"
-            )
-
 # TrainingWorkflowManager: orchestrates full multi-phase training cycles (train, sleep, gestation, dream).
 class TrainingWorkflowManager:
     """Manages training cycles, sleep training, and gestation/dream cycles."""
@@ -927,84 +306,8 @@ class TrainingWorkflowManager:
             self._resource_locks[resource_name] = threading.RLock()
         return self._resource_locks[resource_name]
         
-    def run_training_cycle(self, batch: List[Dict[str, Any]], scaffold_provider: Optional[ScaffoldProvider] = None) -> Tuple[float, Dict[str, Any]]:
-        """Run a complete training cycle using the modular pipeline with error recovery and notification."""
-        with self._training_lock:  # Ensure only one training cycle runs at a time
-            device = getattr(self.trainer, 'device', None)
-            batch_preparer = getattr(self.trainer, 'batch_preparer', None)
-            logger = getattr(self, 'logger', None)
-            training_manager = getattr(self.trainer, 'training_manager', None)
-            error_manager = getattr(self.trainer, 'error_manager', None)
-            error_handling_cfg = None
-            # Get error handling config if available
-            if hasattr(self, 'config') and self.config and hasattr(self.config, 'logging'):
-                error_handling_cfg = getattr(self.config.logging, 'error_handling_config', None)
-            retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
-            retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
-            last_exception = None
-            for attempt in range(retry_attempts):
-                # Prepare batch using modular batch preparer
-                try:
-                    collated_batch = batch_preparer.prepare(batch)
-                except Exception as e:
-                    last_exception = e
-                    if logger:
-                        logger.log_error(
-                            f"Failed to prepare training batch: {str(e)}",
-                            error_type="training_cycle_batch_preparation_error",
-                            stack_trace=traceback.format_exc(),
-                            additional_info={"attempt": attempt+1}
-                        )
-                    if error_manager:
-                        error_manager.notify_error(
-                            error_type="training_cycle_batch_preparation_error",
-                            error_msg=str(e),
-                            context={"attempt": attempt+1, "batch": batch}
-                        )
-                    if attempt < retry_attempts - 1 and retry_delay > 0:
-                        time.sleep(retry_delay)
-                    continue
-                # Run training step with synchronized access to training_manager
-                try:
-                    with self._get_resource_lock('training_manager'):  # Lock access to training_manager
-                        metrics = training_manager.train_step(batch=collated_batch)
-                    loss = metrics.get("loss", 0.0)
-                    return loss, metrics
-                except Exception as e:
-                    last_exception = e
-                    if logger:
-                        logger.log_error(
-                            f"Error during training step: {str(e)}",
-                            error_type="training_cycle_training_error",
-                            stack_trace=traceback.format_exc(),
-                            additional_info={"attempt": attempt+1}
-                        )
-                    if error_manager:
-                        error_manager.notify_error(
-                            error_type="training_cycle_training_error",
-                            error_msg=str(e),
-                            context={"attempt": attempt+1, "batch": batch}
-                        )
-                    if attempt < retry_attempts - 1 and retry_delay > 0:
-                        time.sleep(retry_delay)
-                    continue
-            # If all attempts failed
-            if logger:
-                logger.log_error(
-                    f"Training cycle failed after {retry_attempts} attempts: {str(last_exception)}",
-                    error_type="training_cycle_final_failure",
-                    stack_trace=traceback.format_exc() if last_exception else None
-                )
-            if error_manager:
-                error_manager.notify_error(
-                    error_type="training_cycle_final_failure",
-                    error_msg=str(last_exception),
-                    context={"batch": batch}
-                )
-            return 0.0, {"status": "error", "error": str(last_exception) if last_exception else "unknown_error"}
-        
-    def run_gestation_cycle(self, conversation_history: List[Dict[str, str]]) -> None:
-        """Run gestation cycle with metadata enrichment using the modular pipeline. Supports multiple scaffolds and robust validation and error recovery."""
+    def run_gestation_cycle(self, conversation_history: List[dict]) -> None:
+        """Run gestation cycle using pre-enriched, preprocessed batches. Expects conversation_history as a list of ready-to-train batches (dicts or tensors)."""
         with self._gestation_lock:  # Ensure only one gestation cycle runs at a time
             import time
             import os
@@ -1020,14 +323,10 @@ class TrainingWorkflowManager:
             if state_manager and hasattr(state_manager, 'set_gestation_progress'):
                 state_manager.set_gestation_progress(0.0)
 
-            # Use modular pipeline for metadata enrichment and batch preparation
-            metadata_processor = getattr(self.trainer, 'metadata_processor', None)
-            tokenizer = getattr(self.trainer, 'tokenizer', None)
+            # Get model/scaffold/LoRA managers
             device = getattr(self.trainer, 'device', None)
-            batch_preparer = getattr(self.trainer, 'batch_preparer', None)
             logger = getattr(self, 'logger', None)
             model_manager = getattr(self, 'model_manager', None)
-            training_manager = getattr(self.trainer, 'training_manager', None)
             dreamer = getattr(self.trainer, 'dreamer', None)
             state = getattr(self, 'state', None)
 
@@ -1038,26 +337,23 @@ class TrainingWorkflowManager:
             retry_attempts = (error_handling_cfg or {}).get('retry_attempts', 1)
             retry_delay = (error_handling_cfg or {}).get('retry_delay', 0.0)
 
-            # Validate conversation history
-            if not conversation_history or not isinstance(conversation_history, list) or not all(isinstance(s, dict) for s in conversation_history):
+            # Validate input
+            if not conversation_history or not isinstance(conversation_history, list):
                 if logger:
-                    logger.log_error("Invalid or missing conversation history for gestation cycle.", event_type="gestation_invalid_conversation")
+                    logger.log_error("Invalid or missing batch list for gestation cycle.", event_type="gestation_invalid_batches")
                 return
 
             # Validate model_manager and scaffold models with proper synchronization
             scaffold_count = 0
             lora_count = 0
-            with self._get_resource_lock('model_manager'):  # Lock access to model_manager
+            with self._get_resource_lock('model_manager'):
                 if model_manager:
                     scaffold_count = len(getattr(model_manager, 'scaffold_models', []))
                     lora_count = len(getattr(model_manager, 'lora_managers', []))
-            
             if scaffold_count == 0 or lora_count == 0:
                 if logger:
                     logger.log_error(f"No scaffold models ({scaffold_count}) or LoRA managers ({lora_count}) available for gestation cycle.", event_type="gestation_scaffold_lora_missing")
                 return
-
-            # Validate scaffold and LoRA manager counts
             if scaffold_count != lora_count:
                 if logger:
                     logger.log_warning(
@@ -1065,7 +361,6 @@ class TrainingWorkflowManager:
                         event_type="gestation_scaffold_lora_mismatch",
                         additional_info={"scaffold_count": scaffold_count, "lora_count": lora_count}
                     )
-
             min_count = min(scaffold_count, lora_count)
             successful_scaffolds = []
 
@@ -1074,42 +369,29 @@ class TrainingWorkflowManager:
             torch.cuda.empty_cache()
 
             for idx in range(min_count):
-                # Get references to the current scaffold model and LoRA manager with synchronization
-                with self._get_resource_lock('model_manager'):  # Lock access to model_manager
+                with self._get_resource_lock('model_manager'):
                     scaffold_model = model_manager.scaffold_models[idx]
                     lora_manager = model_manager.lora_managers[idx]
-
-                # Local variables for memory management
-                enriched_samples = None
-                batch = None
                 optimizer = None
                 outputs = None
                 loss = None
-
                 try:
-                    # Retry logic for batch preparation
                     last_exception = None
                     for attempt in range(retry_attempts):
                         try:
-                            # Clear memory before starting new attempt
-                            if enriched_samples is not None:
-                                del enriched_samples
-                            if batch is not None:
-                                del batch
-                            
                             # Force garbage collection
                             gc.collect()
                             torch.cuda.empty_cache()
-                            
-                            # Process data
-                            enriched_samples = [metadata_processor.enrich(sample) for sample in conversation_history]
-                            batch = batch_preparer.prepare(enriched_samples)
+                            # Use the preprocessed batch directly
+                            batch = conversation_history[idx] if idx < len(conversation_history) else None
+                            if batch is None:
+                                raise ValueError(f"No batch provided for scaffold {idx}")
                             break
                         except Exception as e:
                             last_exception = e
                             if logger:
                                 logger.log_error(
-                                    f"Error during gestation batch preparation (scaffold {idx}, attempt {attempt+1}): {str(e)}",
+                                    f"Error accessing preprocessed batch (scaffold {idx}, attempt {attempt+1}): {str(e)}",
                                     error_type="gestation_batch_error",
                                     stack_trace=traceback.format_exc(),
                                     additional_info={"scaffold_index": idx, "attempt": attempt+1}
@@ -1117,26 +399,21 @@ class TrainingWorkflowManager:
                             if attempt < retry_attempts - 1 and retry_delay > 0:
                                 time.sleep(retry_delay)
                     else:
-                        raise RuntimeError(f"Gestation batch preparation failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
+                        raise RuntimeError(f"Gestation batch access failed for scaffold {idx} after {retry_attempts} attempts: {last_exception}")
 
                     # Retry logic for training step with synchronized access to the scaffold model
                     last_exception = None
                     for attempt in range(retry_attempts):
                         try:
-                            # Clean up any previous attempt resources
                             if optimizer is not None:
                                 del optimizer
                             if outputs is not None:
                                 del outputs
                             if loss is not None:
                                 del loss
-                                
-                            # Force garbage collection
                             gc.collect()
                             torch.cuda.empty_cache()
-                            
-                            # Training step with model lock
-                            with self._model_lock:  # Lock access to models during training
+                            with self._model_lock:
                                 optimizer = torch.optim.AdamW(
                                     lora_manager.lora_parameters(scaffold_model),
                                     lr=self.config.optimizer.learning_rate
@@ -1147,10 +424,7 @@ class TrainingWorkflowManager:
                                 loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
                                 loss.backward()
                                 optimizer.step()
-                            
-                            # Extract scalar loss value before deleting tensor
                             loss_value = loss.item()
-                            
                             if logger:
                                 logger.log_info(
                                     f"Gestation LoRA training step complete (scaffold {idx}). Loss: {loss_value}",
@@ -1178,25 +452,19 @@ class TrainingWorkflowManager:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     lora_path = os.path.join(lora_dir, f"lora_{idx}_{timestamp}.pt")
                     try:
-                        # Clean up resources before saving
                         if optimizer is not None:
                             del optimizer
                         if outputs is not None:
                             del outputs
                         if loss is not None:
                             del loss
-                        
                         gc.collect()
                         torch.cuda.empty_cache()
-                        
-                        # Save with proper synchronization
-                        with self._get_resource_lock('lora_manager'):  # Lock access to lora_manager
+                        with self._get_resource_lock('lora_manager'):
                             lora_manager.save_lora_weights(scaffold_model, lora_path)
-                            
-                        with self._get_resource_lock('model_manager'):  # Lock access to model_manager
+                        with self._get_resource_lock('model_manager'):
                             if model_manager:
                                 model_manager.set_active_lora_checkpoint(lora_path)
-                                
                         if logger:
                             logger.log_info(
                                 f"LoRA weights saved after gestation for scaffold {idx} to {lora_path}",
@@ -1204,7 +472,6 @@ class TrainingWorkflowManager:
                                 additional_info={"scaffold_index": idx}
                             )
                     except Exception as e:
-                        # Rollback partial save
                         if os.path.exists(lora_path):
                             os.remove(lora_path)
                         if logger:
@@ -1215,33 +482,21 @@ class TrainingWorkflowManager:
                                 additional_info={"scaffold_index": idx}
                             )
                         raise RuntimeError(f"Failed to save LoRA weights for scaffold {idx}: {e}")
-
                     successful_scaffolds.append(idx)
-                    
                 finally:
-                    # Clean up all resources regardless of success or failure
-                    if enriched_samples is not None:
-                        del enriched_samples
-                    if batch is not None:
-                        del batch
                     if optimizer is not None:
                         del optimizer
                     if outputs is not None:
                         del outputs
                     if loss is not None:
                         del loss
-                    
-                    # Force garbage collection after each scaffold iteration
                     gc.collect()
                     torch.cuda.empty_cache()
-
             if len(successful_scaffolds) != min_count:
                 raise RuntimeError("Not all scaffolds completed gestation training successfully")
-
-            # Update SOVL state if available with synchronization
             if state is not None and hasattr(state, 'update_after_gestation'):
                 try:
-                    with self._get_resource_lock('state'):  # Lock access to state
+                    with self._get_resource_lock('state'):
                         state.update_after_gestation()
                     if logger:
                         logger.log_info("SOVL state updated after gestation.", event_type="gestation_state_update")
@@ -1252,15 +507,11 @@ class TrainingWorkflowManager:
                             error_type="gestation_state_update_error",
                             stack_trace=traceback.format_exc()
                         )
-
-            # DREAMER integration with synchronization
             if dreamer is not None:
                 try:
-                    # Clear memory before running dream cycle
                     gc.collect()
                     torch.cuda.empty_cache()
-                    
-                    with self._get_resource_lock('dreamer'):  # Lock access to dreamer
+                    with self._get_resource_lock('dreamer'):
                         dreamer.run_dream_cycle()
                     if logger:
                         logger.log_info("Dreamer cycle completed after gestation.", event_type="gestation_dreamer")
@@ -1271,17 +522,13 @@ class TrainingWorkflowManager:
                             error_type="gestation_dreamer_error",
                             stack_trace=traceback.format_exc()
                         )
-                        
-            # Final memory cleanup
             gc.collect()
             torch.cuda.empty_cache()
-            
-            # Set mode back to 'online' at the end
             if state_manager and hasattr(state_manager, 'set_mode'):
                 state_manager.set_mode('online')
             if state_manager and hasattr(state_manager, 'set_gestation_progress'):
                 state_manager.set_gestation_progress(1.0)
-            
+
     def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
         """Run a dream cycle with proper synchronization."""
         with self._get_resource_lock('dreamer'):  # Lock access to dreamer
@@ -1369,20 +616,6 @@ class SOVLTrainer:
             error_cooldown=self.config.logging.error_cooldown
         )
         
-        # Initialize TrainingManager with ErrorManager
-        self.training_manager = TrainingManager(
-            self.config, self.model, self.device, config_manager, logger, self.error_manager
-        )
-        
-        # Initialize training state tracking
-        self._training_state = {
-            "current_epoch": 0,
-            "total_steps": self.training_manager.step_count,
-            "last_checkpoint": None,
-            "best_metrics": self.training_manager.best_metrics.copy(),
-            "error_history": deque(maxlen=self.config.logging.max_recent_errors)
-        }
-        
         # Log initialization
         self._logger.log_event(
             event_type="trainer_initialization",
@@ -1400,251 +633,6 @@ class SOVLTrainer:
                 "model_class": self.model.__class__.__name__
             }
         )
-
-    def _prepare_gestation_batch(self, batch_size: int) -> int:
-        """Prepare batch for gestation training with memory awareness."""
-        try:
-            # Check memory health
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
-            
-            # Adjust batch size based on memory health
-            if not ram_health['is_healthy'] or not gpu_health['is_healthy']:
-                adjusted_size = max(1, batch_size // 2)
-                self._logger.record_event(
-                    event_type="batch_size_adjusted",
-                    message="Batch size adjusted due to memory constraints",
-                    level="warning",
-                    additional_info={
-                        "original_size": batch_size,
-                        "adjusted_size": adjusted_size,
-                        "ram_health": ram_health,
-                        "gpu_health": gpu_health
-                    }
-                )
-                return adjusted_size
-                
-            return batch_size
-            
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to prepare gestation batch: {str(e)}",
-                error_type="batch_preparation_error",
-                stack_trace=traceback.format_exc()
-            )
-            return 1  # Return minimum batch size on error
-
-    def load_scribe_batches(self, scribe_path: str, batch_size: int = 32):
-        """
-        Loads batches from a scribe journal JSONL file, tokenizes the 'memory' field, and yields (inputs, weights).
-        """
-        loader = ScribeJSONLBatchLoader(scribe_path, batch_size=batch_size)
-        for batch_texts, batch_weights in loader:
-            memory_texts = [entry["memory"] for entry in batch_texts]
-            # Tokenize memory strings
-            inputs = self.tokenizer(memory_texts, return_tensors="pt", padding=True, truncation=True, max_length=getattr(self.tokenizer, 'model_max_length', 512))
-            # Move to device
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            yield inputs, batch_weights
-
-    # Example usage in training loop:
-    # for inputs, weights in self.load_scribe_batches("scribe_journal.jsonl", batch_size=32):
-    #     outputs = self.model(**inputs)
-    #     # Use weights for loss scaling if supported
-    #     ...
-
-    def train_from_scribe_journal(self, scribe_path: str, batch_size: int = 32, val_split: float = 0.1, patience_limit: int = 5):
-        """
-        Main training loop using scribe_journal.jsonl. Handles batching, weighted loss, validation, checkpointing, and logging.
-        Returns a dict of training/validation losses for analysis.
-        """
-        import os
-        import json
-        import torch
-        from tqdm import tqdm
-        from sklearn.model_selection import train_test_split
-
-        # Device check
-        if self.device.type == "cuda" and not torch.cuda.is_available():
-            self._logger.log_event("device_warning", "CUDA not available, switching to CPU.", level="warning")
-            self.device = torch.device("cpu")
-
-        # Load all entries for optional validation split
-        with open(scribe_path, 'r', encoding='utf-8') as f:
-            all_lines = [line.strip() for line in f if line.strip()]
-        if val_split > 0.0:
-            train_lines, val_lines = train_test_split(all_lines, test_size=val_split, random_state=42)
-        else:
-            train_lines, val_lines = all_lines, []
-
-        def batch_loader(lines, batch_size):
-            batch_texts, batch_weights = [], []
-            skipped = 0
-            for line in lines:
-                try:
-                    entry = json.loads(line)
-                    memory = entry["memory"]
-                    weight = float(entry.get("weight", 1.0))
-                    batch_texts.append(memory)
-                    batch_weights.append(weight)
-                except Exception as e:
-                    skipped += 1
-                    self._logger.log_error(f"Failed to parse line: {e}", error_type="data_parse_error")
-                if len(batch_texts) == batch_size:
-                    yield batch_texts, batch_weights
-                    batch_texts, batch_weights = [], []
-            if batch_texts:
-                yield batch_texts, batch_weights
-            return skipped
-
-        # Prepare optimizer, scheduler, etc.
-        model = self.model
-        device = self.device
-        optimizer = self.training_manager.optimizer
-        scheduler = self.training_manager.scheduler
-        scaler = self.training_manager.scaler
-        tokenizer = self.tokenizer
-        grad_accum_steps = self.config.optimizer.grad_accum_steps
-        max_epochs = self.config.params.max_epochs
-        validate_every = self.config.params.validate_every_n_steps
-        checkpoint_interval = self.config.params.checkpoint_interval
-        checkpoint_path = self.config.params.checkpoint_path
-        use_amp = self.config.memory.use_amp
-
-        global_step = 0
-        best_val_loss = float('inf')
-        patience = 0
-        train_losses = []
-        val_losses = []
-        skipped_train = 0
-        skipped_val = 0
-        for epoch in range(max_epochs):
-            model.train()
-            epoch_loss = 0.0
-            num_batches = 0
-            pbar = tqdm(batch_loader(train_lines, batch_size), desc=f"Epoch {epoch+1}/{max_epochs}")
-            for batch_texts, batch_weights in pbar:
-                # Tokenize
-                inputs = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=getattr(tokenizer, 'model_max_length', 512))
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                labels = inputs["input_ids"].clone()
-                batch_weights_tensor = torch.tensor(batch_weights, dtype=torch.float32, device=device)
-                # Forward pass
-                with torch.cuda.amp.autocast(enabled=use_amp):
-                    outputs = model(**inputs, labels=labels)
-                    # Per-sample loss (assume CrossEntropyLoss with reduction='none')
-                    if hasattr(outputs, 'loss') and outputs.loss is not None:
-                        if outputs.loss.dim() == 0:
-                            loss = outputs.loss
-                        else:
-                            # Weighted mean
-                            loss = (outputs.loss * batch_weights_tensor).mean() / grad_accum_steps
-                    else:
-                        continue
-                # Backward
-                if scaler is not None:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
-                # Optimizer step
-                if (global_step + 1) % grad_accum_steps == 0:
-                    if scaler is not None:
-                        scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.optimizer.max_grad_norm)
-                    if scaler is not None:
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        optimizer.step()
-                    if scheduler is not None:
-                        scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
-                epoch_loss += loss.item() * grad_accum_steps
-                num_batches += 1
-                global_step += 1
-                # Logging
-                if global_step % 10 == 0:
-                    self._logger.log_event("train_progress", f"Step {global_step} | Loss: {loss.item():.4f}", level="info")
-                # Validation
-                if val_lines and global_step % validate_every == 0:
-                    val_loss, skipped_val = self._run_validation(val_lines, batch_size, tokenizer, device, use_amp)
-                    val_losses.append(val_loss)
-                    self._logger.log_event("val_progress", f"Step {global_step} | Val Loss: {val_loss:.4f}", level="info")
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        patience = 0
-                        self.save_checkpoint(f"{checkpoint_path}_best.pt")
-                    else:
-                        patience += 1
-                        if patience >= patience_limit:
-                            self._logger.log_event("early_stopping", f"Early stopping at step {global_step} due to no improvement.", level="info")
-                            break
-                # Checkpointing
-                if global_step % checkpoint_interval == 0:
-                    self.save_checkpoint(f"{checkpoint_path}_step{global_step}.pt")
-                pbar.set_postfix({"loss": loss.item()})
-            # End of epoch checkpoint
-            self.save_checkpoint(f"{checkpoint_path}_epoch{epoch+1}.pt")
-            avg_loss = epoch_loss / max(1, num_batches)
-            train_losses.append(avg_loss)
-            self._logger.log_event("epoch_end", f"Epoch {epoch+1} complete. Avg Loss: {avg_loss:.4f}", level="info")
-            if patience >= patience_limit:
-                break
-        # Save final model
-        self.save_checkpoint(f"{checkpoint_path}_final.pt")
-        save_dir = os.path.dirname(checkpoint_path) or "."
-        os.makedirs(save_dir, exist_ok=True)
-        if hasattr(tokenizer, 'save_pretrained'):
-            tokenizer.save_pretrained(save_dir)
-        self._logger.log_event("training_complete", f"Training complete. Skipped {skipped_train} train lines, {skipped_val} val lines.", level="info")
-        return {"train_losses": train_losses, "val_losses": val_losses, "skipped_train": skipped_train, "skipped_val": skipped_val}
-
-    def _run_validation(self, val_lines, batch_size, tokenizer, device, use_amp):
-        import torch
-        from tqdm import tqdm
-        total_loss = 0.0
-        num_batches = 0
-        skipped = 0
-        self.model.eval()
-        with torch.no_grad():
-            pbar = tqdm(self._batch_loader(val_lines, batch_size), desc="Validation", leave=False)
-            for batch_texts, batch_weights in pbar:
-                try:
-                    inputs = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=getattr(tokenizer, 'model_max_length', 512))
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-                    labels = inputs["input_ids"].clone()
-                    batch_weights_tensor = torch.tensor(batch_weights, dtype=torch.float32, device=device)
-                    with torch.cuda.amp.autocast(enabled=use_amp):
-                        outputs = self.model(**inputs, labels=labels)
-                        if hasattr(outputs, 'loss') and outputs.loss is not None:
-                            if outputs.loss.dim() == 0:
-                                loss = outputs.loss
-                            else:
-                                loss = (outputs.loss * batch_weights_tensor).mean()
-                            total_loss += loss.item()
-                            num_batches += 1
-                except Exception as e:
-                    skipped += 1
-                    self._logger.log_error(f"Validation batch error: {e}", error_type="val_batch_error")
-        self.model.train()
-        return total_loss / max(1, num_batches), skipped
-
-    def _batch_loader(self, lines, batch_size):
-        batch_texts, batch_weights = [], []
-        for line in lines:
-            try:
-                entry = json.loads(line)
-                memory = entry["memory"]
-                weight = float(entry.get("weight", 1.0))
-                batch_texts.append(memory)
-                batch_weights.append(weight)
-            except Exception:
-                continue
-            if len(batch_texts) == batch_size:
-                yield batch_texts, batch_weights
-                batch_texts, batch_weights = [], []
-        if batch_texts:
-            yield batch_texts, batch_weights
 
 @dataclass
 class InterpretationConfig:
