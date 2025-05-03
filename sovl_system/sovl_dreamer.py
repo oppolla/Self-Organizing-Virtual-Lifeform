@@ -126,15 +126,25 @@ class SurrealNarrationStrategy(DreamNarrationStrategy):
         return generation_manager.generate_text(prompt, num_return_sequences=1)[0].strip()
 
     def narrate(self, dream_event: Dict[str, Any], noise_level: float, generation_manager=None) -> str:
-        prompt = dream_event["event_data"].get("prompt", "")
-        response = dream_event["event_data"].get("response", "")
-        parts = [prompt, response]
-        random.shuffle(parts)
-        narration = f"In the midst of swirling thoughts, a dream emerged: {parts[0]} ... Suddenly, {parts[1]} ... The boundaries of meaning blurred."
-        if random.random() < noise_level and generation_manager is not None:
-            phrase = self.get_llm_dreamlike_phrase(generation_manager)
-            narration += f" {phrase}"
-        return narration.strip()
+        """
+        Compose a short, surreal, dreamlike narration blending two dream fragments
+        """
+        prompt = (
+            "Essential qualities:\n"
+            "  - Compose a short, surreal, dreamlike narration (max 2 sentences) that blends the following two dream fragments.\n"
+            "  - The narration should be vivid, mysterious, and evocative of a dream.\n"
+            "  - You may optionally end with a brief, surreal phrase.\n"
+            "Fragments:\n"
+            f"  - Fragment 1: {dream_event['event_data'].get('prompt', '')}\n"
+            f"  - Fragment 2: {dream_event['event_data'].get('response', '')}\n"
+            "Key constraints:\n"
+            "  - Output only your narration, no explanations or commentary.\n"
+            "  - Do not reference music, songs, or lyrics directly.\n"
+            "  - Do not refer to the specific key, scale, or tempo.\n"
+            "  - Do not include dialogue or meta-commentary.\n"
+        )
+        narration = generation_manager.generate_text(prompt, num_return_sequences=1)[0].strip()
+        return narration
 
 class DreamEventSelector:
     """Handles event extraction and selection for dream generation."""
