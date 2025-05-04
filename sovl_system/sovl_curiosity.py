@@ -46,6 +46,15 @@ class Curiosity:
         self.weight_ignorance = config_manager.get("curiosity_config.weight_ignorance", 0.7)
         self.weight_novelty = config_manager.get("curiosity_config.weight_novelty", 0.3)
         self.metrics_maxlen = config_manager.get("curiosity_config.novelty_history_maxlen", 1000)
+        # New: cache and prune batch size config
+        self.embedding_cache_maxlen = config_manager.get("curiosity_config.embedding_cache_maxlen", 1000)
+        self.embedding_cache_prune_batch = config_manager.get("curiosity_config.embedding_cache_prune_batch", 100)
+        self.embedding_cache_backup_enabled = config_manager.get("curiosity_config.embedding_cache_backup_enabled", False)
+        self.embedding_cache_backup_path = config_manager.get("curiosity_config.embedding_cache_backup_path", "embedding_cache_backup.jsonl")
+        self.background_pruning_enabled = config_manager.get("curiosity_config.background_pruning_enabled", True)
+        self.similarity_early_exit_threshold = config_manager.get("curiosity_config.similarity_early_exit_threshold", 0.99)
+        self.adaptive_batch_min = config_manager.get("curiosity_config.adaptive_batch_min", 8)
+        self.adaptive_batch_max = config_manager.get("curiosity_config.adaptive_batch_max", 128)
         
         self._validate_weights(self.weight_ignorance, self.weight_novelty)
         self.logger = logger
@@ -62,6 +71,14 @@ class Curiosity:
         self.embedding_cache = {}
         self.lock = threading.Lock()
         self.curiosity_score = 0.0  # For external nudges
+        # For incremental/background pruning
+        self._prune_in_progress = False
+        self._prune_event = threading.Event()
+        self._prune_thread = None
+        self._prune_shutdown = False
+        if self.background_pruning_enabled:
+            self._prune_thread = threading.Thread(target=self._background_prune_loop, daemon=True)
+            self._prune_thread.start()
         
     def _validate_weights(self, ignorance: float, novelty: float) -> None:
         """Validate weight parameters."""
@@ -99,7 +116,7 @@ class Curiosity:
             pass
 
     def _prune_cache(self) -> None:
-        """Prune cache if memory usage exceeds threshold, using RAM/GPU managers if available."""
+        """Signal background thread to prune cache if needed."""
         usage_high = False
         if self.ram_manager and self.gpu_manager:
             try:
@@ -115,67 +132,110 @@ class Curiosity:
                         stack_trace=traceback.format_exc()
                     )
         else:
-            # Fallback: use cache size
-            if len(self.embedding_cache) > 10000:
+            if len(self.embedding_cache) > self.embedding_cache_maxlen:
                 usage_high = True
-        if usage_high:
+        if usage_high and self.background_pruning_enabled:
+            self._prune_event.set()
+        elif usage_high:
+            # Fallback: prune on main thread if background pruning is disabled
+            self._prune_cache_main_thread()
+
+    def _prune_cache_main_thread(self):
+        """Prune cache on the main thread (used if background pruning is disabled)."""
+        with self.lock:
             sorted_cache = sorted(
                 self.embedding_cache.items(),
                 key=lambda x: x[1].get('last_access', 0)
             )
             initial_cache_size = len(self.embedding_cache)
-            max_prune_fraction = 0.5
-            prune_limit = int(initial_cache_size * max_prune_fraction)
-            max_iterations = 1000
+            prune_batch = self.embedding_cache_prune_batch
+            prune_limit = min(prune_batch, initial_cache_size)
             pruned_count = 0
-            iteration = 0
-
-            # Optional: backup pruned embeddings before deletion
-            try:
-                backup_path = "embedding_cache_backup.jsonl"
-                with open(backup_path, "a", encoding="utf-8") as f:
-                    for key, value in sorted_cache[:prune_limit]:
-                        json.dump({"key": key, "value": value}, f, default=str)
-                        f.write("\n")
-            except Exception as e:
-                if self.logger:
-                    self.logger.log_error(
-                        error_msg=f"Failed to backup pruned embeddings: {str(e)}",
-                        error_type="curiosity_prune_backup_error",
-                        stack_trace=traceback.format_exc()
-                    )
-
-            while (
-                len(self.embedding_cache) > 0
-                and usage_high
-                and sorted_cache
-                and pruned_count < prune_limit
-                and iteration < max_iterations
-            ):
-                key, _ = sorted_cache.pop(0)
+            if self.embedding_cache_backup_enabled and prune_limit > 0:
+                try:
+                    backup_path = self.embedding_cache_backup_path
+                    with open(backup_path, "a", encoding="utf-8") as f:
+                        for key, value in sorted_cache[:prune_limit]:
+                            json.dump({"key": key, "value": value}, f, default=str)
+                            f.write("\n")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.log_error(
+                            error_msg=f"Failed to backup pruned embeddings: {str(e)}",
+                            error_type="curiosity_prune_backup_error",
+                            stack_trace=traceback.format_exc()
+                        )
+            for i in range(prune_limit):
+                key, _ = sorted_cache[i]
                 del self.embedding_cache[key]
                 pruned_count += 1
-                iteration += 1
-                # Optionally re-check memory after each prune
-                if self.ram_manager and self.gpu_manager:
-                    try:
-                        ram_stats = self.ram_manager.check_memory_health()
-                        gpu_stats = self.gpu_manager.get_gpu_usage()
-                        if ram_stats.get("usage_percentage", 0) < 0.7 and gpu_stats.get("usage_percentage", 0) < 0.7:
-                            break
-                    except Exception as e:
-                        if self.logger:
-                            self.logger.log_error(
-                                error_msg=f"Memory check failed during pruning: {str(e)}",
-                                error_type="curiosity_memory_error",
-                                stack_trace=traceback.format_exc()
-                            )
-                        break
-            if iteration >= max_iterations and self.logger:
-                self.logger.log_error(
-                    error_msg="Pruning stopped due to iteration limit",
-                    error_type="curiosity_prune_limit_error"
+            if self.logger:
+                self.logger.record_event(
+                    event_type="embedding_cache_pruned",
+                    message=f"[MainThread] Pruned {pruned_count} embeddings from cache. Remaining: {len(self.embedding_cache)}",
+                    level="info",
+                    additional_info={
+                        "initial_cache_size": initial_cache_size,
+                        "pruned_count": pruned_count,
+                        "remaining": len(self.embedding_cache)
+                    }
                 )
+
+    def _background_prune_loop(self):
+        """Background thread loop for cache pruning."""
+        while not self._prune_shutdown:
+            self._prune_event.wait()
+            while True:
+                with self.lock:
+                    if len(self.embedding_cache) <= self.embedding_cache_maxlen or self._prune_shutdown:
+                        break
+                    sorted_cache = sorted(
+                        self.embedding_cache.items(),
+                        key=lambda x: x[1].get('last_access', 0)
+                    )
+                    initial_cache_size = len(self.embedding_cache)
+                    prune_batch = self.embedding_cache_prune_batch
+                    prune_limit = min(prune_batch, initial_cache_size)
+                    pruned_count = 0
+                    if self.embedding_cache_backup_enabled and prune_limit > 0:
+                        try:
+                            backup_path = self.embedding_cache_backup_path
+                            with open(backup_path, "a", encoding="utf-8") as f:
+                                for key, value in sorted_cache[:prune_limit]:
+                                    json.dump({"key": key, "value": value}, f, default=str)
+                                    f.write("\n")
+                        except Exception as e:
+                            if self.logger:
+                                self.logger.log_error(
+                                    error_msg=f"Failed to backup pruned embeddings: {str(e)}",
+                                    error_type="curiosity_prune_backup_error",
+                                    stack_trace=traceback.format_exc()
+                                )
+                    for i in range(prune_limit):
+                        key, _ = sorted_cache[i]
+                        del self.embedding_cache[key]
+                        pruned_count += 1
+                    if self.logger:
+                        self.logger.record_event(
+                            event_type="embedding_cache_pruned",
+                            message=f"[Background] Pruned {pruned_count} embeddings from cache. Remaining: {len(self.embedding_cache)}",
+                            level="info",
+                            additional_info={
+                                "initial_cache_size": initial_cache_size,
+                                "pruned_count": pruned_count,
+                                "remaining": len(self.embedding_cache)
+                            }
+                        )
+                if len(self.embedding_cache) <= self.embedding_cache_maxlen or self._prune_shutdown:
+                    break
+            self._prune_event.clear()
+
+    def shutdown_prune_thread(self):
+        """Cleanly shutdown the background pruning thread."""
+        self._prune_shutdown = True
+        self._prune_event.set()
+        if self._prune_thread is not None:
+            self._prune_thread.join()
 
     def _compress_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """Compress tensor to reduce memory usage, using GPU manager if available."""
@@ -245,32 +305,47 @@ class Curiosity:
         """Compute ignorance component of curiosity score."""
         return self._clamp_score(1.0 - (base_conf * 0.5 + scaf_conf * 0.5))
 
+    def _estimate_adaptive_batch_size(self):
+        """Estimate batch size based on available memory (RAM or GPU)."""
+        # Simple heuristic: scale batch size based on available memory
+        try:
+            if self.gpu_manager:
+                gpu_stats = self.gpu_manager.get_gpu_usage()
+                avail = 1.0 - gpu_stats.get("usage_percentage", 0.5)
+            elif self.ram_manager:
+                ram_stats = self.ram_manager.check_memory_health()
+                avail = 1.0 - ram_stats.get("usage_percentage", 0.5)
+            else:
+                avail = 0.5  # fallback
+            batch = int(self.adaptive_batch_min + (self.adaptive_batch_max - self.adaptive_batch_min) * avail)
+            return max(self.adaptive_batch_min, min(self.adaptive_batch_max, batch))
+        except Exception:
+            return self.batch_size
+
     def _compute_novelty_score(
         self,
         memory_embeddings: List[torch.Tensor],
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
-        """Compute novelty component of curiosity score using batched processing."""
+        """Compute novelty component of curiosity score using batched processing, with early exit and adaptive batch size."""
         try:
             query_embedding = query_embedding.to(device)
-            
-            # Process embeddings in batches
             max_similarity = 0.0
-            for i in range(0, len(memory_embeddings), self.batch_size):
-                batch = memory_embeddings[i:i + self.batch_size]
+            batch_size = self._estimate_adaptive_batch_size()
+            for i in range(0, len(memory_embeddings), batch_size):
+                batch = memory_embeddings[i:i + batch_size]
                 batch_tensors = torch.stack([emb.to(device) for emb in batch])
-                
-                # Compute similarities in parallel
                 similarities = self.cosine_similarity(
                     query_embedding.unsqueeze(0),
                     batch_tensors
                 )
-                
-                max_similarity = max(max_similarity, similarities.max().item())
-            
+                batch_max = similarities.max().item()
+                max_similarity = max(max_similarity, batch_max)
+                # Early exit if high enough similarity is found
+                if max_similarity >= self.similarity_early_exit_threshold:
+                    break
             return self._clamp_score(1.0 - max_similarity)
-            
         except Exception as e:
             self._log_error(f"Novelty score computation failed: {str(e)}")
             return 0.0

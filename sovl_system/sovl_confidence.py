@@ -97,6 +97,9 @@ class ConfidenceCalculator:
         # Initialize configuration
         self._initialize_config()
         
+        # Temperature scaling attribute (default 1.0)
+        self._temperature = 1.0
+        
     def _initialize_config(self) -> None:
         """Initialize and validate configuration from ConfigManager."""
         try:
@@ -415,16 +418,9 @@ class ConfidenceCalculator:
             raise ValueError("logits must be 2D and generated_ids must be 1D")
 
     def __calculate_probabilities(self, logits: torch.Tensor) -> torch.Tensor:
-        """Calculate softmax probabilities from logits.
-        
-        Args:
-            logits: Model output logits
-        
-        Returns:
-            torch.Tensor: Softmax probabilities
-        """
+        """Calculate softmax probabilities from logits, with temperature scaling."""
         with NumericalGuard():
-            return torch.softmax(logits, dim=-1)
+            return torch.softmax(logits / self._temperature, dim=-1)
 
     def __compute_base_confidence(self, probs: torch.Tensor) -> float:
         """Compute base confidence from probabilities.
@@ -572,6 +568,66 @@ class ConfidenceCalculator:
                 }
             )
             return self.default_confidence
+
+    def set_temperature(self, temperature: float) -> None:
+        """Set the temperature for temperature scaling."""
+        if temperature <= 0:
+            raise ValueError("Temperature must be positive.")
+        self._temperature = float(temperature)
+
+    def get_temperature(self) -> float:
+        """Get the current temperature value."""
+        return self._temperature
+
+    def fit_temperature(self, logits: torch.Tensor, labels: torch.Tensor, max_iter: int = 1000, lr: float = 0.01, allow: bool = False) -> float:
+        """
+        Fit the temperature parameter on a validation set to minimize NLL.
+        WARNING: This method is for offline/manual calibration only and should not be used in production or normal operation.
+        By default, calling this method will raise a RuntimeError unless explicitly allowed by setting allow=True.
+        Args:
+            logits: [N, C] tensor of model logits
+            labels: [N] tensor of true class indices
+            max_iter: maximum optimization steps
+            lr: learning rate for optimizer
+            allow: must be True to enable fitting (default False)
+        Returns:
+            float: The optimized temperature value
+        Raises:
+            RuntimeError: if allow is not True
+        """
+        if not allow:
+            raise RuntimeError(
+                "fit_temperature is restricted to offline/manual calibration only. "
+                "To run, call with allow=True during maintenance periods."
+            )
+        import torch.optim as optim
+        import torch.nn.functional as F
+        device = logits.device
+        temperature = torch.ones(1, device=device, requires_grad=True) * self._temperature
+        optimizer = optim.LBFGS([temperature], lr=lr, max_iter=max_iter)
+        labels = labels.to(device)
+        
+        def _nll():
+            # Clamp temperature to avoid zero or negative
+            temp = temperature.clamp(min=1e-3)
+            scaled_logits = logits / temp
+            loss = F.cross_entropy(scaled_logits, labels)
+            return loss
+        
+        def closure():
+            optimizer.zero_grad()
+            loss = _nll()
+            loss.backward()
+            return loss
+        optimizer.step(closure)
+        self._temperature = float(temperature.clamp(min=1e-3).item())
+        self.logger.record_event(
+            event_type="temperature_fitted",
+            message=f"Temperature fitted to {self._temperature}",
+            level="info",
+            additional_info={"temperature": self._temperature}
+        )
+        return self._temperature
 
 # Singleton instance of ConfidenceCalculator
 _confidence_calculator = None
