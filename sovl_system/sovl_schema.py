@@ -437,6 +437,25 @@ class ValidationSchema:
         }
     
     @staticmethod
+    def _get_monitoring_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the monitoring_config schema."""
+        return {
+            "poll_interval": ConfigSchema(
+                field="monitoring_config.poll_interval",
+                type=float,
+                default=10.0,
+                description="Interval (in seconds) between system health checks. Increase for lower power systems."
+            ),
+            "bond_history_maxlen": ConfigSchema(
+                field="monitoring_config.bond_history_maxlen",
+                type=int,
+                default=30,
+                description="Maximum number of bond score history entries to keep per user."
+            ),
+            # ... any other monitoring config fields ...
+        }
+    
+    @staticmethod
     def _get_scribed_config_schema() -> Dict[str, ConfigSchema]:
         """Return the scribed_config schema."""
         return {
@@ -459,6 +478,18 @@ class ValidationSchema:
                 field="scribed_config.scribe_queue_maxsize",
                 type=int,
                 default=2000
+            ),
+        }
+    
+    @staticmethod
+    def _get_memory_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the memory_config schema."""
+        return {
+            "faiss_rebuild_threshold": ConfigSchema(
+                field="memory_config.faiss_rebuild_threshold",
+                type=int,
+                default=100,
+                description="Number of new/changed records before the FAISS index is rebuilt. Increase for less frequent rebuilds on low-power systems."
             ),
         }
     

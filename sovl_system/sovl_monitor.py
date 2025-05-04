@@ -60,7 +60,9 @@ class SystemMonitor:
         self._error_manager = error_manager
         self.bond_calculator = bond_calculator
         self._bond_score_history = {}  # user_id -> deque of bond scores
-        self._bond_history_maxlen = 100
+        self._bond_history_maxlen = self._config_manager.get_setting(
+            'monitoring', 'bond_history_maxlen', default=30
+        )
         
         # Load thresholds from config
         self._ram_critical_threshold = self._config_manager.get_setting(
@@ -352,9 +354,9 @@ class TraitsMonitor:
         self.bond_calculator = bond_calculator
         self.bond_modulator = bond_modulator
         
-        # Load update interval from config if not provided
-        self._update_interval = update_interval or self._config_manager.get_setting(
-            'monitoring', 'traits_update_interval_seconds', default=0.5
+        # Configurable polling interval for monitor loop
+        self._update_interval = update_interval if update_interval is not None else config_manager.get_setting(
+            'monitoring', 'poll_interval', default=10.0
         )
         
         # Load config values

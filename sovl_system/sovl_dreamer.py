@@ -85,16 +85,27 @@ class DreamEventSelector:
         self.selection_strategy = config_manager.get("dreamer_config.selection_strategy")
 
     def extract_last_active_period(self) -> List[Dict]:
-        """Extract events since the last 'wake' event, streaming to reduce memory usage."""
+        """Efficiently extract only the last N events since the last 'wake', using generator-based streaming and a two-pass approach."""
         try:
             loader = JSONLLoader(self.config_manager, self.logger, self.error_manager)
-            events = []
+            # First pass: count events since last 'wake'
+            event_count = 0
             for entry in loader.stream_jsonl(self.scribe_path):
                 if entry.get("event_type") == "wake":
-                    events = []
+                    event_count = 0
                 else:
-                    events.append(entry)
-            return events
+                    event_count += 1
+            # Second pass: yield only the last N events
+            max_events = self.max_dreams
+            buffer = []
+            for entry in loader.stream_jsonl(self.scribe_path):
+                if entry.get("event_type") == "wake":
+                    buffer = []
+                else:
+                    buffer.append(entry)
+                    if len(buffer) > max_events:
+                        buffer.pop(0)
+            return buffer
         except Exception as e:
             error_type = f"dreamer_extract_last_active_period_error"
             context = {"function": "extract_last_active_period"}

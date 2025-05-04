@@ -204,6 +204,9 @@ class LongTermMemory:
             self._init_database()
             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
             self.message_ids = []
+            # Throttle FAISS index rebuilds
+            self._faiss_pending_changes = 0
+            self._faiss_rebuild_threshold = config_manager.get("memory.faiss_rebuild_threshold", 100) if config_manager else 100
             self.rebuild_faiss_index()
             self.logger.record_event(
                 event_type="long_term_memory_init",
@@ -301,6 +304,11 @@ class LongTermMemory:
             with self._write_lock:
                 self.message_ids.append(msg_id)
                 self.message_timestamps[msg_id] = msg["timestamp"]
+                # Throttle FAISS index rebuilds
+                self._faiss_pending_changes += 1
+                if self._faiss_pending_changes >= self._faiss_rebuild_threshold:
+                    self.rebuild_faiss_index()
+                    self._faiss_pending_changes = 0
             self.logger.record_event(
                 event_type="long_term_memory_add",
                 message="Message added to LongTermMemory.",
@@ -395,6 +403,9 @@ class LongTermMemory:
             self.faiss_index = faiss.IndexFlatL2(self.embedding_dim)
             self.message_ids = []
             self.message_timestamps = {}
+            # Always rebuild index and reset counter on clear
+            self.rebuild_faiss_index()
+            self._faiss_pending_changes = 0
         try:
             cursor = self._db_conn.cursor()
             if user_id:

@@ -655,6 +655,11 @@
 
 "logging_config": {
     "logging_enabled": true
+},
+
+"monitoring_config": {
+    "poll_interval": 10.0,
+    "bond_history_maxlen": 30
 }
 
 }

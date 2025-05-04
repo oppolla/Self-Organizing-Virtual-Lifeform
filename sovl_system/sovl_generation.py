@@ -853,6 +853,31 @@ class GenerationManager:
             return wrapper
         return decorator
 
+    def _estimate_optimal_batch_size(self):
+        """Estimate the optimal batch size based on available memory and config."""
+        min_bs = self._get_config_value("generation_config.min_batch_size", 1)
+        max_bs = self._get_config_value("generation_config.max_batch_size", 8)
+        default_bs = self._get_config_value("generation_config.default_batch_size", 1)
+        mem_per_sample = self._get_config_value("generation_config.mem_per_sample_mb", 100)
+        # Try to use GPU memory if available, else RAM
+        available_mem = 0
+        if hasattr(self, 'gpu_manager') and self.gpu_manager:
+            try:
+                available_mem = self.gpu_manager.get_available_memory()
+            except Exception:
+                available_mem = 0
+        if not available_mem and hasattr(self, 'ram_manager') and self.ram_manager:
+            try:
+                available_mem = self.ram_manager.get_available_memory()
+            except Exception:
+                available_mem = 0
+        if not available_mem:
+            return default_bs
+        for bs in range(max_bs, min_bs - 1, -1):
+            if bs * mem_per_sample < available_mem:
+                return bs
+        return min_bs
+
     @state_managed_operation("generate_text")
     def generate_text(self, prompt: str, num_return_sequences: int = 1, user_id: str = "default", metadata_entries: list = None, **kwargs) -> List[str]:
         """Generate text with state-driven error handling, recovery, scribe logging, and always-on memory integration.
