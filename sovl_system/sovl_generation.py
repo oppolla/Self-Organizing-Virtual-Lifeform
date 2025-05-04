@@ -19,7 +19,7 @@ from sovl_confidence import ConfidenceCalculator, calculate_confidence_score
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_manager import ModelManager
-from sovl_scaffold import GenerationScaffoldProvider
+from sovl_scaffold import ScaffoldProvider
 from sovl_bonder import BondCalculator
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
 from sovl_resource import ResourceManager  # Import ResourceManager
@@ -203,7 +203,7 @@ class GenerationManager:
             # Ensure memory manager is initialized first
             self._initialize_memory_manager()
             
-            self.scaffold_provider = GenerationScaffoldProvider(
+            self.scaffold_provider = ScaffoldProvider(
                 scaffold_model=self.scaffolds[0],  # Use first scaffold model
                 scaffold_tokenizer=self.scaffold_tokenizer,
                 device=self.device,
