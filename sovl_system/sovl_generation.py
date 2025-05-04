@@ -18,6 +18,7 @@ from sovl_trainer import LifecycleManager, TrainingConfig
 from sovl_confidence import ConfidenceCalculator, calculate_confidence_score
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
+from sovl_manager import ModelManager
 from sovl_scaffold import GenerationScaffoldProvider
 from sovl_bonder import BondCalculator
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
@@ -47,12 +48,14 @@ class GenerationManager:
         generation_hooks: Dict[str, bool] = {},
         dialogue_context_manager: Optional[Any] = None,
         state_manager: Any = None,
-        resource_manager: ResourceManager = None  # New argument
+        resource_manager: ResourceManager = None,  # New argument
+        model_manager: Any = None  # New argument
     ):
         """Initialize GenerationManager with configuration and model components.
         Args:
             ...
             resource_manager: Optional ResourceManager for coordinated resource allocation.
+            model_manager: Optional ModelManager for dynamic context length.
         """
         # Core components
         self._config_manager = config_manager
@@ -66,6 +69,12 @@ class GenerationManager:
         else:
             self.resource_manager = resource_manager
         self.components["resource_manager"] = self.resource_manager
+        # ModelManager integration
+        if model_manager is None:
+            self.model_manager = ModelManager(logger=self.logger)
+        else:
+            self.model_manager = model_manager
+        self.components["model_manager"] = self.model_manager
         # Resource acquisition for base_model and scaffolds
         try:
             # Acquire GPU memory for base_model
@@ -627,7 +636,7 @@ class GenerationManager:
     ) -> Dict[str, torch.Tensor]:
         """Tokenize prompts and map to scaffold tokens."""
         try:
-            max_length = max_length or self.training_config.get("max_seq_length", 128)
+            max_length = max_length or self.model_manager.max_context_length
             prompts = [prompts] if isinstance(prompts, str) else prompts
 
             batch_size = self.training_config.get("batch_size", 1)
@@ -946,7 +955,7 @@ class GenerationManager:
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
-                max_length=self._get_config_value("controls_config.max_seq_length", 512)
+                max_length=self.model_manager.max_context_length
             )
             model_device = next(self.base_model.parameters()).device
             inputs = {k: v.to(model_device) for k, v in inputs.items()}
@@ -1065,7 +1074,7 @@ class GenerationManager:
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
-                max_length=self._get_config_value("controls_config.max_seq_length", 512)
+                max_length=self.model_manager.max_context_length
             )
             
             # Validate device matches base model
@@ -1218,7 +1227,7 @@ class GenerationManager:
                 event_data = {
                     "user_response": prompt,
                     "generated_text": generated_text,
-                    "confidence_score": calculated_confidence,
+                    "confidence_score": calculate_confidence_score,
                     "num_return_sequences": initial_kwargs.get("num_return_sequences", 1),
                 }
                 # Optionally add detailed fields if present

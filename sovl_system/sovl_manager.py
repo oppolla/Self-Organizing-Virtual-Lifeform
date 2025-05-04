@@ -1052,3 +1052,26 @@ class ModelManager:
                 level="info"
             )
             return None
+
+    def get_max_context_length(self, model=None) -> int:
+        """
+        Return the max context length for the given model (or current base model if not specified).
+        Checks common config attributes and falls back to config or a safe default.
+        """
+        if model is None:
+            model = self.get_base_model()
+        if model is not None and hasattr(model, "config"):
+            for attr in ['max_position_embeddings', 'n_ctx', 'seq_length', 'max_seq_len']:
+                if hasattr(model.config, attr):
+                    return getattr(model.config, attr)
+        # Fallback to config or a safe default
+        if hasattr(self, "_config_manager"):
+            return self._config_manager.get("controls_config.max_seq_length", 2048)
+        return 2048
+
+    @property
+    def max_context_length(self):
+        """
+        Property for convenient access to the current base model's max context length.
+        """
+        return self.get_max_context_length()
