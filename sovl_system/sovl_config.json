@@ -648,6 +648,7 @@
   "error_message": 0.2,
   "user_interaction": 1.0,
   "curiosity_question": 0.8,
+  "curiosity_question_user": 2.0,
   "dream": 1.5,
   "meditation": 0.7
 }
