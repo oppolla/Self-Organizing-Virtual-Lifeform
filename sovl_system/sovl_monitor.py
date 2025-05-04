@@ -223,6 +223,29 @@ class SystemMonitor:
         else:
             return f"{mode.capitalize()}{dots:<3}"
 
+    def get_dreaming_status(self) -> dict:
+        mode = None
+        progress = None
+        if hasattr(self, 'state_manager') and self.state_manager:
+            mode = self.state_manager.get_mode()
+            if mode == 'dreaming':
+                progress = self.state_manager.get_dreaming_progress()
+        return {
+            'mode': mode,
+            'progress': progress,
+        }
+
+    def get_dreaming_message(self, dot_count=1):
+        status = self.get_dreaming_status()
+        mode = status.get('mode', 'unknown')
+        progress = status.get('progress', None)
+        percent = int(progress * 100) if progress is not None else None
+        dots = '.' * dot_count
+        if percent is not None:
+            return f"{mode.capitalize()}{dots:<3} {percent}%"
+        else:
+            return f"{mode.capitalize()}{dots:<3}"
+
 class MemoryMonitor:
     """Monitors system memory usage."""
     

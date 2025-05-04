@@ -539,6 +539,7 @@ class SOVLState(StateBase):
             self.version = self.STATE_VERSION
             self.mode: str = "online"  # online, gestating, offline, pending_gestation, dreaming
             self.gestation_progress: float = 0.0  # 0.0 to 1.0
+            self.dreaming_progress: float = 0.0  # 0.0 to 1.0
             
             self.log_event(
                 "state_initialized",
@@ -800,7 +801,8 @@ class SOVLState(StateBase):
                     "curiosity_metrics": {k: list(v) for k, v in getattr(self, "curiosity_metrics", {}).items()},
                     "curiosity_exploration_queue": list(getattr(self, "curiosity_exploration_queue", [])),
                     "mode": self.mode,
-                    "gestation_progress": self.gestation_progress
+                    "gestation_progress": self.gestation_progress,
+                    "dreaming_progress": self.dreaming_progress
                 }
                 if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
                     state_data['short_term_memory'] = self.short_term_memory.to_dict()
@@ -867,6 +869,9 @@ class SOVLState(StateBase):
             
             # Load gestation progress
             self.gestation_progress = float(data.get("gestation_progress", 0.0))
+            
+            # Load dreaming progress
+            self.dreaming_progress = float(data.get("dreaming_progress", 0.0))
             
             # Validate loaded state
             self._validate_state()
@@ -949,7 +954,8 @@ class SOVLState(StateBase):
             "conversation_metadata": self._conversation_metadata,
             "goals": [goal.copy() for goal in self.goals],
             "mode": self.mode,
-            "gestation_progress": self.gestation_progress
+            "gestation_progress": self.gestation_progress,
+            "dreaming_progress": self.dreaming_progress
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
@@ -1278,6 +1284,17 @@ class StateManager(StateAccessor):
         with self._lock:
             if self._current_state and hasattr(self._current_state, 'gestation_progress'):
                 return self._current_state.gestation_progress
+            return 0.0
+
+    def set_dreaming_progress(self, value: float):
+        with self._lock:
+            if self._current_state:
+                self._current_state.dreaming_progress = value
+
+    def get_dreaming_progress(self) -> float:
+        with self._lock:
+            if self._current_state and hasattr(self._current_state, 'dreaming_progress'):
+                return self._current_state.dreaming_progress
             return 0.0
 
 class StateTracker(StateBase):

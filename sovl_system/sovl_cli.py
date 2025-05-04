@@ -2,7 +2,7 @@ import time
 import torch
 import traceback
 from typing import List, Dict, Tuple, Optional, Callable
-from sovl_main import SOVLSystem
+from sovl_main import SOVLSystem, SystemInitializationError
 from sovl_state import StateManager
 from sovl_config import ConfigManager
 from sovl_utils import safe_compare, format_file_size, format_timestamp, print_section_header, print_bullet_list, print_kv_table, progress_bar, print_success, print_error
@@ -24,6 +24,7 @@ import difflib
 import threading
 import json
 import shutil
+from sovl_dreamer import Dreamer  # <-- Add this import
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -35,7 +36,7 @@ COMMAND_CATEGORIES = {
     "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc", "/run", "/stop"],
     "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant"],
     "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk"],
-    "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo"],
+    "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo", "/dream"],
     "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
     "Tutorial": ["/tutorial"],
 }
@@ -219,6 +220,10 @@ class CommandHandler(cmd.Cmd):
                         self._last_progress = None  # Reset progress on mode change
                     if mode == 'gestating' and system_monitor and hasattr(system_monitor, 'get_gestation_message'):
                         message = system_monitor.get_gestation_message(dot_count)
+                        print(f"\r{message}", end="")
+                        dot_count = dot_count % 3 + 1
+                    elif mode == 'dreaming' and system_monitor and hasattr(system_monitor, 'get_dreaming_message'):
+                        message = system_monitor.get_dreaming_message(dot_count)
                         print(f"\r{message}", end="")
                         dot_count = dot_count % 3 + 1
             except Exception:
@@ -2326,6 +2331,94 @@ scaffold models for debugging and development purposes.
             else:
                 return None
         return super().complete(text, state)
+
+    def do_dream(self, arg):
+        """
+        Generate a dream cycle using the Dreamer module.
+        Usage: dream [--config CONFIG_PATH] [--scribe SCRIBE_PATH]
+        If not provided, uses the system's config and scribe paths.
+        Supports interactive abort (wake from dream) with any key.
+        """
+        import shlex
+        import threading
+        import sys
+        import time
+        args = shlex.split(arg)
+        config_path = None
+        scribe_path = None
+        # Parse args
+        for i, a in enumerate(args):
+            if a in ('--config', '-c') and i + 1 < len(args):
+                config_path = args[i + 1]
+            if a in ('--scribe', '-s') and i + 1 < len(args):
+                scribe_path = args[i + 1]
+        # Use system defaults if not provided
+        if not config_path:
+            config_path = getattr(self.sovl_system, 'config_path', None)
+            if not config_path and hasattr(self.sovl_system, 'config_handler'):
+                config_path = getattr(self.sovl_system.config_handler, 'config_path', None)
+        if not scribe_path:
+            scribe_path = getattr(self.sovl_system, 'scribe_path', None)
+            if not scribe_path and hasattr(self.sovl_system, 'config_handler'):
+                scribe_path = self.sovl_system.config_handler.get('scribe_path', None)
+        if not config_path or not scribe_path:
+            print_error("Could not determine config or scribe path. Please specify with --config and --scribe.")
+            return
+        # Set mode to dreaming and reset progress
+        state_manager = getattr(self.sovl_system, 'state_manager', None)
+        if state_manager and hasattr(state_manager, 'set_mode') and hasattr(state_manager, 'set_dreaming_progress'):
+            state_manager.set_mode('dreaming')
+            state_manager.set_dreaming_progress(0.0)
+        print_section_header("Dream Cycle Generation")
+        abort_flag = [False]
+        dream_done = [False]
+        result_holder = [None]
+        def dream_thread():
+            result_holder[0] = Dreamer.cli_run_dream(
+                config_path=config_path,
+                scribe_path=scribe_path,
+                state_manager=state_manager,
+                abort_flag=abort_flag
+            )
+            dream_done[0] = True
+        t = threading.Thread(target=dream_thread)
+        t.start()
+        try:
+            while not dream_done[0]:
+                print("\rDreaming... (press any key to wake)", end="", flush=True)
+                if sys.platform.startswith('win'):
+                    time.sleep(0.5)
+                else:
+                    import select
+                    dr, _, _ = select.select([sys.stdin], [], [], 0.5)
+                    if dr:
+                        print("\nAre you sure you want to wake from dream? (y/N): ", end="", flush=True)
+                        ans = sys.stdin.readline().strip().lower()
+                        if ans == 'y':
+                            abort_flag[0] = True
+                            print_success("You awoke from the dream early.")
+                            break
+                        else:
+                            print("Resuming dream...")
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\nAre you sure you want to wake from dream? (y/N): ", end="", flush=True)
+            ans = sys.stdin.readline().strip().lower()
+            if ans == 'y':
+                abort_flag[0] = True
+                print_success("You woke from the dream early.")
+            else:
+                print("Resuming dreaming...")
+        finally:
+            t.join()
+            if state_manager and hasattr(state_manager, 'set_mode'):
+                state_manager.set_mode('online')
+        if abort_flag[0]:
+            print_error("Dream cycle aborted by user.")
+        elif result_holder[0] is not None:
+            print_success("Dream cycle completed successfully.")
+        else:
+            print_error("Dream cycle failed. See logs for details.")
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None

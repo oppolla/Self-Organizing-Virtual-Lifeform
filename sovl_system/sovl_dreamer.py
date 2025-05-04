@@ -293,7 +293,8 @@ class DreamAlbumGenerator:
         config_manager: ConfigManager,
         scribe_path: str,
         error_manager: ErrorManager,
-        scribe_event_fn
+        scribe_event_fn,
+        state_manager=None
     ):
         self.config_manager = config_manager
         self.scribe_path = scribe_path
@@ -331,6 +332,7 @@ class DreamAlbumGenerator:
             "bVII": "freedom, escape, rebellion",
             # Add more as needed if new chords are introduced
         }
+        self.state_manager = state_manager
 
     def _clean_title(self, text: str, max_length: int = 48) -> str:
         """Clean and truncate text for titles."""
@@ -387,8 +389,9 @@ class DreamAlbumGenerator:
             section_lyric_so_far += next_line.strip() + "\n"
         return section_lyric_so_far.strip()
 
-    def run_dream_album_cycle(self, generation_manager, memories: Optional[List[str]] = None) -> Optional[Dict]:
-        """Generate a dream album with songs and sections."""
+    def run_dream_album_cycle(self, generation_manager, memories: Optional[List[str]] = None, state_manager=None, abort_flag=None) -> Optional[Dict]:
+        if state_manager is None:
+            state_manager = self.state_manager
         logger = Logger.get_instance()
         logger.info("Starting dream album cycle generation...")
         import time
@@ -410,7 +413,11 @@ class DreamAlbumGenerator:
             album_title = self._clean_title(motif, max_length=48)
             album = []
             logger.info(f"Dream album title: {album_title}")
+            total_songs = self.num_songs
             for song_idx in range(self.num_songs):
+                if abort_flag and abort_flag[0]:
+                    logger.info("Dream cycle aborted by user during album generation.")
+                    break
                 logger.info(f"Generating song {song_idx+1}/{self.num_songs}...")
                 song = self.Song(self)  # Markov structure
                 song_sections = []
@@ -446,6 +453,9 @@ class DreamAlbumGenerator:
                     "musical_details": musical_details
                 })
                 song_title = self._clean_title(list(section_motifs.values())[0], max_length=48)
+                # Update dreaming progress after each song
+                if state_manager and hasattr(state_manager, 'set_dreaming_progress'):
+                    state_manager.set_dreaming_progress((song_idx + 1) / total_songs)
             poetic_score = "\n".join(score_lines)
             # Each dreamN is a full section narration
             event_data = {
@@ -498,6 +508,8 @@ class DreamAlbumGenerator:
             logger.info("Top memory usage during cycle:")
             for stat in top_stats:
                 logger.info(stat)
+            if state_manager and hasattr(state_manager, 'set_dreaming_progress'):
+                state_manager.set_dreaming_progress(1.0)
 
     def clear_scribe_memory_cache(self):
         """Clear the cached scribe memories (call if journal is updated)."""
@@ -732,7 +744,8 @@ class Dreamer:
         config_manager: ConfigManager,
         scribe_path: str,
         scribe_event_fn=capture_scribe_event,
-        error_manager: ErrorManager = None
+        error_manager: ErrorManager = None,
+        state_manager=None
     ):
         self.config_manager = config_manager
         self.scribe_path = scribe_path
@@ -746,17 +759,31 @@ class Dreamer:
         )
         self.event_selector = DreamEventSelector(config_manager, scribe_path, self.error_manager)
         self.dream_generator = DreamGenerator(config_manager, self.error_manager, SurrealNarrationStrategy())
-        self.album_generator = DreamAlbumGenerator(config_manager, scribe_path, self.error_manager, scribe_event_fn)
+        self.album_generator = DreamAlbumGenerator(config_manager, scribe_path, self.error_manager, scribe_event_fn, state_manager=state_manager)
         self.scribe_ingestion_processor = ScribeIngestionProcessor(log_paths=[scribe_path], logger=self.logger)
+        self.state_manager = state_manager
         # Register recovery strategy
         self.error_manager.recovery_strategies["dreamer_queue_error"] = self._recover_queue_failure
 
-    def run_dream_cycle(self) -> None:
-        """Extract, select, generate, and log dream events."""
+    def run_dream_cycle(self, generation_manager=None, state_manager=None, abort_flag=None) -> None:
+        if state_manager is None:
+            state_manager = self.state_manager
+        if state_manager and hasattr(state_manager, 'set_dreaming_progress'):
+            state_manager.set_dreaming_progress(0.0)
         events = self.event_selector.extract_last_active_period()
         candidates = self.event_selector.score_and_select_dreams(events)
-        dreams = self.dream_generator.generate_dream_events(candidates)
-        self.log_dreams(dreams)
+        dreams = self.dream_generator.generate_dream_events(candidates, generation_manager=generation_manager)
+        for idx, dream in enumerate(dreams):
+            if abort_flag and abort_flag[0]:
+                self.logger.info("Dream cycle aborted by user during dream event generation.")
+                break
+            self.log_dreams([dream])
+            if state_manager and hasattr(state_manager, 'set_dreaming_progress'):
+                state_manager.set_dreaming_progress((idx + 1) / len(dreams))
+        if state_manager and hasattr(state_manager, 'set_dreaming_progress'):
+            state_manager.set_dreaming_progress(1.0)
+        if state_manager and hasattr(state_manager, 'set_mode'):
+            state_manager.set_mode('online')
 
     def log_dreams(self, dreams: List[Dict]) -> None:
         """Log dream events to scribe queue."""
@@ -790,9 +817,8 @@ class Dreamer:
                 level="info"
             )
 
-    def run_dream_album_cycle(self, generation_manager, memories: Optional[List[str]] = None) -> Optional[Dict]:
-        """Generate and log a dream album."""
-        return self.album_generator.run_dream_album_cycle(generation_manager, memories)
+    def run_dream_album_cycle(self, generation_manager, memories: Optional[List[str]] = None, state_manager=None, abort_flag=None) -> Optional[Dict]:
+        return self.album_generator.run_dream_album_cycle(generation_manager, memories, state_manager, abort_flag)
 
     def _recover_queue_failure(self, record):
         """Recovery strategy for scribe queue failures."""
@@ -816,6 +842,44 @@ class Dreamer:
                 error_type="dreamer_recovery_error",
                 context={"original_error": record.error_type}
             )
+
+    @classmethod
+    def cli_run_dream(
+        cls,
+        config_path: str,
+        scribe_path: str,
+        generation_manager: Optional[Any] = None,
+        **kwargs
+    ) -> Optional[Dict]:
+        """
+        CLI-friendly entry point to generate a dream cycle.
+        """
+        logger = Logger.get_instance()
+        logger.info("[CLI] Starting dream cycle generation...")
+        try:
+            config_manager = ConfigManager(config_path)
+            error_manager = ErrorManager(context=None, state_tracker=None, config_manager=config_manager)
+            state_manager = kwargs.get('state_manager', None)
+            abort_flag = kwargs.get('abort_flag', None)
+            dreamer = cls(
+                config_manager=config_manager,
+                scribe_path=scribe_path,
+                error_manager=error_manager,
+                state_manager=state_manager
+            )
+            if generation_manager is None:
+                try:
+                    from sovl_generate import GenerationManager
+                    generation_manager = GenerationManager(config_manager=config_manager, logger=logger)
+                except ImportError:
+                    logger.error("Could not import GenerationManager. Please provide a generation_manager.")
+                    return None
+            result = dreamer.run_dream_cycle(generation_manager=generation_manager, state_manager=state_manager, abort_flag=abort_flag)
+            logger.info("[CLI] Dream cycle generation complete.")
+            return result
+        except Exception as e:
+            logger.error(f"[CLI] Exception during dream cycle generation: {e}", exc_info=True)
+            return None
 
 class Key:
     """
