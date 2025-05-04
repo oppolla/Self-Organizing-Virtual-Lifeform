@@ -136,11 +136,11 @@ class ScaffoldTokenMapper:
             self.logger.warning("Falling back to character-based similarity for token mapping.")
         self._initialize_token_maps()
         # Metric tracking for runtime monitoring
-        self._mapping_confidences = deque(maxlen=1000)
+        self._mapping_confidences = deque(maxlen=500)
         self._fallback_counts = defaultdict(int)
-        self._drift_values = deque(maxlen=1000)
+        self._drift_values = deque(maxlen=500)
         self._mapping_errors = 0
-        self._mapping_latencies = deque(maxlen=1000)
+        self._mapping_latencies = deque(maxlen=500)
         self._metrics_lock = threading.Lock()
         
     def _check_embedding_availability(self):

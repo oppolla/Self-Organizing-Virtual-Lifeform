@@ -100,7 +100,7 @@ class ScribeQueue:
                         self._logger.debug(f"Successfully queued CRITICAL entry from {origin} with event type {event_type}")
                     return True
                 else:
-                    self._queue.put(entry, timeout=0.1)
+                    self._queue.put(entry, timeout=0.5)
                     if self._logger:
                         self._logger.debug(f"Successfully queued entry from {origin} with event type {event_type}")
                     return True
