@@ -16,6 +16,7 @@ from transformers import PreTrainedTokenizer, LogitsProcessor
 from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 from sovl_schema import get_default_trainer_weighting
+import threading
 
 # Placeholder for SOVLState until we can properly import it
 try:
@@ -1174,6 +1175,11 @@ class MetadataProcessor:
                 "defined_schemas": list(self._schemas.keys())
             }
         )
+        # Global state snapshot caching for performance
+        self._cached_state = None
+        self._cached_state_time = 0
+        self._state_cache_ttl = self.config_manager.get("metadata_processor.state_cache_ttl", 2.0)
+        self._cache_lock = threading.Lock()
 
     def _define_event_schemas(self) -> Dict[str, Dict[str, List[str]]]:
         """Define the canonical metadata schemas for different event types.
@@ -1385,14 +1391,20 @@ class MetadataProcessor:
         })
 
     def _enrich_global_state(self, final_metadata: Dict[str, Any]) -> None:
-        """Enrich metadata with global system state if available.
-        
-        Args:
-            final_metadata: The metadata dictionary to enrich
-        """
+        """Enrich metadata with global system state if available, using a short-lived cache for performance."""
         if self.state_accessor is not None:
             try:
-                current_state = self.state_accessor.get_current_snapshot()
+                now = time.time()
+                with self._cache_lock:
+                    if (
+                        self._cached_state is not None and
+                        (now - self._cached_state_time) < self._state_cache_ttl
+                    ):
+                        current_state = self._cached_state
+                    else:
+                        current_state = self.state_accessor.get_current_snapshot()
+                        self._cached_state = current_state
+                        self._cached_state_time = now
                 if current_state:
                     final_metadata.update({
                         "sovl_version": current_state.get("version"),

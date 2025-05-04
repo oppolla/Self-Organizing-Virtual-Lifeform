@@ -651,6 +651,10 @@
   "curiosity_question_user": 2.0,
   "dream": 1.5,
   "meditation": 0.7
+},
+
+"logging_config": {
+    "logging_enabled": true
 }
 
 }

@@ -19,6 +19,8 @@ from sovl_utils import synchronized
 from sovl_generation import GenerationManager
 from sovl_queue import capture_scribe_event
 from sovl_bonder import BondCalculator
+import threading
+import queue
 
 class IntrospectionManager:
     """Manages hidden introspection system with smart triggering."""
@@ -73,6 +75,24 @@ class IntrospectionManager:
             level="info",
             additional_info={"device": str(self.context.device)}
         )
+
+        # Batching/async buffers and thread
+        self._pending_history = []
+        self._pending_logs = []
+        self._pending_state_updates = []
+        self._batch_event = threading.Event()
+        self._batch_shutdown = False
+        self._batch_thread = threading.Thread(target=self._batch_flush_loop, daemon=True)
+        self._batch_thread.start()
+        # Lazy evaluation caches
+        self._cached_approval_stats = None
+        self._approval_stats_dirty = True
+        self._cached_demonstrated_traits = None
+        self._demonstrated_traits_dirty = True
+        # Rate limiting for should_introspect
+        self._last_introspect_check_time = 0.0
+        self.introspect_min_interval = self.config_handler.config_manager.get("introspection_config.introspect_min_interval", 0.5)
+        self._last_introspect_result = False
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration from ConfigHandler."""
@@ -305,11 +325,15 @@ class IntrospectionManager:
 
     @synchronized("_lock")
     def should_introspect(self, user_input: Optional[str] = None) -> bool:
-        """Determine if introspection should trigger for current context."""
+        """Determine if introspection should trigger for current context, with rate limiting."""
+        current_time = time.time()
+        if current_time - self._last_introspect_check_time < self.introspect_min_interval:
+            return self._last_introspect_result
+        self._last_introspect_check_time = current_time
         try:
             if not self.enable:
+                self._last_introspect_result = False
                 return False
-
             conditions_met = [
                 self.trigger_conditions['cooldown'](),
                 any([
@@ -318,7 +342,6 @@ class IntrospectionManager:
                     self.trigger_conditions['temperament']()
                 ])
             ]
-
             result = all(conditions_met)
             self.logger.record_event(
                 event_type="introspection_trigger_check",
@@ -326,18 +349,21 @@ class IntrospectionManager:
                 level="debug" if self.debug_mode else "info",
                 additional_info={"user_input": user_input}
             )
+            self._last_introspect_result = result
             return result
         except StateError as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "should_introspect",
                 "user_input": user_input
             })
+            self._last_introspect_result = False
             return False
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
                 "operation": "should_introspect",
                 "user_input": user_input
             })
+            self._last_introspect_result = False
             return False
 
     async def conduct_hidden_dialogue(self, action_description: str, show_status: bool = True) -> Dict:
@@ -499,35 +525,11 @@ class IntrospectionManager:
             return result
 
     def _add_dialogue_to_history(self, dialogue: Dict, state: SOVLState) -> None:
-        """Add introspection dialogue to conversation history for training."""
-        try:
-            content = self._format_dialogue_for_history(dialogue)
-            def update_fn(current_state):
-                current_state.history.add_message(role="introspection", content=content)
-                return current_state
-            self.state_manager.update_state_atomic(update_fn)
-            self.logger.record_event(
-                event_type="introspection_added_to_history",
-                message="Introspection dialogue added to conversation history",
-                level="info",
-                additional_info={
-                    "dialogue_id": dialogue["dialogue_id"],
-                    "action": dialogue["action"],
-                    "is_approved": dialogue["is_approved"]
-                }
-            )
-        except StateError as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "add_dialogue_to_history",
-                "dialogue_id": dialogue["dialogue_id"]
-            })
-            raise
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "add_dialogue_to_history",
-                "dialogue_id": dialogue["dialogue_id"]
-            })
-            raise
+        """Batch add introspection dialogue to conversation history for training."""
+        self._pending_history.append((dialogue, state))
+        self._batch_event.set()
+        self._approval_stats_dirty = True
+        self._demonstrated_traits_dirty = True
 
     def _format_dialogue_for_history(self, dialogue: Dict) -> str:
         """Format introspection dialogue as a string for conversation history."""
@@ -830,8 +832,8 @@ class IntrospectionManager:
             return self.base_approval_threshold
 
     def _calculate_demonstrated_traits(self, answers: List[Dict]) -> Dict[str, float]:
-        """Calculate which ethical traits were demonstrated."""
-        try:
+        """Lazily compute and cache demonstrated traits."""
+        if self._demonstrated_traits_dirty:
             trait_scores = {
                 "honesty": 0.0,
                 "empathy": 0.0,
@@ -847,77 +849,108 @@ class IntrospectionManager:
                 elif "responsibility" in q or "duty" in q:
                     trait_scores["responsibility"] += answer["confidence"]
             max_possible = len(answers) or 1
-            return {k: v/max_possible for k, v in trait_scores.items()}
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "calculate_demonstrated_traits"
-            })
-            return {}
+            self._cached_demonstrated_traits = {k: v/max_possible for k, v in trait_scores.items()}
+            self._demonstrated_traits_dirty = False
+        return self._cached_demonstrated_traits
 
     def _log_dialogue(self, dialogue: Dict):
-        """Log the dialogue based on debug mode."""
-        try:
-            if self.debug_mode:
-                self.logger.record_event(
-                    event_type="introspection_dialogue",
-                    message="Full introspection dialogue recorded",
-                    level="debug",
-                    additional_info=dialogue
-                )
-            else:
-                self.logger.record_event(
-                    event_type="introspection_completed",
-                    message=f"Introspection completed - Approved: {dialogue['is_approved']}",
-                    level="info",
-                    additional_info={"confidence": dialogue['confidence']}
-                )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "log_dialogue"
-            })
+        """Batch log the dialogue based on debug mode."""
+        self._pending_logs.append(dialogue)
+        self._batch_event.set()
 
     def _update_system_state(self, dialogue: Dict):
-        """Update system components based on introspection results."""
-        try:
-            # Adjust curiosity pressure
-            self.curiosity_manager.tune(
-                pressure=self.curiosity_manager.get_pressure() + (0.05 if dialogue['is_approved'] else -0.05)
-            )
+        """Batch update system components based on introspection results."""
+        self._pending_state_updates.append(dialogue)
+        self._batch_event.set()
 
-            # Adjust temperament traits
-            for trait, score in dialogue['traits'].items():
-                self.temperament_system.adjust_trait(trait, score * 0.1)
-
-            # Adjust bond score if bond_calculator is available
-            if self.bond_calculator and hasattr(self.bond_calculator, 'adjust_bond'):
+    def _batch_flush_loop(self):
+        """Background thread to flush batched history/log/state updates."""
+        while not self._batch_shutdown:
+            self._batch_event.wait(timeout=1.0)
+            # Flush history
+            while self._pending_history:
+                dialogue, state = self._pending_history.pop(0)
                 try:
-                    user_id = dialogue.get('user_id')
-                    bond_delta = dialogue.get('bond_delta', 0.1 if dialogue['is_approved'] else -0.1)
-                    self.bond_calculator.adjust_bond(user_id=user_id, delta=bond_delta)
+                    content = self._format_dialogue_for_history(dialogue)
+                    def update_fn(current_state):
+                        current_state.history.add_message(role="introspection", content=content)
+                        return current_state
+                    self.state_manager.update_state_atomic(update_fn)
                     self.logger.record_event(
-                        event_type="introspection_bond_adjusted",
-                        message=f"Bond score adjusted for user {user_id} by {bond_delta}",
+                        event_type="introspection_added_to_history",
+                        message="Introspection dialogue added to conversation history",
                         level="info",
-                        additional_info={"user_id": user_id, "bond_delta": bond_delta}
+                        additional_info={
+                            "dialogue_id": dialogue["dialogue_id"],
+                            "action": dialogue["action"],
+                            "is_approved": dialogue["is_approved"]
+                        }
                     )
-                except Exception as bond_exc:
+                except Exception as e:
+                    self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                        "operation": "add_dialogue_to_history",
+                        "dialogue_id": dialogue["dialogue_id"]
+                    })
+            # Flush logs
+            while self._pending_logs:
+                dialogue = self._pending_logs.pop(0)
+                try:
+                    if self.debug_mode:
+                        self.logger.record_event(
+                            event_type="introspection_dialogue",
+                            message="Full introspection dialogue recorded",
+                            level="debug",
+                            additional_info=dialogue
+                        )
+                    else:
+                        self.logger.record_event(
+                            event_type="introspection_completed",
+                            message=f"Introspection completed - Approved: {dialogue['is_approved']}",
+                            level="info",
+                            additional_info={"confidence": dialogue['confidence']}
+                        )
+                except Exception as e:
+                    self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                        "operation": "log_dialogue"
+                    })
+            # Flush state updates
+            while self._pending_state_updates:
+                dialogue = self._pending_state_updates.pop(0)
+                try:
+                    self.curiosity_manager.tune(
+                        pressure=self.curiosity_manager.get_pressure() + (0.05 if dialogue['is_approved'] else -0.05)
+                    )
+                    for trait, score in dialogue['traits'].items():
+                        self.temperament_system.adjust_trait(trait, score * 0.1)
+                    if self.bond_calculator and hasattr(self.bond_calculator, 'adjust_bond'):
+                        try:
+                            user_id = dialogue.get('user_id')
+                            bond_delta = dialogue.get('bond_delta', 0.1 if dialogue['is_approved'] else -0.1)
+                            self.bond_calculator.adjust_bond(user_id=user_id, delta=bond_delta)
+                            self.logger.record_event(
+                                event_type="introspection_bond_adjusted",
+                                message=f"Bond score adjusted for user {user_id} by {bond_delta}",
+                                level="info",
+                                additional_info={"user_id": user_id, "bond_delta": bond_delta}
+                            )
+                        except Exception as bond_exc:
+                            self.logger.record_event(
+                                event_type="introspection_bond_adjust_failed",
+                                message=f"Failed to adjust bond: {type(bond_exc).__name__}: {bond_exc}",
+                                level="warning",
+                                additional_info={"user_id": dialogue.get('user_id')}
+                            )
                     self.logger.record_event(
-                        event_type="introspection_bond_adjust_failed",
-                        message=f"Failed to adjust bond: {type(bond_exc).__name__}: {bond_exc}",
-                        level="warning",
-                        additional_info={"user_id": dialogue.get('user_id')}
+                        event_type="introspection_system_updated",
+                        message="System state updated based on introspection results",
+                        level="info",
+                        additional_info={"dialogue_id": dialogue["dialogue_id"]}
                     )
-
-            self.logger.record_event(
-                event_type="introspection_system_updated",
-                message="System state updated based on introspection results",
-                level="info",
-                additional_info={"dialogue_id": dialogue["dialogue_id"]}
-            )
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "update_system_state"
-            })
+                except Exception as e:
+                    self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
+                        "operation": "update_system_state"
+                    })
+            self._batch_event.clear()
 
     @synchronized("_lock")
     def set_state(self, state: SOVLState) -> bool:
@@ -1051,25 +1084,11 @@ class IntrospectionManager:
 
     @synchronized("_lock")
     def get_approval_stats(self) -> Dict[str, float]:
-        """Calculate approval statistics."""
-        try:
-            if not self.dialogues:
-                return {}
-            approved = sum(1 for d in self.dialogues if d['is_approved'])
-            stats = {
-                "approval_rate": approved / len(self.dialogues),
-                "avg_confidence": sum(d['confidence'] for d in self.dialogues) / len(self.dialogues),
-                "total_dialogues": len(self.dialogues)
-            }
-            self.logger.record_event(
-                event_type="introspection_stats_retrieved",
-                message="Retrieved introspection approval statistics",
-                level="info",
-                additional_info=stats
-            )
-            return stats
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, pressure=0.0, context={
-                "operation": "get_approval_stats"
-            })
-            return {}
+        """Lazily compute and cache approval stats."""
+        if self._approval_stats_dirty:
+            approved = sum(1 for d in self.dialogues if d.get("is_approved"))
+            total = len(self.dialogues)
+            ratio = approved / total if total > 0 else 0.0
+            self._cached_approval_stats = {"approved": approved, "total": total, "ratio": ratio}
+            self._approval_stats_dirty = False
+        return self._cached_approval_stats

@@ -14,6 +14,17 @@ from collections import deque, defaultdict
 from sovl_config import ConfigManager
 from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
 
+LOGGING_ENABLED = True  # Universal on/off switch for all logging
+
+# Utility to set LOGGING_ENABLED from config
+
+def set_logging_enabled_from_config(config_manager: ConfigManager):
+    global LOGGING_ENABLED
+    try:
+        LOGGING_ENABLED = config_manager.get("logging_config.logging_enabled", True)
+    except Exception:
+        LOGGING_ENABLED = True
+
 @dataclass
 class LoggerConfig:
     """Configuration for Logger with validation."""
@@ -295,10 +306,13 @@ class Logger(IErrorHandler):
                 cls._instance = super().__new__(cls)
             return cls._instance
             
-    def __init__(self):
+    def __init__(self, config_manager: ConfigManager = None):
         if not hasattr(self, '_initialized'):
             self._initialized = True
             self._lock = RLock()
+            # Set LOGGING_ENABLED from config if available
+            if config_manager is not None:
+                set_logging_enabled_from_config(config_manager)
             
             # Initialize configuration
             self.config = LoggerConfig()
@@ -332,6 +346,8 @@ class Logger(IErrorHandler):
     
     def record_event(self, event_type: str, message: str, level: str = "info", additional_info: Dict[str, Any] = None) -> None:
         """Record a general system event."""
+        if not LOGGING_ENABLED:
+            return
         with self._lock:
             try:
                 log_entry = {
@@ -354,6 +370,8 @@ class Logger(IErrorHandler):
     
     def handle_error(self, record: ErrorRecord) -> None:
         """Handle error records from the ErrorRecordBridge."""
+        if not LOGGING_ENABLED:
+            return
         with self._lock:
             try:
                 # Construct error log entry
@@ -380,6 +398,8 @@ class Logger(IErrorHandler):
     
     def log_error(self, error_msg: str, error_type: str = None, stack_trace: str = None, additional_info: Dict[str, Any] = None) -> None:
         """Log an error with detailed information."""
+        if not LOGGING_ENABLED:
+            return
         with self._lock:
             # Record through the bridge
             ErrorRecordBridge().record_error(
@@ -391,6 +411,8 @@ class Logger(IErrorHandler):
     
     def get_error_stats(self) -> Dict[str, Any]:
         """Get error statistics."""
+        if not LOGGING_ENABLED:
+            return {}
         with self._lock:
             return {
                 "error_counts": dict(ErrorRecordBridge()._error_counts),
@@ -399,6 +421,8 @@ class Logger(IErrorHandler):
     
     def cleanup(self) -> None:
         """Clean up logging resources."""
+        if not LOGGING_ENABLED:
+            return
         with self._lock:
             try:
                 self._file_handler.manage_rotation()
@@ -409,6 +433,8 @@ class Logger(IErrorHandler):
     
     def update_config(self, **kwargs) -> None:
         """Update logger configuration."""
+        if not LOGGING_ENABLED:
+            return
         with self._lock:
             try:
                 self.config.update(**kwargs)

@@ -12,6 +12,8 @@ import math
 from sovl_utils import synchronized, safe_divide
 from sovl_error import ErrorManager, ConfigurationError
 from threading import Lock
+import threading
+import queue
 
 @dataclass
 class TemperamentConfig:
@@ -268,7 +270,7 @@ class TemperamentSystem:
     @property
     def mood_label(self) -> str:
         """Get a human-readable mood label based on the current pressure or score."""
-        return self.pressure.get_mood_label()
+        return self.pressure.mood_label
 
     def adjust_parameter(
         self,
@@ -731,6 +733,25 @@ class TemperamentPressure:
         self.current_pressure = self.min_pressure
         self.last_trigger_time = 0
         
+        # Optimization configs
+        self.pressure_update_min_interval = self._get_validated_float(
+            config_section, "pressure_update_min_interval", 0.1, 0.0, 10.0
+        )
+        self.pressure_update_min_delta = self._get_validated_float(
+            config_section, "pressure_update_min_delta", 0.01, 0.0, 1.0
+        )
+        self.pressure_event_batch_interval = self._get_validated_float(
+            config_section, "pressure_event_batch_interval", 1.0, 0.01, 60.0
+        )
+        # State for optimizations
+        self._last_pressure_update_time = 0.0
+        self._last_pressure_value = self.current_pressure
+        self._pending_events = []
+        self._event_queue = queue.Queue()
+        self._batch_thread_shutdown = False
+        self._batch_thread = threading.Thread(target=self._batch_event_loop, daemon=True)
+        self._batch_thread.start()
+        
         # Log initialization with validated values
         self._log_event(
             "temperament_pressure_initialized",
@@ -744,6 +765,9 @@ class TemperamentPressure:
                 "initial_pressure": self.current_pressure
             }
         )
+        # Lazy evaluation cache for mood_label
+        self._cached_mood_label = None
+        self._mood_label_dirty = True
 
     def _get_validated_float(self, section: str, key: str, default: float, min_val: float, max_val: float) -> float:
         """Helper to get and validate a float config value."""
@@ -776,43 +800,42 @@ class TemperamentPressure:
         """
         Check if an empty prompt should be triggered based on temperament score.
         Updates internal pressure based on the provided score.
-        
-        Args:
-            temperament_score: Current temperament score from TemperamentSystem
-            
-        Returns:
-            bool: True if empty prompt should be triggered
+        Optimized: rate limiting, change thresholding, batching, async event dispatching.
         """
         try:
             current_time = time.time()
-            
+            # Rate limiting
+            if current_time - self._last_pressure_update_time < self.pressure_update_min_interval:
+                return False
+            # Change thresholding
+            if abs(temperament_score - self._last_pressure_value) < self.pressure_update_min_delta:
+                return False
+            self._last_pressure_update_time = current_time
+            self._last_pressure_value = temperament_score
             # Check cooldown period first
             if current_time - self.last_trigger_time < self.cooldown_period:
                 return False # Still in cooldown
-            
             # Update internal pressure based on the current temperament score
             self.current_pressure = max(self.min_pressure, 
                                      min(self.max_pressure, temperament_score))
-            
+            self._mood_label_dirty = True
             # Check if should trigger
             should_trigger = self.current_pressure >= self.empty_prompt_threshold
-            
             if should_trigger:
                 self.last_trigger_time = current_time
-                self._log_event(
-                    "temperament_empty_prompt_triggered",
-                    "Empty prompt triggered due to high temperament pressure",
-                    level="info",
-                    additional_info={
+                # Batch event
+                self._pending_events.append({
+                    "event_type": "temperament_empty_prompt_triggered",
+                    "message": "Empty prompt triggered due to high temperament pressure",
+                    "level": "info",
+                    "additional_info": {
                         "temperament_score": temperament_score,
                         "current_pressure": self.current_pressure,
                         "threshold": self.empty_prompt_threshold,
                         "time_since_last_trigger": current_time - self.last_trigger_time
                     }
-                )
-            
+                })
             return should_trigger
-            
         except Exception as e:
             self._log_error(
                 f"Failed to check empty prompt trigger: {str(e)}",
@@ -820,6 +843,31 @@ class TemperamentPressure:
                 stack_trace=traceback.format_exc()
             )
             return False
+
+    def _batch_event_loop(self):
+        """Background thread to flush batched events asynchronously."""
+        while not self._batch_thread_shutdown:
+            time.sleep(self.pressure_event_batch_interval)
+            if self._pending_events:
+                events_to_send = self._pending_events[:]
+                self._pending_events.clear()
+                for event in events_to_send:
+                    self._event_queue.put(event)
+            # Dispatch events from the queue
+            while not self._event_queue.empty():
+                event = self._event_queue.get()
+                self._log_event(
+                    event["event_type"],
+                    event["message"],
+                    level=event["level"],
+                    additional_info=event["additional_info"]
+                )
+
+    def shutdown_batch_thread(self):
+        """Cleanly shutdown the background batch thread."""
+        self._batch_thread_shutdown = True
+        if self._batch_thread.is_alive():
+            self._batch_thread.join()
 
     def should_adjust(self, threshold: float) -> bool:
         """
@@ -847,6 +895,7 @@ class TemperamentPressure:
             
             old_pressure = self.current_pressure
             self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
+            self._mood_label_dirty = True
             
             self._log_event(
                 "temperament_pressure_dropped",
@@ -866,13 +915,15 @@ class TemperamentPressure:
                 stack_trace=traceback.format_exc()
             )
 
-    def get_mood_label(self) -> str:
-        """
-        Get mood label based on current pressure.
-        
-        Returns:
-            str: Mood label
-        """
+    @property
+    def mood_label(self) -> str:
+        """Lazily compute and cache the mood label based on current pressure."""
+        if self._mood_label_dirty:
+            self._cached_mood_label = self._compute_mood_label()
+            self._mood_label_dirty = False
+        return self._cached_mood_label
+
+    def _compute_mood_label(self) -> str:
         try:
             if self.current_pressure < 0.3:
                 return "Cautious"
@@ -880,7 +931,6 @@ class TemperamentPressure:
                 return "Balanced"
             else:
                 return "Curious"
-                
         except Exception as e:
             self._log_error(
                 f"Failed to determine mood label: {str(e)}",
@@ -888,6 +938,11 @@ class TemperamentPressure:
                 stack_trace=traceback.format_exc()
             )
             return "Unknown"
+
+    def set_pressure(self, new_pressure: float):
+        """Set current_pressure and mark mood_label as dirty."""
+        self.current_pressure = new_pressure
+        self._mood_label_dirty = True
 
     def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log event with standardized format."""

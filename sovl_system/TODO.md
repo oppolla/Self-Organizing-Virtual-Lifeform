@@ -8,7 +8,7 @@
 4. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. 
-7. 
+7. Consider an "offline" mode for maintainence
 8. complete sovl_state atomic refactors
 
 

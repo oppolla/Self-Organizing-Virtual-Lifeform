@@ -435,6 +435,43 @@ class ValidationSchema:
                 "memory_monitoring_interval": ConfigSchema(field="memory_config.manager.memory_monitoring_interval", type=int, default=5, range=(1, None)),
             },
         }
+    
+    @staticmethod
+    def _get_scribed_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the scribed_config schema."""
+        return {
+            "output_path": ConfigSchema(
+                field="scribed_config.output_path",
+                type=str,
+                default="scribe/sovl_scribe.jsonl"
+            ),
+            "scribe_batch_size": ConfigSchema(
+                field="scribed_config.scribe_batch_size",
+                type=int,
+                default=20
+            ),
+            "scribe_flush_interval": ConfigSchema(
+                field="scribed_config.scribe_flush_interval",
+                type=float,
+                default=2.0
+            ),
+            "scribe_queue_maxsize": ConfigSchema(
+                field="scribed_config.scribe_queue_maxsize",
+                type=int,
+                default=2000
+            ),
+        }
+    
+    @staticmethod
+    def _get_logging_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the logging_config schema."""
+        return {
+            "logging_enabled": ConfigSchema(
+                field="logging_config.logging_enabled",
+                type=bool,
+                default=True
+            ),
+        }
 
     @staticmethod
     def _get_state_config_schema() -> Dict[str, ConfigSchema]:

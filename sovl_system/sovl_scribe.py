@@ -12,6 +12,7 @@ from sovl_error import ErrorManager
 from sovl_logger import Logger
 from sovl_queue import ScribeEntry
 from sovl_io import JsonlWriter
+import time
 
 class StateAccessorInterface:
     """Interface for state accessor objects to ensure proper dependency handling."""
@@ -34,7 +35,7 @@ class Scriber:
         error_manager: ErrorManager,
         metadata_processor: MetadataProcessor,
         logger: Logger,
-        scribe_queue: queue.Queue,
+        scribe_queue: queue.Queue = None,
         state_accessor: Optional[Any] = None
     ):
         """
@@ -75,6 +76,20 @@ class Scriber:
         self._stop_event = threading.Event()
 
         self.scribe_ingestion_processor = ScribeIngestionProcessor(log_paths=[])
+
+        # Configurable batch/flush/queue size
+        self.scribe_batch_size = self.config_manager.get("scribed_config.scribe_batch_size", 20)
+        self.scribe_flush_interval = self.config_manager.get("scribed_config.scribe_flush_interval", 2.0)
+        self.scribe_queue_maxsize = self.config_manager.get("scribed_config.scribe_queue_maxsize", 2000)
+        if scribe_queue is None:
+            self.scribe_queue = queue.Queue(maxsize=self.scribe_queue_maxsize)
+        else:
+            self.scribe_queue = scribe_queue
+
+        # For batch/async writes
+        self._batch_buffer = []
+        self._last_flush_time = time.time()
+        self._batch_lock = threading.Lock()
 
         try:
             # Determine scribe output path from config or explicit override
@@ -210,9 +225,9 @@ class Scriber:
         # Ensure the writer is initialized
         self._initialize_jsonl_writer()
         
+        metadata_cache = {}
         while not self._stop_event.is_set():
             try:
-                # Wait for an item for up to 1 second
                 scribe_entry_obj = self.scribe_queue.get(timeout=1)
                 
                 try:
@@ -224,14 +239,18 @@ class Scriber:
                     session_id = scribe_entry_obj.session_id
                     timestamp = scribe_entry_obj.timestamp
 
-                    # Process and enrich the scribed data
-                    validated_event_data, final_metadata = self.metadata_processor.enrich_and_validate(
-                        origin=origin,
-                        event_type=event_type,
-                        event_data=event_data,
-                        source_metadata=source_metadata,
-                        session_id=session_id,
-                    )
+                    cache_key = (origin, event_type, session_id)
+                    if cache_key in metadata_cache:
+                        validated_event_data, final_metadata = metadata_cache[cache_key]
+                    else:
+                        validated_event_data, final_metadata = self.metadata_processor.enrich_and_validate(
+                            origin=origin,
+                            event_type=event_type,
+                            event_data=event_data,
+                            source_metadata=source_metadata,
+                            session_id=session_id,
+                        )
+                        metadata_cache[cache_key] = (validated_event_data, final_metadata)
 
                     # Prepare event for ingestion processor
                     event_for_ingestion = {
@@ -252,15 +271,15 @@ class Scriber:
                     formatted_scribe_string = json.dumps(scribe_entry, default=str)
 
                     # Write to JSONL file
-                    with self.jsonl_writer.lock:
-                        self.jsonl_writer._buffer.append(formatted_scribe_string)
-                        if len(self.jsonl_writer._buffer) >= self.jsonl_writer.buffer_size:
-                            try:
+                    with self._batch_lock:
+                        self._batch_buffer.append(formatted_scribe_string)
+                        now = time.time()
+                        if len(self._batch_buffer) >= self.scribe_batch_size or (now - self._last_flush_time) >= self.scribe_flush_interval:
+                            with self.jsonl_writer.lock:
+                                self.jsonl_writer._buffer.extend(self._batch_buffer)
+                                self._batch_buffer = []
                                 self.jsonl_writer._flush_buffer()
-                            except Exception as flush_err:
-                                self.fallback_logger.exception(
-                                    f"Writer thread failed during flush: {flush_err}"
-                                )
+                            self._last_flush_time = now
 
                 except Exception as processing_error:
                     self.fallback_logger.exception(
@@ -282,14 +301,16 @@ class Scriber:
                     self.scribe_queue.task_done()
 
             except queue.Empty:
-                # Queue was empty, loop again to check stop event
+                # On timeout, check if flush interval elapsed
+                with self._batch_lock:
+                    now = time.time()
+                    if self._batch_buffer and (now - self._last_flush_time) >= self.scribe_flush_interval:
+                        with self.jsonl_writer.lock:
+                            self.jsonl_writer._buffer.extend(self._batch_buffer)
+                            self._batch_buffer = []
+                            self.jsonl_writer._flush_buffer()
+                        self._last_flush_time = now
                 continue
-            except Exception as e:
-                self.fallback_logger.exception(
-                    f"Unexpected error in writer thread: {e}"
-                )
-                # Mark task done even if error occurred to prevent blocking shutdown
-                self.scribe_queue.task_done()
 
         # --- Shutdown sequence ---
         self.logger.info("Writer thread received stop signal. Processing remaining scribes...")
@@ -306,14 +327,18 @@ class Scriber:
                     session_id = scribe_entry_obj.session_id
                     timestamp = scribe_entry_obj.timestamp
 
-                    # Process and enrich the scribed data
-                    validated_event_data, final_metadata = self.metadata_processor.enrich_and_validate(
-                        origin=origin,
-                        event_type=event_type,
-                        event_data=event_data,
-                        source_metadata=source_metadata,
-                        session_id=session_id,
-                    )
+                    cache_key = (origin, event_type, session_id)
+                    if cache_key in metadata_cache:
+                        validated_event_data, final_metadata = metadata_cache[cache_key]
+                    else:
+                        validated_event_data, final_metadata = self.metadata_processor.enrich_and_validate(
+                            origin=origin,
+                            event_type=event_type,
+                            event_data=event_data,
+                            source_metadata=source_metadata,
+                            session_id=session_id,
+                        )
+                        metadata_cache[cache_key] = (validated_event_data, final_metadata)
 
                     # Prepare event for ingestion processor
                     event_for_ingestion = {
@@ -334,15 +359,15 @@ class Scriber:
                     formatted_scribe_string = json.dumps(scribe_entry, default=str)
 
                     # Write to JSONL file
-                    with self.jsonl_writer.lock:
-                        self.jsonl_writer._buffer.append(formatted_scribe_string)
-                        if len(self.jsonl_writer._buffer) >= self.jsonl_writer.buffer_size:
-                            try:
+                    with self._batch_lock:
+                        self._batch_buffer.append(formatted_scribe_string)
+                        now = time.time()
+                        if len(self._batch_buffer) >= self.scribe_batch_size or (now - self._last_flush_time) >= self.scribe_flush_interval:
+                            with self.jsonl_writer.lock:
+                                self.jsonl_writer._buffer.extend(self._batch_buffer)
+                                self._batch_buffer = []
                                 self.jsonl_writer._flush_buffer()
-                            except Exception as flush_err:
-                                self.fallback_logger.exception(
-                                    f"Writer thread failed during flush: {flush_err}"
-                                )
+                            self._last_flush_time = now
 
                 except Exception as processing_error:
                     self.fallback_logger.exception(
@@ -369,22 +394,18 @@ class Scriber:
                 f"Error processing remaining scribes during shutdown: {e}"
             )
 
-        # Final flush before exiting
-        try:
-            with self.jsonl_writer.lock:
-                self.jsonl_writer._flush_buffer()
-        except Exception as final_flush_err:
-            self.fallback_logger.exception(
-                f"Writer thread failed during final flush: {final_flush_err}"
-            )
+        # Flush any remaining batch buffer
+        with self._batch_lock:
+            if self._batch_buffer:
+                with self.jsonl_writer.lock:
+                    self.jsonl_writer._buffer.extend(self._batch_buffer)
+                    self._batch_buffer = []
+                    self.jsonl_writer._flush_buffer()
 
         self.logger.info("Scriber writer thread finished.")
 
     def shutdown(self) -> None:
         """Signals writer thread to stop, waits, and closes resources."""
-        import time
-        import json
-
         self.logger.info("Initiating Scriber shutdown...")
 
         # Signal the writer thread to stop
