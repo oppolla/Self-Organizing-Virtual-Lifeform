@@ -1097,10 +1097,6 @@ def move_batch_to_device(batch: dict, device: "torch.device") -> dict:
     """
     return {k: (v.to(device) if isinstance(v, torch.Tensor) else v) for k, v in batch.items()}
 
-# ================== END BATCH & TENSOR HELPERS ==================
-
-# ================== MODULAR DATA PIPELINE INTERFACES (Phase 3) ==================
-
 class TrainingSampleEnricher:
     """
     Enriches and validates training samples by adding/correcting metadata fields.
