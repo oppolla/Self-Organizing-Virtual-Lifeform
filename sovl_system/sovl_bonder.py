@@ -2,7 +2,7 @@ from typing import Optional, Dict
 import torch
 from threading import Lock
 from sovl_logger import Logger
-from sovl_state import SOVLState, StateManager
+from sovl_state import SOVLState, StateManager, UserProfileState
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import traceback
+import threading
 
 class BondCalculator:
     """Calculates bonding score and manages user bond/nickname via UserProfileState."""
@@ -36,6 +37,42 @@ class BondCalculator:
             "coherence": 0.25,
             "personalized": 0.25
         })
+        # Limit metadata list size for signature generation
+        self.max_signature_metadata = int(bonding_config.get("max_signature_metadata", 30))
+        # Batch/debounce state sync
+        self._pending_state_syncs = set()
+        self._last_sync_time = time.time()
+        self._state_sync_interval = float(bonding_config.get("state_sync_interval", 2.0))
+        self._sync_lock = threading.Lock()
+        self._sync_thread = None
+        self._sync_thread_stop = threading.Event()
+        self._start_sync_thread()
+
+    def _start_sync_thread(self):
+        if self._sync_thread is None or not self._sync_thread.is_alive():
+            self._sync_thread_stop.clear()
+            self._sync_thread = threading.Thread(target=self._sync_worker, daemon=True)
+            self._sync_thread.start()
+
+    def _sync_worker(self):
+        while not self._sync_thread_stop.is_set():
+            time.sleep(self._state_sync_interval)
+            with self._sync_lock:
+                pending = list(self._pending_state_syncs)
+                self._pending_state_syncs.clear()
+            for sig_hash in pending:
+                if self.state_manager and sig_hash in self.identified_users:
+                    profile = self.identified_users[sig_hash]
+                    def update_fn(state):
+                        if hasattr(state, 'add_identified_user'):
+                            state.add_identified_user(sig_hash, profile)
+                        return state
+                    self.state_manager.update_state_atomic(update_fn)
+
+    def stop_sync_thread(self):
+        self._sync_thread_stop.set()
+        if self._sync_thread:
+            self._sync_thread.join()
 
     def _initialize_config(self) -> None:
         """Initialize bonding score configuration."""
@@ -71,6 +108,8 @@ class BondCalculator:
         Returns:
             signature: dict
         """
+        # Limit metadata list size
+        metadata_entries = metadata_entries[-self.max_signature_metadata:]
         if not metadata_entries or not isinstance(metadata_entries, list):
             self.logger.log_warning("metadata_entries is empty or not a list in _generate_signature")
             return None
@@ -156,23 +195,25 @@ class BondCalculator:
                     level="info",
                     additional_info={'signature': signature}
                 )
-                # Sync with central state atomically
-                if self.state_manager:
-                    def update_fn(state):
-                        if hasattr(state, 'add_identified_user'):
-                            state.add_identified_user(sig_hash, profile)
-                        return state
-                    self.state_manager.update_state_atomic(update_fn)
+                # Batch state sync
+                with self._sync_lock:
+                    self._pending_state_syncs.add(sig_hash)
             else:
-                self.identified_users[sig_hash]['last_seen'] = time.time()
-                self.identified_users[sig_hash]['metadata_count'] += len(metadata_entries)
-                # Sync update with central state atomically
-                if self.state_manager:
-                    def update_fn(state):
-                        if hasattr(state, 'add_identified_user'):
-                            state.add_identified_user(sig_hash, self.identified_users[sig_hash])
-                        return state
-                    self.state_manager.update_state_atomic(update_fn)
+                # Only update if changed
+                profile = self.identified_users[sig_hash]
+                now = time.time()
+                updated = False
+                if abs(now - profile['last_seen']) > 1.0:
+                    profile['last_seen'] = now
+                    updated = True
+                old_count = profile['metadata_count']
+                new_count = old_count + len(metadata_entries)
+                if new_count != old_count:
+                    profile['metadata_count'] = new_count
+                    updated = True
+                if updated:
+                    with self._sync_lock:
+                        self._pending_state_syncs.add(sig_hash)
         return sig_hash
 
     def calculate_bond(self, user_id: str, metadata_entries, extra_data: Optional[dict] = None, **kwargs) -> float:
@@ -191,13 +232,25 @@ class BondCalculator:
         return self.user_profile_state.get_bond_score(user_id)
 
     def set_bond_score(self, user_id: str, value: float) -> None:
-        self.user_profile_state.set_bond_score(user_id, value)
+        # Only update if changed (epsilon for float)
+        current = self.user_profile_state.get_bond_score(user_id)
+        if abs(current - value) > 1e-6:
+            self.user_profile_state.set_bond_score(user_id, value)
+            # Batch state sync
+            with self._sync_lock:
+                self._pending_state_syncs.add(user_id)
 
     def get_nickname(self, user_id: str) -> str:
         return self.user_profile_state.get_nickname(user_id)
 
     def set_nickname(self, user_id: str, value: str) -> None:
-        self.user_profile_state.set_nickname(user_id, value)
+        # Only update if changed
+        current = self.user_profile_state.get_nickname(user_id)
+        if current != value:
+            self.user_profile_state.set_nickname(user_id, value)
+            # Batch state sync
+            with self._sync_lock:
+                self._pending_state_syncs.add(user_id)
 
     def get_all_profiles(self) -> Dict[str, Dict]:
         return self.user_profile_state.get_all_profiles()
