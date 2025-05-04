@@ -351,6 +351,54 @@ class ValidationSchema:
             "provider_type": ConfigSchema(field="data_provider.provider_type", type=str, default="default"),
             "data_path": ConfigSchema(field="data_provider.data_path", type=str, required=True),
         }
+    
+    @staticmethod
+    def _get_event_type_weights_schema() -> Dict[str, ConfigSchema]:
+        """Return the event_type_weights schema for event weighting."""
+        return {
+            "error_message": ConfigSchema(
+                field="event_type_weights.error_message",
+                type=float,
+                default=0.2,
+                range=(0.0, 10.0),
+                required=False
+            ),
+            "user_interaction": ConfigSchema(
+                field="event_type_weights.user_interaction",
+                type=float,
+                default=1.0,
+                range=(0.0, 10.0),
+                required=False
+            ),
+            "curiosity_question": ConfigSchema(
+                field="event_type_weights.curiosity_question",
+                type=float,
+                default=0.8,
+                range=(0.0, 10.0),
+                required=False
+            ),
+            "curiosity_question_user": ConfigSchema(
+                field="event_type_weights.curiosity_question_user",
+                type=float,
+                default=2.0,
+                range=(0.0, 10.0),
+                required=False
+            ),
+            "dream": ConfigSchema(
+                field="event_type_weights.dream",
+                type=float,
+                default=1.5,
+                range=(0.0, 10.0),
+                required=False
+            ),
+            "meditation": ConfigSchema(
+                field="event_type_weights.meditation",
+                type=float,
+                default=0.7,
+                range=(0.0, 10.0),
+                required=False
+            ),
+        }
 
     @staticmethod
     def _get_memory_config_schema() -> Dict[str, Dict[str, ConfigSchema]]:

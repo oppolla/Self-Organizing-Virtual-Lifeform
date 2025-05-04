@@ -219,9 +219,9 @@ class SystemMonitor:
         percent = int(progress * 100) if progress is not None else None
         dots = '.' * dot_count
         if percent is not None:
-            return f"{mode.capitalize()}{dots:<3} {percent}%"
+            return f"Gestating {percent}% {dots:<3}"
         else:
-            return f"{mode.capitalize()}{dots:<3}"
+            return f"Gestating {dots:<3}"
 
     def get_dreaming_status(self) -> dict:
         mode = None
@@ -242,9 +242,9 @@ class SystemMonitor:
         percent = int(progress * 100) if progress is not None else None
         dots = '.' * dot_count
         if percent is not None:
-            return f"{mode.capitalize()}{dots:<3} {percent}%"
+            return f"Dreaming {percent}% {dots:<3}"
         else:
-            return f"{mode.capitalize()}{dots:<3}"
+            return f"Dreaming {dots:<3}"
 
 class MemoryMonitor:
     """Monitors system memory usage."""

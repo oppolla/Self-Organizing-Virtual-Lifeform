@@ -1222,3 +1222,52 @@ class CuriosityManager(CuriosityAccessor):
                     stack_trace=traceback.format_exc()
                 )
                 return self._curiosity_score
+
+    def ask_user_curiosity_question(
+        self,
+        context: str = None,
+        spontaneous: bool = False,
+        generation_params: Optional[dict] = None,
+        ask_user_fn=None
+    ) -> Optional[str]:
+        """
+        Only ask the user a curiosity question if a curiosity eruption occurs.
+        `ask_user_fn` should be a callable that takes a question string and returns the user's response.
+        """
+        # Check for curiosity eruption
+        if not self.curiosity_pressure.should_erupt(self.pressure_threshold):
+            return None  # No eruption, do not ask
+
+        # Drop pressure after eruption
+        self.curiosity_pressure.drop_pressure(self.pressure_drop)
+
+        # Generate the question
+        question = self.generate_curiosity_question(
+            context=context,
+            spontaneous=spontaneous,
+            generation_params=generation_params
+        )
+        if not question or ask_user_fn is None:
+            return None
+
+        user_response = ask_user_fn(question)
+
+        # Log the user-asked event
+        from sovl_queue import capture_scribe_event
+        capture_scribe_event(
+            origin="sovl_curiosity",
+            event_type="curiosity_question_user",
+            event_data={
+                "question": question,
+                "user_response": user_response,
+                "context": context,
+                "spontaneous": spontaneous,
+                "generation_params": generation_params or {}
+            },
+            source_metadata={
+                "module": "CuriosityManager",
+                "session_id": getattr(self, 'session_id', None)
+            },
+            session_id=getattr(self, 'session_id', None)
+        )
+        return user_response

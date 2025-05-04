@@ -1788,7 +1788,7 @@ class MetadataProcessor:
 MEMORY_TEMPLATES = {
     "user_interaction": (
         "You spoke with {user_id} at {timestamp_unix}. "
-        "The user said: {prompt}"
+        "The user said: {user_response}"
         "You responded with: {generated_text}. "
         "It was the {session_id} time you awoke. "
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
@@ -1799,6 +1799,16 @@ MEMORY_TEMPLATES = {
     ),
     "curiosity_question": (
         "You pondered the question: {question} at {timestamp_unix}. "
+        "It was the {session_id} time you awoke. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
+        "The novelty was {novelty_score}. " 
+        "The confidence was {confidence_score}. "
+        "You were in your {current_lifecycle_stage} phase. "
+        "It took you {generation_time} to respond."
+    ),
+    "curiosity_question_user": (
+        "You asked the user: {question} at {timestamp_unix}. "
+        "The user responded: {user_response}. "
         "It was the {session_id} time you awoke. "
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
         "The novelty was {novelty_score}. " 
@@ -1896,6 +1906,14 @@ SCRIBE_EVENT_FIELDS = {
         ("full_text", "Main text content of the question"),
         ("current_mood_label", "Current mood label"),
         ("current_temperament_score", "Current temperament score"),
+        ("session_id", "Session identifier"),
+    ],
+    "curiosity_question_user": [
+        ("origin", "Source module/component name"),
+        ("timestamp_unix", "UNIX timestamp of the event"),
+        ("question", "The question asked to the user"),
+        ("user_response", "The user's response"),
+        ("context", "Context for the question"),
         ("session_id", "Session identifier"),
     ],
     "error_message": [

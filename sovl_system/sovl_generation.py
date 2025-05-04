@@ -1216,11 +1216,10 @@ class GenerationManager:
                     )
 
                 event_data = {
-                    "prompt": prompt,
-                    "scaffold_index": scaffold_index,
-                    "max_new_tokens": max_new_tokens,
+                    "user_response": prompt,
                     "generated_text": generated_text,
-                    "generation_params": generation_config
+                    "confidence_score": calculated_confidence,
+                    "num_return_sequences": initial_kwargs.get("num_return_sequences", 1),
                 }
                 # Optionally add detailed fields if present
                 if return_logits and 'logits' in result:
@@ -1467,8 +1466,8 @@ class ScribeAssembler:
 
         # --- Assemble event_data (Data directly related to the event's core action) ---
         event_data = {
-            "prompt": prompt,
-            "texts": generated_texts,
+            "user_response": prompt,
+            "generated_text": generated_texts[0] if generated_texts else "",
             "confidence_score": calculated_confidence,
             "num_return_sequences": initial_kwargs.get("num_return_sequences", 1),
         }

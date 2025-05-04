@@ -1000,6 +1000,7 @@ class TemperamentManager:
                             event_data={
                                 "prompt": prompt,
                                 "response": response,
+                                "full_text": response,
                                 "temperament_score": temperament_score,
                                 "pressure": self.pressure.current_pressure,
                                 "threshold": self.pressure.empty_prompt_threshold
