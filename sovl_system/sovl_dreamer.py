@@ -20,96 +20,6 @@ import tracemalloc
 Handles all dream generation, dream structure, narration, and scribe journal integration for SOVL
 """
 
-# Configuration schema for dream_memory_config
-DREAM_MEMORY_CONFIG_SCHEMA = [
-    ConfigSchema(
-        field="dream_memory_config.max_events_per_cycle",
-        type=int,
-        default=5,
-        range=(1, 100),
-        required=True
-    ),
-    ConfigSchema(
-        field="dream_memory_config.novelty_weight",
-        type=float,
-        default=1.0,
-        range=(0.0, 10.0),
-        required=True
-    ),
-    ConfigSchema(
-        field="dream_memory_config.confidence_weight",
-        type=float,
-        default=0.0,
-        range=(0.0, 10.0),
-        required=True
-    ),
-    ConfigSchema(
-        field="dream_memory_config.selection_strategy",
-        type=str,
-        default="top",
-        validator=lambda x: x in ["top", "random"],
-        required=True
-    ),
-    ConfigSchema(
-        field="dream_memory_config.noise_level",
-        type=float,
-        default=0.2,
-        range=(0.0, 1.0),
-        required=True
-    ),
-    ConfigSchema(
-        field="dream_memory_config.num_songs_per_album",
-        type=int,
-        default=3,
-        range=(1, 10),
-        required=True
-    ),
-    ConfigSchema(
-        field="dream_memory_config.chord_functions",
-        type=dict,
-        default={
-            "I": "home and safety",
-            "IV": "expansion and openness",
-            "V": "tension and anticipation",
-            "vi": "nostalgia and longing",
-            "ii": "subtle unease",
-            "vii°": "instability and surrealism"
-        },
-        required=True
-    )
-]
-
-# Error handling decorator
-def handle_dreamer_errors(logger: Logger, error_manager: ErrorManager):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                error_type = f"dreamer_{func.__name__}_error"
-                context = {"function": func.__name__, "args": str(args), "kwargs": str(kwargs)}
-                error_manager.record_error(
-                    error=ScaffoldError(
-                        message=f"Error in {func.__name__}: {str(e)}",
-                        operation=func.__name__,
-                        context=context
-                    ),
-                    error_type=error_type,
-                    context=context,
-                    stack_trace=traceback.format_exc()
-                )
-                logger.record_event(
-                    event_type=error_type,
-                    message=f"Error in {func.__name__}: {str(e)}",
-                    level="error",
-                    additional_info=context,
-                    stack_trace=traceback.format_exc()
-                )
-                return None
-        return wrapper
-    return decorator
-
 class DreamNarrationStrategy:
     """Base class for dream narration strategies."""
     def narrate(self, dream_event: Dict[str, Any], noise_level: float) -> str:
@@ -169,10 +79,10 @@ class DreamEventSelector:
         self.scribe_path = scribe_path
         self.logger = Logger.get_instance()
         self.error_manager = error_manager
-        self.max_dreams = config_manager.get("dream_memory_config.max_events_per_cycle")
-        self.novelty_weight = config_manager.get("dream_memory_config.novelty_weight")
-        self.confidence_weight = config_manager.get("dream_memory_config.confidence_weight")
-        self.selection_strategy = config_manager.get("dream_memory_config.selection_strategy")
+        self.max_dreams = config_manager.get("dreamer_config.max_events_per_cycle")
+        self.novelty_weight = config_manager.get("dreamer_config.novelty_weight")
+        self.confidence_weight = config_manager.get("dreamer_config.confidence_weight")
+        self.selection_strategy = config_manager.get("dreamer_config.selection_strategy")
 
     def extract_last_active_period(self) -> List[Dict]:
         """Extract events since the last 'wake' event, streaming to reduce memory usage."""
@@ -279,7 +189,7 @@ class DreamGenerator:
         self.logger = Logger.get_instance()
         self.error_manager = error_manager
         self.narration_strategy = narration_strategy or SurrealNarrationStrategy()
-        self.noise_level = config_manager.get("dream_memory_config.noise_level")
+        self.noise_level = config_manager.get("dreamer_config.noise_level")
 
     def apply_dream_noise(self, dream_event: Dict[str, Any]) -> Dict[str, Any]:
         """Apply random noise to dream event data and metadata."""
@@ -390,9 +300,9 @@ class DreamAlbumGenerator:
         self.logger = Logger.get_instance()
         self.error_manager = error_manager
         self.scribe_event_fn = scribe_event_fn
-        self.noise_level = config_manager.get("dream_memory_config.noise_level")
-        self.chord_functions = config_manager.get("dream_memory_config.chord_functions")
-        self.num_songs = config_manager.get("dream_memory_config.num_songs_per_album")
+        self.noise_level = config_manager.get("dreamer_config.noise_level")
+        self.chord_functions = config_manager.get("dreamer_config.chord_functions")
+        self.num_songs = config_manager.get("dreamer_config.num_songs_per_album")
         # Emotional color mapping for chords
         self.chord_emotional_colors = {
             "I": "home, resolution, peace",
@@ -834,7 +744,6 @@ class Dreamer:
             config_manager=config_manager,
             error_cooldown=1.0
         )
-        self.config_manager.register_schema(DREAM_MEMORY_CONFIG_SCHEMA)
         self.event_selector = DreamEventSelector(config_manager, scribe_path, self.error_manager)
         self.dream_generator = DreamGenerator(config_manager, self.error_manager, SurrealNarrationStrategy())
         self.album_generator = DreamAlbumGenerator(config_manager, scribe_path, self.error_manager, scribe_event_fn)
