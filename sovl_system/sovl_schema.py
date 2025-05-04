@@ -456,6 +456,54 @@ class ValidationSchema:
         }
     
     @staticmethod
+    def _get_training_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the training_config schema."""
+        return {
+            "batch_size": ConfigSchema(
+                field="training_config.batch_size",
+                type=int,
+                default=1,
+                description="Batch size for training. Lower for low-power systems."
+            ),
+            "use_amp": ConfigSchema(
+                field="training_config.use_amp",
+                type=bool,
+                default=False,
+                description="Use automatic mixed precision (AMP). Set False for CPUs or older GPUs."
+            ),
+            "checkpoint_interval": ConfigSchema(
+                field="training_config.checkpoint_interval",
+                type=int,
+                default=5000,
+                description="Steps between checkpoints. Increase for less disk I/O on low-power systems."
+            ),
+            "validate_every_n_steps": ConfigSchema(
+                field="training_config.validate_every_n_steps",
+                type=int,
+                default=500,
+                description="Steps between validation runs. Increase for less CPU usage."
+            ),
+            "max_in_memory_logs": ConfigSchema(
+                field="training_config.max_in_memory_logs",
+                type=int,
+                default=100,
+                description="Maximum number of training logs to keep in memory."
+            ),
+            "prune_interval_hours": ConfigSchema(
+                field="training_config.prune_interval_hours",
+                type=int,
+                default=48,
+                description="How often (in hours) to prune old logs."
+            ),
+            "logging_verbosity": ConfigSchema(
+                field="training_config.logging_verbosity",
+                type=str,
+                default="info",
+                description="Logging verbosity: 'debug', 'info', 'warning', 'error'."
+            ),
+        }
+    
+    @staticmethod
     def _get_scribed_config_schema() -> Dict[str, ConfigSchema]:
         """Return the scribed_config schema."""
         return {

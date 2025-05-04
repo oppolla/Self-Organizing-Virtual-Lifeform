@@ -29,14 +29,15 @@ class TrainingConfig:
         log_file: str = "training_logs.jsonl"
         max_size_mb: int = 10
         compress_old: bool = True
-        max_in_memory_logs: int = 1000
+        max_in_memory_logs: int = 100
         rotation_count: int = 5
         max_log_age_days: int = 30
-        prune_interval_hours: int = 24
+        prune_interval_hours: int = 48
         memory_threshold_mb: int = 100
         gpu_memory_threshold: float = 0.85
         error_cooldown: float = 1.0
         max_recent_errors: int = 100
+        logging_verbosity: str = "info"
         error_handling_config: Dict[str, Any] = field(default_factory=lambda: {
             "max_history_per_error": 10,
             "critical_threshold": 5,
@@ -71,9 +72,9 @@ class TrainingConfig:
     @dataclass
     class MemoryConfig:
         """Memory and batch configuration."""
-        batch_size: int = 2
+        batch_size: int = 1
         max_seq_length: int = 512
-        use_amp: bool = True
+        use_amp: bool = False
         max_patience: int = 2
         
     # TrainingParams: core loop parameters like epochs, validation frequency, and checkpoints.
@@ -81,8 +82,8 @@ class TrainingConfig:
     class TrainingParams:
         """Core training parameters."""
         max_epochs: int = 3
-        validate_every_n_steps: int = 100
-        checkpoint_interval: int = 1000
+        validate_every_n_steps: int = 500
+        checkpoint_interval: int = 5000
         checkpoint_path: str = "checkpoints/sovl_trainer"
         dropout_rate: float = 0.1
         metrics_to_track: List[str] = field(default_factory=lambda: ["loss", "accuracy", "confidence"])
@@ -121,15 +122,15 @@ class TrainingConfig:
             self.scheduler.warmup_ratio = self.config_manager.get("training.warmup_ratio", 0.1)
             
             # Load memory config
-            self.memory.batch_size = self.config_manager.get("training.batch_size", 2)
+            self.memory.batch_size = self.config_manager.get("training.batch_size", 1)
             self.memory.max_seq_length = self.config_manager.get("training.max_seq_length", 512)
-            self.memory.use_amp = self.config_manager.get("training.use_amp", True)
+            self.memory.use_amp = self.config_manager.get("training.use_amp", False)
             self.memory.max_patience = self.config_manager.get("training.max_patience", 2)
             
             # Load training params
             self.params.max_epochs = self.config_manager.get("training.max_epochs", 3)
-            self.params.validate_every_n_steps = self.config_manager.get("training.validate_every_n_steps", 100)
-            self.params.checkpoint_interval = self.config_manager.get("training.checkpoint_interval", 1000)
+            self.params.validate_every_n_steps = self.config_manager.get("training.validate_every_n_steps", 500)
+            self.params.checkpoint_interval = self.config_manager.get("training.checkpoint_interval", 5000)
             self.params.checkpoint_path = self.config_manager.get("training.checkpoint_path", "checkpoints/sovl_trainer")
             self.params.dropout_rate = self.config_manager.get("training.dropout_rate", 0.1)
             self.params.metrics_to_track = self.config_manager.get(
@@ -141,14 +142,15 @@ class TrainingConfig:
             self.logging.log_file = self.config_manager.get("training.logging.log_file", "training_logs.jsonl")
             self.logging.max_size_mb = self.config_manager.get("training.logging.max_size_mb", 10)
             self.logging.compress_old = self.config_manager.get("training.logging.compress_old", True)
-            self.logging.max_in_memory_logs = self.config_manager.get("training.logging.max_in_memory_logs", 1000)
+            self.logging.max_in_memory_logs = self.config_manager.get("training.logging.max_in_memory_logs", 100)
             self.logging.rotation_count = self.config_manager.get("training.logging.rotation_count", 5)
             self.logging.max_log_age_days = self.config_manager.get("training.logging.max_log_age_days", 30)
-            self.logging.prune_interval_hours = self.config_manager.get("training.logging.prune_interval_hours", 24)
+            self.logging.prune_interval_hours = self.config_manager.get("training.logging.prune_interval_hours", 48)
             self.logging.memory_threshold_mb = self.config_manager.get("training.logging.memory_threshold_mb", 100)
             self.logging.gpu_memory_threshold = self.config_manager.get("training.logging.gpu_memory_threshold", 0.85)
             self.logging.error_cooldown = self.config_manager.get("training.logging.error_cooldown", 1.0)
             self.logging.max_recent_errors = self.config_manager.get("training.logging.max_recent_errors", 100)
+            self.logging.logging_verbosity = self.config_manager.get("training.logging.logging_verbosity", "info")
             self.logging.error_handling_config = self.config_manager.get(
                 "training.logging.error_handling_config",
                 {
