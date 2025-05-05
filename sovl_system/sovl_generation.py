@@ -42,9 +42,7 @@ class GenerationManager:
         state: SOVLState,
         logger: Logger,
         error_manager: ErrorManager,
-        cross_attention_injector: Any,
         device: torch.device,
-        curiosity_manager: Any = None,
         generation_hooks: Dict[str, bool] = {},
         dialogue_context_manager: Optional[Any] = None,
         state_manager: Any = None,
@@ -188,34 +186,14 @@ class GenerationManager:
         """Lazily initialize the primer when needed."""
         if not self._initialized_primer:
             self.logger.log_debug("Initializing generation primer")
-            
             # Ensure memory manager is initialized first
             self._initialize_memory_manager()
-            
-            # Get temperament system from system context if available
-            temperament_system = None
-            confidence_calculator = None
-            lifecycle_manager = None
-            bond_modulator = None
-            
-            if self._system_context is not None:
-                if hasattr(self._system_context, 'temperament_system'):
-                    temperament_system = self._system_context.temperament_system
-                if hasattr(self._system_context, 'confidence_calculator'):
-                    confidence_calculator = self._system_context.confidence_calculator
-                if hasattr(self._system_context, 'lifecycle_manager'):
-                    lifecycle_manager = self._system_context.lifecycle_manager
-            
             self.primer = GenerationPrimer(
                 config_manager=self._config_manager,
                 logger=self.logger,
                 state=self.state,
                 error_manager=self.error_manager,
-                curiosity_manager=self.curiosity_manager,
-                temperament_system=temperament_system,
-                confidence_calculator=confidence_calculator,
                 device=self.device,
-                lifecycle_manager=lifecycle_manager,
                 generation_hooks=self.generation_hooks
             )
             self._initialized_primer = True
@@ -361,9 +339,8 @@ class GenerationManager:
             level="info",
             additional_info={
                 "controls_config": {k: self.controls_config.get(k) for k in [
-                    "memory_threshold", "max_generation_retries", "scaffold_unk_id", 
-                    "use_token_map_memory", "dynamic_cross_attn_mode", "conversation_history_maxlen",
-                    "memory_decay_rate", "enable_repetition_check", "enable_confidence_tracking",
+                    "memory_threshold", "max_generation_retries", "enable_repetition_check",
+                    "conversation_history_maxlen", "memory_decay_rate",  
                     "enable_error_listening", "dream_memory_weight", "base_temperature"
                 ]},
                 "training_config": {k: self.training_config.get(k) for k in [
@@ -687,28 +664,9 @@ class GenerationManager:
                     error_type="missing_dialogue_context"
                 )
             traits = self.primer.prepare_for_generation(prompt, user_id=user_id, metadata_entries=metadata_entries, **kwargs)
-            def validate_trait(name, value, default, valid_range=None):
-                if value is None:
-                    self.logger.log_warning(f"Trait '{name}' is None, using default value {default}")
-                    return default
-                if valid_range and not (valid_range[0] <= value <= valid_range[1]):
-                    self.logger.log_warning(f"Trait '{name}' value {value} out of range {valid_range}, using default {default}")
-                    return default
-                return value
-            temperament = validate_trait("temperament", traits.get("temperament"), 0.5, (0.0, 1.0))
-            curiosity = validate_trait("curiosity", traits.get("curiosity"), 0.0, (0.0, 1.0))
-            bond_score = traits.get("bond")
-            if bond_score is not None and not isinstance(bond_score, (float, int)):
-                self.logger.log_warning(f"Trait 'bond' is not a number: {bond_score}, ignoring bond context")
-                bond_score = None
-            bond_context = None
-            if bond_score is not None:
-                bond_context = f"Bond score: {bond_score:.2f}"
             composite_prompt = prompt
             if memory_context:
                 composite_prompt = f"{memory_context}\n\n{composite_prompt}"
-            if bond_context:
-                composite_prompt = f"[{bond_context}]\n\n{composite_prompt}"
             # --- Prepare input batch ---
             inputs = self.base_tokenizer(
                 composite_prompt,
@@ -724,25 +682,13 @@ class GenerationManager:
             base_temp = gen_kwargs.get("temperature", 1.0)
             base_top_k = gen_kwargs.get("top_k", self._get_config_value("controls_config.top_k", 50))
             base_top_p = gen_kwargs.get("top_p", self._get_config_value("controls_config.top_p", 0.95))
-            gen_kwargs["temperature"] = self.primer.adjust_parameter(base_temp, "temperature", temperament=temperament, curiosity=curiosity)
-            gen_kwargs["top_k"] = int(self.primer.adjust_parameter(base_top_k, "top_k", temperament=temperament, curiosity=curiosity))
-            gen_kwargs["top_p"] = self.primer.adjust_parameter(base_top_p, "top_p", temperament=temperament, curiosity=curiosity)
+            gen_kwargs["temperature"] = self.primer.adjust_parameter(base_temp, "temperature")
+            gen_kwargs["top_k"] = int(self.primer.adjust_parameter(base_top_k, "top_k"))
+            gen_kwargs["top_p"] = self.primer.adjust_parameter(base_top_p, "top_p")
             # --- Model inference under lock ---
             with self._locks['generation']:
                 output_sequences = self.base_model.generate(**inputs, **gen_kwargs)
             generated_texts = [self.base_tokenizer.decode(seq, skip_special_tokens=True) for seq in output_sequences]
-            if bond_score is not None:
-                self.logger.record_event(
-                    event_type="bond_modulation_applied",
-                    message="Bond context applied to generation",
-                    level="info",
-                    additional_info={
-                        "bond_score": bond_score,
-                        "bond_context": bond_context,
-                        "user_id": user_id,
-                        "metadata_entries": metadata_entries
-                    }
-                )
             generation_result = {
                 "generated_texts": generated_texts,
                 "generation_config_used": self._get_generation_config(),
@@ -1107,7 +1053,6 @@ class GenerationManager:
     def _validate_state_consistency(self) -> None:
         """Ensure state consistency by setting defaults if values are missing or invalid."""
         try:
-            # Remove legacy confidence logic; should be managed by primer
             pass
         except Exception as e:
             self._handle_error("state_consistency", e)
@@ -1208,11 +1153,8 @@ class ScribeAssembler:
 
         # Retrieve calculated scores from generation_result
         generated_texts = generation_result.get("generated_texts", [])
-        calculated_confidence = generation_result.get("calculated_confidence")
-        calculated_novelty = generation_result.get("calculated_novelty")
 
         # Retrieve state-based scores/info from manager
-        current_temperament = getattr(manager.state, "temperament_score", None)
         current_memory_mb = manager.memory_manager.get_memory_usage().get("total_mb") if hasattr(manager, 'memory_manager') and manager.memory_manager else None
 
         # --- Assemble event_data (Data directly related to the event's core action) ---
@@ -1235,7 +1177,6 @@ class ScribeAssembler:
             # System State Snapshot
             "model_name": getattr(manager.base_model.config, "_name_or_path", "unknown"),
             "device": str(manager.device),
-            "novelty_score": calculated_novelty,
             "memory_usage_mb": current_memory_mb,
             # Performance
             "processing_time_ms": generation_result.get("processing_time_ms"),
