@@ -3,7 +3,6 @@ import time
 import threading
 from collections import deque, defaultdict
 from typing import Optional, Dict, Any, List, Union, Callable, Tuple, Set
-import contextlib
 import traceback
 from functools import wraps
 from datetime import datetime
@@ -18,8 +17,8 @@ from sovl_trainer import LifecycleManager, TrainingConfig
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_manager import ModelManager
-from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
-from sovl_resource import ResourceManager  # Import ResourceManager
+from sovl_primer import GenerationPrimer  
+from sovl_resource import ResourceManager
 
 class GenerationError(Exception):
     """Raised when text generation fails in a way that should halt upstream processing."""
