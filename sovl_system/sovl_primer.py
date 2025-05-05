@@ -2,7 +2,7 @@ from typing import Optional, Any, Dict
 from sovl_curiosity import Curiosity, CuriosityPressure, CuriosityCallbacks
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
 from sovl_confidence import ConfidenceCalculator, calculate_confidence_score
-from sovl_bonder import BondCalculator, BondModulator
+from sovl_bonder import BondCalculator, BondModulator, get_bond_calculator
 from sovl_logger import Logger 
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
@@ -27,7 +27,6 @@ class GenerationPrimer:
         curiosity_manager: Optional[Any] = None,
         temperament_system: Optional[Any] = None,
         confidence_calculator: Optional[Any] = None,
-        bond_calculator: Optional[Any] = None,
         bond_modulator: Optional[Any] = None,
         device: Optional[Any] = None,
         lifecycle_manager: Optional[Any] = None,
@@ -47,7 +46,7 @@ class GenerationPrimer:
         self.curiosity_manager = curiosity_manager
         self.temperament_system = temperament_system
         self.confidence_calculator = confidence_calculator
-        self.bond_calculator = bond_calculator
+        self.bond_calculator = get_bond_calculator(config_manager, logger, state_manager.get_state())
         self.bond_modulator = bond_modulator
         self.device = device
         self.lifecycle_manager = lifecycle_manager

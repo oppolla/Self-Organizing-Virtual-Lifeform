@@ -19,7 +19,6 @@ from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_manager import ModelManager
 from sovl_scaffold import ScaffoldProvider
-from sovl_bonder import BondCalculator
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
 from sovl_resource import ResourceManager  # Import ResourceManager
 
@@ -134,13 +133,11 @@ class GenerationManager:
         self._initialized_primer = False
         self._initialized_memory_manager = False
         self._initialized_scaffold_provider = False
-        self._initialized_bond_calculator = False
         
         # Lazy-loaded components
         self.primer = None
         self.memory_manager = None
         self.scaffold_provider = None
-        self.bond_calculator = None
         
         # Get global session_id from config
         self.session_id = self._config_manager.get("runtime.session_id")
@@ -237,17 +234,6 @@ class GenerationManager:
             )
             self._initialized_scaffold_provider = True
             
-    def _initialize_bond_calculator(self) -> None:
-        """Lazily initialize the bond calculator when needed."""
-        if not self._initialized_bond_calculator:
-            self.logger.log_debug("Initializing bond calculator")
-            self.bond_calculator = BondCalculator(
-                self._config_manager, 
-                self.logger,
-                self.state
-            )
-            self._initialized_bond_calculator = True
-            
     def _initialize_primer(self) -> None:
         """Lazily initialize the primer when needed."""
         if not self._initialized_primer:
@@ -256,13 +242,11 @@ class GenerationManager:
             # Ensure memory manager is initialized first
             self._initialize_memory_manager()
             
-            # Ensure bond calculator is initialized
-            self._initialize_bond_calculator()
-            
             # Get temperament system from system context if available
             temperament_system = None
             confidence_calculator = None
             lifecycle_manager = None
+            bond_modulator = None
             
             if self._system_context is not None:
                 if hasattr(self._system_context, 'temperament_system'):
@@ -280,10 +264,10 @@ class GenerationManager:
                 curiosity_manager=self.curiosity_manager,
                 temperament_system=temperament_system,
                 confidence_calculator=confidence_calculator,
-                bond_calculator=self.bond_calculator,
                 device=self.device,
                 lifecycle_manager=lifecycle_manager,
                 scaffold_manager=self.scaffold_manager,
+                bond_modulator=bond_modulator,
                 memory_manager=self.memory_manager,
                 generation_hooks=self.generation_hooks
             )
