@@ -2,18 +2,17 @@ import json
 import os
 import gzip
 import hashlib
-from typing import Any, Optional, Dict, List, Union, Callable, Tuple, NamedTuple
+from typing import Any, Optional, Dict, List, Union, Callable, Tuple
 from dataclasses import dataclass
 from threading import Lock
 import traceback
-import re
 import time
 from sovl_logger import Logger
-from transformers import AutoConfig
 from sovl_schema import ValidationSchema
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 import tempfile
 import shutil
+from sovl_utils import set_nested_dict_value, get_nested_dict_value
 
 # ConfigSchema defines validation rules and defaults for configuration fields.
 @dataclass
@@ -96,6 +95,31 @@ class SchemaValidator:
 
             return True, value
 
+    def validate_batch(self, items: Dict[str, Any], conversation_id: str = "init") -> Tuple[bool, Dict[str, Any], Dict[str, Any]]:
+        """
+        Validate a batch of key-value pairs. Returns (all_valid, valid_items, invalid_items_with_defaults).
+        """
+        all_valid = True
+        valid_items = {}
+        invalid_items = {}
+        for key, value in items.items():
+            valid, corrected = self.validate(key, value, conversation_id)
+            if valid:
+                valid_items[key] = value
+            else:
+                all_valid = False
+                invalid_items[key] = corrected
+        return all_valid, valid_items, invalid_items
+
+    def required_keys_missing(self, required_keys: List[str], config: Dict[str, Any]) -> List[str]:
+        """Return a list of required keys that are missing from the config."""
+        return [key for key in required_keys if key not in config or config[key] is None]
+
+    def required_section_keys_missing(self, section: str, required_keys: List[str], structured_config: Dict[str, Any]) -> List[str]:
+        """Return a list of required keys missing from a section."""
+        section_dict = structured_config.get(section, {})
+        return [key for key in required_keys if key not in section_dict or section_dict[key] is None]
+
 # ConfigStore maintains both flat and structured views for efficient lookups and organized access.
 class ConfigStore:
     """Manages configuration storage and structure."""
@@ -133,40 +157,15 @@ class ConfigStore:
         """Set a value in flat and structured configs with thread safety."""
         with self._lock:
             self.cache[key] = value
-            keys = key.split('.')
-            if len(keys) == 2:
-                section, field = keys
-                self.flat_config.setdefault(section, {})[field] = value
-                self.structured_config[section][field] = value
-            elif len(keys) == 3:
-                section, sub_section, field = keys
-                if section == "training_config" and sub_section == "dry_run_params":
-                    self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
-                    self.structured_config[section][sub_section][field] = value
-                elif section == "controls_config" and sub_section == "lifecycle_params":
-                    self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
-                    self.structured_config[section][sub_section][field] = value
-                elif section == "curiosity_config" and sub_section == "lifecycle_params":
-                    self.flat_config.setdefault(section, {}).setdefault(sub_section, {})[field] = value
-                    self.structured_config[section][sub_section][field] = value
-            elif len(keys) == 4:
-                section, sub_section, sub_sub_section, field = keys
-                if section in ["controls_config", "curiosity_config"] and sub_section == "lifecycle_params":
-                    self.flat_config.setdefault(section, {}).setdefault(sub_section, {}).setdefault(sub_sub_section, {})[field] = value
-                    self.structured_config[section][sub_section][sub_sub_section][field] = value
+            set_nested_dict_value(self.flat_config, key, value)
+            set_nested_dict_value(self.structured_config, key, value)
 
     def get_value(self, key: str, default: Any) -> Any:
         """Retrieve a value from the configuration with thread safety."""
         with self._lock:
             if key in self.cache:
                 return self.cache[key]
-            keys = key.split('.')
-            value = self.flat_config
-            for k in keys:
-                if isinstance(value, dict):
-                    value = value.get(k, default)
-                else:
-                    return default
+            value = get_nested_dict_value(self.flat_config, key, default)
             return value if value != {} and value is not None else default
 
     def get_section(self, section: str) -> Dict[str, Any]:
@@ -178,26 +177,7 @@ class ConfigStore:
         """Rebuild structured config from flat config with thread safety."""
         with self._lock:
             for schema in schemas:
-                keys = schema.field.split('.')
-                section = keys[0]
-                if len(keys) == 2:
-                    field = keys[1]
-                    self.structured_config[section][field] = self.get_value(schema.field, schema.default)
-                elif len(keys) == 3:
-                    sub_section = keys[1]
-                    field = keys[2]
-                    if section == "training_config" and sub_section == "dry_run_params":
-                        self.structured_config[section]["dry_run_params"][field] = self.get_value(schema.field, schema.default)
-                    elif section == "controls_config" and sub_section == "lifecycle_params":
-                        self.structured_config[section]["lifecycle_params"][field] = self.get_value(schema.field, schema.default)
-                    elif section == "curiosity_config" and sub_section == "lifecycle_params":
-                        self.structured_config[section]["lifecycle_params"][field] = self.get_value(schema.field, schema.default)
-                elif len(keys) == 4:
-                    sub_section = keys[1]
-                    sub_sub_section = keys[2]
-                    field = keys[3]
-                    if section in ["controls_config", "curiosity_config"] and sub_section == "lifecycle_params":
-                        self.structured_config[section][sub_section].setdefault(sub_sub_section, {})[field] = self.get_value(schema.field, schema.default)
+                set_nested_dict_value(self.structured_config, schema.field, self.get_value(schema.field, schema.default))
 
     def update_cache(self, schemas: List[ConfigSchema]) -> None:
         """Update cache with current config values with thread safety."""
@@ -397,18 +377,18 @@ class ConfigManager:
             return value
 
     def validate_keys(self, required_keys: List[str]) -> None:
-        with self.lock:
-            missing_keys = [key for key in required_keys if self.get(key, None) is None]
-            if missing_keys:
-                self._log_error(f"Missing required configuration keys: {', '.join(missing_keys)}", {"keys": missing_keys})
-                raise ValueError(f"Missing required configuration keys: {', '.join(missing_keys)}")
+        """(Refactored) Validate required keys using SchemaValidator."""
+        missing_keys = self.validator.required_keys_missing(required_keys, self.store.flat_config)
+        if missing_keys:
+            self._log_error(f"Missing required configuration keys: {', '.join(missing_keys)}", {"keys": missing_keys})
+            raise ValueError(f"Missing required configuration keys: {', '.join(missing_keys)}")
 
     def get_section(self, section: str) -> Dict[str, Any]:
         with self.lock:
             return self.store.get_section(section)
 
     def update(self, key: str, value: Any) -> bool:
-        """Update a configuration value."""
+        """Update a configuration value, using SchemaValidator for validation."""
         try:
             if self._frozen:
                 self.error_manager.record_error(
@@ -417,15 +397,14 @@ class ConfigManager:
                     context={"key": key, "value": value}
                 )
                 return False
-
-            if not self.validate_value(key, value):
+            valid, corrected = self.validator.validate(key, value)
+            if not valid:
                 self.error_manager.record_error(
                     error=ConfigurationError(f"Invalid value for key {key}"),
                     error_type="validation_error",
-                    context={"key": key, "value": value}
+                    context={"key": key, "value": value, "suggested": corrected}
                 )
                 return False
-
             old_value = self.store.get_value(key)
             self.store.set_value(key, value)
             self._notify_subscribers()
@@ -455,7 +434,7 @@ class ConfigManager:
                     self._log_error("Failed to notify subscriber of config change", {"error": str(e)})
 
     def update_batch(self, updates: Dict[str, Any], rollback_on_failure: bool = True) -> bool:
-        """Update multiple configuration values at once."""
+        """Update multiple configuration values at once, using SchemaValidator for batch validation."""
         old_values = {}
         try:
             if self._frozen:
@@ -465,27 +444,24 @@ class ConfigManager:
                     context={"updates": updates}
                 )
                 return False
-
             # Store old values for potential rollback
             for key in updates:
                 old_values[key] = self.store.get_value(key)
-
-            # Validate all updates first
-            for key, value in updates.items():
-                if not self.validate_value(key, value):
+            # Validate all updates first (batch)
+            all_valid, valid_items, invalid_items = self.validator.validate_batch(updates)
+            if not all_valid:
+                for key, corrected in invalid_items.items():
                     self.error_manager.record_error(
                         error=ConfigurationError(f"Invalid value for key {key}"),
                         error_type="validation_error",
-                        context={"key": key, "value": value}
+                        context={"key": key, "value": updates[key], "suggested": corrected}
                     )
-                    if rollback_on_failure:
-                        self._rollback_updates(old_values)
-                    return False
-
+                if rollback_on_failure:
+                    self._rollback_updates(old_values)
+                return False
             # Apply updates
-            for key, value in updates.items():
+            for key, value in valid_items.items():
                 self.store.set_value(key, value)
-
             self._notify_subscribers()
             return True
         except Exception as e:
@@ -616,24 +592,15 @@ class ConfigManager:
         return self.update_batch(updates) if updates else True
 
     def validate_section(self, section: str, required_keys: List[str]) -> bool:
-        try:
-            with self.lock:
-                if section not in self.store.structured_config:
-                    self._log_error(f"Configuration section '{section}' not found", {"section": section})
-                    return False
-
-                missing_keys = [key for key in required_keys if key not in self.store.structured_config[section]]
-                if missing_keys:
-                    self._log_error(f"Missing required keys in section '{section}': {', '.join(missing_keys)}", {
-                        "section": section,
-                        "missing_keys": missing_keys
-                    })
-                    return False
-
-                return True
-        except Exception as e:
-            self._log_error(f"Failed to validate section '{section}'", {"section": section, "error": str(e)})
+        """(Refactored) Validate required section keys using SchemaValidator."""
+        missing_keys = self.validator.required_section_keys_missing(section, required_keys, self.store.structured_config)
+        if missing_keys:
+            self._log_error(f"Missing required keys in section '{section}': {', '.join(missing_keys)}", {
+                "section": section,
+                "missing_keys": missing_keys
+            })
             return False
+        return True
 
     def tune_parameter(self, section: str, key: str, value: Any, min_value: Any = None, max_value: Any = None) -> bool:
         full_key = f"{section}.{key}"
@@ -713,25 +680,6 @@ class ConfigManager:
                 context={"model_config": str(model_config) if model_config else None}
             )
             raise
-
-    def validate_value(self, key: str, value: Any) -> bool:
-        """Validate a configuration value."""
-        try:
-            valid, _ = self.validator.validate(key, value)
-            if not valid:
-                self.error_manager.record_error(
-                    error=ConfigurationError(f"Invalid value for key {key}"),
-                    error_type="validation_error",
-                    context={"key": key, "value": value}
-                )
-            return valid
-        except Exception as e:
-            self.error_manager.record_error(
-                error=e,
-                error_type="validation_error",
-                context={"key": key, "value": value}
-            )
-            return False
 
     def validate_with_model(self, model_config: Any) -> bool:
         try:
