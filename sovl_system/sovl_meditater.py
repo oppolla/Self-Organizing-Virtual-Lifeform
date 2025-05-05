@@ -11,6 +11,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager
 from sovl_state import SOVLState, StateManager, StateError
+from sovl_main import SystemContext
 from sovl_temperament import TemperamentSystem
 from sovl_confidence import ConfidenceCalculator
 from sovl_curiosity import CuriosityManager
