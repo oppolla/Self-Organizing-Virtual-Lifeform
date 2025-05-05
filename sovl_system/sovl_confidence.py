@@ -7,11 +7,9 @@ import traceback
 from sovl_state import SOVLState, StateManager
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
-from sovl_curiosity import CuriosityManager
 from sovl_utils import synchronized, NumericalGuard
 from sovl_config import ConfigManager
-from sovl_temperament import TemperamentSystem
-from sovl_trainer import TrainingCycleManager
+from sovl_recaller import DialogueContextManager
 import time
 import threading
 import math
@@ -20,39 +18,17 @@ from sovl_error import ErrorManager
 
 # Constants
 DEFAULT_CONFIDENCE = 0.5
-RECOVERY_WEIGHTS = [0.5, 0.3, 0.2]
 MIN_CONFIDENCE = 0.0
 MAX_CONFIDENCE = 1.0
 MIN_HISTORY_LENGTH = 3
-CURIOSITY_PRESSURE_FACTOR = 0.1
-DEFAULT_TEMPERAMENT_INFLUENCE = 0.3
-DEFAULT_LIFECYCLE_INFLUENCE = 0.2
-
-# Temperament-based confidence adjustments
-TEMPERAMENT_MOOD_MULTIPLIERS = {
-    "Cautious": 0.8,  # Reduce confidence in cautious mood
-    "Balanced": 1.0,  # No adjustment in balanced mood
-    "Curious": 1.2    # Increase confidence in curious mood
-}
-
-# Lifecycle stage adjustments
-LIFECYCLE_STAGE_MULTIPLIERS = {
-    "initialization": 0.9,    # More conservative during initialization
-    "exploration": 1.1,       # More confident during exploration
-    "consolidation": 1.0,     # Normal confidence during consolidation
-    "refinement": 0.95        # Slightly more conservative during refinement
-}
 
 """
 Confidence calculation module for the SOVL system.
 
 This module provides functionality to calculate confidence scores for model outputs,
-incorporating curiosity and temperament adjustments. It is thread-safe and includes
-robust error recovery mechanisms.
 
 Primary interface: calculate_confidence_score
 """
-
 
 class ConfidenceCalculator:
     """Handles confidence score calculation with thread safety.
@@ -63,8 +39,6 @@ class ConfidenceCalculator:
         self, 
         config_manager: ConfigManager, 
         logger: Logger, 
-        temperament_system: Optional[TemperamentSystem] = None,
-        lifecycle_manager: Optional[TrainingCycleManager] = None,
         state_manager: Optional[Any] = None
     ):
         """Initialize the confidence calculator with configuration and logging.
@@ -72,8 +46,6 @@ class ConfidenceCalculator:
         Args:
             config_manager: ConfigManager instance for configuration handling
             logger: Logger instance for logging
-            temperament_system: Optional TemperamentSystem instance for mood-based adjustments
-            lifecycle_manager: Optional TrainingCycleManager instance for lifecycle-based adjustments
             state_manager: Optional StateManager for atomic state updates
             
         Raises:
@@ -90,8 +62,6 @@ class ConfidenceCalculator:
         self.config_manager = config_manager
         self.logger = logger
         self.lock = Lock()
-        self.temperament_system = temperament_system
-        self.lifecycle_manager = lifecycle_manager
         self.state_manager = state_manager
         
         # Initialize configuration
@@ -111,38 +81,6 @@ class ConfidenceCalculator:
             self.max_confidence = float(confidence_config.get("max_confidence", 1.0))
             self.default_confidence = float(confidence_config.get("default_confidence", 0.5))
             self.min_history_length = int(confidence_config.get("min_history_length", 3))
-            self.curiosity_pressure_factor = float(confidence_config.get("curiosity_pressure_factor", 0.1))
-            self.temperament_influence = float(confidence_config.get("temperament_influence", 0.3))
-            self.lifecycle_influence = float(confidence_config.get("lifecycle_influence", 0.2))
-            self.recovery_weights = [
-                float(w) for w in confidence_config.get("recovery_weights", [0.5, 0.3, 0.2])
-            ]
-            
-            # Load temperament configuration if available
-            if self.temperament_system:
-                self.temperament_config = self.temperament_system.temperament_config
-                self.logger.record_event(
-                    event_type="temperament_integration_initialized",
-                    message="Temperament system integration initialized",
-                    level="info",
-                    additional_info={
-                        "temperament_influence": self.temperament_influence,
-                        "mood_multipliers": TEMPERAMENT_MOOD_MULTIPLIERS,
-                        "lifecycle_multipliers": LIFECYCLE_STAGE_MULTIPLIERS
-                    }
-                )
-            
-            # Load lifecycle configuration if available
-            if self.lifecycle_manager:
-                self.logger.record_event(
-                    event_type="lifecycle_integration_initialized",
-                    message="Lifecycle manager integration initialized",
-                    level="info",
-                    additional_info={
-                        "lifecycle_influence": self.lifecycle_influence,
-                        "stage_multipliers": LIFECYCLE_STAGE_MULTIPLIERS
-                    }
-                )
             
             # Validate configuration values
             self._validate_config_values()
@@ -158,11 +96,7 @@ class ConfidenceCalculator:
                     "min_confidence": self.min_confidence,
                     "max_confidence": self.max_confidence,
                     "default_confidence": self.default_confidence,
-                    "min_history_length": self.min_history_length,
-                    "curiosity_pressure_factor": self.curiosity_pressure_factor,
-                    "temperament_influence": self.temperament_influence,
-                    "lifecycle_influence": self.lifecycle_influence,
-                    "recovery_weights": self.recovery_weights
+                    "min_history_length": self.min_history_length
                 }
             )
             
@@ -195,26 +129,6 @@ class ConfidenceCalculator:
             if not 1 <= self.min_history_length <= 10:
                 raise ValueError(f"Invalid min_history_length: {self.min_history_length}. Must be between 1 and 10.")
                 
-            # Validate influence factors
-            if not 0.0 <= self.curiosity_pressure_factor <= 1.0:
-                raise ValueError(f"Invalid curiosity_pressure_factor: {self.curiosity_pressure_factor}. Must be between 0.0 and 1.0.")
-                
-            if not 0.0 <= self.temperament_influence <= 1.0:
-                raise ValueError(f"Invalid temperament_influence: {self.temperament_influence}. Must be between 0.0 and 1.0.")
-                
-            if not 0.0 <= self.lifecycle_influence <= 1.0:
-                raise ValueError(f"Invalid lifecycle_influence: {self.lifecycle_influence}. Must be between 0.0 and 1.0.")
-                
-            # Validate recovery weights
-            if len(self.recovery_weights) != 3:
-                raise ValueError(f"Invalid recovery_weights length: {len(self.recovery_weights)}. Must be exactly 3 weights.")
-                
-            if not all(0.0 <= w <= 1.0 for w in self.recovery_weights):
-                raise ValueError("All recovery weights must be between 0.0 and 1.0.")
-                
-            if abs(sum(self.recovery_weights) - 1.0) > 1e-6:
-                raise ValueError("Recovery weights must sum to 1.0.")
-                
         except Exception as e:
             self.logger.record_event(
                 event_type="confidence_config_validation_failed",
@@ -240,106 +154,6 @@ class ConfidenceCalculator:
                 level="error",
                 additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
             )
-            
-    def _apply_temperament_adjustments(self, base_confidence: float, state: SOVLState) -> float:
-        """Apply temperament-based adjustments to confidence score.
-        
-        Args:
-            base_confidence: Initial confidence score
-            state: Current SOVL state
-            
-        Returns:
-            float: Adjusted confidence score
-        """
-        if not self.temperament_system:
-            return base_confidence
-            
-        try:
-            # Get current mood and lifecycle stage
-            mood_label = self.temperament_system.mood_label
-            lifecycle_stage = getattr(state, 'lifecycle_stage', 'initialization')
-            
-            # Apply mood-based multiplier
-            mood_multiplier = TEMPERAMENT_MOOD_MULTIPLIERS.get(mood_label, 1.0)
-            
-            # Apply lifecycle stage multiplier
-            lifecycle_multiplier = LIFECYCLE_STAGE_MULTIPLIERS.get(lifecycle_stage, 1.0)
-            
-            # Calculate adjusted confidence
-            adjusted_confidence = base_confidence * mood_multiplier * lifecycle_multiplier
-            
-            # Log the adjustments
-            self.logger.record_event(
-                event_type="temperament_adjustment_applied",
-                message="Applied temperament-based confidence adjustments",
-                level="info",
-                additional_info={
-                    "base_confidence": base_confidence,
-                    "adjusted_confidence": adjusted_confidence,
-                    "mood_label": mood_label,
-                    "lifecycle_stage": lifecycle_stage,
-                    "mood_multiplier": mood_multiplier,
-                    "lifecycle_multiplier": lifecycle_multiplier
-                }
-            )
-            
-            return adjusted_confidence
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="temperament_adjustment_failed",
-                message=f"Failed to apply temperament adjustments: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
-            return base_confidence
-
-    def _apply_lifecycle_adjustments(self, base_confidence: float, state: SOVLState) -> float:
-        """Apply lifecycle-based adjustments to confidence score.
-        
-        Args:
-            base_confidence: Initial confidence score
-            state: Current SOVL state
-            
-        Returns:
-            float: Adjusted confidence score
-        """
-        if not self.lifecycle_manager:
-            return base_confidence
-            
-        try:
-            # Get current lifecycle stage
-            lifecycle_stage = self.lifecycle_manager.get_lifecycle_stage()
-            
-            # Apply lifecycle stage multiplier
-            stage_multiplier = LIFECYCLE_STAGE_MULTIPLIERS.get(lifecycle_stage, 1.0)
-            
-            # Calculate adjusted confidence
-            adjusted_confidence = base_confidence * stage_multiplier
-            
-            # Log the adjustments
-            self.logger.record_event(
-                event_type="lifecycle_adjustment_applied",
-                message="Applied lifecycle-based confidence adjustments",
-                level="info",
-                additional_info={
-                    "base_confidence": base_confidence,
-                    "adjusted_confidence": adjusted_confidence,
-                    "lifecycle_stage": lifecycle_stage,
-                    "stage_multiplier": stage_multiplier
-                }
-            )
-            
-            return adjusted_confidence
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="lifecycle_adjustment_failed",
-                message=f"Failed to apply lifecycle adjustments: {str(e)}",
-                level="error",
-                additional_info={"error": str(e), "stack_trace": traceback.format_exc()}
-            )
-            return base_confidence
 
     @synchronized()
     def calculate_confidence_score(
@@ -349,37 +163,86 @@ class ConfidenceCalculator:
         state: SOVLState,
         error_manager: ErrorManager,
         context: SystemContext,
-        curiosity_manager: Optional[CuriosityManager] = None,
-        state_manager: Optional[Any] = None
+        state_manager: Optional[Any] = None,
+        recaller: Optional[Any] = None,  # DialogueContextManager
+        user_id: str = "default",
+        strategy: str = "blended",  # "classic", "experience", "entropy", "margin", "blended"
+        top_k: int = 5,
+        weights: Optional[dict] = None
     ) -> float:
-        """Calculate confidence score with robust error recovery and thread safety."""
+        """Calculate confidence score with robust error recovery and thread safety.
+        Supports multiple strategies: classic, experience, entropy, margin, blended.
+        """
         with self.lock:
             try:
                 self.logger.record_event(
                     event_type="confidence_calculation_start",
                     message="Starting confidence calculation",
                     level="info",
-                    additional_info={"state_id": getattr(state, 'id', None)}
+                    additional_info={"state_id": getattr(state, 'id', None), "strategy": strategy}
                 )
                 # Validate inputs
                 self.__validate_inputs(logits, generated_ids)
                 # Calculate probabilities
                 probs = self.__calculate_probabilities(logits)
-                # Compute base confidence
-                base_confidence = self.__compute_base_confidence(probs)
-                # Apply adjustments
-                adjusted_confidence = self.__apply_adjustments(
-                    base_confidence, state, context, curiosity_manager
-                )
+                # 1. Base confidence (mean max prob)
+                base_conf = probs.max(dim=-1).values.mean().item()
+                # 2. Experience-based adjustment
+                experience_factor = None
+                experience_adj = base_conf
+                if recaller is not None:
+                    # Get embedding for current context (assume context has a 'text' or similar attribute)
+                    context_text = getattr(context, 'text', None)
+                    if context_text is not None and hasattr(recaller, 'embedding_fn') and hasattr(recaller, 'get_long_term_context'):
+                        embedding = recaller.embedding_fn(context_text)
+                        similar_msgs = recaller.get_long_term_context(user_id=user_id, query_embedding=embedding, top_k=top_k)
+                        experience_factor = min(len(similar_msgs) / float(top_k), 1.0) if top_k > 0 else 0.0
+                        experience_adj = 0.7 * base_conf + 0.3 * experience_factor
+                # 3. Entropy-based confidence
+                entropy = -(probs * probs.log()).sum(dim=-1)
+                max_entropy = math.log(probs.size(-1))
+                norm_entropy = entropy / max_entropy
+                entropy_conf = 1 - norm_entropy.mean().item()
+                # 4. Margin-based confidence
+                top2 = torch.topk(probs, 2, dim=-1).values
+                margin_conf = (top2[:, 0] - top2[:, 1]).mean().item()
+                # 5. Blended confidence
+                if weights is None:
+                    weights = {"base": 0.5, "entropy": 0.25, "margin": 0.25, "experience": 0.3}
+                if strategy == "classic":
+                    confidence = base_conf
+                elif strategy == "experience":
+                    confidence = experience_adj
+                elif strategy == "entropy":
+                    confidence = entropy_conf
+                elif strategy == "margin":
+                    confidence = margin_conf
+                elif strategy == "blended":
+                    # If recaller is not provided, fallback to base_conf for experience_adj
+                    confidence = (
+                        weights.get("base", 0.5) * experience_adj +
+                        weights.get("entropy", 0.25) * entropy_conf +
+                        weights.get("margin", 0.25) * margin_conf
+                    )
+                else:
+                    confidence = base_conf  # fallback
                 # Clamp to valid range
-                adjusted_confidence = max(self.min_confidence, min(self.max_confidence, adjusted_confidence))
+                confidence = max(self.min_confidence, min(self.max_confidence, confidence))
                 # Finalize and update history
-                final_confidence = self.__finalize_confidence(adjusted_confidence, state)
+                final_confidence = self.__finalize_confidence(confidence, state)
                 self.logger.record_event(
                     event_type="confidence_calculation_success",
                     message="Confidence calculation completed",
                     level="info",
-                    additional_info={"final_confidence": final_confidence}
+                    additional_info={
+                        "final_confidence": final_confidence,
+                        "base_conf": base_conf,
+                        "experience_factor": experience_factor,
+                        "experience_adj": experience_adj,
+                        "entropy_conf": entropy_conf,
+                        "margin_conf": margin_conf,
+                        "strategy": strategy
+                    }
                 )
                 return final_confidence
             except Exception as e:
@@ -434,36 +297,6 @@ class ConfidenceCalculator:
         max_probs = probs.max(dim=-1).values
         return max_probs.mean().item()
 
-    def __apply_adjustments(
-        self,
-        base_confidence: float,
-        state: SOVLState,
-        context: SystemContext,
-        curiosity_manager: Optional[CuriosityManager]
-    ) -> float:
-        """Apply curiosity and temperament adjustments to confidence.
-        
-        Args:
-            base_confidence: Initial confidence score
-            state: Current SOVL state
-            context: System context
-            curiosity_manager: Optional curiosity manager
-        
-        Returns:
-            float: Adjusted confidence score
-        """
-        confidence = base_confidence
-        
-        # Apply curiosity pressure adjustment if available
-        if curiosity_manager is not None:
-            pressure = curiosity_manager.get_pressure()
-            confidence *= (1.0 - pressure * self.curiosity_pressure_factor)
-        
-        # Apply temperament influence
-        confidence *= (1.0 + state.temperament_score * self.temperament_influence)
-        
-        return confidence
-
     def __finalize_confidence(self, confidence: float, state: SOVLState) -> float:
         """Finalize confidence score and update history atomically using StateManager."""
         if self.state_manager:
@@ -484,7 +317,6 @@ class ConfidenceCalculator:
 
     def __recover_confidence(self, error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
         """Attempt to recover confidence from history or use default, with defensive checks and logging."""
-        # No mutation to state; only reads. If mutation is needed, use atomic update.
         try:
             # Validate confidence history
             if not hasattr(state, 'confidence_history') or not isinstance(state.confidence_history, deque):
@@ -515,21 +347,6 @@ class ConfidenceCalculator:
             ]
 
             if not valid_confidences:
-                # Try alternative: use temperament if available
-                if hasattr(state, 'temperament_score') and isinstance(state.temperament_score, (int, float)):
-                    recovered_confidence = self.default_confidence * (1.0 + state.temperament_score * 0.1)
-                    recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
-                    error_manager.logger.record_event(
-                        event_type="confidence_recovered_temperament",
-                        message="Recovered confidence using temperament score as fallback",
-                        level="info",
-                        additional_info={
-                            "error": str(error),
-                            "recovered_confidence": recovered_confidence,
-                            "temperament_score": state.temperament_score
-                        }
-                    )
-                    return recovered_confidence
                 error_manager.logger.record_event(
                     event_type="confidence_history_no_valid_entries",
                     message="No valid history entries for recovery, using default",
@@ -541,13 +358,12 @@ class ConfidenceCalculator:
                 )
                 return self.default_confidence
 
-            # Use average of valid confidences for partial recovery
-            weights = [1.0 / len(valid_confidences)] * len(valid_confidences)
-            recovered_confidence = sum(c * w for c, w in zip(valid_confidences, weights))
+            # Use simple mean of valid confidences for recovery
+            recovered_confidence = sum(valid_confidences) / len(valid_confidences)
             recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
             error_manager.logger.record_event(
                 event_type="partial_confidence_recovery",
-                message=f"Recovered confidence using {len(valid_confidences)} valid history entries",
+                message=f"Recovered confidence using mean of {len(valid_confidences)} valid history entries",
                 level="info",
                 additional_info={
                     "error": str(error),
@@ -639,8 +455,12 @@ def calculate_confidence_score(
     state: SOVLState,
     error_manager: ErrorManager,
     context: SystemContext,
-    curiosity_manager: Optional[CuriosityManager] = None,
-    state_manager: Optional[Any] = None
+    state_manager: Optional[Any] = None,
+    recaller: Optional[Any] = None,  # DialogueContextManager
+    user_id: str = "default",
+    strategy: str = "blended",  # "classic", "experience", "entropy", "margin", "blended"
+    top_k: int = 5,
+    weights: Optional[dict] = None
 ) -> float:
     """Calculate confidence score with robust error recovery.
     
@@ -650,8 +470,12 @@ def calculate_confidence_score(
         state: Current SOVL state
         error_manager: Error handling manager
         context: System context
-        curiosity_manager: Optional curiosity manager
         state_manager: Optional StateManager for atomic state updates
+        recaller: DialogueContextManager for experience-based adjustment
+        user_id: User identifier for experience-based adjustment
+        strategy: Confidence strategy ("classic", "experience", "entropy", "margin", "blended")
+        top_k: Top k similar messages for experience-based adjustment
+        weights: Optional weights for blended confidence calculation
         
     Returns:
         float: Confidence score between 0.0 and 1.0
@@ -670,7 +494,12 @@ def calculate_confidence_score(
         state=state,
         error_manager=error_manager,
         context=context,
-        curiosity_manager=curiosity_manager
+        state_manager=state_manager,
+        recaller=recaller,
+        user_id=user_id,
+        strategy=strategy,
+        top_k=top_k,
+        weights=weights
     )
 
 def reset_confidence_calculator():
