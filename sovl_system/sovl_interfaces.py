@@ -13,41 +13,71 @@ from sovl_main import SOVLSystem, SystemContext
 from sovl_monitor import MemoryMonitor
 
 class SystemInterface(ABC):
-    """
-    Abstract interface for the SOVL system, defining essential methods to break
-    circular dependency with the orchestrator.
-    """
+    """Core interface for the SOVL system."""
     
     @abstractmethod
     def get_state(self) -> Dict[str, Any]:
-        """
-        Get the current system state.
+        """Get the current system state.
         
         Returns:
-            Dictionary containing the system state.
+            Dict[str, Any]: The current system state.
         """
         pass
     
     @abstractmethod
     def update_state(self, state_dict: Dict[str, Any]) -> None:
-        """
-        Update the system state with the provided dictionary.
+        """Update the system state.
         
         Args:
-            state_dict: Dictionary containing state updates.
-        
-        Raises:
-            ValueError: If state update is invalid.
+            state_dict: A dictionary containing state updates.
         """
         pass
     
     @abstractmethod
     def shutdown(self) -> None:
-        """
-        Shutdown the system, saving state and releasing resources.
+        """Shutdown the system, saving state and releasing resources.
         
         Raises:
             RuntimeError: If shutdown fails.
+        """
+        pass
+    
+    @abstractmethod
+    def toggle_memory(self, enable: bool) -> bool:
+        """Enable or disable memory features.
+        
+        Args:
+            enable: True to enable memory, False to disable.
+        
+        Returns:
+            bool: Current memory state after operation.
+        """
+        pass
+    
+    @abstractmethod
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get statistics about memory usage.
+        
+        Returns:
+            Dict[str, Any]: Memory usage statistics.
+        """
+        pass
+    
+    @abstractmethod
+    def get_component_status(self) -> Dict[str, bool]:
+        """Get status of all system components.
+        
+        Returns:
+            Dict[str, bool]: Component status (True for active, False for inactive).
+        """
+        pass
+    
+    @abstractmethod
+    def get_system_state(self) -> Dict[str, Any]:
+        """Get complete system state including status of all components.
+        
+        Returns:
+            Dict[str, Any]: Complete system state.
         """
         pass
 
@@ -318,81 +348,6 @@ class SOVLOrchestratorAdapter(OrchestratorInterface):
     def sync_state(self) -> None:
         self._orchestrator._sync_state_to_system()
 
-class SystemInterface:
-    """Interface for system components."""
-    
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        logger: Logger,
-        ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
-    ):
-        """
-        Initialize system interface.
-        
-        Args:
-            config_manager: Config manager for fetching configuration values
-            logger: Logger instance for logging events
-            ram_manager: RAMManager instance for RAM memory management
-            gpu_manager: GPUMemoryManager instance for GPU memory management
-        """
-        self._config_manager = config_manager
-        self._logger = logger
-        self.ram_manager = ram_manager
-        self.gpu_manager = gpu_manager
-        
-    def check_memory_health(self) -> Dict[str, Any]:
-        """Check memory health across all memory managers."""
-        try:
-            ram_manager = getattr(self, 'ram_manager', None)
-            gpu_manager = getattr(self, 'gpu_manager', None)
-            logger = getattr(self, '_logger', None)
-            if not ram_manager or not gpu_manager:
-                msg = "RAMManager or GPUMemoryManager missing in SystemInterface."
-                if logger:
-                    try:
-                        logger.log_error(
-                            error_msg=msg,
-                            error_type="memory_health_error",
-                            stack_trace=traceback.format_exc()
-                        )
-                    except Exception:
-                        print(f"[ERROR] {msg}")
-                        traceback.print_exc()
-                else:
-                    print(f"[ERROR] {msg}")
-                    traceback.print_exc()
-                return {
-                    "ram_health": {"status": "error"},
-                    "gpu_health": {"status": "error"}
-                }
-            ram_health = ram_manager.check_memory_health()
-            gpu_health = gpu_manager.check_memory_health()
-            return {
-                "ram_health": ram_health,
-                "gpu_health": gpu_health
-            }
-        except Exception as e:
-            logger = getattr(self, '_logger', None)
-            if logger:
-                try:
-                    logger.log_error(
-                        error_msg=f"Failed to check memory health: {str(e)}",
-                        error_type="memory_health_error",
-                        stack_trace=traceback.format_exc()
-                    )
-                except Exception:
-                    print(f"[ERROR] Failed to log memory health error: {str(e)}")
-                    traceback.print_exc()
-            else:
-                print(f"[ERROR] Failed to check memory health: {str(e)}")
-                traceback.print_exc()
-            return {
-                "ram_health": {"status": "error"},
-                "gpu_health": {"status": "error"}
-            }
-
 class StateAccessor(ABC):
     """Interface for accessing and manipulating state.
     This interface allows components to access state without direct dependencies.
@@ -474,66 +429,6 @@ class CuriosityAccessor(ABC):
         
         Returns:
             Dict[str, Any]: Memory usage statistics.
-        """
-        pass
-
-class SystemInterface(ABC):
-    """Core interface for the SOVL system."""
-    
-    @abstractmethod
-    def get_state(self) -> Dict[str, Any]:
-        """Get the current system state.
-        
-        Returns:
-            Dict[str, Any]: The current system state.
-        """
-        pass
-    
-    @abstractmethod
-    def update_state(self, state_dict: Dict[str, Any]) -> None:
-        """Update the system state.
-        
-        Args:
-            state_dict: A dictionary containing state updates.
-        """
-        pass
-    
-    @abstractmethod
-    def toggle_memory(self, enable: bool) -> bool:
-        """Enable or disable memory features.
-        
-        Args:
-            enable: True to enable memory, False to disable.
-            
-        Returns:
-            bool: Current memory state after operation.
-        """
-        pass
-    
-    @abstractmethod
-    def get_memory_stats(self) -> Dict[str, Any]:
-        """Get statistics about memory usage.
-        
-        Returns:
-            Dict[str, Any]: Memory usage statistics.
-        """
-        pass
-    
-    @abstractmethod
-    def get_component_status(self) -> Dict[str, bool]:
-        """Get status of all system components.
-        
-        Returns:
-            Dict[str, bool]: Component status (True for active, False for inactive).
-        """
-        pass
-    
-    @abstractmethod
-    def get_system_state(self) -> Dict[str, Any]:
-        """Get complete system state including status of all components.
-        
-        Returns:
-            Dict[str, Any]: Complete system state.
         """
         pass
 
