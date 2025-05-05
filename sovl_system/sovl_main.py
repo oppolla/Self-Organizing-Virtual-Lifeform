@@ -200,8 +200,15 @@ class SystemContext:
                 # Use fallback logging if logger isn't initialized yet
                 if hasattr(self, 'logger') and self.logger:
                     self.logger.log_error(error_msg=error_msg, error_type="init_error", stack_trace=stack_trace)
+                elif hasattr(self, 'error_handler') and self.error_handler:
+                    self.error_handler.handle_error(
+                        error_type="init_error",
+                        error_message=error_msg,
+                        error_context={"stack_trace": stack_trace}
+                    )
                 else:
-                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {error_msg}\n{stack_trace}\n")
+                    from sovl_error import ErrorManager
+                    ErrorManager.fallback_log_error(error_msg, stack_trace)
                 # Clean up any partially initialized resources
                 cleanup_components(self._initialized_components, self, getattr(self, 'logger', None))
                 self._initialized = False
@@ -283,8 +290,15 @@ class SystemContext:
             error_msg = f"Failed to initialize core components: {str(e)}"
             if hasattr(self, 'logger') and self.logger:
                 self.logger.log_error(error_msg=error_msg, error_type="init_core_error", stack_trace=traceback.format_exc())
+            elif hasattr(self, 'error_handler') and self.error_handler:
+                self.error_handler.handle_error(
+                    error_type="init_core_error",
+                    error_message=error_msg,
+                    error_context={"stack_trace": traceback.format_exc()}
+                )
             else:
-                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {error_msg}\n{traceback.format_exc()}\n")
+                from sovl_error import ErrorManager
+                ErrorManager.fallback_log_error(error_msg, traceback.format_exc())
             raise
     
     def _initialize_dependent_components(self):
@@ -444,13 +458,20 @@ class SystemContext:
                         stack_trace=traceback.format_exc()
                     )
                 except Exception as log_err:
-                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
-                    # Try to write to an emergency file
-                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
+                    from sovl_error import ErrorManager
+                    ErrorManager.fallback_log_error(log_msg, None)
+            elif hasattr(self, 'error_handler') and self.error_handler:
+                self.error_handler.handle_error(
+                    error_type="system_initialization",
+                    error_message=f"System initialization failed: {str(error)}",
+                    error_context={"stack_trace": traceback.format_exc()}
+                )
             else:
-                safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
+                from sovl_error import ErrorManager
+                ErrorManager.fallback_log_error(f"System initialization failed: {str(error)}", traceback.format_exc())
         except Exception as e2:
-            safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] {log_msg}\n")
+            from sovl_error import ErrorManager
+            ErrorManager.fallback_log_error(log_msg, None)
     
     def _start_memory_monitoring(self):
         """Start proactive memory monitoring during initialization."""
@@ -483,9 +504,11 @@ class SystemContext:
                                 stack_trace=traceback.format_exc()
                             )
                         else:
-                            safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error in startup memory monitor (logger unavailable): {str(e)}\n")
+                            from sovl_error import ErrorManager
+                            ErrorManager.fallback_log_error(f"Error in startup memory monitor (logger unavailable): {str(e)}", None)
                     except Exception as e2:
-                        safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Critical error in startup memory monitor exception handler: {str(e)}\nAdditionally, error handler failed: {str(e2)}\n")
+                        from sovl_error import ErrorManager
+                        ErrorManager.fallback_log_error(f"Critical error in startup memory monitor exception handler: {str(e)}\nAdditionally, error handler failed: {str(e2)}", None)
                     
                     time.sleep(5)  # Wait longer on error
         
@@ -502,6 +525,8 @@ class SystemContext:
                 self.logger.log_debug("Startup memory monitoring started")
                 
         except Exception as e:
+            from sovl_error import ErrorManager
+            ErrorManager.fallback_log_error(f"Error starting memory monitoring: {str(e)}", traceback.format_exc())
             safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error starting memory monitoring: {str(e)}\n")
             safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
     
@@ -587,12 +612,10 @@ class SystemContext:
                     self._handle_memory_threshold_exceeded('gpu', gpu_usage)
                     
         except Exception as e:
-            if hasattr(self, 'logger'):
-                self.logger.log_error(
-                    error_msg=f"Memory update failed: {str(e)}",
-                    error_type="memory_update",
-                    stack_trace=traceback.format_exc()
-                )
+            self.error_manager.handle_error(
+                error_type="memory_update",
+                error_message=f"Failed to get memory statistics: {str(e)}"
+            )
     
     def _handle_memory_threshold_exceeded(self, memory_type: str, usage: float):
         """Handle memory threshold exceeded events."""
@@ -612,12 +635,14 @@ class SystemContext:
                 self.gpu_manager.cleanup()
                 
         except Exception as e:
-            if hasattr(self, 'logger'):
-                self.logger.log_error(
-                    error_msg=f"Memory threshold handling failed: {str(e)}",
-                    error_type="memory_threshold",
-                    stack_trace=traceback.format_exc()
-                )
+            self.error_manager.handle_error(
+                error_type="memory_threshold",
+                error_message=f"Memory threshold handling failed: {str(e)}",
+                error_context={
+                    "memory_type": memory_type,
+                    "usage": usage
+                }
+            )
     
     @synchronized("_lock")
     def get_system_state(self) -> Dict[str, Any]:
@@ -675,9 +700,11 @@ class SystemContext:
                         stack_trace=traceback.format_exc()
                     )
                 else:
-                    safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Error completing SystemContext initialization sequence (logger/handler unavailable): {str(e)}\n")
-                    safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
+                    from sovl_error import ErrorManager
+                    ErrorManager.fallback_log_error(f"Failed to complete context initialization sequence (logger/handler unavailable): {str(e)}", traceback.format_exc())
             except Exception as err2:
+                from sovl_error import ErrorManager
+                ErrorManager.fallback_log_error(f"Critical error in initialization completion exception handler: {str(err2)}\nOriginal error: {str(e)}", traceback.format_exc())
                 safe_append_to_file("sovl_initialization_error.log", f"[{time.ctime()}] Critical error in initialization completion exception handler: {str(err2)}\nOriginal error: {str(e)}\n")
                 safe_append_to_file("sovl_initialization_error.log", traceback.format_exc() + "\n")
 
@@ -777,41 +804,6 @@ class SystemContext:
             time.sleep(0.1)
             
         return False
-
-    @classmethod
-    def initialize_singleton(cls, config_path: str = None) -> 'SystemContext':
-        """
-        Thread-safe way to initialize the singleton instance.
-        This method ensures that only one thread creates and initializes the SystemContext.
-        
-        Args:
-            config_path: Optional path to the configuration file
-            
-        Returns:
-            The fully initialized singleton instance
-            
-        Raises:
-            SystemInitializationError: If initialization fails
-        """
-        config_path = config_path or SystemConstants.DEFAULT_CONFIG_PATH
-        
-        with cls._lock:
-            if cls._instance is None or not cls._instance._initialized:
-                # Create and initialize the instance
-                instance = cls(config_path)
-                
-                # Wait for initialization to complete
-                if not instance.wait_for_initialization():
-                    raise SystemInitializationError(
-                        message="Timeout waiting for SystemContext initialization",
-                        config_path=config_path,
-                        stack_trace=""
-                    )
-                
-                return instance
-            else:
-                # Return the existing instance
-                return cls._instance
 
     def create_and_bind_generation_manager(self):
         """
@@ -1296,18 +1288,20 @@ class SOVLSystem(SystemInterface):
             return {}
 
     def update_state(self, state_dict: Dict[str, Any]) -> None:
-        """Update the system state."""
+        """Update the system state atomically using StateManager if available."""
         try:
             with self._lock:
                 if not self.state_tracker:
                     raise ValueError("State tracker not initialized")
-                # Use atomic update protocol
                 if hasattr(self.context, 'state_manager') and self.context.state_manager:
                     def update_fn(state):
-                        # This assumes SOVLState has a from_dict method that mutates in place
                         state.from_dict(state_dict, getattr(self.context, 'device', None))
                     self.context.state_manager.update_state_atomic(update_fn)
                 else:
+                    self.error_manager.handle_error(
+                        error_type="state_update_fallback",
+                        error_message="StateManager not available, falling back to direct update (not atomic)."
+                    )
                     self.state_tracker.update_state(state_dict)
         except Exception as e:
             self.error_manager.handle_error(
