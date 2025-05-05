@@ -7,7 +7,7 @@ from sovl_state import SOVLState, StateManager, StateTracker
 from sovl_logger import Logger
 from sovl_events import EventDispatcher
 import math
-from sovl_utils import synchronized, safe_divide
+from sovl_utils import safe_compare, float_gt
 from sovl_error import ErrorManager, ConfigurationError
 from threading import Lock
 import threading
@@ -549,7 +549,7 @@ class TemperamentAdjuster:
             # Define a threshold for inconsistency (e.g., from config or hardcoded)
             inconsistency_threshold = 0.5 # Example threshold
             
-            if abs(new_score - last_recorded_score) > inconsistency_threshold:
+            if float_gt(abs(new_score - last_recorded_score), inconsistency_threshold) and not safe_compare(abs(new_score - last_recorded_score), inconsistency_threshold):
                 self.logger.record_event(
                     event_type="temperament_inconsistency_detected",
                     message="Potential temperament inconsistency: large jump detected",
@@ -878,14 +878,12 @@ class TemperamentPressure:
         """
         Checks if the current pressure meets a generic adjustment threshold.
         Used by TemperamentSystem to decide if pressure-related actions should occur.
-        
         Args:
             threshold: The threshold to check against.
-
         Returns:
-            bool: True if current_pressure >= threshold.
+            bool: True if current_pressure >= threshold (with tolerance).
         """
-        return self.current_pressure >= threshold
+        return float_gt(self.current_pressure, threshold) or safe_compare(self.current_pressure, threshold)
 
     def drop_pressure(self, amount: float) -> None:
         """
@@ -930,9 +928,9 @@ class TemperamentPressure:
 
     def _compute_mood_label(self) -> str:
         try:
-            if self.current_pressure < 0.3:
+            if float_gt(0.3, self.current_pressure) and not safe_compare(self.current_pressure, 0.3):
                 return "Cautious"
-            elif self.current_pressure < 0.7:
+            elif float_gt(0.7, self.current_pressure) and not safe_compare(self.current_pressure, 0.7):
                 return "Balanced"
             else:
                 return "Curious"
