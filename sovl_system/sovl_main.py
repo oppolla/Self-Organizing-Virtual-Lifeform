@@ -1942,11 +1942,24 @@ class SOVLSystem(SystemInterface):
         t.start()
         try:
             while not dream_done[0]:
-                # Non-blocking keypress check (works on Unix)
                 print("\rDreaming... (press any key to abort)", end="", flush=True)
-                if sys.platform.startswith('win'):
-                    time.sleep(0.5)
+                if sys.platform.startswith('win') or os.name == 'nt':
+                    import msvcrt
+                    time.sleep(0.1)
+                    if msvcrt.kbhit():
+                        msvcrt.getch()  # Clear the input buffer
+                        print("\nAre you sure you want to abort dreaming? (y/N): ", end="", flush=True)
+                        ans = msvcrt.getch().decode(errors='ignore').lower()
+                        print(ans)  # Echo the key
+                        if ans == 'y':
+                            abort_flag[0] = True
+                            if logger:
+                                logger.info("Dreaming aborted by user.")
+                            break
+                        else:
+                            print("Resuming dreaming...")
                 else:
+                    import select
                     dr, _, _ = select.select([sys.stdin], [], [], 0.5)
                     if dr:
                         print("\nAre you sure you want to abort dreaming? (y/N): ", end="", flush=True)
