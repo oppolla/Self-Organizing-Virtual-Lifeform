@@ -16,7 +16,6 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_curiosity import CuriosityConfig
 from sovl_utils import NumericalGuard, safe_divide, safe_compare, synchronized
-from sovl_records import ConfidenceHistory
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_data import DataStats
 from sovl_interfaces import StateAccessor
@@ -494,19 +493,18 @@ class SOVLState(StateBase):
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         """Initialize SOVL state with configuration and dependencies."""
         super().__init__(config_manager, logger)
-        self._device = device
-        self._initialize_memory_managers()
+        self.device = device
+        self._initialize_state()
+        # Replace legacy ConfidenceHistory with a simple deque
+        from collections import deque
+        self.confidence_history = deque(maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 100))
         self.data_stats = DataStats()
         self.state_version = 0  # Version for optimistic locking and concurrency control
-        self._initialize_state()
 
     def _initialize_state(self) -> None:
         """Initialize state components with safe defaults."""
         try:
             # Core state components
-            self._confidence_history = ConfidenceHistory(
-                maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 100)
-            )
             self._training_state = TrainingState()
             self._conversation_metadata = {}
             self._cache = {}
@@ -556,7 +554,7 @@ class SOVLState(StateBase):
         """Validate state integrity."""
         try:
             # Check core components exist and have correct types
-            assert hasattr(self, '_confidence_history') and isinstance(self._confidence_history, ConfidenceHistory), "Invalid _confidence_history"
+            assert hasattr(self, '_confidence_history') and isinstance(self.confidence_history, deque), "Invalid _confidence_history"
             assert hasattr(self, '_training_state') and isinstance(self._training_state, TrainingState), "Invalid _training_state"
             assert hasattr(self, 'history') and isinstance(self.history, ConversationHistory), "Invalid history"
             assert hasattr(self, 'seen_prompts') and isinstance(self.seen_prompts, set), "seen_prompts must be a set"
@@ -670,23 +668,11 @@ class SOVLState(StateBase):
                 if target_device is not None:
                     tensor = tensor.to(target_device)
                 else:
-                    tensor = tensor.to(self._device)
+                    tensor = tensor.to(self.device)
                 return tensor
         except Exception as e:
             self.log_error(f"Failed to decompress tensor: {str(e)}", error_type="tensor_decompression_error")
             raise
-
-    def add_confidence(self, confidence: float) -> None:
-        """Add a confidence score to the history."""
-        self._confidence_history.add_confidence(confidence)
-
-    def get_confidence_history(self) -> Deque[float]:
-        """Get the confidence history."""
-        return self._confidence_history.get_confidence_history()
-
-    def clear_confidence_history(self) -> None:
-        """Clear the confidence history."""
-        self._confidence_history.clear_history()
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to dictionary for serialization."""
@@ -694,7 +680,7 @@ class SOVLState(StateBase):
             try:
                 state_data = {
                     "version": self.STATE_VERSION,
-                    "confidence_history": list(self._confidence_history.get_history()),
+                    "confidence_history": list(self.confidence_history),
                     "temperament_history": list(self.temperament_history),
                     "temperament_score": self.temperament_score,
                     "last_temperament_score": self.last_temperament_score,
@@ -720,9 +706,9 @@ class SOVLState(StateBase):
     def _populate_from_dict(self, data: Dict[str, Any]) -> None:
         """Populate state from dictionary data."""
         try:
-            # Load confidence history
-            self._confidence_history.clear_history()
-            self._confidence_history.add_many(data.get("confidence_history", []))
+            # Load confidence history as a deque
+            from collections import deque
+            self.confidence_history = deque(data.get("confidence_history", []), maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 100))
             
             # Load temperament data
             self.temperament_history.clear()
@@ -843,7 +829,7 @@ class SOVLState(StateBase):
             "seen_prompts": tuple(self.seen_prompts),
             "temperament_score": self.temperament_score,
             "last_temperament_score": self.last_temperament_score,
-            "confidence_history": tuple(self._confidence_history),
+            "confidence_history": tuple(self.confidence_history),
             "temperament_history": tuple(self.temperament_history),
             "gestation_progress": self.gestation_progress,
             "dreaming_progress": self.dreaming_progress
