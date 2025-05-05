@@ -17,6 +17,11 @@ import json
 from dataclasses import dataclass
 from sovl_utils import cosine_similarity
 
+# Unified output function for all utterances (user or system)
+def output_response(text: str):
+    """Outputs a response to the user. Replace with UI logic as needed."""
+    print(text)
+
 @dataclass
 class CuriosityConfig:
     max_questions: int
@@ -408,6 +413,8 @@ class CuriosityPressure:
             
         self.current_pressure = self.base_pressure
         self.last_update = time.time()
+        self._last_eruption_time = 0.0
+        self.cooldown = config.get("eruption_cooldown", 30.0)  # seconds, add to config if not present
         
         # Log initialization
         self._log_event(
@@ -450,58 +457,29 @@ class CuriosityPressure:
             )
             raise
 
-    def should_erupt(self, threshold: float) -> bool:
-        """Check if pressure exceeds threshold."""
-        try:
-            if not isinstance(threshold, (int, float)) or not (0 <= threshold <= 1.0):
-                raise ValueError("Threshold must be a number between 0 and 1")
-                
-            result = self.current_pressure >= threshold
-            self._log_event(
-                "curiosity_pressure_threshold_check",
-                "Checked if pressure exceeds threshold",
-                level="debug",
-                additional_info={
-                    "current_pressure": self.current_pressure,
-                    "threshold": threshold,
-                    "result": result
-                }
-            )
-            return result
-        except Exception as e:
-            self._log_error(
-                f"Failed to check pressure threshold: {str(e)}",
-                error_type="curiosity_pressure_check_error",
-                stack_trace=traceback.format_exc()
-            )
-            return False
-
-    def drop_pressure(self, amount: float) -> None:
-        """Reduce pressure by a specified amount."""
-        try:
-            # Validate amount
-            if not isinstance(amount, (int, float)) or amount < 0:
-                raise ValueError("Amount must be a non-negative number")
-                
+    def check_eruption(self, threshold: float, drop: float) -> bool:
+        """
+        Check if pressure exceeds threshold and cooldown has elapsed. If so, drop pressure and return True.
+        Returns True if an eruption occurred, else False.
+        """
+        now = time.time()
+        if self.current_pressure >= threshold and (now - self._last_eruption_time > self.cooldown):
             old_pressure = self.current_pressure
-            self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
-            
+            self.current_pressure = max(self.min_pressure, self.current_pressure - drop)
+            self._last_eruption_time = now
             self._log_event(
-                "curiosity_pressure_dropped",
-                "Reduced curiosity pressure",
-                level="debug",
+                "curiosity_pressure_erupted",
+                "Curiosity pressure eruption occurred",
+                level="info",
                 additional_info={
                     "old_pressure": old_pressure,
                     "new_pressure": self.current_pressure,
-                    "amount": amount
+                    "threshold": threshold,
+                    "drop": drop
                 }
             )
-        except Exception as e:
-            self._log_error(
-                f"Failed to drop pressure: {str(e)}",
-                error_type="curiosity_pressure_drop_error",
-                stack_trace=traceback.format_exc()
-            )
+            return True
+        return False
 
     def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
         """Log event with standardized format."""
@@ -1208,19 +1186,15 @@ class CuriosityManager(CuriosityAccessor):
         self,
         context: str = None,
         spontaneous: bool = False,
-        generation_params: Optional[dict] = None,
-        ask_user_fn=None
+        generation_params: Optional[dict] = None
     ) -> Optional[str]:
         """
-        Only ask the user a curiosity question if a curiosity eruption occurs.
-        `ask_user_fn` should be a callable that takes a question string and returns the user's response.
+        Only ask a curiosity question if a curiosity eruption occurs.
+        Output is handled internally and is indistinguishable from a regular response.
         """
         # Check for curiosity eruption
-        if not self.curiosity_pressure.should_erupt(self.pressure_threshold):
+        if not self.curiosity_pressure.check_eruption(self.pressure_threshold, self.pressure_drop):
             return None  # No eruption, do not ask
-
-        # Drop pressure after eruption
-        self.curiosity_pressure.drop_pressure(self.pressure_drop)
 
         # Generate the question
         question = self.generate_curiosity_question(
@@ -1228,22 +1202,28 @@ class CuriosityManager(CuriosityAccessor):
             spontaneous=spontaneous,
             generation_params=generation_params
         )
-        if not question or ask_user_fn is None:
+        if not question:
             return None
 
-        user_response = ask_user_fn(question)
+        self.output_curiosity_utterance(question)
+        self.capture_curiosity_utterance(question, context, spontaneous)
+        return question
 
-        # Log the user-asked event
-        from sovl_queue import capture_scribe_event
+    def output_curiosity_utterance(self, text: str) -> None:
+        """Outputs the curiosity utterance using the unified output function (no labels)."""
+        output_response(text)
+
+    def capture_curiosity_utterance(self, text: str, context: str, spontaneous: bool) -> None:
+        """Capture the curiosity utterance for memory/training."""
         capture_scribe_event(
             origin="sovl_curiosity",
-            event_type="curiosity_question_user",
+            event_type="curiosity_utterance",
             event_data={
-                "question": question,
-                "user_response": user_response,
+                "full_text": text,
                 "context": context,
                 "spontaneous": spontaneous,
-                "generation_params": generation_params or {}
+                "timestamp_unix": time.time(),
+                "session_id": getattr(self, 'session_id', None)
             },
             source_metadata={
                 "module": "CuriosityManager",
@@ -1251,4 +1231,3 @@ class CuriosityManager(CuriosityAccessor):
             },
             session_id=getattr(self, 'session_id', None)
         )
-        return user_response
