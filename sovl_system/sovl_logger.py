@@ -8,7 +8,6 @@ from datetime import datetime
 from threading import Lock, RLock
 from typing import List, Dict, Union, Optional, Callable, Any, Tuple, Literal
 from dataclasses import dataclass, field
-import torch
 import traceback
 from collections import deque, defaultdict
 from sovl_config import ConfigManager
@@ -37,6 +36,7 @@ class LoggerConfig:
     prune_interval_hours: int = 24  # How often to prune old logs
     memory_threshold_mb: int = 100  # Memory threshold to trigger aggressive pruning
     gpu_memory_threshold: float = 0.85  # GPU memory usage threshold (0-1)
+    log_level: str = "INFO"  # Log level threshold (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     
     # Error handling configuration
     error_cooldown: float = 1.0  # Time in seconds before an error is no longer considered recent
@@ -72,7 +72,10 @@ class LoggerConfig:
             value = getattr(self, key)
             if not (min_val <= value <= max_val):
                 raise ValueError(f"{key} must be between {min_val} and {max_val}, got {value}")
-        
+        # Validate log_level
+        valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if self.log_level.upper() not in valid_levels:
+            raise ValueError(f"log_level must be one of {valid_levels}, got {self.log_level}")
         # Validate error handling config
         if not isinstance(self.error_handling_config, dict):
             raise ValueError("error_handling_config must be a dictionary")
@@ -102,6 +105,10 @@ class LoggerConfig:
                 required_keys = {"max_history_per_error", "critical_threshold", "warning_threshold"}
                 if not all(k in value for k in required_keys):
                     raise ValueError(f"error_handling_config must contain all required keys: {required_keys}")
+            elif key == "log_level":
+                valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+                if not isinstance(value, str) or value.upper() not in valid_levels:
+                    raise ValueError(f"log_level must be one of {valid_levels}, got {value}")
             else:
                 raise ValueError(f"Unknown configuration parameter: {key}")
             setattr(self, key, value)
@@ -299,6 +306,13 @@ class Logger(IErrorHandler):
     """Main logger class for the SOVL system."""
     _instance = None
     _lock = RLock()
+    LOG_LEVELS = {
+        "DEBUG": 10,
+        "INFO": 20,
+        "WARNING": 30,
+        "ERROR": 40,
+        "CRITICAL": 50
+    }
     
     def __new__(cls):
         with cls._lock:
@@ -344,9 +358,15 @@ class Logger(IErrorHandler):
                 cls._instance = cls()
             return cls._instance
     
+    def should_log(self, entry_level: str) -> bool:
+        config_level = self.config.log_level
+        entry_level_num = self.LOG_LEVELS.get(entry_level.upper(), 20)
+        config_level_num = self.LOG_LEVELS.get(config_level.upper(), 20)
+        return entry_level_num >= config_level_num
+    
     def record_event(self, event_type: str, message: str, level: str = "info", additional_info: Dict[str, Any] = None) -> None:
         """Record a general system event."""
-        if not LOGGING_ENABLED:
+        if not LOGGING_ENABLED or not self.should_log(level):
             return
         with self._lock:
             try:
@@ -358,19 +378,17 @@ class Logger(IErrorHandler):
                     'level': level,
                     **(additional_info or {})
                 }
-                
                 if self._validator.validate_entry(log_entry):
                     self._file_handler.write_batch([log_entry])
                 else:
                     self._fallback_logger.warning(f"Invalid log entry skipped: {log_entry}")
-                    
             except Exception as e:
                 self._fallback_logger.error(f"Failed to record event: {str(e)}")
                 self._fallback_logger.error(traceback.format_exc())
     
     def handle_error(self, record: ErrorRecord) -> None:
         """Handle error records from the ErrorRecordBridge."""
-        if not LOGGING_ENABLED:
+        if not LOGGING_ENABLED or not self.should_log("ERROR"):
             return
         with self._lock:
             try:
@@ -385,13 +403,11 @@ class Logger(IErrorHandler):
                     'stack_trace': record.stack_trace,
                     **(record.additional_info or {})
                 }
-                
                 # Write error to log file
                 if self._validator.validate_entry(error_entry):
                     self._file_handler.write_batch([error_entry])
                 else:
                     self._fallback_logger.warning(f"Invalid error entry skipped: {error_entry}")
-                    
             except Exception as e:
                 self._fallback_logger.error(f"Failed to handle error: {str(e)}")
                 self._fallback_logger.error(traceback.format_exc())
