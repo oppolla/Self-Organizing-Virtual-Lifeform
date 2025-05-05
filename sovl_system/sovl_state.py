@@ -253,7 +253,7 @@ class StateBase:
             self.log_error(f"Failed to load state: {str(e)}")
             raise StateError(f"State loading failed: {str(e)}")
 
-class CuriosityState(StateBase):
+class CuriosityState(StateBase, DictSerializable):
     """Manages curiosity-related state and question prioritization."""
     def __init__(self, config_manager: ConfigManager, logger: Logger, device: torch.device):
         super().__init__(config_manager, logger)
@@ -405,34 +405,34 @@ class CuriosityState(StateBase):
             return None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize curiosity state to dictionary."""
+        """Serialize curiosity state to dictionary using DictSerializable."""
         try:
             with self.lock:
-                return {
-                    "unanswered_questions": [
-                        (q, s, v.cpu().numpy().tolist() if v is not None else None)
-                        for q, s, v in self.unanswered_questions
-                    ],
-                    "last_question_time": self.last_question_time,
-                    "pressure": self.pressure,
-                    "novelty_scores": list(self.novelty_scores),
-                    "question_count": self.question_count,
-                    "version": "1.1"
-                }
+                # Use DictSerializable's logic for the main fields, but handle unanswered_questions specially
+                result = super().to_dict()
+                result["unanswered_questions"] = [
+                    (q, s, v.cpu().numpy().tolist() if v is not None else None)
+                    for q, s, v in self.unanswered_questions
+                ]
+                result["last_question_time"] = self.last_question_time
+                result["pressure"] = self.pressure
+                result["novelty_scores"] = list(self.novelty_scores)
+                result["question_count"] = self.question_count
+                result["version"] = "1.1"
+                return result
         except Exception as e:
             self.log_error("Curiosity state serialization failed")
             raise StateError(f"Curiosity state serialization failed: {str(e)}")
 
     def from_dict(self, data: Dict[str, Any]) -> None:
-        """Load curiosity state from dictionary."""
+        """Load curiosity state from dictionary using DictSerializable."""
         try:
             with self.lock:
-                version = data.get("version", "1.0")
-                if version not in ["1.0", "1.1"]:
-                    self.log_event(
-                        "unsupported_version", f"Unsupported curiosity state version: {version}",
-                        level="warning", version=version
-                    )
+                # Use DictSerializable's logic for the main fields, but handle unanswered_questions specially
+                for k, v in data.items():
+                    if k in ["unanswered_questions", "novelty_scores", "last_question_time", "pressure", "question_count", "version"]:
+                        continue  # handled below
+                    setattr(self, k, v)
                 self.unanswered_questions = deque(maxlen=self._config.max_questions)
                 for q, s, v in data.get("unanswered_questions", []):
                     context_vector = (
@@ -446,9 +446,10 @@ class CuriosityState(StateBase):
                     [float(s) for s in data.get("novelty_scores", [])], maxlen=self._config.max_novelty_scores
                 )
                 self.question_count = int(data.get("question_count", 0))
+                # version is informational only
                 self.log_event(
                     "curiosity_state_loaded", "Curiosity state loaded from dictionary",
-                    question_count=self.question_count, pressure=self.pressure, version=version
+                    question_count=self.question_count, pressure=self.pressure, version=data.get("version", "1.0")
                 )
         except Exception as e:
             self.log_error("Failed to load curiosity state", data_keys=list(data.keys()))
@@ -486,7 +487,36 @@ class ConversationHistory:
             history.add_message(msg["role"], msg["content"])
         return history
 
-class SOVLState(StateBase):
+class DictSerializable:
+    """Mixin for shared to_dict/from_dict logic with hooks for custom field handling."""
+    def to_dict(self):
+        result = {}
+        for k, v in self.__dict__.items():
+            result[k] = self._serialize_field(v)
+        return result
+
+    @classmethod
+    def from_dict(cls, data):
+        obj = cls.__new__(cls)
+        for k, v in data.items():
+            setattr(obj, k, cls._deserialize_field(v))
+        return obj
+
+    @staticmethod
+    def _serialize_field(value):
+        if isinstance(value, deque):
+            return list(value)
+        if isinstance(value, defaultdict):
+            return dict(value)
+        # Add more custom type handling as needed
+        return value
+
+    @staticmethod
+    def _deserialize_field(value):
+        # Add custom deserialization logic as needed
+        return value
+
+class SOVLState(StateBase, DictSerializable):
     """Manages the state of the SOVL system."""
     STATE_VERSION = "1.0"
 
@@ -675,92 +705,72 @@ class SOVLState(StateBase):
             raise
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert state to dictionary for serialization."""
+        """Convert state to dictionary for serialization using DictSerializable."""
         with self.lock:
             try:
-                state_data = {
-                    "version": self.STATE_VERSION,
-                    "confidence_history": list(self.confidence_history),
-                    "temperament_history": list(self.temperament_history),
-                    "temperament_score": self.temperament_score,
-                    "last_temperament_score": self.last_temperament_score,
-                    "seen_prompts": list(self.seen_prompts),
-                    "training_state": self._training_state.__dict__,
-                    "conversation_history": self.history.to_dict(),
-                    "conversation_metadata": self._conversation_metadata,
-                    "goals": [goal.copy() for goal in self.goals],
-                    # Curiosity state additions
-                    "curiosity_metrics": {k: list(v) for k, v in getattr(self, "curiosity_metrics", {}).items()},
-                    "curiosity_exploration_queue": list(getattr(self, "curiosity_exploration_queue", [])),
-                    "mode": self.mode,
-                    "gestation_progress": self.gestation_progress,
-                    "dreaming_progress": self.dreaming_progress
-                }
+                result = super().to_dict()
+                # Custom handling for special fields
+                result["version"] = self.STATE_VERSION
+                result["confidence_history"] = list(self.confidence_history)
+                result["temperament_history"] = list(self.temperament_history)
+                result["seen_prompts"] = list(self.seen_prompts)
+                result["training_state"] = self._training_state.__dict__
+                result["conversation_history"] = self.history.to_dict() if hasattr(self, "history") else None
+                result["conversation_metadata"] = self._conversation_metadata
+                result["goals"] = [goal.copy() for goal in self.goals]
+                result["curiosity_metrics"] = {k: list(v) for k, v in getattr(self, "curiosity_metrics", {}).items()}
+                result["curiosity_exploration_queue"] = list(getattr(self, "curiosity_exploration_queue", []))
+                result["mode"] = self.mode
+                result["gestation_progress"] = self.gestation_progress
+                result["dreaming_progress"] = self.dreaming_progress
                 if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
-                    state_data['short_term_memory'] = self.short_term_memory.to_dict()
-                return state_data
+                    result['short_term_memory'] = self.short_term_memory.to_dict()
+                return result
             except Exception as e:
                 self.log_error(f"Failed to convert state to dict: {str(e)}")
                 raise StateError(f"State serialization failed: {str(e)}")
 
     def _populate_from_dict(self, data: Dict[str, Any]) -> None:
-        """Populate state from dictionary data."""
+        """Populate state from dictionary data using DictSerializable."""
         try:
-            # Load confidence history as a deque
-            from collections import deque
+            # Use DictSerializable's logic for the main fields, but handle special fields below
+            for k, v in data.items():
+                if k in [
+                    "confidence_history", "temperament_history", "seen_prompts", "training_state",
+                    "conversation_history", "conversation_metadata", "goals", "curiosity_metrics",
+                    "curiosity_exploration_queue", "short_term_memory", "mode", "gestation_progress",
+                    "dreaming_progress", "version"
+                ]:
+                    continue  # handled below
+                setattr(self, k, v)
+            from collections import deque, defaultdict
             self.confidence_history = deque(data.get("confidence_history", []), maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 100))
-            
-            # Load temperament data
             self.temperament_history.clear()
             self.temperament_history.extend(data.get("temperament_history", []))
             self.temperament_score = float(data.get("temperament_score", 0.0))
             self.last_temperament_score = float(data.get("last_temperament_score", 0.0))
-            
-            # Load seen prompts
             self.seen_prompts = set(data.get("seen_prompts", []))
-            
-            # Load training state
             training_state_data = data.get("training_state", {})
             if isinstance(training_state_data, dict):
                 self._training_state = TrainingState(**training_state_data)
-            
-            # Load conversation history
             history_data = data.get("conversation_history", {})
             if isinstance(history_data, dict):
                 max_messages = self.config_manager.get("controls_config.max_messages", 100)
                 self.history = ConversationHistory.from_dict(history_data, maxlen=max_messages)
-            
-            # Load conversation metadata
             self._conversation_metadata = data.get("conversation_metadata", {})
-            
-            # Load goals
             self.goals = [goal.copy() for goal in data.get("goals", [])]
-            
-            # Curiosity state additions
-            from collections import defaultdict, deque
             metrics = data.get("curiosity_metrics", {})
             self.curiosity_metrics = defaultdict(list)
             for k, v in metrics.items():
                 self.curiosity_metrics[k] = list(v)
             queue = data.get("curiosity_exploration_queue", [])
             self.curiosity_exploration_queue = deque(queue, maxlen=self.config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
-            
-            # Load short term memory
             if 'short_term_memory' in data and hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'from_dict'):
                 self.short_term_memory.from_dict(data['short_term_memory'])
-            
-            # Load mode
             self.mode = data.get("mode", "online")
-            
-            # Load gestation progress
             self.gestation_progress = float(data.get("gestation_progress", 0.0))
-            
-            # Load dreaming progress
             self.dreaming_progress = float(data.get("dreaming_progress", 0.0))
-            
-            # Validate loaded state
             self._validate_state()
-            
         except Exception as e:
             self.log_error(f"Failed to populate state from dict: {str(e)}")
             raise StateError(f"State population failed: {str(e)}")
@@ -1300,7 +1310,7 @@ class StateTracker(StateBase):
                 "recent_history": self.get_state_history(5)
             }
         
-class UserProfileState(StateBase):
+class UserProfileState(StateBase, DictSerializable):
     """Manages user profiles for bonding score calculations with simplicity and elegance."""
     
     def __init__(self, config_manager: ConfigManager, logger: Logger):
@@ -1323,11 +1333,28 @@ class UserProfileState(StateBase):
             "bond_score": 0.5  # Default bond score
         }
 
+    def _get_or_create_profile(self, user_id: str) -> dict:
+        profile = self.profiles.get(user_id)
+        if not profile:
+            profile = self._default_profile()
+            self.profiles[user_id] = profile
+        return profile
+
+    @synchronized("lock")
+    def get_profile_field(self, user_id: str, field: str, default=None):
+        profile = self._get_or_create_profile(user_id)
+        return profile.get(field, default)
+
+    @synchronized("lock")
+    def set_profile_field(self, user_id: str, field: str, value):
+        profile = self._get_or_create_profile(user_id)
+        profile[field] = value
+
     @synchronized("lock")
     def update(self, user_id: str, user_input: str, session_start: float) -> None:
         """Update user profile with new input dynamically."""
         try:
-            profile = self.profiles.setdefault(user_id, self._default_profile())
+            profile = self._get_or_create_profile(user_id)
             for word in re.findall(r'\w+', user_input.lower()):
                 profile["lexicon"][word] += 1
             if len(profile["lexicon"]) > self.max_lexicon:
@@ -1346,10 +1373,7 @@ class UserProfileState(StateBase):
     @synchronized("lock")
     def get(self, user_id: str) -> Dict[str, Any]:
         """Retrieve user profile elegantly."""
-        profile = self.profiles.get(user_id)
-        if not profile:
-            profile = self._default_profile()
-            self.profiles[user_id] = profile
+        profile = self._get_or_create_profile(user_id)
         self.log_event("profile_retrieved", "Profile retrieved", user_id=user_id, level="debug")
         return profile.copy()
 
@@ -1363,39 +1387,35 @@ class UserProfileState(StateBase):
             self.log_error(error_msg=f"Profile reset failed: {str(e)}", user_id=user_id)
             raise StateError(f"Profile reset failed: {str(e)}")
 
+    # Compatibility: keep old methods as wrappers
     @synchronized("lock")
     def get_bond_score(self, user_id: str) -> float:
-        profile = self.profiles.get(user_id)
-        if profile is None:
-            return 0.5
-        return profile["bond_score"]
+        return self.get_profile_field(user_id, "bond_score", 0.5)
 
     @synchronized("lock")
     def set_bond_score(self, user_id: str, value: float) -> None:
-        profile = self.profiles.setdefault(user_id, self._default_profile())
-        profile["bond_score"] = float(value)
+        self.set_profile_field(user_id, "bond_score", float(value))
 
     @synchronized("lock")
     def get_nickname(self, user_id: str) -> str:
-        profile = self.profiles.get(user_id)
-        if profile is None:
-            return ""
-        return profile["nickname"]
+        return self.get_profile_field(user_id, "nickname", "")
 
     @synchronized("lock")
     def set_nickname(self, user_id: str, value: str) -> None:
-        profile = self.profiles.setdefault(user_id, self._default_profile())
-        profile["nickname"] = value
+        self.set_profile_field(user_id, "nickname", value)
 
     @synchronized("lock")
     def get_all_profiles(self) -> Dict[str, Dict[str, Any]]:
         return {uid: p.copy() for uid, p in self.profiles.items()}
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize profiles simply for persistence."""
+        """Serialize profiles simply for persistence using DictSerializable."""
         try:
             with self.lock:
-                result = {"profiles": {}, "version": "2.0"}
+                # Use DictSerializable's logic for the main fields, but handle profiles specially
+                result = super().to_dict()
+                # Custom handling for profiles field
+                result["profiles"] = {}
                 for uid, p in self.profiles.items():
                     try:
                         lexicon = dict(p["lexicon"]) if isinstance(p["lexicon"], (dict, defaultdict)) else {}
@@ -1414,15 +1434,21 @@ class UserProfileState(StateBase):
                     except Exception as profile_exc:
                         self.log_error(error_msg=f"Profile serialization failed for {uid}: {str(profile_exc)}")
                         continue
+                result["version"] = "2.0"
                 return result
         except Exception as e:
             self.log_error(error_msg=f"Profile serialization failed: {str(e)}")
             raise StateError(f"Profile serialization failed: {str(e)}")
 
     def from_dict(self, data: Dict[str, Any]) -> None:
-        """Load profiles dynamically from serialized data."""
+        """Load profiles dynamically from serialized data using DictSerializable."""
         try:
             with self.lock:
+                # Use DictSerializable's logic for the main fields, but handle profiles specially
+                for k, v in data.items():
+                    if k == "profiles":
+                        continue  # handled below
+                    setattr(self, k, v)
                 self.profiles.clear()
                 for uid, p in data.get("profiles", {}).items():
                     try:
