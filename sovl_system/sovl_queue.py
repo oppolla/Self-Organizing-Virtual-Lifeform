@@ -7,6 +7,8 @@ from sovl_logger import Logger
 from sovl_error import ErrorManager
 import json
 import threading
+import os
+import time
 
 """
 Centralized queue system for SOVL component communication.
@@ -18,6 +20,8 @@ MAX_QUEUE_SIZE = 2000  # Maximum number of entries in queue
 WARNING_THRESHOLD = 0.8  # Warn when queue is 80% full
 FALLBACK_PATH = "scribe_fallback.jsonl"
 CRITICAL_EVENT_TYPES = {"checkpoint", "training_complete"}
+FALLBACK_MAX_SIZE_MB = 10
+FALLBACK_ROTATION_COUNT = 3
 
 # Singleton instance
 _global_scribe_queue = None
@@ -108,6 +112,22 @@ class ScribeQueue:
                 if self._logger:
                     self._logger.warning(f"Scribe queue full, writing to fallback for {origin} ({event_type})")
                 try:
+                    # Fallback file size/rotation logic
+                    if os.path.exists(FALLBACK_PATH):
+                        size_mb = os.path.getsize(FALLBACK_PATH) / (1024 * 1024)
+                        if size_mb > FALLBACK_MAX_SIZE_MB:
+                            # Rotate file
+                            timestamp = time.strftime('%Y%m%d_%H%M%S')
+                            rotated = f"{FALLBACK_PATH}.{timestamp}"
+                            os.rename(FALLBACK_PATH, rotated)
+                            if self._logger:
+                                self._logger.warning(f"Rotated fallback file after exceeding {FALLBACK_MAX_SIZE_MB}MB.")
+                            # Prune old rotated files
+                            rotated_files = sorted([
+                                f for f in os.listdir('.') if f.startswith('scribe_fallback.jsonl.')
+                            ])
+                            while len(rotated_files) > FALLBACK_ROTATION_COUNT:
+                                os.remove(rotated_files.pop(0))
                     with self._fallback_lock:
                         with open(FALLBACK_PATH, "a", encoding="utf-8") as f:
                             json.dump(entry.__dict__, f, default=str)
