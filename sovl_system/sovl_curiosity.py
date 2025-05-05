@@ -1,6 +1,6 @@
 import time
 from typing import Any, Dict, List, Optional, Deque, Tuple
-from collections import deque, defaultdict
+from collections import deque, defaultdict, Counter
 import traceback
 import threading
 import math
@@ -260,67 +260,50 @@ class Curiosity:
 
     def compute_curiosity(
         self,
-        base_conf: float,
-        scaf_conf: float,
         state: SOVLState,
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
-        """Compute curiosity score based on confidence and embeddings with confidence awareness."""
+        """Compute curiosity score based on novelty only."""
         try:
-            # Get memory embeddings with memory limits
-            memory_embeddings = self._get_valid_memory_embeddings(state)
-            
-            # Compute base curiosity score
-            ignorance = self._compute_ignorance_score(base_conf, scaf_conf)
+            memory_embeddings = self._get_valid_memory_embeddings()
             novelty = (
                 self._compute_novelty_score(memory_embeddings, query_embedding, device)
                 if memory_embeddings and query_embedding is not None
                 else 0.0
             )
-            
-            # Calculate final score
-            final_score = self.weight_ignorance * ignorance + self.weight_novelty * novelty
-            
-            # Log the complete computation
+            final_score = novelty
             self._log_event(
                 "curiosity_computed",
                 message="Curiosity score computed",
                 level="info",
                 additional_info={
                     "final_score": final_score,
-                    "ignorance": ignorance,
                     "novelty": novelty,
                     "memory_embeddings_count": len(memory_embeddings)
                 }
             )
-            
             return self._clamp_score(final_score)
-            
         except Exception as e:
             self._log_error(f"Curiosity computation failed: {str(e)}")
             return 0.5
 
-    def _compute_ignorance_score(self, base_conf: float, scaf_conf: float) -> float:
-        """Compute ignorance component of curiosity score."""
-        return self._clamp_score(1.0 - (base_conf * 0.5 + scaf_conf * 0.5))
-
-    def _estimate_adaptive_batch_size(self):
-        """Estimate batch size based on available memory (RAM or GPU)."""
-        # Simple heuristic: scale batch size based on available memory
+    def _get_valid_memory_embeddings(self) -> List[torch.Tensor]:
+        """Get valid memory embeddings with memory constraints."""
         try:
-            if self.gpu_manager:
-                gpu_stats = self.gpu_manager.get_gpu_usage()
-                avail = 1.0 - gpu_stats.get("usage_percentage", 0.5)
-            elif self.ram_manager:
-                ram_stats = self.ram_manager.check_memory_health()
-                avail = 1.0 - ram_stats.get("usage_percentage", 0.5)
-            else:
-                avail = 0.5  # fallback
-            batch = int(self.adaptive_batch_min + (self.adaptive_batch_max - self.adaptive_batch_min) * avail)
-            return max(self.adaptive_batch_min, min(self.adaptive_batch_max, batch))
-        except Exception:
-            return self.batch_size
+            valid_embeddings = []
+            batch_size = self.batch_size
+
+            embeddings = state.embeddings
+
+            for i in range(0, len(embeddings), batch_size):
+                batch = embeddings[i:i + batch_size]
+                valid_embeddings.extend(batch)
+
+            return valid_embeddings
+        except Exception as e:
+            self._log_error(f"Failed to get valid memory embeddings: {str(e)}")
+            return []
 
     def _compute_novelty_score(
         self,
@@ -467,52 +450,6 @@ class CuriosityPressure:
                 stack_trace=traceback.format_exc()
             )
             raise
-
-    def update(self, confidence: float) -> float:
-        """Update pressure based on confidence with time-based decay."""
-        try:
-            # Validate confidence input
-            if not isinstance(confidence, (int, float)) or not (0 <= confidence <= 1.0):
-                raise ValueError("Confidence must be a number between 0 and 1")
-                
-            time_delta = time.time() - self.last_update
-            if time_delta < 0:
-                raise ValueError("Invalid time delta detected")
-                
-            self.last_update = time.time()
-            
-            # Apply time-based decay
-            old_pressure = self.current_pressure
-            decay = math.exp(-self.decay_rate * time_delta)
-            self.current_pressure = (self.current_pressure * decay +
-                                   (1 - decay) * (self.base_pressure + (confidence - self.base_pressure) * self.confidence_adjustment))
-            
-            # Ensure pressure stays within bounds
-            self.current_pressure = max(self.min_pressure, min(self.max_pressure, self.current_pressure))
-            
-            # Log pressure update
-            self._log_event(
-                "curiosity_pressure_updated",
-                "Curiosity pressure updated",
-                level="debug",
-                additional_info={
-                    "old_pressure": old_pressure,
-                    "new_pressure": self.current_pressure,
-                    "confidence": confidence,
-                    "time_delta": time_delta,
-                    "decay": decay
-                }
-            )
-            
-            return self.current_pressure
-            
-        except Exception as e:
-            self._log_error(
-                f"Failed to update pressure: {str(e)}",
-                error_type="curiosity_pressure_update_error",
-                stack_trace=traceback.format_exc()
-            )
-            return self.current_pressure
 
     def should_erupt(self, threshold: float) -> bool:
         """Check if pressure exceeds threshold."""
@@ -677,10 +614,6 @@ class CuriosityManager(CuriosityAccessor):
         error_manager: ErrorManager,
         device: torch.device,
         state_manager=None,
-        lifecycle_manager=None,
-        temperament_system=None,
-        confidence_calculator=None,
-        generation_manager=None
     ):
         """Initialize the curiosity manager with necessary components and configs."""
         self.config_manager = config_manager
@@ -688,10 +621,6 @@ class CuriosityManager(CuriosityAccessor):
         self.error_manager = error_manager
         self.device = device
         self.state_manager = state_manager
-        self.lifecycle_manager = lifecycle_manager
-        self.temperament_system = temperament_system
-        self.confidence_calculator = confidence_calculator
-        self.generation_manager = generation_manager
         
         # Thread safety
         self._lock = threading.RLock()
@@ -865,13 +794,13 @@ class CuriosityManager(CuriosityAccessor):
             )
             raise
 
-    def _get_valid_memory_embeddings(self, state: SOVLState) -> List[torch.Tensor]:
+    def _get_valid_memory_embeddings(self) -> List[torch.Tensor]:
         """Get valid memory embeddings with memory constraints."""
         try:
             valid_embeddings = []
             batch_size = self.curiosity.batch_size
 
-            embeddings = state.embeddings
+            embeddings = self.state_manager.get_state().embeddings
 
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i + batch_size]
@@ -963,261 +892,239 @@ class CuriosityManager(CuriosityAccessor):
             })
             return False
             
-    def calculate_curiosity_score(self, prompt: str) -> float:
-        """Calculate curiosity score for a prompt."""
-        try:
-            if not self.state_manager:
-                return 0.0
-                
-            novelty_score = self._calculate_novelty(prompt)
-            ignorance_score = self._calculate_ignorance(prompt)
-            
-            weight_novelty = self.weight_novelty
-            weight_ignorance = self.weight_ignorance
-            
-            return (weight_novelty * novelty_score + 
-                   weight_ignorance * ignorance_score)
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "curiosity_score_calculation",
-                "prompt": prompt
-            })
-            return 0.0
-            
-    def should_explore(self, prompt: str = None) -> bool:
-        """
-        Determine if the system should explore based on curiosity score.
-        
-        Args:
-            prompt: Optional prompt to calculate curiosity for
-            
-        Returns:
-            bool: True if system should explore
-        """
-        with self._lock:
-            try:
-                # Get curiosity score, either for prompt or global
-                score = self.calculate_curiosity_score(prompt) if prompt else self._curiosity_score
-                
-                # Check if above threshold and within rate limits
-                explore = (
-                    score > self.curiosity_threshold and 
-                    self._exploration_count < self.max_exploration_rate
-                )
-                
-                if explore:
-                    self._exploration_count += 1
-                
-                self._record_event(
-                    event_type="curiosity_explore_decision",
-                    message=f"Exploration decision: {explore}",
-                    level="info",
-                    additional_info={
-                        "score": score,
-                        "threshold": self.curiosity_threshold,
-                        "exploration_count": self._exploration_count
-                    }
-                )
-                
-                return explore
-            except Exception as e:
-                self._record_error(
-                    message=f"Failed to determine exploration status: {str(e)}",
-                    error_type="curiosity_explore_error",
-                    stack_trace=traceback.format_exc()
-                )
-                return False
-            
-    def queue_exploration(self, prompt: str) -> bool:
-        """Queue a prompt for exploration atomically in SOVLState."""
-        try:
-            def update_fn(state):
-                if not hasattr(state, "curiosity_exploration_queue"):
-                    from collections import deque
-                    state.curiosity_exploration_queue = deque(maxlen=self._config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
-                state.curiosity_exploration_queue.append({
-                    "prompt": prompt,
-                    "timestamp": time.time(),
-                    "score": self.calculate_curiosity_score(prompt)
-                })
-            self.state_manager.update_state_atomic(update_fn)
-            return True
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "exploration_queue",
-                "prompt": prompt
-            })
-            return False
-            
-    def get_next_exploration(self) -> Optional[Dict]:
-        """Get next prompt for exploration atomically from SOVLState."""
-        try:
-            state = self.state_manager.get_state()
-            if not hasattr(state, "curiosity_exploration_queue") or not state.curiosity_exploration_queue:
-                return None
-            timeout = self.config_manager.get("curiosity_question_timeout")
-            current_time = time.time()
-            queue = state.curiosity_exploration_queue
-            while queue:
-                item = queue[0]
-                if current_time - item["timestamp"] > timeout:
-                    def update_fn(s):
-                        s.curiosity_exploration_queue.popleft()
-                    self.state_manager.update_state_atomic(update_fn)
-                else:
-                    return item
-            return None
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "get_next_exploration"
-            })
-            return None
-            
     def _calculate_novelty(self, prompt: str) -> float:
-        """Calculate novelty score for a prompt."""
-        try:
-            if not self.state_manager:
-                return 0.0
-                
-            seen_prompts = self.state_manager.get_seen_prompts()
-            if not seen_prompts:
-                return 1.0
-                
-            similarities = [
-                cosine_similarity(
-                    self.state_manager.get_prompt_embedding(prompt),
-                    self.state_manager.get_prompt_embedding(seen)
-                )
-                for seen in seen_prompts
-            ]
-            
-            return 1.0 - max(similarities)
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "novelty_calculation",
-                "prompt": prompt
-            })
-            return 0.0
-            
+        """Calculate novelty score for a prompt (1.0 = most novel, 0.0 = not novel)."""
+        seen_prompts = self.state_manager.get_seen_prompts()
+        if not seen_prompts:
+            return 1.0
+        similarities = [
+            cosine_similarity(
+                self.state_manager.get_prompt_embedding(prompt),
+                self.state_manager.get_prompt_embedding(seen)
+            )
+            for seen in seen_prompts
+        ]
+        return 1.0 - max(similarities) if similarities else 1.0
+
+    def _generate_and_score_answer(self, prompt: str):
+        """Generate an answer and return a (possibly heuristic) quality score."""
+        answer = self.generation_manager.generate_text(prompt, num_return_sequences=1)[0]
+        # Heuristic scoring
+        if not answer or answer.strip() == "":
+            return answer, 0.0
+        if "I don't know" in answer or "unsure" in answer:
+            return answer, 0.2
+        if len(answer.split()) < 5:
+            return answer, 0.4
+        return answer, 0.8
+
     def _calculate_ignorance(self, prompt: str) -> float:
-        """Calculate ignorance score for a prompt."""
-        try:
-            if not self.state_manager:
-                return 0.0
-                
-            confidence = self.state_manager.get_confidence()
-            if confidence is None:
-                return 1.0
-                
-            decay_rate = self.config_manager.get("curiosity_decay_rate")
-            return math.exp(-decay_rate * confidence)
-        except Exception as e:
-            self.error_manager.handle_curiosity_error(e, {
-                "operation": "ignorance_calculation",
-                "prompt": prompt
-            })
-            return 0.0
-
-    def generate_curiosity_question(
-        self,
-        context: str = None,
-        spontaneous: bool = False,
-        generation_params: Optional[dict] = None
-    ) -> Optional[str]:
-        """Generate a curiosity-driven question using GenerationManager and capture scribe event."""
-        max_retries = 3
-        question = None
-        last_exception = None
-
-        self._record_event(
-            "curiosity_question_generation_started",
-            "Starting curiosity question generation",
-            level="info",
+        """Calculate ignorance as 1.0 - answer quality score."""
+        answer, quality_score = self._generate_and_score_answer(prompt)
+        quality_score = max(0.0, min(1.0, quality_score))
+        ignorance = 1.0 - quality_score
+        self.logger.log_event(
+            event_type="ignorance_calculated",
+            message="Ignorance calculated for prompt",
             additional_info={
-                "context": context,
-                "spontaneous": spontaneous
+                "prompt": prompt,
+                "answer": answer,
+                "quality_score": quality_score,
+                "ignorance": ignorance
             }
         )
+        return ignorance
 
-        # Use GenerationManager for question generation
-        if not hasattr(self, 'generation_manager') or self.generation_manager is None:
-            self._record_error("CuriosityManager requires a GenerationManager instance for question generation.")
-            return None
-        if context is None:
-            self._record_error("A context prompt must be provided for curiosity question generation.")
-            return None
-        if generation_params is None:
-            generation_params = {}
+    def calculate_curiosity_score(self, prompt: str) -> float:
+        novelty_score = self._calculate_novelty(prompt)
+        ignorance_score = self._calculate_ignorance(prompt)
+        curiosity_score = 0.5 * novelty_score + 0.5 * ignorance_score
+        self.logger.log_event(
+            event_type="curiosity_computed",
+            message="Curiosity score computed",
+            additional_info={
+                "prompt": prompt,
+                "curiosity_score": curiosity_score,
+                "novelty": novelty_score,
+                "ignorance": ignorance_score
+            }
+        )
+        return curiosity_score
 
-        for attempt in range(max_retries):
-            try:
-                result = self.generation_manager.generate_text(
-                    prompt=context,
-                    num_return_sequences=1,
-                    **generation_params
-                )
-                question = result[0] if result and isinstance(result, list) else None
-                if question:
-                    break
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    self.logger.log_warning(
-                        f"Curiosity question generation attempt {attempt + 1} failed: {e}"
-                    )
-                    time.sleep(1)
-                    continue
-                self.logger.log_error(
-                    f"Question generation failed after {max_retries} attempts: {e}"
-                )
-                question = None
-
-        # Fallback question if all attempts fail
-        if not question:
-            question = "What is an interesting aspect of this topic?"
-            self.logger.log_warning("Using fallback question due to generation failure")
-
-        # Only capture scribe event for successful (non-fallback) generations
-        if question and (last_exception is None or question != "What is an interesting aspect of this topic?"):
-            from sovl_queue import capture_scribe_event
-            capture_scribe_event(
-                origin="sovl_curiosity",
-                event_type="curiosity_question",
-                event_data={
-                    "prompt": context,
-                    "question": question,
-                    "spontaneous": spontaneous,
-                    "generation_params": generation_params
-                },
-                source_metadata={
-                    "module": "CuriosityManager",
-                    "session_id": getattr(self, 'session_id', None)
-                },
-                session_id=getattr(self, 'session_id', None)
-            )
-
-        if question and (last_exception is None or question != "What is an interesting aspect of this topic?"):
-            self._record_event(
-                "curiosity_question",
-                "Successfully generated curiosity question",
-                level="info",
-                additional_info={
-                    "question": question,
-                    "context": context,
-                    "spontaneous": spontaneous
-                }
-            )
+    def _summarize_knowns(self, prompt: str) -> str:
+        """Summarize what the system knows about the prompt."""
+        if not isinstance(prompt, str) or not prompt.strip():
+            return "Prompt is invalid or empty."
+        seen_prompts = self.state_manager.get_seen_prompts()
+        if not seen_prompts:
+            return "Prompt is new to the system."
+        # Use Counter for large lists
+        if len(seen_prompts) > 1000:
+            prompt_counts = Counter(seen_prompts)
+            count = prompt_counts.get(prompt, 0)
         else:
-            self._record_event(
-                "curiosity_question_failed",
-                "Failed to generate curiosity question, using fallback",
-                level="warning",
-                additional_info={
-                    "context": context,
-                    "spontaneous": spontaneous
-                }
+            count = seen_prompts.count(prompt)
+        if count > 0:
+            return f"Prompt has been seen {count} times."
+        return "Prompt is new to the system."
+
+    def _summarize_unknowns(self, prompt: str) -> str:
+        """Summarize what the system is ignorant or uncertain about."""
+        if not isinstance(prompt, str) or not prompt.strip():
+            return "Prompt is invalid or empty."
+        try:
+            ignorance = self._calculate_ignorance(prompt)
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Ignorance calculation failed: {e}")
+            return "System could not assess ignorance for this prompt."
+        if ignorance > 0.8:
+            return "System is highly ignorant about this prompt."
+        elif ignorance > 0.5:
+            return "System is somewhat ignorant about this prompt."
+        else:
+            return "System has some knowledge about this prompt."
+
+    def _is_good_question(self, question: str, prompt: str) -> bool:
+        """Heuristic to check if a generated question is specific, relevant, and not generic."""
+        if not question or len(question) < 5:
+            return False
+        if question.lower() in ["what is this?", "i don't know.", "unsure"]:
+            return False
+        if prompt.lower() in question.lower():
+            return True
+        return True
+
+    # Curiosity question system prompt template (for future development)
+    curiosity_prompt_template = (
+        "You are an inquisitive digital mind, always seeking to learn and understand more. "
+        "Given the following context and what is known and unknown, ask a single, specific question that would help you or others learn something new.\n"
+        "Context:\n"
+        "{context}\n"
+        "Knowns:\n"
+        "{knowns}\n"
+        "Unknowns:\n"
+        "{unknowns}\n"
+        "Essential qualities:\n"
+        "   - The question must be specific, relevant, and not generic.\n"
+        "   - It should be naturally curious, as if you genuinely want to know the answer.\n"
+        "   - The question should be open-ended or thought-provoking, not answerable by yes/no.\n"
+        "   - Avoid repeating the context verbatim; synthesize and focus on what is truly unknown.\n"
+        "Key constraints:\n"
+        "   - Do not mention being an AI, computer, or digital entity.\n"
+        "   - Do not ask about yourself or your own capabilities.\n"
+        "   - Output only the question, with no preamble or explanation.\n"
+        "   - If you understand, reply with only the curiosity question."
+    )
+
+    def summarize_context(self, context, max_sentences=2):
+        """Return the last N sentences from the context string."""
+        if not isinstance(context, str) or not context.strip():
+            return "No context provided."
+        sentences = [s.strip() for s in context.split('.') if s.strip()]
+        summary = '. '.join(sentences[-max_sentences:]) + ('.' if sentences else '')
+        return summary
+
+    def build_curiosity_prompt(self, context, knowns, unknowns):
+        context_summary = self.summarize_context(context)
+        knowns_summary = '; '.join(knowns[:3])
+        unknowns_summary = '; '.join(unknowns[:3])
+        prompt = self.curiosity_prompt_template.format(
+            context=context_summary,
+            knowns=knowns_summary,
+            unknowns=unknowns_summary
+        )
+        if len(prompt) > 2000:
+            context_summary = self.summarize_context(context, max_sentences=1)
+            prompt = self.curiosity_prompt_template.format(
+                context=context_summary,
+                knowns=knowns_summary,
+                unknowns=unknowns_summary
             )
-        return question
+        return prompt
+
+    def generate_curiosity_question(self, prompt: str, context: str = None) -> str:
+        """Generate a high-quality curiosity question based on the prompt/context."""
+        if not isinstance(prompt, str) or not prompt.strip():
+            if self.logger:
+                self.logger.log_error("Prompt is invalid or empty.")
+            return None
+        curiosity_score = self.calculate_curiosity_score(prompt)
+        if curiosity_score < getattr(self, 'curiosity_threshold', 0.5):
+            return None  # Not curious enough to ask
+        knowns = [self._summarize_knowns(prompt)]
+        unknowns = [self._summarize_unknowns(prompt)]
+        meta_prompt = self.build_curiosity_prompt(context or prompt, knowns, unknowns)
+        question = None
+        try:
+            if not hasattr(self, 'generation_manager') or self.generation_manager is None:
+                if self.logger:
+                    self.logger.log_error("generation_manager is not set.")
+                return None
+            if not hasattr(self.generation_manager, 'generate_text'):
+                if self.logger:
+                    self.logger.log_error("generation_manager has no generate_text method.")
+                return None
+            output = self.generation_manager.generate_text(meta_prompt, num_return_sequences=1)
+            if not output or not isinstance(output, list) or not output[0]:
+                if self.logger:
+                    self.logger.log_error("generate_text returned no output.")
+                return None
+            question = output[0]
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"generate_text failed: {e}")
+            return None
+        if self._is_good_question(question, prompt):
+            try:
+                if self.logger:
+                    self.logger.log_event(
+                        event_type="curiosity_question_generated",
+                        message="Curiosity question generated",
+                        additional_info={
+                            "prompt": prompt,
+                            "context": context,
+                            "question": question,
+                            "curiosity_score": curiosity_score
+                        }
+                    )
+                try:
+                    from sovl_queue import capture_scribe_event
+                    capture_scribe_event(
+                        origin="sovl_curiosity",
+                        event_type="curiosity_question_generated",
+                        event_data={
+                            "prompt": prompt,
+                            "context": context,
+                            "question": question,
+                            "curiosity_score": curiosity_score
+                        },
+                        source_metadata={
+                            "module": "CuriosityManager",
+                            "session_id": getattr(self, 'session_id', None)
+                        },
+                        session_id=getattr(self, 'session_id', None)
+                    )
+                except Exception as e:
+                    if self.logger:
+                        self.logger.log_error(f"capture_scribe_event failed: {e}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(f"Logging failed: {e}")
+            return question
+        else:
+            if self.logger:
+                self.logger.log_event(
+                    event_type="curiosity_question_rejected",
+                    message="Generated question did not meet quality standards",
+                    additional_info={
+                        "prompt": prompt,
+                        "context": context,
+                        "question": question,
+                        "curiosity_score": curiosity_score
+                    }
+                )
+            return None
 
     def get_curiosity_score(self, prompt: str = None) -> float:
         """
