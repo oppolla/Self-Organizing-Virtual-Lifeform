@@ -499,36 +499,6 @@ class CuriosityPressure:
             additional_info=kwargs.get("additional_info", {})
         )
 
-class CuriosityCallbacks:
-    """Handles curiosity-related callbacks."""
-    
-    def __init__(self, logger: Optional[Any] = None):
-        self.callbacks: Dict[str, List[callable]] = {}
-        self.logger = logger
-
-    def register_callback(self, event: str, callback: callable) -> None:
-        """Register a callback for an event."""
-        self.callbacks.setdefault(event, []).append(callback)
-
-    def trigger_callback(self, event: str, **kwargs) -> None:
-        """Trigger callbacks for an event."""
-        for callback in self.callbacks.get(event, []):
-            try:
-                callback(**kwargs)
-            except Exception as e:
-                self._log_error(f"Callback {event} failed: {str(e)}")
-
-    def _log_error(self, message: str, **kwargs) -> None:
-        """Log error with standardized format."""
-        if self.logger:
-            self.logger.log_error(
-                error_msg=message,
-                error_type="curiosity_error",
-                stack_trace=traceback.format_exc(),
-                **kwargs
-            )
-
-
 class CuriosityError(Exception):
     """Custom error for curiosity-related failures."""
     pass
@@ -617,11 +587,6 @@ class CuriosityManager(CuriosityAccessor):
             config_manager=self.config_manager,
             logger=self.logger
         )
-        
-        self.callbacks = CuriosityCallbacks(logger=self.logger)
-        
-        # Register default callbacks
-        self._register_default_callbacks()
         
         # Initialize metrics
         self._curiosity_score = 0.0
@@ -1186,40 +1151,35 @@ class CuriosityManager(CuriosityAccessor):
         self,
         context: str = None,
         spontaneous: bool = False,
-        generation_params: Optional[dict] = None
+        generation_params: Optional[dict] = None,
+        num_candidates: int = 3
     ) -> Optional[str]:
         """
-        Only ask a curiosity question if a curiosity eruption occurs.
+        On curiosity eruption, generate a batch of candidate curiosity questions, select the best to ask the user, and log all.
         Output is handled internally and is indistinguishable from a regular response.
         """
         # Check for curiosity eruption
         if not self.curiosity_pressure.check_eruption(self.pressure_threshold, self.pressure_drop):
             return None  # No eruption, do not ask
 
-        # Generate the question
-        question = self.generate_curiosity_question(
-            context=context,
-            spontaneous=spontaneous,
-            generation_params=generation_params
-        )
-        if not question:
+        # Generate candidate questions
+        candidates = self.generate_candidate_curiosity_questions(context, num_candidates)
+        if not candidates:
             return None
 
-        self.output_curiosity_utterance(question)
-        self.capture_curiosity_utterance(question, context, spontaneous)
-        return question
+        # Score and select the best question
+        best_question = self.select_best_curiosity_question(candidates, context)
+        if not best_question:
+            return None
 
-    def output_curiosity_utterance(self, text: str) -> None:
-        """Outputs the curiosity utterance using the unified output function (no labels)."""
-        output_response(text)
-
-    def capture_curiosity_utterance(self, text: str, context: str, spontaneous: bool) -> None:
-        """Capture the curiosity utterance for memory/training."""
+        # Output the selected question
+        self.output_curiosity_utterance(best_question)
+        # Log the asked question as 'curiosity_question_user'
         capture_scribe_event(
             origin="sovl_curiosity",
-            event_type="curiosity_utterance",
+            event_type="curiosity_question_user",
             event_data={
-                "full_text": text,
+                "question": best_question,
                 "context": context,
                 "spontaneous": spontaneous,
                 "timestamp_unix": time.time(),
@@ -1231,3 +1191,60 @@ class CuriosityManager(CuriosityAccessor):
             },
             session_id=getattr(self, 'session_id', None)
         )
+        # Log each unasked question as 'curiosity_question'
+        for q in candidates:
+            if q != best_question:
+                capture_scribe_event(
+                    origin="sovl_curiosity",
+                    event_type="curiosity_question",
+                    event_data={
+                        "question": q,
+                        "context": context,
+                        "spontaneous": spontaneous,
+                        "timestamp_unix": time.time(),
+                        "session_id": getattr(self, 'session_id', None)
+                    },
+                    source_metadata={
+                        "module": "CuriosityManager",
+                        "session_id": getattr(self, 'session_id', None)
+                    },
+                    session_id=getattr(self, 'session_id', None)
+                )
+        return best_question
+
+    def generate_candidate_curiosity_questions(self, context: str, num_candidates: int = 5) -> list:
+        """Generate a batch of candidate curiosity questions using the LLM/generation_manager."""
+        prompt = context or "What should I be curious about?"
+        knowns = [self._summarize_knowns(prompt)]
+        unknowns = [self._summarize_unknowns(prompt)]
+        meta_prompt = self.build_curiosity_prompt(context or prompt, knowns, unknowns)
+        try:
+            if not hasattr(self, 'generation_manager') or self.generation_manager is None:
+                if self.logger:
+                    self.logger.log_error("generation_manager is not set.")
+                return []
+            if not hasattr(self.generation_manager, 'generate_text'):
+                if self.logger:
+                    self.logger.log_error("generation_manager has no generate_text method.")
+                return []
+            outputs = self.generation_manager.generate_text(meta_prompt, num_return_sequences=num_candidates)
+            # Filter and clean
+            candidates = [q.strip() for q in outputs if q and self._is_good_question(q, prompt)]
+            return candidates
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"generate_text failed: {e}")
+            return []
+
+    def select_best_curiosity_question(self, candidates: list, context: str = None) -> Optional[str]:
+        """Select the best curiosity question from candidates (by curiosity score, novelty, etc.)."""
+        if not candidates:
+            return None
+        # Score by curiosity score (novelty + ignorance)
+        scored = [(q, self.calculate_curiosity_score(q)) for q in candidates]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[0][0] if scored else None
+
+    def output_curiosity_utterance(self, text: str) -> None:
+        """Outputs the curiosity utterance using the unified output function (no labels)."""
+        output_response(text)
