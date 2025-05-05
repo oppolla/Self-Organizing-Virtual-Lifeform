@@ -6,8 +6,6 @@ from sovl_config import ConfigManager
 from sovl_state import SOVLState, StateManager, StateTracker
 from sovl_logger import Logger
 from sovl_events import EventDispatcher
-from sovl_trainer import TrainingCycleManager
-from sovl_confidence import ConfidenceCalculator
 import math
 from sovl_utils import synchronized, safe_divide
 from sovl_error import ErrorManager, ConfigurationError
@@ -46,11 +44,9 @@ class TemperamentConfig:
                 "temperament_config.temp_smoothing_factor": (0.0, 1.0),
                 "temperament_config.temperament_decay_rate": (0.0, 1.0),
                 "temperament_config.temperament_history_maxlen": (3, 10),
-                "temperament_config.confidence_history_maxlen": (3, 10),
                 "temperament_config.temperament_pressure_threshold": (0.0, 1.0),
                 "temperament_config.temperament_max_pressure": (0.0, 1.0),
                 "temperament_config.temperament_min_pressure": (0.0, 1.0),
-                "temperament_config.temperament_confidence_adjustment": (0.0, 1.0),
                 "temperament_config.temperament_pressure_drop": (0.0, 1.0),
             }
             
@@ -126,20 +122,26 @@ class TemperamentConfig:
             raise
 
 class TemperamentSystem:
-    """Manages the temperament state and updates."""
+    """Manages the temperament state and updates. Uses ErrorManager for structured error handling."""
     # NOTE: All mutations to SOVLState must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
-    def __init__(self, state_manager: StateManager, config_manager: ConfigManager, lifecycle_manager: Optional[Any] = None):
+    def __init__(self, state_manager: StateManager, config_manager: ConfigManager, error_manager: ErrorManager, lifecycle_manager: Optional[Any] = None):
         """
         Initialize temperament system.
+        Args:
+            state_manager: StateManager instance
+            config_manager: ConfigManager instance
+            error_manager: ErrorManager instance (required)
+            lifecycle_manager: Optional lifecycle manager
         """
         self.state_manager = state_manager
         self.config_manager = config_manager
+        self.error_manager = error_manager
         self.temperament_config = TemperamentConfig(config_manager)
         self.logger = config_manager.logger
         self.lifecycle_manager = lifecycle_manager
         self._lifecycle_stage = "initialization"
         self._last_lifecycle_update = time.time()
-        self.pressure = TemperamentPressure(config_manager)
+        self.pressure = TemperamentPressure(config_manager, error_manager)
         if self.lifecycle_manager:
             self.logger.record_event(
                 event_type="temperament_lifecycle_integration_initialized",
@@ -151,9 +153,10 @@ class TemperamentSystem:
                 }
             )
         
-    def update(self, new_score: float, confidence: float, lifecycle_stage: Optional[str] = None) -> None:
+    def update(self, new_score: float, lifecycle_stage: Optional[str] = None) -> None:
         """
         Update the temperament system with new values, using pressure-based adjustments.
+        Uses ErrorManager for structured error handling.
         """
         def update_fn(state):
             try:
@@ -161,17 +164,6 @@ class TemperamentSystem:
                     self.logger.record_event(
                         event_type="temperament_update_invalid_score",
                         message=f"Invalid temperament score: {new_score}. Ignoring update.",
-                        level="warning",
-                        additional_info={
-                            "lifecycle_stage": lifecycle_stage,
-                            "current_score": state.current_temperament
-                        }
-                    )
-                    return state
-                if not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
-                    self.logger.record_event(
-                        event_type="temperament_update_invalid_confidence",
-                        message=f"Invalid confidence: {confidence}. Ignoring update.",
                         level="warning",
                         additional_info={
                             "lifecycle_stage": lifecycle_stage,
@@ -219,7 +211,6 @@ class TemperamentSystem:
                         level="info",
                         additional_info={
                             "adjusted_score": adjusted_score,
-                            "confidence": confidence,
                             "pressure_before_drop": self.pressure.current_pressure,
                             "eager_threshold": eager_threshold,
                             "pressure_drop_amount": pressure_drop,
@@ -237,7 +228,6 @@ class TemperamentSystem:
                         "previous_score": previous_score,
                         "new_score": state.current_temperament,
                         "input_score": new_score,
-                        "confidence": confidence,
                         "current_pressure": self.pressure.current_pressure,
                         "lifecycle_stage": lifecycle_stage_local,
                         "conversation_id": getattr(state, 'conversation_id', None),
@@ -256,6 +246,15 @@ class TemperamentSystem:
                         "stack_trace": traceback.format_exc(),
                         "lifecycle_stage": lifecycle_stage,
                         "current_score": getattr(state, 'current_temperament', None)
+                    }
+                )
+                self.error_manager.record_error(
+                    error=e,
+                    error_type="temperament_update_error",
+                    context={
+                        "lifecycle_stage": lifecycle_stage,
+                        "current_score": getattr(state, 'current_temperament', None),
+                        "stack_trace": traceback.format_exc()
                     }
                 )
                 raise
@@ -403,13 +402,15 @@ class TemperamentAdjuster:
         config_handler: ConfigManager,
         state_tracker: StateTracker,
         logger: Logger,
-        event_dispatcher: EventDispatcher
+        event_dispatcher: EventDispatcher,
+        error_manager: ErrorManager
     ):
         """Initialize temperament adjuster with required dependencies."""
         self.config_handler = config_handler
         self.state_tracker = state_tracker
         self.logger = logger
         self.event_dispatcher = event_dispatcher
+        self.error_manager = error_manager
         self.temperament_system = None
         self._last_parameter_hash = None
         self._last_state_hash = None
@@ -612,7 +613,8 @@ class TemperamentAdjuster:
             # Create new temperament system
             self.temperament_system = TemperamentSystem(
                 state_manager=self.state_tracker,
-                config_manager=self.config_handler.config_manager
+                config_manager=self.config_handler.config_manager,
+                error_manager=self.error_manager
             )
             
             # Update parameter hash
@@ -693,15 +695,18 @@ class TemperamentPressure:
     
     def __init__(
         self,
-        config_manager: ConfigManager
+        config_manager: ConfigManager,
+        error_manager: ErrorManager
     ):
         """
         Initialize temperament pressure monitoring, validating config values.
         
         Args:
             config_manager: Configuration manager instance
+            error_manager: ErrorManager instance (required)
         """
         self.config_manager = config_manager
+        self.error_manager = error_manager
         self.logger = config_manager.logger
         
         # Get configuration values with defaults and validation
@@ -970,17 +975,19 @@ class TemperamentManager:
         config_manager: ConfigManager, 
         logger: Logger, 
         state: SOVLState, 
-        generation_manager: Any # Use Any to avoid potential circular import
+        generation_manager: Any, # Use Any to avoid potential circular import
+        error_manager: ErrorManager
     ):
         """Initialize the TemperamentManager."""
         self.config_manager = config_manager
         self.logger = logger
         self.state = state
         self.generation_manager = generation_manager
+        self.error_manager = error_manager
         
         # Initialize the pressure component using its own config
         # Assumes TemperamentPressure is defined above in this file
-        self.pressure = TemperamentPressure(config_manager=self.config_manager) 
+        self.pressure = TemperamentPressure(config_manager=self.config_manager, error_manager=self.error_manager) 
 
         self._log_event("temperament_manager_initialized", "Temperament Manager initialized.")
 
