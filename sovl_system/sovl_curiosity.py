@@ -12,7 +12,6 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_queue import capture_scribe_event
 from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_interfaces import CuriosityAccessor
 import json
 from dataclasses import dataclass
 from sovl_utils import cosine_similarity
@@ -548,9 +547,8 @@ class CuriositySystem:
                 "gpu_health": {"status": "error"}
             }
 
-class CuriosityManager(CuriosityAccessor):
+class CuriosityManager():
     """
-    Manages the system's curiosity component, implementing the CuriosityAccessor interface.
     Handles calculation of curiosity scores, memory embeddings, and exploration decisions.
     """
     
