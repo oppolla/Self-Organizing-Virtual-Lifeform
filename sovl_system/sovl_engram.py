@@ -7,10 +7,7 @@ from sovl_utils import check_adaptation_dependencies
 from sovl_scaffold import CrossAttentionInjector
 
 """
-sovl_engram.py
 LoRA Adapter and Adapter Management for SOVL System
-
-This module provides utilities for integrating, configuring, saving, and loading LoRA (Low-Rank Adapter) modules for transformer-based models in the SOVL system.
 """
 
 # Optional: Only import PEFT if available
