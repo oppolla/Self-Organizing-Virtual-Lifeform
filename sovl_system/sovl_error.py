@@ -12,6 +12,7 @@ from datetime import datetime
 from sovl_memory import GPUMemoryManager
 from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
 from functools import wraps
+from sovl_utils import safe_append_to_file
 
 class ConfigurationError(Exception):
     """Raised when there is an error related to configuration."""
@@ -543,6 +544,14 @@ class ErrorManager(IErrorHandler):
             except Exception as log_exc:
                 print(f"[ERROR] Failed to log model loading recovery failure: {log_exc}")
                 traceback.print_exc()
+
+    @staticmethod
+    def fallback_log_error(error_msg: str, stack_trace: str = None):
+        """Fallback error logger for critical errors when no logger or error handler is available."""
+        msg = f"[{time.ctime()}] {error_msg}\n"
+        if stack_trace:
+            msg += f"{stack_trace}\n"
+        safe_append_to_file("sovl_initialization_error.log", msg)
 
 class ScaffoldError(Exception):
     """
