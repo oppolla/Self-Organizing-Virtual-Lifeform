@@ -11,7 +11,6 @@ from sovl_utils import NumericalGuard, safe_divide, synchronized
 from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_state import SOVLState, StateManager
-from sovl_records import ConfidenceHistory
 from transformers import PreTrainedTokenizer, LogitsProcessor
 from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
@@ -295,7 +294,7 @@ class SOVLProcessor:
         self._lock = Lock()
         self._validator = TensorValidator(self.device, self.logger)
         self.confidence_calculator = ConfidenceCalculator(self.config_manager, self.logger)
-        self._confidence_history = ConfidenceHistory(self.config_manager, self.logger)
+        self._confidence_history = deque(maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 10))
         
         # Initialize message queue for curiosity parameters
         self._curiosity_queue = deque(maxlen=100)
@@ -361,7 +360,7 @@ class SOVLProcessor:
             self.confidence_calculator = ConfidenceCalculator(self.config_manager, self.logger)
             
             # Clear confidence history
-            self._confidence_history.clear_history()
+            self._confidence_history.clear()
             
             self.logger.record_event(
                 "confidence_calc_recovery",
@@ -536,13 +535,13 @@ class SOVLProcessor:
             )
             return self.MIN_CONFIDENCE
 
-    def get_confidence_history(self) -> Deque[float]:
+    def get_confidence_history(self) -> List[float]:
         """Get the confidence history."""
-        return self._confidence_history.get_confidence_history()
+        return list(self._confidence_history)
 
     def clear_confidence_history(self) -> None:
         """Clear the confidence history."""
-        self._confidence_history.clear_history()
+        self._confidence_history.clear()
 
     def get_state(self) -> Dict[str, Any]:
         """Export processor state."""
@@ -553,7 +552,7 @@ class SOVLProcessor:
                     "scaffold_unk_id": self.scaffold_unk_id,
                     "token_map": self.token_map
                 },
-                "confidence_history": self._confidence_history.to_dict()
+                "confidence_history": list(self._confidence_history)
             }
 
     def load_state(self, state: Dict[str, Any]) -> None:
@@ -574,9 +573,7 @@ class SOVLProcessor:
                 if not isinstance(self.token_map, dict):
                     raise TypeError("Expected 'token_map' within 'token_mapping' to be a dict")
             if "confidence_history" in state:
-                if not isinstance(state["confidence_history"], dict):
-                    raise TypeError("Expected 'confidence_history' to be a dict in loaded state")
-                self._confidence_history.from_dict(state["confidence_history"])
+                self._confidence_history = deque(state["confidence_history"], maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 10))
             return current_state
         try:
             if self.state_manager:
@@ -610,7 +607,7 @@ class SOVLProcessor:
             self.config = ProcessorConfig.from_config_manager(self.config_manager)
             self.scaffold_unk_id = 0
             self.token_map = {}
-            self._confidence_history.clear_history()
+            self._confidence_history.clear()
             self._validator = TensorValidator(self.device, self.logger)
             self.confidence_calculator = ConfidenceCalculator(self.config_manager, self.logger)
             self._curiosity_queue.clear()
