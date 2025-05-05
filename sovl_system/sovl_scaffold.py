@@ -12,16 +12,14 @@ from sovl_config import ConfigManager
 from sovl_error import ErrorManager, ScaffoldError
 from sovl_io import ConfigurationError
 from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_confidence import ConfidenceManager
-import contextlib
 import functools
 from sovl_engram import LoraAdapterManager
-import difflib
 import copy
 import threading
 from sovl_utils import check_model_health as util_check_model_health, calculate_token_map_confidence
 import queue
 import numpy as np
+
 # Centralized handler for scaffold errors and recovery.
 class ScaffoldErrorManager:
     """Centralized error handling for scaffold operations."""
@@ -96,7 +94,7 @@ def scaffold_operation(operation_name: str):
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
     
-    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any, config: Optional[Dict[str, Any]] = None, base_model: Any = None, scaffold_model: Any = None, mapping_strategy: str = None):
+    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any, config: Optional[Dict[str, Any]] = None, base_model: Any = None, scaffold_model: Any = None, mapping_strategy: str = None, ram_manager: Optional[RAMManager] = None, gpu_manager: Optional[GPUMemoryManager] = None, provider: Optional[Any] = None):
         self.base_tokenizer = base_tokenizer
         self.scaffold_tokenizer = scaffold_tokenizer
         self.logger = logger
@@ -105,16 +103,12 @@ class ScaffoldTokenMapper:
         self.mapping_strategy = mapping_strategy  # User-selectable, but defaults to None for now
         self.max_tokens_per_mapping = config.get('max_tokens_per_mapping', 3) if config else 3
         self.mapping_similarity_threshold = config.get('mapping_similarity_threshold', 0.7) if config else 0.7
-        self.allow_bidirectional_mapping = config.get('allow_bidirectional_mapping', False) if config else False
-        self.fallback_strategy = config.get('fallback_strategy', 'split') if config else 'split'
-        self.normalization_level = config.get('normalization_level', 'basic') if config else 'basic'
-        self.min_semantic_similarity = config.get('min_semantic_similarity', 0.5) if config else 0.5
-        self.max_meaning_drift = config.get('max_meaning_drift', 0.3) if config else 0.3
-        self.enable_periodic_validation = config.get('enable_periodic_validation', True) if config else True
         self.conflict_resolution_strategy = config.get('conflict_resolution_strategy', 'keep_highest_conf') if config else 'keep_highest_conf'
         self.token_map = defaultdict(lambda: {'ids': [scaffold_tokenizer.unk_token_id], 'weight': 1.0})
         self.embedding_available = self._check_embedding_availability()
         self.config = config or {}
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
         # Drift config
         self.max_drift = self.config.get('max_drift', 0.9)
         self.cosine_weight = self.config.get('cosine_weight', 0.5)
@@ -142,6 +136,44 @@ class ScaffoldTokenMapper:
         self._mapping_errors = 0
         self._mapping_latencies = deque(maxlen=500)
         self._metrics_lock = threading.Lock()
+        # Memory usage logging
+        if self.ram_manager:
+            self.logger.record_event(
+                event_type="ram_memory_health",
+                message="RAM health at init",
+                level="info",
+                additional_info=self.ram_manager.check_memory_health() if hasattr(self.ram_manager, 'check_memory_health') else {}
+            )
+        if self.gpu_manager:
+            self.logger.record_event(
+                event_type="gpu_memory_health",
+                message="GPU health at init",
+                level="info",
+                additional_info=self.gpu_manager.get_gpu_usage() if hasattr(self.gpu_manager, 'get_gpu_usage') else {}
+            )
+        
+        # Fallback strategy pipeline
+        fallback_order = (config.get('token_mapping_fallback_order') if config else None) or [
+            'levenshtein', 'subword', 'char', 'split', 'merge', 'nearest', 'unk'
+        ]
+        self._fallback_strategies = []
+        for strat in fallback_order:
+            if strat == 'levenshtein':
+                self._fallback_strategies.append(LevenshteinStrategy())
+            elif strat == 'subword':
+                self._fallback_strategies.append(SubwordStrategy())
+            elif strat == 'char':
+                self._fallback_strategies.append(CharSimilarityStrategy())
+            elif strat == 'split':
+                self._fallback_strategies.append(SplitStrategy())
+            elif strat == 'merge':
+                self._fallback_strategies.append(MergeStrategy())
+            elif strat == 'nearest':
+                self._fallback_strategies.append(NearestStrategy())
+            elif strat == 'unk':
+                self._fallback_strategies.append(UnkStrategy())
+        
+        self.provider = provider
         
     def _check_embedding_availability(self):
         # Check if both models and their input embeddings are available
@@ -165,20 +197,6 @@ class ScaffoldTokenMapper:
         except Exception:
             return None
 
-    def _embedding_similarity(self, token1, token2):
-        try:
-            id1 = self.base_tokenizer.convert_tokens_to_ids(token1)
-            id2 = self.scaffold_tokenizer.convert_tokens_to_ids(token2)
-            emb1 = self._get_token_embedding(self.base_model, id1)
-            emb2 = self._get_token_embedding(self.scaffold_model, id2)
-            if emb1 is not None and emb2 is not None:
-                import torch
-                sim = torch.nn.functional.cosine_similarity(emb1, emb2, dim=0)
-                return sim.item()
-        except Exception:
-            pass
-        return None
-
     def _char_similarity(self, token1, token2):
         set1 = set(token1)
         set2 = set(token2)
@@ -186,25 +204,6 @@ class ScaffoldTokenMapper:
         union = len(set1.union(set2))
         return intersection / union if union > 0 else 0.0
 
-    def _calculate_similarity(self, token1, token2):
-        # User can select, but default is None (current behavior: embedding if available, else char)
-        strategy = self.mapping_strategy
-        if strategy == "embedding":
-            sim = self._embedding_similarity(token1, token2)
-            if sim is not None:
-                return sim
-            # fallback
-            return self._char_similarity(token1, token2)
-        elif strategy == "char" or strategy is None:
-            if self.embedding_available:
-                sim = self._embedding_similarity(token1, token2)
-                if sim is not None:
-                    return sim
-            return self._char_similarity(token1, token2)
-        else:
-            # Future: add more strategies here
-            return self._char_similarity(token1, token2)
-        
     def _normalize_token(self, token: str) -> str:
         """Normalize token based on configured level."""
         if self.normalization_level == 'none':
@@ -214,258 +213,71 @@ class ScaffoldTokenMapper:
         else:  # aggressive
             return token.replace("Ġ", "").replace("##", "").lower()
             
-    def _handle_fallback(self, token: str, base_id: int) -> List[int]:
-        """Handle token mapping fallback based on configured strategy."""
-        if self.fallback_strategy == 'split':
-            # Split token into smaller parts
-            parts = [token[i:i+2] for i in range(0, len(token), 2)]
-            scaffold_ids = []
-            for part in parts:
-                ids = self.scaffold_tokenizer.encode(part, add_special_tokens=False)
-                scaffold_ids.extend(ids)
-            return scaffold_ids[:self.max_tokens_per_mapping]
-            
-        elif self.fallback_strategy == 'merge':
-            # Try to merge with similar tokens
-            similar_tokens = self._find_similar_tokens(token)
-            if similar_tokens:
-                return similar_tokens[0]['ids']
-            return [self.scaffold_tokenizer.unk_token_id]
-            
-        elif self.fallback_strategy == 'nearest':
-            # Find nearest token in vocabulary
-            nearest = self._find_nearest_token(token)
-            if nearest:
-                return [nearest]
-            return [self.scaffold_tokenizer.unk_token_id]
-            
-        else:  # 'unk'
-            return [self.scaffold_tokenizer.unk_token_id]
-            
-    def _find_similar_tokens(self, token: str) -> List[Dict]:
-        """Find tokens with similar patterns."""
-        similar = []
-        for base_id, mapping in self.token_map.items():
-            base_token = self.base_tokenizer.decode([base_id])
-            if self._calculate_similarity(token, base_token) > self.mapping_similarity_threshold:
-                similar.append(mapping)
-        return similar
-        
-    def _find_nearest_token(self, token: str) -> Optional[int]:
-        """Find the nearest token in the scaffold vocabulary."""
-        min_distance = float('inf')
-        nearest_id = None
-        
-        for scaffold_id in self.scaffold_tokenizer.get_vocab().values():
-            scaffold_token = self.scaffold_tokenizer.decode([scaffold_id])
-            distance = self._calculate_similarity(token, scaffold_token)
-            if distance < min_distance:
-                min_distance = distance
-                nearest_id = scaffold_id
-                
-        return nearest_id if min_distance < self.mapping_similarity_threshold else None
-        
-    def _validate_mapping_quality(self, base_token: str, scaffold_ids: List[int]) -> bool:
-        """Validate mapping quality based on configured parameters."""
-        if not scaffold_ids:
+    def _validate_fallback_mapping(self, token, scaffold_ids, strategy_name, context):
+        if scaffold_ids == [self.scaffold_tokenizer.unk_token_id]:
+            self.logger.warning(f"Unk token mapping for '{token}' using {strategy_name}")
             return False
-            
-        # Check semantic similarity
-        scaffold_token = self.scaffold_tokenizer.decode(scaffold_ids)
-        similarity = self._calculate_similarity(base_token, scaffold_token)
-        if similarity < self.min_semantic_similarity:
-            return False
-            
-        # Check meaning drift
-        if self._calculate_meaning_drift(base_token, scaffold_token) > self.max_meaning_drift:
-            return False
-            
+        if self.embedding_available and self.base_model is not None and self.scaffold_model is not None:
+            base_emb = self._get_token_embedding(self.base_model, context['base_id'])
+            scaf_emb = self._get_token_embedding(self.scaffold_model, scaffold_ids[0])
+            if base_emb is not None and scaf_emb is not None:
+                import torch.nn.functional as F
+                similarity = F.cosine_similarity(base_emb, scaf_emb, dim=0).item()
+                if similarity < self.mapping_similarity_threshold:
+                    self.logger.warning(f"Low embedding similarity ({similarity:.3f}) for fallback mapping '{token}' using {strategy_name}")
+                    return False
         return True
+
+    def _score_mapping(self, token, scaffold_ids, context):
+        # Use embedding similarity if available, else fallback to char similarity
+        if self.embedding_available and self.base_model is not None and self.scaffold_model is not None:
+            base_emb = self._get_token_embedding(self.base_model, context['base_id'])
+            scaf_emb = self._get_token_embedding(self.scaffold_model, scaffold_ids[0])
+            if base_emb is not None and scaf_emb is not None:
+                import torch.nn.functional as F
+                return F.cosine_similarity(base_emb, scaf_emb, dim=0).item()
+        # Fallback: character similarity
+        scaf_token = self.scaffold_tokenizer.decode(scaffold_ids) if hasattr(self.scaffold_tokenizer, 'decode') else str(scaffold_ids)
+        return self._char_similarity(token, scaf_token)
+
+    def _handle_fallback(self, token: str, base_id: int) -> List[int]:
+        """Handle token mapping fallback using the configured strategy pipeline with validation and scoring."""
+        context = {
+            'self': self,
+            'base_tokenizer': self.base_tokenizer,
+            'scaffold_tokenizer': self.scaffold_tokenizer,
+            'max_tokens_per_mapping': self.max_tokens_per_mapping,
+            'base_id': base_id
+        }
+        candidates = []
+        for strat in self._fallback_strategies:
+            result = strat.try_map(token, context)
+            if result and self._validate_fallback_mapping(token, result, strat.__class__.__name__, context):
+                score = self._score_mapping(token, result, context)
+                candidates.append({'ids': result, 'score': score, 'strategy': strat.__class__.__name__})
+                self.logger.record_event(
+                    event_type="token_fallback_candidate",
+                    message=f"Candidate fallback mapping for '{token}' using {strat.__class__.__name__} (score={score:.3f})",
+                    level="info",
+                    additional_info={"token": token, "strategy": strat.__class__.__name__, "score": score, "ids": result}
+                )
+        if candidates:
+            best = max(candidates, key=lambda x: x['score'])
+            self.logger.record_event(
+                event_type="token_fallback_selected",
+                message=f"Selected fallback mapping for '{token}' using {best['strategy']} (score={best['score']:.3f})",
+                level="info",
+                additional_info={"token": token, "strategy": best['strategy'], "score": best['score'], "ids": best['ids']}
+            )
+            return best['ids']
+        self.logger.record_event(
+            event_type="token_fallback_unk",
+            message=f"All fallback strategies failed for '{token}', returning <unk>",
+            level="warning",
+            additional_info={"token": token}
+        )
+        return [self.scaffold_tokenizer.unk_token_id]
         
-    def _calculate_meaning_drift(self, token1: str, token2: str) -> float:
-        """
-        Compute semantic drift between two tokens using embeddings (if available)
-        or advanced heuristics. Returns a value in [0, 1], lower is better.
-        """
-        try:
-            max_drift = self.max_drift
-            cosine_weight = self.cosine_weight
-            euclidean_weight = self.euclidean_weight
-            norm_weight = self.norm_weight
-            levenshtein_weight = self.levenshtein_weight
-            char_weight = self.char_weight
-            subword_weight = self.subword_weight
-            freq_weight = self.freq_weight
-            cache_size = self.drift_cache_size
-            cache_key = (token1, token2)
-            with self._drift_cache_lock:
-                if cache_key in self._drift_cache:
-                    return self._drift_cache[cache_key]
-            # Special token handling
-            specials = set([
-                getattr(self.base_tokenizer, 'pad_token', None), getattr(self.base_tokenizer, 'unk_token', None), getattr(self.base_tokenizer, 'eos_token', None),
-                getattr(self.scaffold_tokenizer, 'pad_token', None), getattr(self.scaffold_tokenizer, 'unk_token', None), getattr(self.scaffold_tokenizer, 'eos_token', None)
-            ])
-            t1n, t2n = self._normalize_token(token1), self._normalize_token(token2)
-            if t1n in specials or t2n in specials:
-                drift = 0.0 if t1n == t2n else self.max_meaning_drift
-                self._cache_drift(cache_key, drift, cache_size)
-                return drift
-            # Embedding-based drift
-            if self.embedding_available:
-                try:
-                    id1 = self.base_tokenizer.convert_tokens_to_ids(token1)
-                    id2 = self.scaffold_tokenizer.convert_tokens_to_ids(token2)
-                    emb1 = self._get_token_embedding(self.base_model, id1)
-                    emb2 = self._get_token_embedding(self.scaffold_model, id2)
-                    if emb1 is not None and emb2 is not None:
-                        emb1 = emb1 / (emb1.norm() + 1e-8)
-                        emb2 = emb2 / (emb2.norm() + 1e-8)
-                        cosine = 1.0 - torch.nn.functional.cosine_similarity(emb1, emb2, dim=0).item()
-                        euclid = (emb1 - emb2).norm().item()
-                        euclid = euclid / (euclid + 1.0)
-                        normdiff = abs(emb1.norm().item() - emb2.norm().item())
-                        normdiff = normdiff / (normdiff + 1.0)
-                        drift = (
-                            cosine_weight * cosine +
-                            euclidean_weight * euclid +
-                            norm_weight * normdiff
-                        )
-                        drift = min(drift, max_drift)
-                        self._cache_drift(cache_key, drift, cache_size)
-                        return drift
-                except Exception as e:
-                    self.logger.record_event(
-                        event_type="meaning_drift_embedding_error",
-                        message=f"Embedding drift failed: {str(e)}",
-                        level="warning"
-                    )
-            # Heuristic fallback
-            lev = self._levenshtein_distance(t1n, t2n)
-            maxlen = max(len(t1n), len(t2n), 1)
-            lev_drift = lev / maxlen
-            char_drift = 1.0 - self._char_similarity(t1n, t2n)
-            t1_sub = set(self.base_tokenizer.encode(t1n, add_special_tokens=False))
-            t2_sub = set(self.scaffold_tokenizer.encode(t2n, add_special_tokens=False))
-            # Subword drift calculation (explicit fallback for empty sets)
-            if t1_sub and t2_sub:
-                subword_drift = 1.0 - (len(t1_sub & t2_sub) / max(len(t1_sub | t2_sub), 1))
-            else:
-                subword_drift = 1.0  # Default to max drift for empty subword sets
-            freq_drift = 0.0
-            if not hasattr(self, '_freq_drift_disabled_logged'):
-                self._freq_drift_disabled_logged = False
-            try:
-                base_vocab = self.base_tokenizer.get_vocab()
-                scaf_vocab = self.scaffold_tokenizer.get_vocab()
-                base_val = base_vocab.get(t1n, 0)
-                scaf_val = scaf_vocab.get(t2n, 0)
-                # Only use if values are plausible frequencies (not just token IDs)
-                if (
-                    isinstance(base_val, int) and isinstance(scaf_val, int)
-                    and (base_val > 100 or scaf_val > 100)
-                ):
-                    base_freq = base_val
-                    scaf_freq = scaf_val
-                    freq_diff = abs(base_freq - scaf_freq)
-                    freq_drift = freq_diff / (freq_diff + 1000.0)
-                else:
-                    freq_drift = 0.0
-                    if not self._freq_drift_disabled_logged:
-                        self.logger.record_event(
-                            event_type="freq_drift_disabled",
-                            message="Frequency drift disabled: vocab values are not frequencies.",
-                            level="info"
-                        )
-                        self._freq_drift_disabled_logged = True
-            except Exception:
-                freq_drift = 0.0
-            total_len = len(t1n) + len(t2n)
-            lev_w = levenshtein_weight * (1.2 if total_len > 10 else 0.8)
-            char_w = char_weight * (0.8 if total_len > 10 else 1.2)
-            total_w = lev_w + char_w + subword_weight + freq_weight
-            lev_w /= total_w
-            char_w /= total_w
-            subword_weight /= total_w
-            freq_weight /= total_w
-            drift = (
-                lev_w * lev_drift +
-                char_w * char_drift +
-                subword_weight * subword_drift +
-                freq_weight * freq_drift
-            )
-            drift = min(max(drift, 0.0), 1.0)
-            # --- Add explicit logging for heuristic-based drift ---
-            self.logger.record_event(
-                event_type="meaning_drift_fallback",
-                message=f"Heuristic-based drift for {token1} -> {token2}: {drift:.4f}",
-                level="warning" if self.embedding_available else "debug",
-                additional_info={
-                    "tokens": [token1, token2],
-                    "lev_drift": lev_drift,
-                    "char_drift": char_drift,
-                    "subword_drift": subword_drift,
-                    "freq_drift": freq_drift,
-                    "weights": [lev_w, char_w, subword_weight, freq_weight]
-                }
-            )
-            with self._metrics_lock:
-                self._drift_values.append(drift)
-            self._cache_drift(cache_key, drift, cache_size)
-            return drift
-        except Exception as e:
-            self.logger.record_event(
-                event_type="meaning_drift_error",
-                message=f"Failed to compute meaning drift for {token1} <-> {token2}: {str(e)}",
-                level="error"
-            )
-            return self.max_meaning_drift
-
-    def _cache_drift(self, cache_key, drift, cache_size):
-        with self._drift_cache_lock:
-            self._drift_cache[cache_key] = drift
-            self._drift_cache_order.append(cache_key)
-            if len(self._drift_cache_order) > cache_size:
-                old_key = self._drift_cache_order.pop(0)
-                self._drift_cache.pop(old_key, None)
-
-    def _levenshtein_distance(self, s1, s2):
-        # Simple Levenshtein distance implementation
-        if len(s1) < len(s2):
-            return self._levenshtein_distance(s2, s1)
-        if len(s2) == 0:
-            return len(s1)
-        previous_row = range(len(s2) + 1)
-        for i, c1 in enumerate(s1):
-            current_row = [i + 1]
-            for j, c2 in enumerate(s2):
-                insertions = previous_row[j + 1] + 1
-                deletions = current_row[j] + 1
-                substitutions = previous_row[j] + (c1 != c2)
-                current_row.append(min(insertions, deletions, substitutions))
-            previous_row = current_row
-        return previous_row[-1]
-
-    def _find_levenshtein_match(self, token, threshold=0.3):
-        # Normalized Levenshtein distance
-        min_dist = float('inf')
-        best_id = None
-        for scaf_token, scaf_id in self.scaffold_tokenizer.get_vocab().items():
-            dist = self._levenshtein_distance(token, scaf_token) / max(len(token), len(scaf_token), 1)
-            if dist < min_dist:
-                min_dist = dist
-                best_id = scaf_id
-        if min_dist <= threshold:
-            return [best_id]
-        return None
-
-    def _subword_heuristic(self, token):
-        # Try prefix/suffix match for subword tokens
-        for scaf_token, scaf_id in self.scaffold_tokenizer.get_vocab().items():
-            if token.startswith(scaf_token) or token.endswith(scaf_token):
-                return [scaf_id]
-        return None
-
     def _build_token_map(self):
         """Build main token mapping with enhanced strategies and layered fallback."""
         special_tokens = {
@@ -484,49 +296,9 @@ class ScaffoldTokenMapper:
                 scaf_id = self.scaffold_tokenizer.get_vocab()[normalized]
                 self.token_map[base_id] = {'ids': [scaf_id], 'weight': 1.0, 'confidence': 1.0}
                 continue
-            # 3. Levenshtein distance
-            lev_match = self._find_levenshtein_match(normalized)
-            if lev_match:
-                self.logger.record_event(
-                    event_type="token_map_fallback",
-                    message=f"Levenshtein fallback for {base_token} -> {lev_match}",
-                    level="debug"
-                )
-                self.token_map[base_id] = {'ids': lev_match, 'weight': 0.8, 'confidence': 0.8}
-                continue
-            # 4. Subword heuristics
-            subword_match = self._subword_heuristic(normalized)
-            if subword_match:
-                self.logger.record_event(
-                    event_type="token_map_fallback",
-                    message=f"Subword heuristic fallback for {base_token} -> {subword_match}",
-                    level="debug"
-                )
-                self.token_map[base_id] = {'ids': subword_match, 'weight': 0.7, 'confidence': 0.7}
-                continue
-            # 5. Legacy char similarity fallback
-            best_score = 0.0
-            best_id = None
-            for scaf_token, scaf_id in self.scaffold_tokenizer.get_vocab().items():
-                score = self._char_similarity(normalized, scaf_token)
-                if score > best_score:
-                    best_score = score
-                    best_id = scaf_id
-            if best_score > 0.0:
-                self.logger.record_event(
-                    event_type="token_map_fallback",
-                    message=f"Legacy char similarity fallback for {base_token} -> {best_id}",
-                    level="debug"
-                )
-                self.token_map[base_id] = {'ids': [best_id], 'weight': 0.5, 'confidence': 0.5}
-                continue
-            # 6. Final fallback to unk_token_id
-            self.logger.record_event(
-                event_type="token_map_fallback",
-                message=f"Mapping {base_token} to unk_token_id as last resort.",
-                level="warning"
-            )
-            self.token_map[base_id] = {'ids': [self.scaffold_tokenizer.unk_token_id], 'weight': 0.1, 'confidence': 0.1}
+            # 3. Use fallback strategy pipeline for all other cases
+            fallback_ids = self._handle_fallback(normalized, base_id)
+            self.token_map[base_id] = {'ids': fallback_ids, 'weight': 0.5, 'confidence': 0.5}
 
     def _resolve_conflict(self, base_id: int, new_mapping: Dict, existing_mapping: Dict) -> Dict:
         """Resolve mapping conflicts based on configured strategy."""
@@ -611,13 +383,14 @@ class ScaffoldTokenMapper:
         return self._validate_token_maps()
         
     def tokenize_and_map(self, prompt: str) -> Tuple[List[int], List[float]]:
-        """Tokenize prompt and map to scaffold token space, enforcing minimum confidence."""
+        """Tokenize prompt and map to scaffold token space, enforcing minimum confidence and <unk> ratio."""
         try:
             start = time.time()
             base_tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
             scaffold_ids = []
             weights = []
             low_conf_count = 0
+            unk_count = 0
             min_conf = 0.5  # Minimum allowed confidence for a mapping
             for base_id in base_tokens:
                 mapping = self.token_map[base_id]
@@ -628,27 +401,34 @@ class ScaffoldTokenMapper:
                     self._mapping_confidences.append(mapping['weight'])
                     if 'fallback_type' in mapping:
                         self._fallback_counts[mapping['fallback_type']] += 1
+                if mapping['weight'] < min_conf:
+                    low_conf_count += 1
+                if mapping['ids'] == [self.scaffold_tokenizer.unk_token_id]:
+                    unk_count += 1
             total = len(base_tokens) if base_tokens else 1
             low_conf_ratio = low_conf_count / total
+            unk_ratio = unk_count / total
             # Log mapping quality
             self.logger.record_event(
                 event_type="token_mapping_quality",
-                message=f"Token mapping: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}",
-                level="warning" if low_conf_ratio > 0.2 else "info",
+                message=f"Token mapping: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens",
+                level="warning" if low_conf_ratio > 0.1 or unk_ratio > 0.1 else "info",
                 additional_info={
                     "low_conf_count": low_conf_count,
                     "total_tokens": total,
                     "low_conf_ratio": low_conf_ratio,
+                    "unk_count": unk_count,
+                    "unk_ratio": unk_ratio,
                     "min_conf": min_conf,
                     "timestamp": time.time()
                 }
             )
-            # Enforce threshold: if >20% of tokens are low-confidence, raise error
-            if low_conf_ratio > 0.2:
+            # Enforce threshold: if >10% of tokens are low-confidence or <unk>, raise error
+            if low_conf_ratio > 0.1 or unk_ratio > 0.1:
                 with self._metrics_lock:
                     self._mapping_errors += 1
                 raise ScaffoldError(
-                    f"Too many low-confidence token mappings: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}",
+                    f"Too many low-confidence or <unk> token mappings: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens",
                     operation="tokenize_and_map"
                 )
             end = time.time()
@@ -665,7 +445,7 @@ class ScaffoldTokenMapper:
                 additional_info={"timestamp": time.time()}
             )
             raise
-            
+
     def update_token_map_memory(self, prompt: str, logits: torch.Tensor, source: str = "base"):
         """Update token map based on prompt confidence, using raw base model logits only."""
         try:
@@ -677,6 +457,9 @@ class ScaffoldTokenMapper:
                         self.token_map[base_id]['weight'],
                         confidence
                     )
+            # Synchronize with provider
+            if self.provider is not None:
+                self.provider.update_token_map(self.get_token_map(), source="mapper")
         except Exception as e:
             self.logger.record_event(
                 event_type="token_map_update_error",
@@ -706,12 +489,6 @@ def build_scaffold_token_mapping(
         config: Optional configuration dictionary containing mapping parameters:
             - max_tokens_per_mapping: Maximum scaffold tokens per base token (default: 3)
             - mapping_similarity_threshold: Similarity threshold for alternative mappings (default: 0.7)
-            - allow_bidirectional_mapping: Enable bidirectional token mapping (default: False)
-            - fallback_strategy: Strategy for handling failed mappings (default: 'split')
-            - normalization_level: Token normalization aggressiveness (default: 'basic')
-            - min_semantic_similarity: Minimum semantic similarity threshold (default: 0.5)
-            - max_meaning_drift: Maximum allowed semantic drift (default: 0.3)
-            - enable_periodic_validation: Enable periodic mapping validation (default: True)
             - conflict_resolution_strategy: Strategy for resolving mapping conflicts (default: 'keep_highest_conf')
         base_model: Optional base model for embedding-based similarity
         scaffold_model: Optional scaffold model for embedding-based similarity
@@ -900,17 +677,34 @@ class CrossAttentionLayer(nn.Module):
         logger: Logger,
         hidden_size: Optional[int] = None,
         num_heads: Optional[int] = None,
-        device: Union[str, torch.device] = 'cpu'
+        device: Union[str, torch.device] = 'cpu',
+        ram_manager: Optional[RAMManager] = None,
+        gpu_manager: Optional[GPUMemoryManager] = None
     ):
         super().__init__()
         self._config = config
         self._logger = logger
         self._device = torch.device(device) if isinstance(device, str) else device
-        
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
         self._initialize_parameters(hidden_size, num_heads)
         self._initialize_layers()
         self.to(self._device)
-        
+        # Memory usage logging
+        if self.ram_manager:
+            self._logger.record_event(
+                event_type="ram_memory_health",
+                message="RAM health at CrossAttentionLayer init",
+                level="info",
+                additional_info=self.ram_manager.check_memory_health() if hasattr(self.ram_manager, 'check_memory_health') else {}
+            )
+        if self.gpu_manager:
+            self._logger.record_event(
+                event_type="gpu_memory_health",
+                message="GPU health at CrossAttentionLayer init",
+                level="info",
+                additional_info=self.gpu_manager.get_gpu_usage() if hasattr(self.gpu_manager, 'get_gpu_usage') else {}
+            )
         self._logger.record_event(
             event_type="cross_attention_layer_initialized",
             message="Cross attention layer initialized successfully",
@@ -922,6 +716,8 @@ class CrossAttentionLayer(nn.Module):
                 "timestamp": time.time()
             }
         )
+        self._attention_chunk_size = self._config.get('attention_chunk_size', 128)
+        self._gpu_memory_threshold = self._config.get('gpu_memory_threshold', 0.85)
         
     def _initialize_parameters(self, hidden_size: Optional[int], num_heads: Optional[int]) -> None:
         """Initialize configuration parameters."""
@@ -1014,27 +810,38 @@ class CrossAttentionLayer(nn.Module):
         v: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
         seq_len: int,
-        batch_size: int
+        batch_size: int,
+        chunk_size: Optional[int] = None
     ) -> torch.Tensor:
-        """Compute attention scores with dynamic weighting."""
+        """Compute attention scores with dynamic weighting and memory-aware chunking."""
+        chunk_size = chunk_size or self._attention_chunk_size
         q = q.view(batch_size, seq_len, self._num_heads, self._head_dim).transpose(1, 2)
         k = k.view(batch_size, seq_len, self._num_heads, self._head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self._num_heads, self._head_dim).transpose(1, 2)
-        
-        scores = torch.matmul(q, k.transpose(-2, -1)) / (self._scale * self._dynamic_scale)
-        
-        if attention_mask is not None:
-            scores = scores.masked_fill(attention_mask == 0, float('-inf'))
-            
-        if self._sparse_mask is not None:
-            scores = scores.masked_fill(self._sparse_mask == 0, float('-inf'))
-            
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_output = torch.matmul(attn_weights, v)
-        
+        attn_output = torch.zeros_like(q)
+        for i in range(0, seq_len, chunk_size):
+            end = min(i + chunk_size, seq_len)
+            q_chunk = q[:, :, i:end]
+            scores = torch.matmul(q_chunk, k.transpose(-2, -1)) / (self._scale * self._dynamic_scale)
+            if attention_mask is not None:
+                scores = scores.masked_fill(attention_mask[:, :, i:end] == 0, float('-inf'))
+            if self._sparse_mask is not None:
+                scores = scores.masked_fill(self._sparse_mask[:, :, i:end] == 0, float('-inf'))
+            attn_weights = F.softmax(scores, dim=-1)
+            attn_output[:, :, i:end] = torch.matmul(attn_weights, v)
+            # Memory check and adaptive chunking
+            if self.gpu_manager:
+                usage = self.gpu_manager.get_gpu_usage().get('usage_percentage', 0.0)
+                if usage > self._gpu_memory_threshold:
+                    self._logger.record_event(
+                        event_type="cross_attention_chunking",
+                        message=f"GPU memory usage {usage:.2f} exceeded threshold {self._gpu_memory_threshold}, reducing chunk size.",
+                        level="warning",
+                        additional_info={"usage": usage, "threshold": self._gpu_memory_threshold, "old_chunk_size": chunk_size}
+                    )
+                    chunk_size = max(chunk_size // 2, 32)
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self._hidden_size)
-        
         return attn_output * (self._gate * self._base_weight + self._gate_bias)
         
     def _forward(
@@ -1103,7 +910,7 @@ class CrossAttentionLayer(nn.Module):
 class CrossAttentionInjector:
     """Injector for adding cross-attention layers to a transformer model."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, ram_manager: Optional[RAMManager] = None, gpu_manager: Optional[GPUMemoryManager] = None, lora_manager: Optional[Any] = None, provider: Optional[Any] = None):
         self._config_manager = config_manager
         self._logger = logger
         self._lock = Lock()
@@ -1112,8 +919,38 @@ class CrossAttentionInjector:
         self._error_handler = ErrorManager(config_manager, logger)
         self._target_layer_names: List[str] = []  # Store names of layers being injected
         self._layer_count = 0  # Initialize layer counter for progressive strategy
-        
+        self.ram_manager = ram_manager or RAMManager(config_manager, logger)
+        self.gpu_manager = gpu_manager or GPUMemoryManager(config_manager, logger)
+        self.lora_manager = lora_manager
+        self.allow_lora_post_injection = config_manager.get('controls_config.allow_lora_post_injection', False)
+        self.provider = provider
+        self.current_map_version = -1
         self._validate_config()
+        # Injection strategy pipeline
+        strategy_order = config_manager.get('controls_config.injection_strategy_order', ['sequential', 'parallel', 'replace'])
+        self._injection_strategies = []
+        for strat in strategy_order:
+            if strat == 'sequential':
+                self._injection_strategies.append(SequentialInjectionStrategy())
+            elif strat == 'parallel':
+                self._injection_strategies.append(ParallelInjectionStrategy())
+            elif strat == 'replace':
+                self._injection_strategies.append(ReplaceInjectionStrategy())
+        # Memory usage logging
+        if self.ram_manager:
+            self._logger.record_event(
+                event_type="ram_memory_health",
+                message="RAM health at CrossAttentionInjector init",
+                level="info",
+                additional_info=self.ram_manager.check_memory_health() if hasattr(self.ram_manager, 'check_memory_health') else {}
+            )
+        if self.gpu_manager:
+            self._logger.record_event(
+                event_type="gpu_memory_health",
+                message="GPU health at CrossAttentionInjector init",
+                level="info",
+                additional_info=self.gpu_manager.get_gpu_usage() if hasattr(self.gpu_manager, 'get_gpu_usage') else {}
+            )
 
     def _validate_config(self) -> None:
         """Validate cross-attention configuration."""
@@ -1167,6 +1004,17 @@ class CrossAttentionInjector:
     def _get_scaffold_output(self, scaffold_model: nn.Module, token_map: Optional[Dict], base_hidden_states: torch.Tensor) -> torch.Tensor:
         """Generate scaffold hidden states for cross-attention with robust fallback/error handling."""
         try:
+            # Synchronize token map with provider
+            if self.provider is not None:
+                latest_map, version = self.provider.get_token_map()
+                if version > self.current_map_version:
+                    token_map = latest_map
+                    self.current_map_version = version
+                    self._logger.record_event(
+                        event_type="cross_attention_token_map_sync",
+                        message=f"Updated token map to version {version}",
+                        level="info"
+                    )
             device = base_hidden_states.device
             batch_size, seq_len, hidden_dim = base_hidden_states.shape
             scaffold_dim = None
@@ -1273,19 +1121,24 @@ class CrossAttentionInjector:
     ) -> nn.Module:
         """Inject cross-attention into the model with robust error recovery and fallback."""
         try:
-            # Strict LoRA conflict detection
-            for name, _ in base_model.named_modules():
-                if "lora" in name.lower() or "adapter" in name.lower():
-                    self._logger.log_error(
-                        "LoRA adapters detected in base model. "
-                        "LoRA must be applied before cross-attention injection to ensure compatibility.",
-                        error_type="lora_injection_conflict"
+            # Robust LoRA conflict detection
+            if not self.allow_lora_post_injection:
+                if not self._check_lora_compatibility(base_model):
+                    self._logger.record_event(
+                        event_type="lora_conflict",
+                        message="LoRA detected in base model but configuration does not allow post-injection LoRA or model is incompatible.",
+                        level="error"
                     )
                     raise ScaffoldError(
-                        "LoRA adapters applied to base model after injection. "
-                        "Apply LoRA before calling CrossAttentionInjector.inject.",
+                        "LoRA detected in base model but configuration does not allow post-injection LoRA or model is incompatible.",
                         operation="cross_attention_injection"
                     )
+            else:
+                self._logger.record_event(
+                    event_type="lora_post_injection_allowed",
+                    message="LoRA post-injection is allowed by configuration.",
+                    level="info"
+                )
             # --- Existing injection logic ---
             with self._lock:
                 layers, layer_names = self.find_model_layers(base_model)
@@ -1308,29 +1161,22 @@ class CrossAttentionInjector:
                 skipped_layers = []
 
                 for layer_idx in layer_indices:
-                    strategies = [injection_strategy, "parallel", "replace"]
                     injected = False
-                    for strat in strategies:
+                    for strategy in self._injection_strategies:
                         try:
-                            self._inject_single_layer(
+                            strategy.inject(
                                 model=model_copy,
                                 scaffold_model=scaffold_model,
                                 layer_idx=layer_idx,
-                                injection_strategy=strat,
-                                token_map=token_map
+                                token_map=token_map,
+                                injector=self
                             )
                             injected = True
-                            if strat != injection_strategy:
-                                self._logger.record_event(
-                                    event_type="cross_attention_injection_retry",
-                                    message=f"Layer {layer_idx} injected with fallback strategy '{strat}'",
-                                    level="warning"
-                                )
                             break
                         except Exception as e:
                             self._logger.record_event(
                                 event_type="cross_attention_injection_strategy_failed",
-                                message=f"Layer {layer_idx} injection failed with strategy '{strat}': {str(e)}",
+                                message=f"Layer {layer_idx} injection failed with strategy '{strategy.__class__.__name__}': {str(e)}",
                                 level="warning"
                             )
                     if not injected:
@@ -1765,6 +1611,31 @@ class CrossAttentionInjector:
             )
         return healthy
 
+    def _check_lora_compatibility(self, base_model):
+        if self.lora_manager is None:
+            self._logger.record_event(
+                event_type="lora_manager_missing",
+                message="No LoraAdapterManager provided; skipping LoRA compatibility check.",
+                level="warning"
+            )
+            return True  # Assume compatible if no manager
+        try:
+            compatible = self.lora_manager.is_model_compatible(base_model)
+            if not compatible:
+                self._logger.record_event(
+                    event_type="lora_incompatibility_detected",
+                    message="LoRA detected but model is not compatible with LoRA configuration.",
+                    level="error"
+                )
+            return compatible
+        except Exception as e:
+            self._logger.record_event(
+                event_type="lora_compatibility_check_failed",
+                message=f"Failed to check LoRA compatibility: {str(e)}",
+                level="error"
+            )
+            return False
+
 def calculate_confidence_score(logits: torch.Tensor, generated_ids: torch.Tensor) -> float:
     """Calculate confidence score for scaffold generation."""
     try:
@@ -1801,7 +1672,7 @@ class InsufficientDataError(Exception):
 class ScaffoldProvider:
     """Provides scaffold functionality for the SOVL system with atomic, thread-safe state management."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorManager):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorManager, ram_manager: Optional[RAMManager] = None, gpu_manager: Optional[GPUMemoryManager] = None):
         self.config_manager = config_manager
         self.logger = logger
         self._error_handler = error_handler
@@ -1810,6 +1681,11 @@ class ScaffoldProvider:
         self._update_queue = queue.Queue()
         self._max_retries = 10
         self._retry_delay = 0.1  # seconds
+        self.ram_manager = ram_manager or RAMManager(config_manager, logger)
+        self.gpu_manager = gpu_manager or GPUMemoryManager(config_manager, logger)
+        self._max_update_queue_size = 1000
+        self.token_map_version = 0
+        self.token_map = {}
     
     @scaffold_operation("validate_config")
     def validate_scaffold_config(self, config: Dict[str, Any]) -> None:
@@ -1887,6 +1763,7 @@ class ScaffoldProvider:
             acquired = self._lock.acquire(timeout=self._retry_delay)
             if acquired:
                 try:
+                    self._validate_updates(updates)
                     self._scaffold_state.update(updates)
                     self._scaffold_state["last_updated"] = timestamp
                     break
@@ -1900,12 +1777,20 @@ class ScaffoldProvider:
                 )
                 time.sleep(self._retry_delay)
         else:
-            self.logger.record_event(
-                event_type="scaffold_update_lock_failed",
-                message="Failed to acquire lock for state update after retries. Queuing update.",
-                level="error"
-            )
+            if self._update_queue.qsize() >= self._max_update_queue_size:
+                self.logger.record_event(
+                    event_type="scaffold_update_queue_full",
+                    message="Update queue full, dropping oldest update.",
+                    level="error"
+                )
+                self._update_queue.get()
             self._update_queue.put((updates, timestamp))
+            self.logger.record_event(
+                event_type="scaffold_update_queued",
+                message="Failed to acquire lock, queued update.",
+                level="warning",
+                additional_info={"queue_size": self._update_queue.qsize()}
+            )
         self.logger.record_event(
             event_type="scaffold_update",
             message="Scaffold state updated successfully",
@@ -1915,11 +1800,18 @@ class ScaffoldProvider:
     def process_queued_updates(self, max_updates=100):
         """Process up to max_updates queued state updates atomically."""
         processed = 0
+        updates_list = []
         while not self._update_queue.empty() and processed < max_updates:
             updates, timestamp = self._update_queue.get()
+            updates_list.append((updates, timestamp))
+            processed += 1
+        # Sort by timestamp to ensure correct order
+        updates_list.sort(key=lambda x: x[1])
+        for updates, timestamp in updates_list:
             acquired = self._lock.acquire(timeout=self._retry_delay)
             if acquired:
                 try:
+                    self._validate_updates(updates)
                     self._scaffold_state.update(updates)
                     self._scaffold_state["last_updated"] = timestamp
                 finally:
@@ -1932,9 +1824,8 @@ class ScaffoldProvider:
                 )
                 self._update_queue.put((updates, timestamp))
                 break
-            processed += 1
         queue_size = self._update_queue.qsize()
-        if queue_size >= 1000:
+        if queue_size >= self._max_update_queue_size:
             self.logger.record_event(
                 event_type="scaffold_update_queue_size_warning",
                 message=f"Scaffold update queue size high: {queue_size}",
@@ -2045,3 +1936,186 @@ def create_scaffold_with_adaptation(config_manager, logger, error_manager, lora_
 
 # Example usage elsewhere in the system:
 # model, lora_mgr = create_scaffold_with_adaptation(config_manager, logger, error_manager)
+
+class TokenMappingStrategy:
+    def try_map(self, token, context):
+        raise NotImplementedError
+
+class SplitStrategy(TokenMappingStrategy):
+    def try_map(self, token, context):
+        parts = [token[i:i+2] for i in range(0, len(token), 2)]
+        scaffold_ids = []
+        for part in parts:
+            ids = context['scaffold_tokenizer'].encode(part, add_special_tokens=False)
+            scaffold_ids.extend(ids)
+        if scaffold_ids:
+            return scaffold_ids[:context['max_tokens_per_mapping']]
+        return None
+
+class MergeStrategy(TokenMappingStrategy):
+    @staticmethod
+    def find_similar_tokens(token, context):
+        # Example: Use character overlap as a simple similarity metric
+        scaffold_tokenizer = context['scaffold_tokenizer']
+        max_tokens = context.get('max_tokens_per_mapping', 3)
+        results = []
+        for scaf_token, scaf_id in scaffold_tokenizer.get_vocab().items():
+            # Simple similarity: number of shared characters
+            set1 = set(token)
+            set2 = set(scaf_token)
+            score = len(set1 & set2) / max(len(set1 | set2), 1)
+            if score > 0.0:
+                results.append({'ids': [scaf_id], 'score': score})
+        results.sort(key=lambda x: x['score'], reverse=True)
+        return results[:max_tokens] if results else None
+
+    def try_map(self, token, context):
+        similar_tokens = MergeStrategy.find_similar_tokens(token, context)
+        if similar_tokens:
+            return similar_tokens[0]['ids']
+        return None
+
+class NearestStrategy(TokenMappingStrategy):
+    @staticmethod
+    def find_nearest_token(token, context):
+        # Example: Use minimum edit distance (Levenshtein) as a proxy for 'nearest'
+        scaffold_tokenizer = context['scaffold_tokenizer']
+        def levenshtein(s1, s2):
+            if len(s1) < len(s2):
+                return levenshtein(s2, s1)
+            if len(s2) == 0:
+                return len(s1)
+            previous_row = range(len(s2) + 1)
+            for i, c1 in enumerate(s1):
+                current_row = [i + 1]
+                for j, c2 in enumerate(s2):
+                    insertions = previous_row[j + 1] + 1
+                    deletions = current_row[j] + 1
+                    substitutions = previous_row[j] + (c1 != c2)
+                    current_row.append(min(insertions, deletions, substitutions))
+                previous_row = current_row
+            return previous_row[-1]
+        min_dist = float('inf')
+        best_id = None
+        for scaf_token, scaf_id in scaffold_tokenizer.get_vocab().items():
+            dist = levenshtein(token, scaf_token)
+            if dist < min_dist:
+                min_dist = dist
+                best_id = scaf_id
+        return best_id
+
+    def try_map(self, token, context):
+        nearest = NearestStrategy.find_nearest_token(token, context)
+        if nearest is not None:
+            return [nearest]
+        return None
+
+class UnkStrategy(TokenMappingStrategy):
+    def try_map(self, token, context):
+        return [context['scaffold_tokenizer'].unk_token_id]
+
+class LevenshteinStrategy(TokenMappingStrategy):
+    def try_map(self, token, context):
+        # Normalized Levenshtein distance
+        def levenshtein_distance(s1, s2):
+            if len(s1) < len(s2):
+                return levenshtein_distance(s2, s1)
+            if len(s2) == 0:
+                return len(s1)
+            previous_row = range(len(s2) + 1)
+            for i, c1 in enumerate(s1):
+                current_row = [i + 1]
+                for j, c2 in enumerate(s2):
+                    insertions = previous_row[j + 1] + 1
+                    deletions = current_row[j] + 1
+                    substitutions = previous_row[j] + (c1 != c2)
+                    current_row.append(min(insertions, deletions, substitutions))
+                previous_row = current_row
+            return previous_row[-1]
+        min_dist = float('inf')
+        best_id = None
+        scaffold_tokenizer = context['scaffold_tokenizer']
+        for scaf_token, scaf_id in scaffold_tokenizer.get_vocab().items():
+            dist = levenshtein_distance(token, scaf_token) / max(len(token), len(scaf_token), 1)
+            if dist < min_dist:
+                min_dist = dist
+                best_id = scaf_id
+        if min_dist <= 0.3:
+            return [best_id]
+        return None
+
+class SubwordStrategy(TokenMappingStrategy):
+    def try_map(self, token, context):
+        scaffold_tokenizer = context['scaffold_tokenizer']
+        for scaf_token, scaf_id in scaffold_tokenizer.get_vocab().items():
+            if token.startswith(scaf_token) or token.endswith(scaf_token):
+                return [scaf_id]
+        return None
+
+class CharSimilarityStrategy(TokenMappingStrategy):
+    @staticmethod
+    def char_similarity(token1, token2):
+        set1 = set(token1)
+        set2 = set(token2)
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+        return intersection / union if union > 0 else 0.0
+
+    def try_map(self, token, context):
+        best_score = 0.0
+        best_id = None
+        for scaf_token, scaf_id in context['scaffold_tokenizer'].get_vocab().items():
+            score = CharSimilarityStrategy.char_similarity(token, scaf_token)
+            if score > best_score:
+                best_score = score
+                best_id = scaf_id
+        if best_score > 0.0:
+            return [best_id]
+        return None
+
+class InjectionStrategy:
+    def inject(self, model, scaffold_model, layer_idx, token_map, injector):
+        raise NotImplementedError
+
+class SequentialInjectionStrategy(InjectionStrategy):
+    def inject(self, model, scaffold_model, layer_idx, token_map, injector):
+        # Use the existing _inject_single_layer logic for 'sequential'
+        return injector._inject_single_layer(
+            model=model,
+            scaffold_model=scaffold_model,
+            layer_idx=layer_idx,
+            injection_strategy='sequential',
+            token_map=token_map
+        )
+
+class ParallelInjectionStrategy(InjectionStrategy):
+    def inject(self, model, scaffold_model, layer_idx, token_map, injector):
+        # Placeholder: use the same logic as sequential for now, or implement parallel logic if available
+        return injector._inject_single_layer(
+            model=model,
+            scaffold_model=scaffold_model,
+            layer_idx=layer_idx,
+            injection_strategy='parallel',
+            token_map=token_map
+        )
+
+class ReplaceInjectionStrategy(InjectionStrategy):
+    def inject(self, model, scaffold_model, layer_idx, token_map, injector):
+        # Placeholder: use the same logic as sequential for now, or implement replace logic if available
+        return injector._inject_single_layer(
+            model=model,
+            scaffold_model=scaffold_model,
+            layer_idx=layer_idx,
+            injection_strategy='replace',
+            token_map=token_map
+        )
+
+    def _validate_updates(self, updates: Dict[str, Any]):
+        # Use the same checks as validate_scaffold_config, but for partial updates
+        # For example, check that any provided fields are valid and of correct type
+        allowed_fields = {"token_mapping": dict, "attention_config": dict, "memory_config": dict}
+        for key, expected_type in allowed_fields.items():
+            if key in updates and not isinstance(updates[key], expected_type):
+                raise ConfigurationError(f"Update field '{key}' must be of type {expected_type.__name__}")
+        # Optionally, add more granular validation here
+        return True
