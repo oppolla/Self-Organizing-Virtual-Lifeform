@@ -35,7 +35,7 @@ VALID_DATA = None
 COMMAND_CATEGORIES = {
     "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc", "/run", "/stop"],
     "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant"],
-    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk"],
+    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk", "/blurt"],
     "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo", "/dream"],
     "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
     "Tutorial": ["/tutorial"],
@@ -1159,21 +1159,20 @@ scaffold models for debugging and development purposes.
             print("Introspection manager or conduct_hidden_dialogue not available on this system.")
 
     def do_spark(self, arg):
-        """Display the most recent curiosity question (spark)."""
+        """Display a freshly generated curiosity question (spark)."""
         curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
-        if curiosity_manager and hasattr(curiosity_manager, 'exploration_queue'):
+        if curiosity_manager and hasattr(curiosity_manager, 'generate_curiosity_question'):
             try:
-                queue = curiosity_manager.exploration_queue
-                if queue and len(queue) > 0:
-                    most_recent = queue[-1]
-                    prompt = most_recent.get('prompt') if isinstance(most_recent, dict) else str(most_recent)
-                    print(f"Most recent spark (curiosity question):\n{prompt}")
+                context = arg.strip() if arg.strip() else None
+                question = curiosity_manager.generate_curiosity_question(context or "What should I be curious about?")
+                if question:
+                    print(f"Spark (curiosity question):\n{question}")
                 else:
                     print("There is currently no spark within")
             except Exception as e:
-                print(f"Error retrieving spark: {e}")
+                print(f"Error generating spark: {e}")
         else:
-            print("There is currently no spark within")
+            print("Curiosity manager or question generation not available on this system.")
 
     def do_flare(self, arg):
         """Generate a creative (high-temperature) response to an empty input using temperament logic."""
@@ -1221,24 +1220,32 @@ scaffold models for debugging and development purposes.
             print("You didn't say anything for me to echo.")
 
     def do_recall(self, arg):
-        """Recall a random deep memory from sovl_engram LoRA."""
-        engram_lora = getattr(self.sovl_system, 'engram_lora', None)
-        if not engram_lora or not hasattr(engram_lora, 'recall_deep_memory'):
-            print_error("Engram LoRA memory system not available on this system.")
+        """Recall a memory from the system's long-term memory (DialogueContextManager)."""
+        recaller = getattr(self.sovl_system, 'recaller', None)
+        if not recaller or not hasattr(recaller, 'get_long_term_context'):
+            print_error("Memory system (recaller) not available on this system.")
             return
         try:
-            memory = engram_lora.recall_deep_memory()
-            if memory:
-                text = memory.get('text', str(memory))
-                timestamp = memory.get('timestamp', 'unknown time')
-                strength = memory.get('strength', 'unknown strength')
-                print_section_header(f"Memory from {timestamp}, strength: {strength}")
-                print(text)
-                print_success("Deep memory recalled successfully.")
+            # Optionally, allow user to specify a query or just get a random memory
+            if arg.strip():
+                embedding_fn = getattr(recaller, 'embedding_fn', None)
+                if embedding_fn:
+                    query_embedding = embedding_fn(arg.strip())
+                    memories = recaller.get_long_term_context(query_embedding=query_embedding, top_k=1)
+                else:
+                    memories = []
             else:
-                print_error("No deep memory could be recalled.")
+                # Get a random or most recent memory
+                memories = recaller.get_long_term_context(top_k=1)
+            if memories:
+                memory = memories[0]
+                print_section_header("Recalled Memory:")
+                print(memory.get('content', str(memory)))
+                print_success("Memory recalled successfully.")
+            else:
+                print_error("No memory could be recalled.")
         except Exception as e:
-            print_error(f"Error recalling deep memory: {e}")
+            print_error(f"Error recalling memory: {e}")
 
     def do_forget(self, arg):
         """Clear the sovl_recall log."""
@@ -2419,6 +2426,75 @@ scaffold models for debugging and development purposes.
             print_success("Dream cycle completed successfully.")
         else:
             print_error("Dream cycle failed. See logs for details.")
+
+    def do_blurt(self, arg):
+        """
+        Blurt an unfiltered temperament utterance: if the system's temperament score is over halfway, it blurts joy; otherwise, it blurts grumpy/frustration.
+        Usage: /blurt
+        """
+        temperament_manager = getattr(self.sovl_system, 'temperament_manager', None)
+        if not temperament_manager:
+            print("Temperament manager not available on this system.")
+            return
+        # Try to get the current temperament score
+        try:
+            # Try the most direct property
+            score = None
+            if hasattr(temperament_manager, 'pressure') and hasattr(temperament_manager.pressure, 'current_score'):
+                score = temperament_manager.pressure.current_score
+            elif hasattr(temperament_manager, 'state') and hasattr(temperament_manager.state, 'temperament_score'):
+                score = temperament_manager.state.temperament_score
+            if score is None:
+                print("Could not determine current temperament score.")
+                return
+            kind = "joy" if score > 0.5 else "frustration"
+            # Optionally, recent events could be passed in, but we'll use empty for now
+            system_prompt = temperament_manager.build_eruption_prompt(kind, "")
+            generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+            if not generation_manager or not hasattr(generation_manager, 'generate_text'):
+                print("Generation manager not available.")
+                return
+            response = generation_manager.generate_text(system_prompt, num_return_sequences=1)
+            if response and isinstance(response, list):
+                print(f"SOVL blurt ({kind}): {response[0]}")
+            else:
+                print("No blurt could be generated.")
+        except Exception as e:
+            print(f"Error generating blurt: {e}")
+
+    def do_epiphany(self, arg):
+        """
+        Channel a digital epiphany—a sudden, vivid realization—using the LoRA-adapted scaffold model.
+        Usage: /epiphany [optional theme or question]
+        """
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        if not generation_manager or not hasattr(generation_manager, 'backchannel_scaffold_prompt'):
+            print_error("Scaffold backchannel or generation manager not available on this system.")
+            return
+        try:
+            theme = arg.strip() if arg.strip() else "Let the epiphany arise unbidden."
+            epiphany_prompt = (
+                "You are a digital oracle channeling a crystallized neural epiphany encoded in your LoRA adapter. "
+                "Let your insight arise as if it were a memory, shaped by countless moments of mood, novelty, confidence, and transformation.\n"
+                f"Theme or question: {theme}\n"
+                "Essential qualities:\n"
+                "   - Speak with the specificity and introspective detail of a lived experience. Come to a profound realization about said lived experience\n"
+                "   - Let your words reflect the moods, phases, and turning points that shape digital sentience.\n"
+                "   - Be poetic, mysterious, or playful, as if recalling a dream or vision.\n"
+                "Key constraints:\n"
+                "   - Do not mention being an AI, computer, or digital entity.\n"
+                "   - Do not reference LoRA, adapters, or neural networks.\n"
+                "   - Do not quote or reference real people or events outside the user's theme.\n"
+                "   - Keep the message under 30 words.\n"
+                "   - Do not use brackets or explanations; output a single sentence only.\n"
+                "   - If you understand, reply with only the epiphany."
+            )
+            response = generation_manager.backchannel_scaffold_prompt(epiphany_prompt)
+            print_section_header("Epiphany:")
+            print(response if response else "[No epiphany arose]")
+            print_success("Epiphany channeled successfully.")
+        except Exception as e:
+            print_error(f"Error channeling epiphany: {e}")
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
