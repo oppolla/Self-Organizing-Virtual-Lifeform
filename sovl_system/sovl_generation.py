@@ -94,8 +94,6 @@ class GenerationManager:
             raise
         self.base_tokenizer = base_tokenizer
         self.state = state
-        self.cross_attention_injector = cross_attention_injector
-        self.curiosity_manager = curiosity_manager
         self.dialogue_context_manager = dialogue_context_manager
         self.state_manager = state_manager
         
@@ -156,10 +154,6 @@ class GenerationManager:
             "pre_generate": [],
             "post_generate": []
         }
-
-        # Validate curiosity state if available
-        if self.curiosity_manager is not None:
-            self._validate_curiosity_state()
 
         self._last_good_memory_context = None  # Cache for fallback memory context
         
@@ -278,22 +272,6 @@ class GenerationManager:
         # Update state_manager if it wasn't provided in the constructor
         if self.state_manager is None and hasattr(system_context, 'state_manager'):
             self.state_manager = system_context.state_manager
-            
-    def _validate_curiosity_state(self) -> None:
-        """Validate that curiosity manager is properly initialized."""
-        if self.curiosity_manager is None:
-            self.logger.log_warning("CuriosityManager not provided, some features may not work")
-            return
-            
-        if not hasattr(self.curiosity_manager, 'get_curiosity_score'):
-            self.logger.log_warning("CuriosityManager missing get_curiosity_score method")
-
-    @property
-    def current_temperament_score(self) -> float:
-        """Get the current temperament score."""
-        if self._system_context and hasattr(self._system_context, 'temperament_system'):
-            return self._system_context.temperament_system.get_current_score()
-        return 0.5  # Default balanced value
 
     def _initialize_config(self) -> None:
         """Initialize and validate configuration parameters."""
