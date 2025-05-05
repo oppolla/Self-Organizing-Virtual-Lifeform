@@ -24,7 +24,7 @@ import difflib
 import threading
 import json
 import shutil
-from sovl_dreamer import Dreamer  # <-- Add this import
+from sovl_dreamer import Dreamer
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -34,7 +34,7 @@ VALID_DATA = None
 
 COMMAND_CATEGORIES = {
     "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc", "/run", "/stop"],
-    "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant"],
+    "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant", "/epiphany"],
     "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk", "/blurt"],
     "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo", "/dream"],
     "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
@@ -46,8 +46,8 @@ ALIASES = {
     "q": "quit",
     "h": "help",
     "ls": "history",
-    "s": "status",   # new: /s for /status
-    "r": "reset",    # new: /r for /reset
+    "s": "status",  
+    "r": "reset",  
 }
 
 class CommandHistory:
