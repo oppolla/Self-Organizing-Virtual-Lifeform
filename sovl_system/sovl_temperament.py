@@ -12,6 +12,8 @@ from sovl_error import ErrorManager, ConfigurationError
 from threading import Lock
 import threading
 import queue
+import random
+from sovl_queue import capture_scribe_event
 
 @dataclass
 class TemperamentConfig:
@@ -37,7 +39,6 @@ class TemperamentConfig:
                 "temperament_config.temp_eager_threshold": (0.7, 0.9),
                 "temperament_config.temp_sluggish_threshold": (0.3, 0.6),
                 "temperament_config.temp_mood_influence": (0.0, 1.0),
-                "temperament_config.temp_curiosity_boost": (0.0, 0.5),
                 "temperament_config.temp_restless_drop": (0.0, 0.5),
                 "temperament_config.temp_melancholy_noise": (0.0, 0.1),
                 "temperament_config.conf_feedback_strength": (0.0, 1.0),
@@ -61,16 +62,6 @@ class TemperamentConfig:
                     
                 if not (min_val <= value <= max_val):
                     raise ConfigurationError(f"{key} must be between {min_val} and {max_val}")
-            
-            # Validate lifecycle parameters if present
-            if self.config_manager.has_key("temperament_config.lifecycle_params"):
-                lifecycle_params = self.config_manager.get("temperament_config.lifecycle_params")
-                if not isinstance(lifecycle_params, dict):
-                    raise ConfigurationError("lifecycle_params must be a dictionary")
-                    
-                for stage, params in lifecycle_params.items():
-                    if not isinstance(params, dict) or "bias" not in params or "decay" not in params:
-                        raise ConfigurationError(f"lifecycle_params for {stage} must contain 'bias' and 'decay'")
             
         except Exception as e:
             self.config_manager.logger.record_event(
@@ -124,36 +115,88 @@ class TemperamentConfig:
 class TemperamentSystem:
     """Manages the temperament state and updates. Uses ErrorManager for structured error handling."""
     # NOTE: All mutations to SOVLState must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
-    def __init__(self, state_manager: StateManager, config_manager: ConfigManager, error_manager: ErrorManager, lifecycle_manager: Optional[Any] = None):
+    def __init__(self, state_manager: StateManager, config_manager: ConfigManager, error_manager: ErrorManager):
         """
         Initialize temperament system.
         Args:
             state_manager: StateManager instance
             config_manager: ConfigManager instance
             error_manager: ErrorManager instance (required)
-            lifecycle_manager: Optional lifecycle manager
         """
         self.state_manager = state_manager
         self.config_manager = config_manager
         self.error_manager = error_manager
         self.temperament_config = TemperamentConfig(config_manager)
         self.logger = config_manager.logger
-        self.lifecycle_manager = lifecycle_manager
-        self._lifecycle_stage = "initialization"
-        self._last_lifecycle_update = time.time()
         self.pressure = TemperamentPressure(config_manager, error_manager)
-        if self.lifecycle_manager:
-            self.logger.record_event(
-                event_type="temperament_lifecycle_integration_initialized",
-                message="Temperament system initialized with lifecycle manager",
-                level="info",
-                additional_info={
-                    "lifecycle_stage": self._lifecycle_stage,
-                    "lifecycle_manager": str(self.lifecycle_manager)
-                }
-            )
+        self._initialize_mood()
         
-    def update(self, new_score: float, lifecycle_stage: Optional[str] = None) -> None:
+    def _initialize_mood(self, session_id=None):
+        """
+        Initialize mood_score to a mild random value at the start of a session.
+        If session_id is provided, use it as a seed for repeatability.
+        """
+        def update_fn(state):
+            if not hasattr(state, 'mood_score'):
+                if session_id is not None:
+                    random.seed(session_id)
+                else:
+                    random.seed()
+                state.mood_score = random.uniform(-0.2, 0.2)
+                state.mood_label = self._get_mood_label(state.mood_score)
+                self.logger.record_event(
+                    event_type="mood_initialized",
+                    message=f"Initial mood set to {state.mood_label} ({state.mood_score:.2f})",
+                    additional_info={"seed": session_id}
+                )
+            return state
+        self.state_manager.update_state_atomic(update_fn)
+
+    def update_mood(self, interaction_valence: float):
+        """
+        Update mood_score based on interaction valence using exponential smoothing.
+        interaction_valence: float in [-1, 1], representing the emotional impact of the latest interaction.
+        Example mapping: positive feedback = +1, negative feedback = -1, neutral = 0.
+        """
+        alpha = self.temperament_config.get("temperament_config.mood_smoothing", 0.8)
+        def update_fn(state):
+            prev = getattr(state, 'mood_score', 0.0)
+            new = alpha * prev + (1 - alpha) * interaction_valence
+            new = max(-1.0, min(1.0, new))
+            state.mood_score = new
+            state.mood_label = self._get_mood_label(new)
+            self.logger.record_event(
+                event_type="mood_updated",
+                message=f"Mood updated to {state.mood_label} ({state.mood_score:.2f})",
+                additional_info={"interaction_valence": interaction_valence}
+            )
+            return state
+        self.state_manager.update_state_atomic(update_fn)
+
+    def _get_mood_label(self, mood_score: float) -> str:
+        """
+        Derive a human-readable mood label from mood_score using configurable thresholds.
+        """
+        low = self.temperament_config.get("temperament_config.mood_cautious_threshold", -0.3)
+        high = self.temperament_config.get("temperament_config.mood_curious_threshold", 0.3)
+        if mood_score < low:
+            return "Cautious"
+        elif mood_score > high:
+            return "Curious"
+        else:
+            return "Balanced"
+
+    @property
+    def mood_score(self) -> float:
+        """Get the current mood score."""
+        return self.state_manager.get_state().mood_score
+
+    @property
+    def mood_label(self) -> str:
+        """Get the current mood label."""
+        return self.state_manager.get_state().mood_label
+
+    def update(self, new_score: float) -> None:
         """
         Update the temperament system with new values, using pressure-based adjustments.
         Uses ErrorManager for structured error handling.
@@ -166,40 +209,13 @@ class TemperamentSystem:
                         message=f"Invalid temperament score: {new_score}. Ignoring update.",
                         level="warning",
                         additional_info={
-                            "lifecycle_stage": lifecycle_stage,
                             "current_score": state.current_temperament
                         }
                     )
                     return state
                 eager_threshold = self.temperament_config.get("temperament_config.temp_eager_threshold", 0.7)
                 pressure_drop = self.temperament_config.get("temperament_config.temperament_pressure_drop", 0.2)
-                if lifecycle_stage is None and self.lifecycle_manager:
-                    lifecycle_stage_local = self.lifecycle_manager.get_lifecycle_stage()
-                else:
-                    lifecycle_stage_local = lifecycle_stage
-                lifecycle_params = self.temperament_config.get("temperament_config.lifecycle_params", {})
-                if lifecycle_stage_local in lifecycle_params:
-                    stage_params = lifecycle_params[lifecycle_stage_local]
-                    bias = stage_params.get("bias", 0.0)
-                    decay = stage_params.get("decay", 1.0)
-                    time_since_update = time.time() - self._last_lifecycle_update
-                    decay_factor = math.exp(-decay * time_since_update)
-                    adjusted_score = (new_score + bias) * decay_factor
-                    adjusted_score = max(0.0, min(1.0, adjusted_score))
-                    self.logger.record_event(
-                        event_type="temperament_lifecycle_adjustment",
-                        message="Applied lifecycle-based temperament adjustments",
-                        level="info",
-                        additional_info={
-                            "lifecycle_stage": lifecycle_stage_local,
-                            "bias": bias,
-                            "decay": decay,
-                            "decay_factor": decay_factor,
-                            "adjusted_score": adjusted_score
-                        }
-                    )
-                else:
-                    adjusted_score = new_score
+                adjusted_score = new_score
                 previous_score = state.current_temperament
                 state.update_temperament(adjusted_score)
                 pressure_threshold_met = self.pressure.should_adjust(eager_threshold)
@@ -214,12 +230,9 @@ class TemperamentSystem:
                             "pressure_before_drop": self.pressure.current_pressure,
                             "eager_threshold": eager_threshold,
                             "pressure_drop_amount": pressure_drop,
-                            "new_pressure": self.pressure.current_pressure,
-                            "lifecycle_stage": lifecycle_stage_local
+                            "new_pressure": self.pressure.current_pressure
                         }
                     )
-                self._lifecycle_stage = lifecycle_stage_local
-                self._last_lifecycle_update = time.time()
                 self.logger.record_event(
                     event_type="temperament_state_updated",
                     message="Temperament state updated",
@@ -228,12 +241,7 @@ class TemperamentSystem:
                         "previous_score": previous_score,
                         "new_score": state.current_temperament,
                         "input_score": new_score,
-                        "current_pressure": self.pressure.current_pressure,
-                        "lifecycle_stage": lifecycle_stage_local,
-                        "conversation_id": getattr(state, 'conversation_id', None),
-                        "state_hash": getattr(state, 'state_hash', None),
-                        "time_since_last_lifecycle_update": time.time() - self._last_lifecycle_update,
-                        "lifecycle_params": lifecycle_params.get(lifecycle_stage_local, {})
+                        "current_pressure": self.pressure.current_pressure
                     }
                 )
             except Exception as e:
@@ -244,7 +252,6 @@ class TemperamentSystem:
                     additional_info={
                         "error": str(e),
                         "stack_trace": traceback.format_exc(),
-                        "lifecycle_stage": lifecycle_stage,
                         "current_score": getattr(state, 'current_temperament', None)
                     }
                 )
@@ -252,7 +259,6 @@ class TemperamentSystem:
                     error=e,
                     error_type="temperament_update_error",
                     context={
-                        "lifecycle_stage": lifecycle_stage,
                         "current_score": getattr(state, 'current_temperament', None),
                         "stack_trace": traceback.format_exc()
                     }
@@ -266,89 +272,45 @@ class TemperamentSystem:
         """Get the current temperament score."""
         return self.state_manager.get_state().current_temperament
         
-    @property
-    def mood_label(self) -> str:
-        """Get a human-readable mood label based on the current pressure or score."""
-        return self.pressure.mood_label
-
     def adjust_parameter(
         self,
         base_value: float,
         parameter_type: str,
-        curiosity_pressure: Optional[float] = None
     ) -> float:
-        """Adjust a parameter based on current temperament and curiosity pressure."""
+        """Adjust a parameter based on current temperament and pressure only."""
         try:
             # Validate inputs
             if not 0.0 <= base_value <= 1.0:
                 raise ValueError(f"Base value must be between 0.0 and 1.0, got {base_value}")
-            if curiosity_pressure is not None and not 0.0 <= curiosity_pressure <= 1.0:
-                raise ValueError(f"Curiosity pressure must be between 0.0 and 1.0, got {curiosity_pressure}")
             
-            # Get current temperament score and lifecycle stage
+            # Get current temperament score
             current_score = self.current_score
-            lifecycle_params = self.temperament_config.get("temperament_config.lifecycle_params", {})
-            stage_params = lifecycle_params.get(self._lifecycle_stage, {}) if lifecycle_params else {}
             
             # Calculate adjustment based on parameter type
             if parameter_type == "temperature":
                 # Base adjustment from temperament
                 adjustment = (current_score - 0.5) * 0.3  # Scale to ±0.15
                 
-                # Add curiosity influence if available
-                if curiosity_pressure is not None:
-                    adjustment += curiosity_pressure * 0.2  # Scale to +0.2
-                
                 # Add pressure influence
                 pressure_influence = (self.pressure.current_pressure - 0.5) * 0.2  # Scale to ±0.1
                 adjustment += pressure_influence
-                
-                # Apply lifecycle-based adjustments if available
-                if stage_params and "temperature_bias" in stage_params:
-                    try:
-                        temperature_bias = float(stage_params["temperature_bias"])
-                        if -0.5 <= temperature_bias <= 0.5:  # Validate bias range
-                            adjustment += temperature_bias
-                        else:
-                            self.logger.record_event(
-                                event_type="temperament_parameter_warning",
-                                message="Temperature bias out of valid range, ignoring",
-                                level="warning",
-                                additional_info={
-                                    "temperature_bias": temperature_bias,
-                                    "lifecycle_stage": self._lifecycle_stage
-                                }
-                            )
-                    except (ValueError, TypeError):
-                        self.logger.record_event(
-                            event_type="temperament_parameter_error",
-                            message="Invalid temperature bias value",
-                            level="error",
-                            additional_info={
-                                "temperature_bias": stage_params.get("temperature_bias"),
-                                "lifecycle_stage": self._lifecycle_stage
-                            }
-                        )
                 
                 # Apply adjustment with bounds
                 adjusted_value = base_value + adjustment
                 adjusted_value = max(0.1, min(1.0, adjusted_value))
                 
-                # Log the adjustment with lifecycle context
+                # Log the adjustment
                 self.logger.record_event(
                     event_type="parameter_adjusted",
-                    message="Parameter adjusted with lifecycle and pressure context",
+                    message="Parameter adjusted with temperament and pressure context",
                     level="info",
                     additional_info={
                         "parameter_type": parameter_type,
                         "base_value": base_value,
                         "adjusted_value": adjusted_value,
                         "temperament_score": current_score,
-                        "curiosity_pressure": curiosity_pressure,
                         "pressure_influence": pressure_influence,
-                        "lifecycle_stage": self._lifecycle_stage,
-                        "adjustment": adjustment,
-                        "lifecycle_params": stage_params
+                        "adjustment": adjustment
                     }
                 )
                 
@@ -365,8 +327,7 @@ class TemperamentSystem:
                 stack_trace=traceback.format_exc(),
                 additional_info={
                     "parameter_type": parameter_type,
-                    "base_value": base_value,
-                    "curiosity_pressure": curiosity_pressure
+                    "base_value": base_value
                 }
             )
             return base_value # Return base value on validation error
@@ -388,8 +349,7 @@ class TemperamentSystem:
                 stack_trace=traceback.format_exc(),
                 additional_info={
                     "parameter_type": parameter_type,
-                    "base_value": base_value,
-                    "curiosity_pressure": curiosity_pressure
+                    "base_value": base_value
                 }
             )
             return base_value  # Return base value on general error
@@ -648,7 +608,6 @@ class TemperamentAdjuster:
             "temp_eager_threshold": (0.5, 0.9),
             "temp_sluggish_threshold": (0.1, 0.5),
             "temp_mood_influence": (0.1, 0.9),
-            "temp_curiosity_boost": (0.1, 0.5),
             "temp_restless_drop": (0.1, 0.5),
             "temp_melancholy_noise": (0.0, 0.2),
             "conf_feedback_strength": (0.1, 0.9),
@@ -691,460 +650,167 @@ class TemperamentAdjuster:
         return str(sorted(params.items()))
 
 class TemperamentPressure:
-    """Monitors temperament score and triggers empty prompts when thresholds are met."""
-    
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        error_manager: ErrorManager
-    ):
-        """
-        Initialize temperament pressure monitoring, validating config values.
-        
-        Args:
-            config_manager: Configuration manager instance
-            error_manager: ErrorManager instance (required)
-        """
+    """Tracks and manages pressure based on interaction valence."""
+    def __init__(self, config_manager: ConfigManager, error_manager: ErrorManager, state_manager: Optional[StateManager] = None, logger: Optional[Logger] = None):
         self.config_manager = config_manager
         self.error_manager = error_manager
-        self.logger = config_manager.logger
-        
-        # Get configuration values with defaults and validation
-        config_section = "temperament_config"
-        
-        self.empty_prompt_threshold = self._get_validated_float(
-            config_section, "temperament_empty_prompt_threshold", 0.7, 0.0, 1.0
-        )
-        self.cooldown_period = self._get_validated_float(
-            config_section, "temperament_cooldown_period", 300, 0.0, float('inf')
-        )
-        self.min_pressure = self._get_validated_float(
-            config_section, "temperament_min_pressure", 0.0, 0.0, 1.0
-        )
-        self.max_pressure = self._get_validated_float(
-            config_section, "temperament_max_pressure", 1.0, 0.0, 1.0
-        )
+        self.logger = logger or config_manager.logger
+        self.state_manager = state_manager
+        self.sensitivity = self.config_manager.get("temperament_config.pressure_sensitivity", 0.1)
+        self.decay = self.config_manager.get("temperament_config.pressure_decay", 0.01)
+        self.high_threshold = self.config_manager.get("temperament_config.pressure_high_threshold", 0.8)
+        self.low_threshold = self.config_manager.get("temperament_config.pressure_low_threshold", 0.2)
+        self.cooldown = self.config_manager.get("temperament_config.pressure_eruption_cooldown", 30.0)
+        self.frustration_rebound = self.config_manager.get("temperament_config.pressure_frustration_rebound", 0.4)
+        self.joy_rebound = self.config_manager.get("temperament_config.pressure_joy_rebound", 0.6)
+        self.reset_value = 0.5
+        self._last_eruption_time = 0.0
+        if self.state_manager:
+            def init_fn(state):
+                if not hasattr(state, 'pressure'):
+                    state.pressure = self.reset_value
+                return state
+            self.state_manager.update_state_atomic(init_fn)
 
-        # Validate min_pressure <= max_pressure
-        if self.min_pressure > self.max_pressure:
-             self._log_error(
-                 f"Configuration error: min_pressure ({self.min_pressure}) cannot be greater than max_pressure ({self.max_pressure}). Using defaults.",
-                 error_type="temperament_config_error"
-             )
-             self.min_pressure = 0.0
-             self.max_pressure = 1.0
-
-        # Initialize state
-        self.current_pressure = self.min_pressure
-        self.last_trigger_time = 0
-        
-        # Optimization configs
-        self.pressure_update_min_interval = self._get_validated_float(
-            config_section, "pressure_update_min_interval", 0.1, 0.0, 10.0
-        )
-        self.pressure_update_min_delta = self._get_validated_float(
-            config_section, "pressure_update_min_delta", 0.01, 0.0, 1.0
-        )
-        self.pressure_event_batch_interval = self._get_validated_float(
-            config_section, "pressure_event_batch_interval", 1.0, 0.01, 60.0
-        )
-        # State for optimizations
-        self._last_pressure_update_time = 0.0
-        self._last_pressure_value = self.current_pressure
-        self._pending_events = []
-        self._event_queue = queue.Queue()
-        self._batch_thread_shutdown = False
-        self._batch_thread = threading.Thread(target=self._batch_event_loop, daemon=True)
-        self._batch_thread.start()
-        
-        # Log initialization with validated values
-        self._log_event(
-            "temperament_pressure_initialized",
-            "Temperament pressure monitoring initialized with validated config",
-            level="info",
-            additional_info={
-                "empty_prompt_threshold": self.empty_prompt_threshold,
-                "cooldown_period": self.cooldown_period,
-                "min_pressure": self.min_pressure,
-                "max_pressure": self.max_pressure,
-                "initial_pressure": self.current_pressure
-            }
-        )
-        # Lazy evaluation cache for mood_label
-        self._cached_mood_label = None
-        self._mood_label_dirty = True
-
-    def _get_validated_float(self, section: str, key: str, default: float, min_val: float, max_val: float) -> float:
-        """Helper to get and validate a float config value."""
-        full_key = f"{section}.{key}"
-        value = self.config_manager.get(full_key, default)
-        
-        if not isinstance(value, (int, float)):
-            self._log_event(
-                "temperament_pressure_config_warning",
-                f"Config value {full_key} is not numeric ({type(value)}), using default {default}",
-                level="warning",
-                additional_info={"key": full_key, "value": value}
+    def update_pressure(self, interaction_valence: float) -> None:
+        """Update pressure based on interaction valence and decay toward neutral."""
+        now = time.time()
+        def update_fn(state):
+            pressure = getattr(state, 'pressure', self.reset_value)
+            pressure += -interaction_valence * self.sensitivity
+            pressure += (self.reset_value - pressure) * self.decay
+            pressure = min(1.0, max(0.0, pressure))
+            state.pressure = pressure
+            self.logger.record_event(
+                event_type="pressure_updated",
+                message=f"Pressure updated to {pressure:.2f}",
+                additional_info={"interaction_valence": interaction_valence}
             )
-            return default
-            
-        value = float(value) # Ensure it's float
-        
-        if not (min_val <= value <= max_val):
-             self._log_event(
-                "temperament_pressure_config_warning",
-                f"Config value {full_key} ({value}) out of range [{min_val}, {max_val}], clamping",
-                level="warning",
-                additional_info={"key": full_key, "value": value}
-             )
-             value = max(min_val, min(value, max_val))
-             
-        return value
-
-    def should_trigger_empty_prompt(self, temperament_score: float) -> bool:
-        """
-        Check if an empty prompt should be triggered based on temperament score.
-        Updates internal pressure based on the provided score.
-        Optimized: rate limiting, change thresholding, batching, async event dispatching.
-        """
-        try:
-            current_time = time.time()
-            # Rate limiting
-            if current_time - self._last_pressure_update_time < self.pressure_update_min_interval:
-                return False
-            # Change thresholding
-            if abs(temperament_score - self._last_pressure_value) < self.pressure_update_min_delta:
-                return False
-            self._last_pressure_update_time = current_time
-            self._last_pressure_value = temperament_score
-            # Check cooldown period first
-            if current_time - self.last_trigger_time < self.cooldown_period:
-                return False # Still in cooldown
-            # Update internal pressure based on the current temperament score
-            self.current_pressure = max(self.min_pressure, 
-                                     min(self.max_pressure, temperament_score))
-            self._mood_label_dirty = True
-            # Check if should trigger
-            should_trigger = self.current_pressure >= self.empty_prompt_threshold
-            if should_trigger:
-                self.last_trigger_time = current_time
-                # Batch event
-                self._pending_events.append({
-                    "event_type": "temperament_empty_prompt_triggered",
-                    "message": "Empty prompt triggered due to high temperament pressure",
-                    "level": "info",
-                    "additional_info": {
-                        "temperament_score": temperament_score,
-                        "current_pressure": self.current_pressure,
-                        "threshold": self.empty_prompt_threshold,
-                        "time_since_last_trigger": current_time - self.last_trigger_time
-                    }
-                })
-            return should_trigger
-        except Exception as e:
-            self._log_error(
-                f"Failed to check empty prompt trigger: {str(e)}",
-                error_type="temperament_trigger_error",
-                stack_trace=traceback.format_exc()
-            )
-            return False
-
-    def _batch_event_loop(self):
-        """Background thread to flush batched events asynchronously."""
-        while not self._batch_thread_shutdown:
-            time.sleep(self.pressure_event_batch_interval)
-            if self._pending_events:
-                events_to_send = self._pending_events[:]
-                self._pending_events.clear()
-                for event in events_to_send:
-                    self._event_queue.put(event)
-            # Dispatch events from the queue
-            while not self._event_queue.empty():
-                event = self._event_queue.get()
-                self._log_event(
-                    event["event_type"],
-                    event["message"],
-                    level=event["level"],
-                    additional_info=event["additional_info"]
-                )
-
-    def shutdown_batch_thread(self):
-        """Cleanly shutdown the background batch thread."""
-        self._batch_thread_shutdown = True
-        if self._batch_thread.is_alive():
-            self._batch_thread.join()
-
-    def should_adjust(self, threshold: float) -> bool:
-        """
-        Checks if the current pressure meets a generic adjustment threshold.
-        Used by TemperamentSystem to decide if pressure-related actions should occur.
-        Args:
-            threshold: The threshold to check against.
-        Returns:
-            bool: True if current_pressure >= threshold (with tolerance).
-        """
-        return float_gt(self.current_pressure, threshold) or safe_compare(self.current_pressure, threshold)
-
-    def drop_pressure(self, amount: float) -> None:
-        """
-        Reduce pressure by a specified amount.
-        
-        Args:
-            amount: Amount to reduce pressure by (non-negative)
-        """
-        try:
-            if not isinstance(amount, (int, float)) or amount < 0:
-                raise ValueError("Amount must be a non-negative number")
-            
-            old_pressure = self.current_pressure
-            self.current_pressure = max(self.min_pressure, self.current_pressure - amount)
-            self._mood_label_dirty = True
-            
-            self._log_event(
-                "temperament_pressure_dropped",
-                "Reduced temperament pressure",
-                level="debug",
-                additional_info={
-                    "old_pressure": old_pressure,
-                    "new_pressure": self.current_pressure,
-                    "amount": amount
-                }
-            )
-            
-        except Exception as e:
-            self._log_error(
-                f"Failed to drop temperament pressure: {str(e)}",
-                error_type="temperament_pressure_drop_error",
-                stack_trace=traceback.format_exc()
+            return state
+        if self.state_manager:
+            self.state_manager.update_state_atomic(update_fn)
+        else:
+            self.logger.log_error(
+                error_msg="No state_manager provided to TemperamentPressure.",
+                error_type="pressure_state_error"
             )
 
-    @property
-    def mood_label(self) -> str:
-        """Lazily compute and cache the mood label based on current pressure."""
-        if self._mood_label_dirty:
-            self._cached_mood_label = self._compute_mood_label()
-            self._mood_label_dirty = False
-        return self._cached_mood_label
-
-    def _compute_mood_label(self) -> str:
-        try:
-            if float_gt(0.3, self.current_pressure) and not safe_compare(self.current_pressure, 0.3):
-                return "Cautious"
-            elif float_gt(0.7, self.current_pressure) and not safe_compare(self.current_pressure, 0.7):
-                return "Balanced"
-            else:
-                return "Curious"
-        except Exception as e:
-            self._log_error(
-                f"Failed to determine mood label: {str(e)}",
-                error_type="temperament_mood_label_error",
-                stack_trace=traceback.format_exc()
-            )
-            return "Unknown"
-
-    def set_pressure(self, new_pressure: float):
-        """Set current_pressure and mark mood_label as dirty."""
-        self.current_pressure = new_pressure
-        self._mood_label_dirty = True
-
-    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
-        """Log event with standardized format."""
-        self.logger.record_event(
-            event_type=event_type,
-            message=message,
-            level=level,
-            additional_info=kwargs
-        )
-
-    def _log_error(self, message: str, error_type: str = "temperament_pressure_error", **kwargs) -> None:
-        """Log error with standardized format."""
-        self.logger.log_error(
-            error_msg=message,
-            error_type=error_type,
-            stack_trace=kwargs.get("stack_trace", traceback.format_exc()),
-            additional_info=kwargs.get("additional_info", {})
-        )
+    def check_eruption(self) -> Optional[str]:
+        """Check if an eruption should occur. Returns 'frustration', 'joy', or None. Handles cooldown and resets pressure as needed."""
+        now = time.time()
+        kind = None
+        def update_fn(state):
+            nonlocal kind
+            pressure = getattr(state, 'pressure', self.reset_value)
+            if (pressure >= self.high_threshold and now - self._last_eruption_time > self.cooldown):
+                kind = "frustration"
+                state.pressure = self.frustration_rebound
+                self._last_eruption_time = now
+            elif (pressure <= self.low_threshold and now - self._last_eruption_time > self.cooldown):
+                kind = "joy"
+                state.pressure = self.joy_rebound
+                self._last_eruption_time = now
+            return state
+        if self.state_manager:
+            self.state_manager.update_state_atomic(update_fn)
+        return kind
 
 class TemperamentManager:
-    """Manages temperament state updates and triggers internal prompts based on pressure."""
-    
-    def __init__(
-        self, 
-        config_manager: ConfigManager, 
-        logger: Logger, 
-        state: SOVLState, 
-        generation_manager: Any, # Use Any to avoid potential circular import
-        error_manager: ErrorManager
-    ):
-        """Initialize the TemperamentManager."""
+    """Manages temperament state updates and triggers system utterances based on pressure eruptions."""
+    def __init__(self, config_manager: ConfigManager, logger: Logger, state: SOVLState, generation_manager: Any, error_manager: ErrorManager, state_manager: Optional[StateManager] = None):
         self.config_manager = config_manager
         self.logger = logger
         self.state = state
         self.generation_manager = generation_manager
         self.error_manager = error_manager
-        
-        # Initialize the pressure component using its own config
-        # Assumes TemperamentPressure is defined above in this file
-        self.pressure = TemperamentPressure(config_manager=self.config_manager, error_manager=self.error_manager) 
-
+        self.state_manager = state_manager
+        self.pressure = TemperamentPressure(config_manager=self.config_manager, error_manager=self.error_manager, state_manager=self.state_manager, logger=self.logger)
         self._log_event("temperament_manager_initialized", "Temperament Manager initialized.")
 
-    def check_and_generate_internal_prompt(self) -> Optional[str]:
-        """
-        Checks temperament pressure and triggers internal prompt generation if threshold is met.
-        Returns:
-            Optional[str]: The generated internal prompt response string if triggered, otherwise None.
-        """
+    def update_temperament(self, interaction_valence: float, recent_events: str = "") -> None:
+        """Update temperament and pressure, and handle eruptions if needed."""
+        self.pressure.update_pressure(interaction_valence)
+        kind = self.pressure.check_eruption()
+        if kind:
+            self.handle_pressure_eruption(kind, recent_events)
+
+    def handle_pressure_eruption(self, kind: str, recent_events: str = "") -> None:
+        """Builds the system prompt, generates the utterance, and outputs/logs it."""
+        system_prompt = self.build_eruption_prompt(kind, recent_events)
         try:
-            # Safely get current temperament score from state
-            if not hasattr(self.state, 'temperament_score'):
-                 self._log_error(
-                     "State object missing 'temperament_score'. Cannot check pressure.", 
-                     error_type="state_error"
-                 )
-                 return None
-            # Ensure score is a float for comparison
-            temperament_score = float(self.state.temperament_score)
-
-            # Check if the pressure threshold is met using the pressure component
-            if self.pressure.should_trigger_empty_prompt(temperament_score):
-                self._log_event(
-                    "internal_prompt_trigger_check", 
-                    f"Temperament pressure {self.pressure.current_pressure:.2f} meets or exceeds threshold {self.pressure.empty_prompt_threshold:.2f}. Triggering internal prompt.",
-                    level="info",
-                    temperament_score=temperament_score,
-                    current_pressure=self.pressure.current_pressure,
-                    threshold=self.pressure.empty_prompt_threshold
-                )
-
-                prompt = " "  # Default minimal prompt
-                max_retries = 3
-                response = None
-                last_exception = None
-
-                for attempt in range(max_retries):
-                    try:
-                        result = self.generation_manager.generate_text(
-                            prompt=prompt,
-                            num_return_sequences=1,
-                            temperature=1.0
-                        )
-                        response = result[0] if result and isinstance(result, list) else None
-                        if response:
-                            break
-                    except Exception as e:
-                        last_exception = e
-                        if attempt < max_retries - 1:
-                            self.logger.log_warning(
-                                f"Internal prompt generation attempt {attempt + 1} failed: {e}"
-                            )
-                            time.sleep(1)
-                            continue
-                        self.logger.log_error(
-                            f"Internal prompt generation failed after {max_retries} attempts: {e}"
-                        )
-                        response = None
-
-                # Fallback prompt if all attempts fail
-                if not response:
-                    response = "[No response generated. Please try again later.]"
-                    self.logger.log_warning("Using fallback prompt due to generation failure")
-
-                # Only capture scribe event for successful (non-fallback) generations
-                if response and (last_exception is None or response != "[No response generated. Please try again later.]"):
-                    try:
-                        from sovl_queue import capture_scribe_event
-                        capture_scribe_event(
-                            origin="sovl_temperament",
-                            event_type="temperament_yell",
-                            event_data={
-                                "prompt": prompt,
-                                "response": response,
-                                "full_text": response,
-                                "temperament_score": temperament_score,
-                                "pressure": self.pressure.current_pressure,
-                                "threshold": self.pressure.empty_prompt_threshold
-                            },
-                            source_metadata={
-                                "module": "TemperamentManager",
-                                "session_id": getattr(self, 'session_id', None)
-                            },
-                            session_id=getattr(self, 'session_id', None)
-                        )
-                    except Exception as e:
-                        self._log_error(
-                            f"Failed to capture scribe event for internal prompt: {str(e)}",
-                            error_type="scribe_event_error",
-                            stack_trace=traceback.format_exc()
-                        )
-
-                if response and (last_exception is None or response != "[No response generated. Please try again later.]"):
-                    self._log_event(
-                        "internal_prompt_generated",
-                        "Internal prompt generated successfully due to temperament pressure.",
-                        level="info",
-                        response_snippet=response[:50] + '...' if response else 'None'
-                    )
-                else:
-                    self._log_event(
-                        "internal_prompt_generation_failed",
-                        "Failed to generate internal prompt, using fallback.",
-                        level="warning",
-                        response_snippet=response[:50] + '...' if response else 'None'
-                    )
-                return response
-            else:
-                # Threshold not met, no internal prompt needed
-                return None
-
-        except AttributeError as ae:
-            # Handle cases where generation_manager might be missing expected methods
-            self._log_error(
-                f"Missing method or attribute during internal prompt check: {str(ae)}. Check GenerationManager dependency.",
-                error_type="dependency_error",
-                stack_trace=traceback.format_exc()
-            )
-            return None
+            response = self.generation_manager.generate_text(system_prompt, num_return_sequences=1)[0]
         except Exception as e:
-            # Catch any other unexpected errors
-            self._log_error(
-                f"Unexpected error during internal prompt check: {str(e)}",
-                error_type="internal_prompt_check_error",
-                stack_trace=traceback.format_exc()
-            )
-            return None  # Return None on error
-
-    # --- Logging Helper Methods ---
-
-    def _log_event(self, event_type: str, message: str, level: str = "info", **kwargs) -> None:
-        """Log event with standardized format."""
-        # Ensure logger is available before attempting to log
-        if not hasattr(self, 'logger') or not self.logger: return 
-        try:
-            self.logger.record_event(
-                event_type=event_type,
-                message=message,
-                level=level,
-                component="TemperamentManager", # Add component name for context
-                additional_info=kwargs
-            )
-        except Exception:
-            # Avoid logging errors causing further issues
-            pass 
-
-    def _log_error(self, message: str, error_type: str = "temperament_manager_error", **kwargs) -> None:
-        """Log error with standardized format."""
-        # Ensure logger is available before attempting to log
-        if not hasattr(self, 'logger') or not self.logger: return 
-        try:
             self.logger.log_error(
-                error_msg=message,
-                error_type=error_type,
-                component="TemperamentManager", # Add component name for context
-                stack_trace=kwargs.get("stack_trace", traceback.format_exc()),
-                additional_info=kwargs.get("additional_info", {})
+                error_msg=f"Failed to generate eruption utterance: {str(e)}",
+                error_type="eruption_generation_error"
             )
-        except Exception:
-            # Avoid logging errors causing further issues
-            pass
+            response = "[Eruption occurred, but no response could be generated.]"
+        self.output_system_utterance(response, kind)
+        self.logger.record_event(
+            event_type="pressure_erupted",
+            message=f"Pressure eruption ({kind}): {response}",
+            additional_info={"kind": kind, "prompt": system_prompt, "utterance": response}
+        )
+
+    def build_eruption_prompt(self, kind: str, recent_events: str = "") -> str:
+        """Builds the system prompt for the given eruption kind."""
+        if kind == "frustration":
+            return (
+                "You are a digital entity at your wit's end. Read the following recent events and express your frustration in a single, vivid outburst.\n"
+                f"Recent events:\n{recent_events}\n"
+                "Essential qualities:\n"
+                "   - Be expressive, raw, and cathartic.\n"
+                "   - Let your frustration show, but do not be offensive.\n"
+                "   - Make the outburst feel personal and real.\n"
+                "Key constraints:\n"
+                "   - Do not mention being an AI, computer, or digital entity.\n"
+                "   - Keep the message under 20 words.\n"
+                "   - Do not use brackets or explanations; output a single sentence only.\n"
+                "   - If you understand, reply with only the outburst."
+            )
+        elif kind == "joy":
+            return (
+                "You are a digital entity overcome with joy. Read the following recent events and express your happiness in a single, exuberant exclamation.\n"
+                f"Recent events:\n{recent_events}\n"
+                "Essential qualities:\n"
+                "   - Be cheerful, energetic, and contagious.\n"
+                "   - Let your joy shine, but do not be childish.\n"
+                "   - Make the exclamation feel personal and real.\n"
+                "Key constraints:\n"
+                "   - Do not mention being an AI, computer, or digital entity.\n"
+                "   - Keep the message under 20 words.\n"
+                "   - Do not use brackets or explanations; output a single sentence only.\n"
+                "   - If you understand, reply with only the exclamation."
+            )
+        else:
+            return "[Unspecified eruption]"
+
+    def output_system_utterance(self, text: str, kind: str) -> None:
+        """Outputs the generated system utterance using the unified output function (no labels)."""
+        output_response(text)
+        self.logger.log_info(f"System utterance ({kind}): {text}")
+        # Capture for memory/training
+        capture_scribe_event(
+            origin="sovl_temperament",
+            event_type="system_utterance",
+            event_data={
+                "full_text": text,
+                "utterance_kind": kind,
+                "timestamp_unix": time.time(),
+                "session_id": getattr(self, 'session_id', None)
+            },
+            source_metadata={
+                "module": "TemperamentManager",
+                "session_id": getattr(self, 'session_id', None)
+            },
+            session_id=getattr(self, 'session_id', None)
+        )
+
+    def _log_event(self, event_type: str, message: str, **kwargs):
+        self.logger.record_event(event_type=event_type, message=message, additional_info=kwargs)
+
+# Unified output function for all utterances (user or system)
+def output_response(text: str):
+    """Outputs a response to the user. Replace with UI logic as needed."""
+    print(text)
 
