@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional, Deque, Tuple
 from collections import deque, defaultdict, Counter
 import traceback
 import threading
-import math
 import torch
 from torch import nn
 from datetime import datetime
