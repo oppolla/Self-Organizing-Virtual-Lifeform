@@ -1,17 +1,18 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List, Tuple, Union
-import torch
+from typing import Optional, Dict, Any, List, Tuple, Union, TYPE_CHECKING
 import traceback
 import time
 from threading import Lock
-from sovl_config import ConfigManager
-from sovl_logger import Logger
-from sovl_state import SOVLState, StateManager
-from sovl_error import ErrorManager
-from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_main import SOVLSystem, SystemContext
-from sovl_monitor import MemoryMonitor
+import torch
 
+if TYPE_CHECKING:
+    from sovl_config import ConfigManager
+    from sovl_logger import Logger
+    from sovl_state import SOVLState, StateManager
+    from sovl_error import ErrorManager
+    from sovl_memory import RAMManager, GPUMemoryManager
+    from sovl_main import SOVLSystem, SystemContext
+    
 class SystemInterface(ABC):
     """Core interface for the SOVL system."""
     
@@ -392,43 +393,6 @@ class StateAccessor(ABC):
             
         Returns:
             bool: True if state is valid, False otherwise.
-        """
-        pass
-
-class CuriosityAccessor(ABC):
-    """Interface for accessing curiosity-related functionality.
-    This interface allows components to access curiosity functions without direct dependencies.
-    """
-    
-    @abstractmethod
-    def get_curiosity_score(self, text: str, timestamp: Optional[float] = None) -> float:
-        """Calculate a curiosity score for the given text.
-        
-        Args:
-            text: The text to calculate curiosity for.
-            timestamp: Optional timestamp for the curiosity calculation.
-            
-        Returns:
-            float: Curiosity score between 0.0 and 1.0.
-        """
-        pass
-    
-    @abstractmethod
-    def update_curiosity_pressure(self, pressure: float, timestamp: Optional[float] = None) -> None:
-        """Update the curiosity pressure parameter.
-        
-        Args:
-            pressure: New pressure value between 0.0 and 1.0.
-            timestamp: Optional timestamp for the update.
-        """
-        pass
-    
-    @abstractmethod
-    def get_memory_stats(self) -> Dict[str, Any]:
-        """Get statistics about internal memory usage.
-        
-        Returns:
-            Dict[str, Any]: Memory usage statistics.
         """
         pass
 
