@@ -590,9 +590,7 @@ class CuriosityManager(CuriosityAccessor):
         
         # Initialize metrics
         self._curiosity_score = 0.0
-        self._exploration_count = 0
         self._last_update = time.time()
-        self._exploration_queue = deque(maxlen=100)
         
         # Log initialization
         self._record_event(
@@ -601,7 +599,6 @@ class CuriosityManager(CuriosityAccessor):
             level="info",
             additional_info={
                 "device": str(self.device),
-                "max_exploration_rate": self.max_exploration_rate,
                 "curiosity_threshold": self.curiosity_threshold
             }
         )
