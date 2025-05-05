@@ -18,7 +18,6 @@ from sovl_trainer import LifecycleManager, TrainingConfig
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_manager import ModelManager
-from sovl_scaffold import ScaffoldProvider
 from sovl_primer import GenerationPrimer  # Import GenerationPrimer for trait aggregation and management
 from sovl_resource import ResourceManager  # Import ResourceManager
 
@@ -39,14 +38,11 @@ class GenerationManager:
         self,
         config_manager: ConfigManager,
         base_model: AutoModelForCausalLM,
-        scaffolds: List[AutoModelForCausalLM],
         base_tokenizer: AutoTokenizer,
-        scaffold_tokenizer: AutoTokenizer,
         state: SOVLState,
         logger: Logger,
         error_manager: ErrorManager,
         cross_attention_injector: Any,
-        scaffold_manager: Any,
         device: torch.device,
         curiosity_manager: Any = None,
         generation_hooks: Dict[str, bool] = {},
@@ -79,28 +75,16 @@ class GenerationManager:
         else:
             self.model_manager = model_manager
         self.components["model_manager"] = self.model_manager
-        # Resource acquisition for base_model and scaffolds
+        # Resource acquisition for base_model
         try:
             # Acquire GPU memory for base_model
             model_size_mb = sum(p.numel() * p.element_size() for p in base_model.parameters()) // (1024 * 1024)
             if not self.resource_manager.acquire("gpu_memory", amount=model_size_mb):
                 raise RuntimeError(f"Insufficient GPU memory for base model ({model_size_mb} MB)")
             self.base_model = base_model.to(device)
-            self.scaffolds = []
-            for scaffold in scaffolds:
-                scaffold_size_mb = sum(p.numel() * p.element_size() for p in scaffold.parameters()) // (1024 * 1024)
-                if not self.resource_manager.acquire("gpu_memory", amount=scaffold_size_mb):
-                    # Release base_model memory before raising
-                    self.resource_manager.release("gpu_memory", amount=model_size_mb)
-                    raise RuntimeError(f"Insufficient GPU memory for scaffold model ({scaffold_size_mb} MB)")
-                self.scaffolds.append(scaffold.to(device))
         except Exception as e:
             # Release all acquired resources on failure
-            if hasattr(self, 'scaffolds'):
-                for scaffold in self.scaffolds:
-                    scaffold_size_mb = sum(p.numel() * p.element_size() for p in scaffold.parameters()) // (1024 * 1024)
-                    self.resource_manager.release("gpu_memory", amount=scaffold_size_mb)
-            if 'model_size_mb' in locals():
+            if hasattr(self, 'base_model'):
                 self.resource_manager.release("gpu_memory", amount=model_size_mb)
             self.logger.log_error(
                 error_msg=f"GenerationManager initialization failed: {str(e)}",
@@ -109,10 +93,8 @@ class GenerationManager:
             )
             raise
         self.base_tokenizer = base_tokenizer
-        self.scaffold_tokenizer = scaffold_tokenizer
         self.state = state
         self.cross_attention_injector = cross_attention_injector
-        self.scaffold_manager = scaffold_manager
         self.curiosity_manager = curiosity_manager
         self.dialogue_context_manager = dialogue_context_manager
         self.state_manager = state_manager
@@ -132,12 +114,10 @@ class GenerationManager:
         # Lazy initialization flags
         self._initialized_primer = False
         self._initialized_memory_manager = False
-        self._initialized_scaffold_provider = False
         
         # Lazy-loaded components
         self.primer = None
         self.memory_manager = None
-        self.scaffold_provider = None
         
         # Get global session_id from config
         self.session_id = self._config_manager.get("runtime.session_id")
@@ -165,7 +145,7 @@ class GenerationManager:
         self._initialize_config()
 
         # Memory settings
-        self.scaffold_unk_id = self._get_config_value("controls_config.scaffold_unk_id", scaffold_tokenizer.unk_token_id)
+        self.scaffold_unk_id = self._get_config_value("controls_config.scaffold_unk_id", base_tokenizer.unk_token_id)
         self.use_token_map_memory = self._get_config_value("controls_config.use_token_map_memory", True)
         self.dynamic_cross_attn_mode = self._get_config_value("controls_config.dynamic_cross_attn_mode", None)
 
@@ -190,13 +170,6 @@ class GenerationManager:
         if self.cross_attention_injector is not None and not callable(getattr(self.cross_attention_injector, 'inject', None)):
             raise TypeError("cross_attention_injector must provide a callable 'inject(...)' method.")
 
-        # Interface check for scaffold_manager
-        if self.scaffold_manager is not None:
-            if not callable(getattr(self.scaffold_manager, 'map_sequence', None)):
-                raise TypeError("scaffold_manager must provide a callable 'map_sequence(...)' method.")
-            if not callable(getattr(self.scaffold_manager, 'update_token_map_memory', None)):
-                raise TypeError("scaffold_manager must provide a callable 'update_token_map_memory(...)' method.")
-
         # Interface check for dialogue_context_manager
         if self.dialogue_context_manager is not None:
             if not callable(getattr(self.dialogue_context_manager, 'get_short_term_context', None)):
@@ -216,23 +189,6 @@ class GenerationManager:
                 resource_manager=self.resource_manager  # Pass resource manager if supported
             )
             self._initialized_memory_manager = True
-            
-    def _initialize_scaffold_provider(self) -> None:
-        """Lazily initialize the scaffold provider when needed."""
-        if not self._initialized_scaffold_provider:
-            self.logger.log_debug("Initializing scaffold provider")
-            # Ensure memory manager is initialized first
-            self._initialize_memory_manager()
-            
-            self.scaffold_provider = ScaffoldProvider(
-                scaffold_model=self.scaffolds[0],  # Use first scaffold model
-                scaffold_tokenizer=self.scaffold_tokenizer,
-                device=self.device,
-                logger=self.logger,
-                memory_manager=self.memory_manager,
-                resource_manager=self.resource_manager  # Pass resource manager if supported
-            )
-            self._initialized_scaffold_provider = True
             
     def _initialize_primer(self) -> None:
         """Lazily initialize the primer when needed."""
@@ -266,9 +222,6 @@ class GenerationManager:
                 confidence_calculator=confidence_calculator,
                 device=self.device,
                 lifecycle_manager=lifecycle_manager,
-                scaffold_manager=self.scaffold_manager,
-                bond_modulator=bond_modulator,
-                memory_manager=self.memory_manager,
                 generation_hooks=self.generation_hooks
             )
             self._initialized_primer = True
@@ -377,7 +330,6 @@ class GenerationManager:
                 
             # Validate other critical parameters
             self._validate_memory_config()
-            self._validate_scaffold_config()
             self._validate_generation_config()
             
         except Exception as e:
@@ -393,14 +345,6 @@ class GenerationManager:
         max_cache_size = self._get_config_value("controls_config.max_cache_size", 1000)
         if not isinstance(max_cache_size, int) or max_cache_size < 1:
             raise ValueError(f"Invalid max_cache_size: {max_cache_size}")
-
-    def _validate_scaffold_config(self) -> None:
-        """Validate scaffold-related configuration."""
-        if not isinstance(self.scaffolds, list) or not self.scaffolds:
-            raise ValueError("No scaffold models available")
-            
-        if not isinstance(self.scaffold_tokenizer, AutoTokenizer):
-            raise ValueError("Invalid scaffold tokenizer")
 
     def _validate_generation_config(self) -> None:
         """Validate generation-related configuration."""
@@ -529,7 +473,6 @@ class GenerationManager:
         """Apply graceful degradation steps to reduce memory pressure."""
         try:
             # 1. Clear caches first
-            self._clear_scaffold_cache()
             torch.cuda.empty_cache()
             
             # 2. Reduce batch size if possible
@@ -634,155 +577,6 @@ class GenerationManager:
         except Exception as e:
             self._handle_error("has_repetition", e)
             return False
-
-    def tokenize_and_map(
-        self,
-        prompts: Union[str, List[str]],
-        max_length: Optional[int] = None,
-        padding: str = 'max_length'
-    ) -> Dict[str, torch.Tensor]:
-        """Tokenize prompts and map to scaffold tokens."""
-        try:
-            max_length = max_length or self.model_manager.max_context_length
-            prompts = [prompts] if isinstance(prompts, str) else prompts
-
-            batch_size = self.training_config.get("batch_size", 1)
-            input_batches = [prompts[i: i + batch_size] for i in range(0, len(prompts), batch_size)]
-            all_input_ids = []
-            all_attention_masks = []
-
-            for batch in input_batches:
-                inputs = self.base_tokenizer(
-                    batch,
-                    return_tensors='pt',
-                    padding=padding,
-                    truncation=True,
-                    max_length=max_length,
-                ).to(self.device)
-                scaffold_input_ids = self.scaffold_manager.map_sequence(inputs.input_ids)
-                scaffold_attention_mask = (
-                    scaffold_input_ids != self.scaffold_tokenizer.pad_token_id
-                ).int()
-                all_input_ids.append(scaffold_input_ids)
-                all_attention_masks.append(scaffold_attention_mask)
-
-            return {
-                'input_ids': torch.cat(all_input_ids, dim=0),
-                'attention_mask': torch.cat(all_attention_masks, dim=0),
-            }
-        except Exception as e:
-            self._handle_error("tokenize_and_map", e)
-            raise
-
-    def get_scaffold_hidden_states(self, scaffold_inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Get hidden states from scaffold model."""
-        return self.scaffold_provider.get_scaffold_hidden_states(scaffold_inputs)
-
-    @contextlib.contextmanager
-    def _scaffold_context(self, scaffold_hidden_states: torch.Tensor):
-        """Manage scaffold context with memory monitoring."""
-        with self.scaffold_provider.scaffold_context(scaffold_hidden_states) as ctx:
-            yield ctx
-
-    def _clear_scaffold_cache(self) -> None:
-        """Clear scaffold-related caches with memory optimization."""
-        self.scaffold_provider.clear_scaffold_cache()
-
-    def get_num_scaffolds(self) -> int:
-        """Get the number of available scaffold models."""
-        return len(self.scaffolds)
-
-    def _prepare_generation_params(self, max_new_tokens: int, scaffold_weight: Optional[float], **kwargs) -> Dict[str, Any]:
-        """Prepare and validate generation parameters."""
-        return self.scaffold_provider.prepare_generation_params(max_new_tokens, scaffold_weight, **kwargs)
-
-    def _update_token_map_memory(self, prompt: str, confidence: float) -> None:
-        """Update token map weights."""
-        if not self.use_token_map_memory:
-            return
-        try:
-            self.scaffold_manager.update_token_map_memory(
-                prompt=prompt,
-                confidence=None,  # Remove legacy confidence, should be routed through primer if needed
-                tokenizer=self.base_tokenizer,
-                memory_decay_rate=self.controls_config.get("memory_decay_rate", 0.95),
-            )
-        except Exception as e:
-            self._handle_error("update_token_map_memory", e)
-
-    def prepare_for_training(self, batch: List[Dict[str, str]]) -> Dict[str, Any]:
-        """Prepare data for training."""
-        try:
-            prompts = [item['prompt'] for item in batch]
-            scaffold_inputs = self.tokenize_and_map(prompts)
-            scaffold_hidden_states = self.get_scaffold_hidden_states(scaffold_inputs)
-            return {
-                "scaffold_hidden_states": scaffold_hidden_states,
-                "prompts": prompts
-            }
-        except Exception as e:
-            self._handle_error("prepare_for_training", e)
-            raise
-
-    def _compute_dynamic_factor(self) -> Optional[torch.Tensor]:
-        """Compute dynamic cross-attention factor based on configuration."""
-        if not self.controls_config.get("enable_dynamic_cross_attention", False) or not self.dynamic_cross_attn_mode:
-            return None
-        try:
-            # Remove legacy confidence logic; should use primer if needed
-            return None
-        except Exception as e:
-            self._handle_error("compute_dynamic_factor", e)
-            return None
-
-    def _handle_repetition(self, seq: torch.Tensor, seq_ids: List[int], outputs: Any) -> List[int]:
-        """Handle detected repetition in generated sequence."""
-        if self.controls_config.get("enable_repetition_check", True) and self.has_repetition(seq):
-            original_text = self.base_tokenizer.decode(seq_ids, skip_special_tokens=True)
-            for j in range(len(seq_ids) - 6):
-                if all(seq_ids[j + k] == seq_ids[j + k + 3] for k in range(3)):
-                    seq_ids = seq_ids[:j + 3]
-                    break
-            self.logger.log_event(
-                "repetition_detected",
-                {
-                    "original_text": original_text,
-                    "truncated_at": j + 3
-                }
-            )
-        return seq_ids
-
-    def _initialize_lifecycle_manager(self) -> None:
-        """Initialize the lifecycle manager with validated parameters."""
-        try:
-            # Get training config
-            training_config = TrainingConfig(self._config_manager)
-            
-            # Initialize lifecycle manager
-            self.lifecycle_manager = LifecycleManager(
-                config=training_config,
-                model=self.base_model,
-                state=self.state
-            )
-            
-            # Log initialization
-            self.logger.record_event(
-                event_type="lifecycle_manager_initialized",
-                message="Lifecycle manager initialized with validated parameters",
-                level="info",
-                additional_info={
-                    "data_exposure": self.lifecycle_manager.data_exposure,
-                    "lora_capacity": self.lifecycle_manager.lora_capacity
-                }
-            )
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to initialize lifecycle manager: {str(e)}",
-                error_type="lifecycle_manager_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
 
     def state_managed_operation(self, error_context: str):
         """Unified decorator for error handling and state management."""
