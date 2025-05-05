@@ -33,13 +33,13 @@ from sovl_volition import AutonomyManager
 from sovl_manager import ModelManager
 from sovl_processor import SOVLProcessor, MetadataProcessor
 from sovl_generation import GenerationManager
-from sovl_tuner import SOVLTuner
 
 # Memory and state management
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_recaller import DialogueContextManager
 
 # AI components
+from sovl_bonder import BondCalculator, BondModulator
 from sovl_curiosity import CuriosityManager
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
 from sovl_meditater import IntrospectionManager
@@ -324,6 +324,46 @@ class SystemContext:
             
             self.temperament_system = TemperamentSystem()
             self._initialized_components.add("temperament_system")
+            
+            # Attach temperament_manager
+            from sovl_temperament import TemperamentManager
+            self.temperament_manager = TemperamentManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                state=self.state_manager.get_state() if hasattr(self, 'state_manager') else None,
+                generation_manager=getattr(self, 'generation_manager', None),
+                error_manager=self.error_handler,
+                state_manager=self.state_manager
+            )
+            self._initialized_components.add("temperament_manager")
+            
+            # Attach bond_modulator
+            from sovl_bonder import BondModulator
+            self.bond_modulator = BondModulator(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                user_profile_state=self.state_tracker.state.user_profile_state
+            )
+            self._initialized_components.add("bond_modulator")
+
+            # Attach engram_lora (LoraAdapterManager)
+            from sovl_engram import LoraAdapterManager
+            self.engram_lora = LoraAdapterManager(
+                config_manager=self.config_manager,
+                state_manager=self.state_manager,
+                logger=self.logger
+            )
+            self._initialized_components.add("engram_lora")
+
+            # Attach recaller (DialogueContextManager)
+            from sovl_recaller import DialogueContextManager
+            self.recaller = DialogueContextManager(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                model_manager=self.model_manager,
+                state_manager=self.state_manager
+            )
+            self._initialized_components.add("recaller")
             
             # Log dependent components initialization
             self.logger.log_info("Dependent components initialized successfully")
