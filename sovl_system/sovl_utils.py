@@ -995,3 +995,35 @@ def cosine_similarity(a, b, dim=-1, eps=1e-8):
         torch.Tensor of similarities
     """
     return torch.nn.functional.cosine_similarity(a, b, dim=dim, eps=eps)
+
+def set_nested_dict_value(d: dict, dotted_key: str, value: Any) -> None:
+    """
+    Set a value in a nested dictionary using a dot-separated key.
+    Args:
+        d: The dictionary to modify.
+        dotted_key: The dot-separated key (e.g., 'a.b.c').
+        value: The value to set.
+    """
+    keys = dotted_key.split('.')
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+    d[keys[-1]] = value
+
+
+def get_nested_dict_value(d: dict, dotted_key: str, default: Any = None) -> Any:
+    """
+    Get a value from a nested dictionary using a dot-separated key.
+    Args:
+        d: The dictionary to query.
+        dotted_key: The dot-separated key (e.g., 'a.b.c').
+        default: The value to return if the key is not found.
+    Returns:
+        The value at the nested key, or default if not found.
+    """
+    keys = dotted_key.split('.')
+    for k in keys:
+        if isinstance(d, dict) and k in d:
+            d = d[k]
+        else:
+            return default
+    return d
