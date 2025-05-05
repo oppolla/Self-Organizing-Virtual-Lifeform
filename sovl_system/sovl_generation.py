@@ -15,7 +15,6 @@ from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dyn
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_trainer import LifecycleManager, TrainingConfig
-from sovl_confidence import ConfidenceCalculator, calculate_confidence_score
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_manager import ModelManager
@@ -148,9 +147,10 @@ class GenerationManager:
         if not self.session_id:
             self.logger.log_warning("No global session_id found in config")
         
-        # Use state's memory managers
-        self.ram_manager = state.ram_manager
-        self.gpu_manager = state.gpu_manager
+        # Use memory manager abstraction for RAM/GPU managers
+        self._initialize_memory_manager()  # Ensure memory_manager is initialized
+        self.ram_manager = self.memory_manager.ram_manager
+        self.gpu_manager = self.memory_manager.gpu_manager
         
         # Enhanced thread safety with multiple locks
         self._locks = {
@@ -304,10 +304,7 @@ class GenerationManager:
         try:
             # Get current state metrics
             state_metrics = {
-                'memory_usage': self.memory_manager.get_memory_usage() if hasattr(self, 'memory_manager') and self.memory_manager else {},
-                'confidence': self.state.confidence if hasattr(self.state, 'confidence') else 0.5,
-                'temperament_score': self.current_temperament_score if hasattr(self, 'current_temperament_score') else 0.5,
-                'lifecycle_stage': self.state.lifecycle_stage if hasattr(self.state, 'lifecycle_stage') else 'unknown'
+                'memory_usage': self.memory_manager.get_memory_usage() if hasattr(self, 'memory_manager') and self.memory_manager else {}
             }
             # Merge in any extra context
             if extra_context:
@@ -575,11 +572,12 @@ class GenerationManager:
         request_time = time.time()
         try:
             if self.state_manager:
-                temp_history = self.state.history
+                temp_history = self.state_manager.get_state().history
                 def update_fn(state):
                     state.history = ConversationHistory(
                         maxlen=self.controls_config.get("conversation_history_maxlen", 10)
                     )
+                    return state
                 self.state_manager.update_state_atomic(update_fn)
                 response = self.generate(
                     f"System error detected: {error_msg} What happened?",
@@ -590,6 +588,7 @@ class GenerationManager:
                 )
                 def restore_fn(state):
                     state.history = temp_history
+                    return state
                 self.state_manager.update_state_atomic(restore_fn)
             else:
                 temp_history = self.state.history
@@ -720,7 +719,7 @@ class GenerationManager:
         try:
             self.scaffold_manager.update_token_map_memory(
                 prompt=prompt,
-                confidence=confidence,
+                confidence=None,  # Remove legacy confidence, should be routed through primer if needed
                 tokenizer=self.base_tokenizer,
                 memory_decay_rate=self.controls_config.get("memory_decay_rate", 0.95),
             )
@@ -745,13 +744,8 @@ class GenerationManager:
         """Compute dynamic cross-attention factor based on configuration."""
         if not self.controls_config.get("enable_dynamic_cross_attention", False) or not self.dynamic_cross_attn_mode:
             return None
-
         try:
-            last_conf = self.state.confidence_history[-1] if self.state.confidence_history else 0.5
-            if self.dynamic_cross_attn_mode == 'confidence':
-                return torch.tensor(last_conf, device=self.device, dtype=torch.float)
-            elif self.dynamic_cross_attn_mode == 'temperament':
-                return torch.tensor(self.temperament.score, device=self.device, dtype=torch.float)
+            # Remove legacy confidence logic; should use primer if needed
             return None
         except Exception as e:
             self._handle_error("compute_dynamic_factor", e)
@@ -773,15 +767,6 @@ class GenerationManager:
                 }
             )
         return seq_ids
-
-    def _update_curiosity(self, text: str, confidence: float) -> None:
-        """[DEPRECATED] Use self.primer.update_curiosity_state instead."""
-        self.primer.update_curiosity_state(text, confidence)
-
-    @synchronized()
-    def calculate_confidence_score(self, logits: torch.Tensor, generated_ids: torch.Tensor, state, error_manager, context, curiosity_manager=None) -> float:
-        """Calculate confidence score using the centralized confidence module."""
-        return calculate_confidence_score(logits, generated_ids, state, error_manager, context, curiosity_manager)
 
     def _initialize_lifecycle_manager(self) -> None:
         """Initialize the lifecycle manager with validated parameters."""
@@ -823,10 +808,7 @@ class GenerationManager:
                 try:
                     # Get state metrics before operation
                     state_metrics = {
-                        'memory_usage': self.memory_manager.get_memory_usage(),
-                        'confidence': getattr(self.state, 'confidence', 0.5),
-                        'temperament_score': self.current_temperament_score,
-                        'lifecycle_stage': getattr(self.state, 'lifecycle_stage', 'unknown')
+                        'memory_usage': self.memory_manager.get_memory_usage()
                     }
                     
                     # Execute operation
@@ -1128,24 +1110,6 @@ class GenerationManager:
                 'pad_token_id': self.base_tokenizer.pad_token_id,
                 'eos_token_id': self.base_tokenizer.eos_token_id
             }
-            # Apply any state-based adjustments
-            traits = {}
-            if hasattr(self, 'state') and hasattr(self.state, 'temperament_score'):
-                traits['temperament'] = getattr(self.state, 'temperament_score', 0.5)
-            if hasattr(self, 'curiosity_manager') and self.curiosity_manager:
-                try:
-                    traits['curiosity'] = self.curiosity_manager.get_pressure()
-                except Exception:
-                    traits['curiosity'] = 0.0
-            config['temperature'] = self.primer.adjust_parameter(
-                config['temperature'], 'temperature', **traits
-            )
-            config['top_k'] = int(self.primer.adjust_parameter(
-                config['top_k'], 'top_k', **traits
-            ))
-            config['top_p'] = self.primer.adjust_parameter(
-                config['top_p'], 'top_p', **traits
-            )
             # Ensure any tensor values are on the correct device
             model_device = next(self.base_model.parameters()).device
             config = {
@@ -1262,7 +1226,6 @@ class GenerationManager:
                 event_data = {
                     "user_response": prompt,
                     "generated_text": generated_text,
-                    "confidence_score": calculate_confidence_score,
                     "num_return_sequences": initial_kwargs.get("num_return_sequences", 1),
                 }
                 # Optionally add detailed fields if present
@@ -1388,61 +1351,50 @@ class GenerationManager:
     def _validate_state_consistency(self) -> None:
         """Ensure state consistency by setting defaults if values are missing or invalid."""
         try:
-            # Handle temperament_score
-            if not hasattr(self.state, 'temperament_score'):
-                self.state.temperament_score = 0.5  # Set default
-                self.logger.log_event(
-                    "state_consistency",
-                    {"message": "Set default temperament_score", "value": 0.5}
-                )
-            elif not 0 <= self.state.temperament_score <= 1:
-                self.state.temperament_score = max(0, min(1, self.state.temperament_score))
-                self.logger.log_event(
-                    "state_consistency",
-                    {"message": "Clamped temperament_score", "value": self.state.temperament_score}
-                )
-            
-            # Handle confidence
-            if not hasattr(self.state, 'confidence'):
-                self.state.confidence = 0.5  # Set default
-                self.logger.log_event(
-                    "state_consistency",
-                    {"message": "Set default confidence", "value": 0.5}
-                )
-            elif not 0 <= self.state.confidence <= 1:
-                self.state.confidence = max(0, min(1, self.state.confidence))
-                self.logger.log_event(
-                    "state_consistency",
-                    {"message": "Clamped confidence", "value": self.state.confidence}
-                )
-                
+            # Remove legacy confidence logic; should be managed by primer
+            pass
         except Exception as e:
             self._handle_error("state_consistency", e)
-            # Set safe defaults if error occurs
-            self.state.temperament_score = 0.5
-            self.state.confidence = 0.5
 
     def _handle_internal_prompt(self, prompt: str = " ") -> str:
         """Generate a response based on a minimal or provided prompt."""
         request_time = time.time()
         try:
             # Save current history temporarily
-            temp_history = self.state.history
-            self.state.history = ConversationHistory(
-                maxlen=self.controls_config.get("conversation_history_maxlen", 10)
-            )
-            
-            # Generate with higher temperature for more creative/expressive output
-            response = self.generate(
-                prompt,  # Use the passed or default prompt
-                num_return_sequences=1,
-                temperature=self.controls_config.get("base_temperature", 0.7) + 0.3,
-                top_k=self.controls_config.get("top_k", 50),
-                do_sample=True
-            )[0]
-            
-            # Restore history
-            self.state.history = temp_history
+            if self.state_manager:
+                temp_history = self.state_manager.get_state().history
+                def update_fn(state):
+                    state.history = ConversationHistory(
+                        maxlen=self.controls_config.get("conversation_history_maxlen", 10)
+                    )
+                    return state
+                self.state_manager.update_state_atomic(update_fn)
+                # Generate with higher temperature for more creative/expressive output
+                response = self.generate(
+                    prompt,  # Use the passed or default prompt
+                    num_return_sequences=1,
+                    temperature=self.controls_config.get("base_temperature", 0.7) + 0.3,
+                    top_k=self.controls_config.get("top_k", 50),
+                    do_sample=True
+                )[0]
+                def restore_fn(state):
+                    state.history = temp_history
+                    return state
+                self.state_manager.update_state_atomic(restore_fn)
+            else:
+                temp_history = self.state.history
+                self.state.history = ConversationHistory(
+                    maxlen=self.controls_config.get("conversation_history_maxlen", 10)
+                )
+                # Generate with higher temperature for more creative/expressive output
+                response = self.generate(
+                    prompt,  # Use the passed or default prompt
+                    num_return_sequences=1,
+                    temperature=self.controls_config.get("base_temperature", 0.7) + 0.3,
+                    top_k=self.controls_config.get("top_k", 50),
+                    do_sample=True
+                )[0]
+                self.state.history = temp_history
 
             # Log the internal thought generation
             capture_scribe_event(
@@ -1505,14 +1457,12 @@ class ScribeAssembler:
 
         # Retrieve state-based scores/info from manager
         current_temperament = getattr(manager.state, "temperament_score", None)
-        current_lifecycle_stage = manager.lifecycle_manager.get_lifecycle_stage() if hasattr(manager, 'lifecycle_manager') and manager.lifecycle_manager else None
         current_memory_mb = manager.memory_manager.get_memory_usage().get("total_mb") if hasattr(manager, 'memory_manager') and manager.memory_manager else None
 
         # --- Assemble event_data (Data directly related to the event's core action) ---
         event_data = {
             "user_response": prompt,
             "generated_text": generated_texts[0] if generated_texts else "",
-            "confidence_score": calculated_confidence,
             "num_return_sequences": initial_kwargs.get("num_return_sequences", 1),
         }
 
@@ -1529,8 +1479,6 @@ class ScribeAssembler:
             # System State Snapshot
             "model_name": getattr(manager.base_model.config, "_name_or_path", "unknown"),
             "device": str(manager.device),
-            "temperament_score": current_temperament,
-            "lifecycle_stage": current_lifecycle_stage,
             "novelty_score": calculated_novelty,
             "memory_usage_mb": current_memory_mb,
             # Performance
