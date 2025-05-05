@@ -519,12 +519,6 @@ class SOVLState(StateBase):
                 maxlen=self.config_manager.get("controls_config.temperament_history_maxlen", 5)
             )
             
-            # Dream memory management
-            self.dream_memory = deque(
-                maxlen=self.config_manager.get("controls_config.dream_memory_maxlen", 10)
-            )
-            self.total_dream_memory_mb = 0.0
-            
             # Conversation tracking
             self.history = ConversationHistory(
                 maxlen=self.config_manager.get("controls_config.max_messages", 100),
@@ -535,6 +529,11 @@ class SOVLState(StateBase):
             from collections import defaultdict, deque
             self.curiosity_metrics = defaultdict(list)
             self.curiosity_exploration_queue = deque(maxlen=self.config_manager.get("curiosity_config.exploration_queue_maxlen", 100))
+            
+            # short_term_memory: stores recent memory/context items for integration and recall
+            self.short_term_memory = deque(
+                maxlen=self.config_manager.get("memory_config.short_term_memory_maxlen", 100)
+            )
             
             self.version = self.STATE_VERSION
             self.mode: str = "online"  # online, gestating, offline, pending_gestation, dreaming
@@ -553,81 +552,6 @@ class SOVLState(StateBase):
             self.log_error(f"Failed to initialize state components: {str(e)}")
             raise StateError(f"State initialization failed: {str(e)}")
 
-    def _recalculate_dream_memory_mb(self) -> None:
-        """Recalculate total dream memory size in MB."""
-        try:
-            total_bytes = sum(
-                tensor.element_size() * tensor.nelement() 
-                for tensor in self.dream_memory
-            )
-            self.total_dream_memory_mb = total_bytes / (1024 * 1024)
-        except Exception as e:
-            self.log_error(f"Failed to recalculate dream memory size: {str(e)}")
-
-    def add_dream_tensor(self, tensor: torch.Tensor) -> None:
-        """Add a tensor to dream memory with size tracking."""
-        try:
-            if len(self.dream_memory) >= self.dream_memory.maxlen:
-                removed = self.dream_memory.popleft()
-                removed_size = (removed.element_size() * removed.nelement()) / (1024 * 1024)
-                self.total_dream_memory_mb -= removed_size
-            
-            self.dream_memory.append(tensor)
-            added_size = (tensor.element_size() * tensor.nelement()) / (1024 * 1024)
-            self.total_dream_memory_mb += added_size
-            
-            # Check if pruning needed
-            max_memory = self.config_manager.get("memory_config.max_dream_memory_mb", 512.0)
-            if self.total_dream_memory_mb > max_memory:
-                self._prune_dream_memory()
-                
-        except Exception as e:
-            self.log_error(f"Failed to add dream tensor: {str(e)}")
-
-    def _prune_dream_memory(self) -> None:
-        """Prune dream memory if it exceeds memory threshold."""
-        try:
-            max_memory = self.config_manager.get("memory_config.max_dream_memory_mb", 512.0)
-            if self.total_dream_memory_mb <= max_memory:
-                return
-                
-            # Sort by timestamp if available, otherwise by index
-            sorted_memories = sorted(
-                enumerate(self.dream_memory),
-                key=lambda x: getattr(x[1], 'timestamp', x[0])
-            )
-            
-            # Keep only the most recent memories that fit within limit
-            keep_count = 0
-            total_size = 0
-            for _, tensor in sorted_memories:
-                tensor_size = (tensor.element_size() * tensor.nelement()) / (1024 * 1024)
-                if total_size + tensor_size <= max_memory:
-                    total_size += tensor_size
-                    keep_count += 1
-                else:
-                    break
-            
-            # Update dream memory
-            self.dream_memory = deque(
-                (tensor for _, tensor in sorted_memories[-keep_count:]),
-                maxlen=self.dream_memory.maxlen
-            )
-            
-            # Recalculate total size
-            self._recalculate_dream_memory_mb()
-            
-            self.log_event(
-                "dream_memory_pruned",
-                "Dream memory pruned due to size constraints",
-                before_size=self.total_dream_memory_mb,
-                after_size=total_size,
-                kept_memories=keep_count
-            )
-            
-        except Exception as e:
-            self.log_error(f"Failed to prune dream memory: {str(e)}")
-
     def _validate_state(self) -> None:
         """Validate state integrity."""
         try:
@@ -641,26 +565,10 @@ class SOVLState(StateBase):
 
             # Check collections
             assert isinstance(self.temperament_history, deque), "temperament_history must be a deque"
-            assert isinstance(self.dream_memory, deque), "dream_memory must be a deque"
             
             # Check value ranges
             assert 0 <= self.temperament_score <= 1, f"temperament_score {self.temperament_score} must be in [0, 1]"
             assert all(0 <= score <= 1 for score in self.temperament_history), "temperament scores must be in [0, 1]"
-            
-            # Validate dream memory
-            calculated_dream_mb = sum(
-                (tensor.element_size() * tensor.nelement()) / (1024 * 1024)
-                for tensor in self.dream_memory
-            )
-            if not np.isclose(self.total_dream_memory_mb, calculated_dream_mb, rtol=1e-5):
-                self.log_event(
-                    "dream_memory_size_mismatch",
-                    f"Tracked {self.total_dream_memory_mb} MB != Calculated {calculated_dream_mb} MB",
-                    level="warning"
-                )
-                self.total_dream_memory_mb = calculated_dream_mb  # Correct the tracked value
-            
-            assert self.total_dream_memory_mb >= 0, "total_dream_memory_mb must be non-negative"
             
         except AssertionError as e:
             self.log_error(f"State validation failed: {str(e)}")
@@ -787,8 +695,6 @@ class SOVLState(StateBase):
                 state_data = {
                     "version": self.STATE_VERSION,
                     "confidence_history": list(self._confidence_history.get_history()),
-                    "dream_memory": [self._compress_tensor(tensor) for tensor in self.dream_memory],
-                    "total_dream_memory_mb": self.total_dream_memory_mb,
                     "temperament_history": list(self.temperament_history),
                     "temperament_score": self.temperament_score,
                     "last_temperament_score": self.last_temperament_score,
@@ -817,13 +723,6 @@ class SOVLState(StateBase):
             # Load confidence history
             self._confidence_history.clear_history()
             self._confidence_history.add_many(data.get("confidence_history", []))
-            
-            # Load dream memory
-            self.dream_memory.clear()
-            self.total_dream_memory_mb = 0.0
-            for compressed in data.get("dream_memory", []):
-                tensor = self._decompress_tensor(compressed)
-                self.add_dream_tensor(tensor)
             
             # Load temperament data
             self.temperament_history.clear()
@@ -946,14 +845,6 @@ class SOVLState(StateBase):
             "last_temperament_score": self.last_temperament_score,
             "confidence_history": tuple(self._confidence_history),
             "temperament_history": tuple(self.temperament_history),
-            "dream_memory": tuple(
-                (self._compress_tensor(tensor), tensor.item()) for tensor in self.dream_memory
-            ),
-            "total_dream_memory_mb": self.total_dream_memory_mb,
-            "training_state": self._training_state.__dict__,
-            "conversation_metadata": self._conversation_metadata,
-            "goals": [goal.copy() for goal in self.goals],
-            "mode": self.mode,
             "gestation_progress": self.gestation_progress,
             "dreaming_progress": self.dreaming_progress
         }
@@ -991,9 +882,6 @@ class SOVLState(StateBase):
             errors.append("temperament_score out of range")
         if hasattr(self, 'confidence') and not (0.0 <= self.confidence <= 1.0):
             errors.append("confidence out of range")
-        if hasattr(self, 'total_dream_memory_mb') and self.total_dream_memory_mb < 0:
-            errors.append("total_dream_memory_mb negative")
-        # Add more checks as needed
         if errors:
             raise ValueError(f"SOVLState validation failed: {errors}")
 
@@ -1018,9 +906,6 @@ class SOVLState(StateBase):
         # Short-term memory (if available and structured as a list of dicts with 'embedding')
         if hasattr(self, "short_term_memory"):
             result.extend([msg["embedding"] for msg in self.short_term_memory if "embedding" in msg])
-        # Dream memory (if available)
-        if hasattr(self, "dream_memory"):
-            result.extend(list(self.dream_memory))
         return result
 
 class StateManager(StateAccessor):
@@ -1101,16 +986,6 @@ class StateManager(StateAccessor):
             with open(state_file, 'w') as f:
                 json.dump(state.to_dict(), f, indent=2)
                 
-            # Save tensors to separate files if they exist
-            tensor_file = f"{path_prefix}_tensors.pt"
-            tensors_to_save = {}
-            for key, tensor_dict in state._compressed_tensors.items():
-                if "tensor" in tensor_dict:
-                    tensors_to_save[key] = tensor_dict["tensor"]
-            
-            if tensors_to_save:
-                torch.save(tensors_to_save, tensor_file)
-                
             self.logger.record_event(
                 event_type="state_saved",
                 message=f"State saved to {state_file}",
@@ -1127,7 +1002,6 @@ class StateManager(StateAccessor):
         """Load state from disk."""
         try:
             state_file = f"{path_prefix}_state.json"
-            tensor_file = f"{path_prefix}_tensors.pt"
             
             # Check if files exist
             if not os.path.exists(state_file):
@@ -1144,25 +1018,8 @@ class StateManager(StateAccessor):
                 self.device
             )
             
-            # Load tensors if they exist
-            loaded_tensors = {}
-            if os.path.exists(tensor_file):
-                try:
-                    loaded_tensors = torch.load(tensor_file, map_location=self.device)
-                except Exception as tensor_err:
-                    self.logger.log_error(
-                        f"Error loading tensors, continuing without them: {str(tensor_err)}",
-                        error_type="tensor_load_error"
-                    )
-            
             # Populate state from dict
             state._populate_from_dict(state_dict)
-            
-            # Restore tensors to state
-            if loaded_tensors:
-                for key, tensor in loaded_tensors.items():
-                    compressed = state._compress_tensor(tensor)
-                    state._compressed_tensors[key] = compressed
             
             # Initialize memory managers
             state._initialize_memory_managers()

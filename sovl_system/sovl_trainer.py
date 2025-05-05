@@ -532,26 +532,6 @@ class TrainingWorkflowManager:
             if state_manager and hasattr(state_manager, 'set_gestation_progress'):
                 state_manager.set_gestation_progress(1.0)
 
-    def run_dream_cycle(self, dream_prompt: str, is_novel: bool, memory_count: int) -> None:
-        """Run a dream cycle with proper synchronization."""
-        with self._get_resource_lock('dreamer'):  # Lock access to dreamer
-            # Dream cycle implementation
-            dreamer = getattr(self.trainer, 'dreamer', None)
-            if dreamer is None:
-                return
-                
-            try:
-                # Implementation here
-                pass
-            except Exception as e:
-                logger = getattr(self, 'logger', None)
-                if logger:
-                    logger.log_error(
-                        f"Error during manual dream cycle: {str(e)}",
-                        error_type="manual_dream_cycle_error",
-                        stack_trace=traceback.format_exc()
-                    )
-
 # SOVLTrainer: top-level interface tying config, managers, and execution logic for end-to-end training.
 class SOVLTrainer:
     """Manages training operations and memory usage."""
