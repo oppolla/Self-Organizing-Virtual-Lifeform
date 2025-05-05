@@ -29,7 +29,13 @@ class GenerationError(Exception):
     pass
 
 class GenerationManager:
-    """Manages text generation, scaffold integration, and memory handling for the SOVL system."""
+    """
+    Manages text generation, scaffold integration, and memory handling for the SOVL system.
+
+    cross_attention_injector: Must provide method 'inject(...)'
+    scaffold_manager: Must provide methods 'map_sequence(...)' and 'update_token_map_memory(...)'
+    dialogue_context_manager: Must provide 'get_short_term_context(...)' and 'get_long_term_context(...)'
+    """
     
     def __init__(
         self,
@@ -182,7 +188,25 @@ class GenerationManager:
         
         # Log successful initialization
         self.logger.log_info("GenerationManager initialized successfully (with lazy component loading)")
-    
+
+        # Interface check for cross_attention_injector
+        if self.cross_attention_injector is not None and not callable(getattr(self.cross_attention_injector, 'inject', None)):
+            raise TypeError("cross_attention_injector must provide a callable 'inject(...)' method.")
+
+        # Interface check for scaffold_manager
+        if self.scaffold_manager is not None:
+            if not callable(getattr(self.scaffold_manager, 'map_sequence', None)):
+                raise TypeError("scaffold_manager must provide a callable 'map_sequence(...)' method.")
+            if not callable(getattr(self.scaffold_manager, 'update_token_map_memory', None)):
+                raise TypeError("scaffold_manager must provide a callable 'update_token_map_memory(...)' method.")
+
+        # Interface check for dialogue_context_manager
+        if self.dialogue_context_manager is not None:
+            if not callable(getattr(self.dialogue_context_manager, 'get_short_term_context', None)):
+                raise TypeError("dialogue_context_manager must provide a callable 'get_short_term_context(...)' method.")
+            if not callable(getattr(self.dialogue_context_manager, 'get_long_term_context', None)):
+                raise TypeError("dialogue_context_manager must provide a callable 'get_long_term_context(...)' method.")
+        
     def _initialize_memory_manager(self) -> None:
         """Lazily initialize the memory manager when needed."""
         if not self._initialized_memory_manager:
@@ -733,33 +757,6 @@ class GenerationManager:
             self._handle_error("compute_dynamic_factor", e)
             return None
 
-    def _prepare_dream_memory(self) -> Tuple[Optional[torch.Tensor], Dict[str, Any]]:
-        """Prepare dream memory tensors if available."""
-        dream_memory_info = {"used": False, "tensor_count": 0, "shapes": []}
-        memory_tensors = None
-        dream_memory_weight = self.controls_config.get("dream_memory_weight", 0.1)
-
-        if self.state.dream_memory and dream_memory_weight > 0:
-            try:
-                with self.state.memory_lock:
-                    dream_tensors, dream_weights = zip(*self.state.dream_memory)
-                    dream_memory_info["tensor_count"] = len(dream_tensors)
-                    dream_memory_info["shapes"] = [list(t.shape) for t in dream_tensors]
-                    for tensor in dream_tensors:
-                        if tensor.shape[-1] != self.state.hidden_size:
-                            raise ValueError(
-                                f"Dream tensor shape {tensor.shape} mismatches hidden_size {self.state.hidden_size}"
-                            )
-                    dream_tensors = torch.stack([t.detach().to(self.device) for t in dream_tensors])
-                    dream_weights = torch.tensor(dream_weights, dtype=torch.float32, device=self.device)
-                    memory_tensors = torch.sum(dream_tensors * dream_weights.unsqueeze(-1), dim=0) / dream_weights.sum()
-                    dream_memory_info["used"] = True
-            except Exception as e:
-                dream_memory_info["error"] = str(e)
-                self._handle_error("prepare_dream_memory", e)
-
-        return memory_tensors, dream_memory_info
-
     def _handle_repetition(self, seq: torch.Tensor, seq_ids: List[int], outputs: Any) -> List[int]:
         """Handle detected repetition in generated sequence."""
         if self.controls_config.get("enable_repetition_check", True) and self.has_repetition(seq):
@@ -987,7 +984,11 @@ class GenerationManager:
             gen_kwargs = {"num_return_sequences": num_return_sequences}
             gen_kwargs.update(kwargs)
             base_temp = gen_kwargs.get("temperature", 1.0)
+            base_top_k = gen_kwargs.get("top_k", self._get_config_value("controls_config.top_k", 50))
+            base_top_p = gen_kwargs.get("top_p", self._get_config_value("controls_config.top_p", 0.95))
             gen_kwargs["temperature"] = self.primer.adjust_parameter(base_temp, "temperature", temperament=temperament, curiosity=curiosity)
+            gen_kwargs["top_k"] = int(self.primer.adjust_parameter(base_top_k, "top_k", temperament=temperament, curiosity=curiosity))
+            gen_kwargs["top_p"] = self.primer.adjust_parameter(base_top_p, "top_p", temperament=temperament, curiosity=curiosity)
             # --- Model inference under lock ---
             with self._locks['generation']:
                 output_sequences = self.base_model.generate(**inputs, **gen_kwargs)
@@ -1123,27 +1124,35 @@ class GenerationManager:
                 'do_sample': True,
                 'temperature': self._get_config_value("controls_config.base_temperature", 0.7),
                 'top_k': self._get_config_value("controls_config.top_k", 50),
+                'top_p': self._get_config_value("controls_config.top_p", 0.95),
                 'pad_token_id': self.base_tokenizer.pad_token_id,
                 'eos_token_id': self.base_tokenizer.eos_token_id
             }
-            
             # Apply any state-based adjustments
+            traits = {}
             if hasattr(self, 'state') and hasattr(self.state, 'temperament_score'):
-                config['temperature'] = self.primer.adjust_parameter(
-                    config['temperature'],
-                    'temperature',
-                    self.curiosity_manager.get_pressure() if self.curiosity_manager else None
-                )
-                
+                traits['temperament'] = getattr(self.state, 'temperament_score', 0.5)
+            if hasattr(self, 'curiosity_manager') and self.curiosity_manager:
+                try:
+                    traits['curiosity'] = self.curiosity_manager.get_pressure()
+                except Exception:
+                    traits['curiosity'] = 0.0
+            config['temperature'] = self.primer.adjust_parameter(
+                config['temperature'], 'temperature', **traits
+            )
+            config['top_k'] = int(self.primer.adjust_parameter(
+                config['top_k'], 'top_k', **traits
+            ))
+            config['top_p'] = self.primer.adjust_parameter(
+                config['top_p'], 'top_p', **traits
+            )
             # Ensure any tensor values are on the correct device
             model_device = next(self.base_model.parameters()).device
             config = {
                 k: v.to(model_device) if isinstance(v, torch.Tensor) else v 
                 for k, v in config.items()
             }
-                
             return config
-            
         except Exception as e:
             self._handle_error("get_generation_config", e)
             # Return safe defaults if error occurs
@@ -1152,6 +1161,7 @@ class GenerationManager:
                 'do_sample': True,
                 'temperature': 0.7,
                 'top_k': 50,
+                'top_p': 0.95,
                 'pad_token_id': self.base_tokenizer.pad_token_id,
                 'eos_token_id': self.base_tokenizer.eos_token_id
             }
