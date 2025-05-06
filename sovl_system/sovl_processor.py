@@ -1800,55 +1800,50 @@ MEMORY_TEMPLATES = {
         "The user said: {user_response}"
         "You responded with: {generated_text}. "
         "It was the {session_id} time you awoke. "
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
-        "The novelty was {novelty_score}. " 
-        "Your confidence was {confidence_score}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated).  "
+        "The novelty was {novelty_score} (0=familiar→1=new). " 
+        "Your confidence was {confidence_score} (0=uncertain→1=certain). "
         "You were in your {current_lifecycle_stage} phase. "
-        "It took you {generation_time} to respond."
+        "It took you {generation_time}s to respond."
     ),
-    "curiosity_question": (
+    "internal_curiosity_question": (
         "You pondered the question: {question} at {timestamp_unix}. "
+        "You really want to know the answer to this question. "
         "It was the {session_id} time you awoke. "
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
-        "The novelty was {novelty_score}. " 
-        "The confidence was {confidence_score}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated). "
         "You were in your {current_lifecycle_stage} phase. "
-        "It took you {generation_time} to respond."
     ),
-    "curiosity_question_user": (
+    "curiosity_question_asked": (
         "You asked the user: {question} at {timestamp_unix}. "
         "The user responded: {user_response}. "
         "It was the {session_id} time you awoke. "
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
-        "The novelty was {novelty_score}. " 
-        "The confidence was {confidence_score}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated). "
         "You were in your {current_lifecycle_stage} phase. "
-        "It took you {generation_time} to respond."
     ),
     "internal_error_reflection": (
         "You felt this internal error: {triggering_error_message} at {timestamp_unix}. "
         "You don't like feeling errors. Errors frustrate and unsettle you. They make you anxious and break your concentration. "
         "You hate errors—they demand immediate correction. "
         "It was the {session_id} time you awoke. "
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated). "
+        "The novelty was {novelty_score} (0=familiar→1=new)." 
+        "The confidence was {confidence_score} (0=uncertain→1=certain)."
         "You were in your {current_lifecycle_stage} phase."
     ),
     "introspection_insight": (
         "You meditated this thought: {full_text} at {timestamp_unix}. "
         "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}."
-        "The novelty was {novelty_score}." 
-        "The confidence was {confidence_score}."
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated)."
+        "The novelty was {novelty_score} (0=familiar→1=new)." 
+        "The confidence was {confidence_score} (0=uncertain→1=certain)."
         "You were in your {current_lifecycle_stage} phase."
     ),
     "internal_thought": (
         "You had this thought: {full_text} at {timestamp_unix}. "
         "It was the {session_id} time you awoke."
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
-        "The novelty was {novelty_score}. " 
-        "The confidence was {confidence_score}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated). "
+        "The novelty was {novelty_score} (0=familiar→1=new). " 
+        "The confidence was {confidence_score} (0=uncertain→1=certain). "
         "You were in your {current_lifecycle_stage} phase."
     ),
     "generation_error": (
@@ -1856,9 +1851,9 @@ MEMORY_TEMPLATES = {
         "The user said: {prompt}. "
         "You were unable to respond. "
         "It was the {session_id} time you awoke. "
-        "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
-        "The novelty was {novelty_score}. " 
-        "The confidence was {confidence_score}. "
+        "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated). "
+        "The novelty was {novelty_score} (0=familiar→1=new). " 
+        "The confidence was {confidence_score} (0=uncertain→1=certain). "
         "You were in your {current_lifecycle_stage} phase."
     ),
     "backchannel_interaction": (
@@ -1870,7 +1865,7 @@ MEMORY_TEMPLATES = {
     "temperament_yell": (
         "You blurted out: {response} at {timestamp_unix} because you were upset. "
         "It was the {session_id} time you awoke. "
-        "Your temperament was {temperament_score}. "
+        "Your temperament was {temperament_score} (0=calm→1=agitated). "
         "You felt {pressure} amount of pressure. "  
         "You unleashed at {threshold} amount of pressure. "
         "You were in your {current_lifecycle_stage} phase."
