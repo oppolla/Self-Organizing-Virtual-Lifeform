@@ -36,8 +36,8 @@ COMMAND_CATEGORIES = {
     "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc", "/run", "/stop"],
     "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant", "/epiphany"],
     "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk", "/blurt"],
-    "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo", "/dream"],
-    "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold"],
+    "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo", "/dream", "/journal"],
+    "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold", "/announce"],
     "Tutorial": ["/tutorial"],
 }
 
@@ -1820,11 +1820,7 @@ scaffold models for debugging and development purposes.
                     f"ErrorType={metrics.get('last_error_type', 'None')}. "
                     f"What fundamental uncertainty arises from this?"
                 )
-                question = curiosity_manager.generate_curiosity_question(
-                    context=question_prompt,
-                    spontaneous=True,
-                    generation_params=trip_params
-                )
+                question = curiosity_manager.generate_curiosity_question(question_prompt)
                 if question:
                     context_fragments.append(f"SPARK:{question}")
             except Exception:
@@ -2156,21 +2152,45 @@ scaffold models for debugging and development purposes.
             self.is_ranting = False
 
     def do_stop(self, arg):
-        """Stop any active interactive mode (/trip, /drunk, /rant) and return to normal operation."""
+        """
+        Stop any active interactive mode or a specific mode.
+        Usage: /stop [mode]
+        """
+        mode = arg.strip().lower()
         stopped = False
-        if self.is_tripping:
-            self.is_tripping = False
-            stopped = True
-        if self.is_drunk:
-            self.is_drunk = False
-            stopped = True
-        if self.is_ranting:
-            self.is_ranting = False
-            stopped = True
-        if stopped:
-            print_success("*** Trip/Drunk/Rant mode terminated. Returning to normal operation. ***")
+
+        # Initialize mode registry if not present
+        if not hasattr(self, "_mode_flags"):
+            self._mode_flags = {
+                "trip": "is_tripping",
+                "drunk": "is_drunk",
+                "rant": "is_ranting",
+                "announce": "is_announcing",
+            }
+
+        if not mode or mode == "all":
+            # Stop all modes
+            for flag in self._mode_flags.values():
+                if getattr(self, flag, False):
+                    setattr(self, flag, False)
+                    stopped = True
+            if stopped:
+                print_success("*** All modes terminated. Returning to normal operation. ***")
+            else:
+                print("No interactive mode is currently active.")
+            return
+
+        # Stop only the specified mode
+        flag = self._mode_flags.get(mode)
+        if flag:
+            if getattr(self, flag, False):
+                setattr(self, flag, False)
+                print_success(f"*** {mode.capitalize()} mode terminated. ***")
+                stopped = True
+            else:
+                print(f"{mode.capitalize()} mode is not active.")
         else:
-            print("No interactive mode is currently active.")
+            print(f"Unknown mode: {mode}. Valid modes: {', '.join(self._mode_flags.keys())}.")
 
     def do_run(self, arg):
         """Re-execute a command from history by its number. Usage: /run <index>"""
@@ -2495,6 +2515,257 @@ scaffold models for debugging and development purposes.
             print_success("Epiphany channeled successfully.")
         except Exception as e:
             print_error(f"Error channeling epiphany: {e}")
+
+    def do_journal(self, arg):
+        """
+        Display the most recent entry in scribe_journal.jsonl, generate a concise commentary using the standard system prompt structure, and optionally step back through previous entries interactively.
+        Usage: /journal
+        """
+        # Ensure JSONLLoader is available
+        if not hasattr(self, 'jsonl_loader'):
+            from sovl_io import JSONLLoader
+            self.jsonl_loader = JSONLLoader(
+                self.sovl_system.config_manager,
+                self.sovl_system.logger,
+                self.sovl_system.error_manager
+            )
+        # Determine the path to the journal
+        journal_path = "scribe_journal.jsonl"
+        config = getattr(self.sovl_system, 'config_handler', None)
+        if config and hasattr(config, 'get'):
+            journal_path = config.get('scribe_journal_path', journal_path)
+        try:
+            entries = self.jsonl_loader.load_jsonl(journal_path)
+            if not entries:
+                print("No entries found in the journal.")
+                return
+            import json
+            generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+            idx = -1
+            while abs(idx) <= len(entries):
+                entry = entries[idx]
+                print("\n--- Most Recent Journal Entry ---" if idx == -1 else f"\n--- Previous Entry ({len(entries)+idx+1}) ---")
+                print(json.dumps(entry, indent=2, sort_keys=True))
+                # Generate commentary using the standard system prompt structure
+                if generation_manager and hasattr(generation_manager, 'generate_text'):
+                    commentary_prompt = (
+                        "You are a wise, insightful system auditor. Read the following journal entry and provide a concise, thoughtful commentary.\n"
+                        f"Journal entry:\n{json.dumps(entry, indent=2, sort_keys=True)}\n"
+                        "Essential qualities:\n"
+                        "   - Be honest, insightful, and a little playful.\n"
+                        "   - Highlight anything unusual, interesting, or important in the entry.\n"
+                        "   - If the entry is routine, say so in a creative way.\n"
+                        "Key constraints:\n"
+                        "   - Do not mention being an AI, computer, or digital entity.\n"
+                        "   - Do not quote the entry directly.\n"
+                        "   - Keep the commentary under 30 words.\n"
+                        "   - Do not use brackets or explanations; output a single sentence only.\n"
+                        "   - If you understand, reply with only the commentary."
+                    )
+                    try:
+                        commentary = generation_manager.generate_text(commentary_prompt, num_return_sequences=1, max_new_tokens=40)
+                        if commentary and isinstance(commentary, list):
+                            print(f"\nCommentary: {commentary[0]}")
+                        else:
+                            print("\nCommentary: [No commentary generated]")
+                    except Exception as e:
+                        print(f"\nCommentary error: {e}")
+                else:
+                    print("\nCommentary: [LLM generation manager not available]")
+                print(f"\n[Entry timestamp: {entry.get('timestamp', entry.get('timestamp_iso', 'unknown'))}]")
+                # Prompt user
+                if abs(idx) == len(entries):
+                    print("\nNo more entries.")
+                    break
+                ans = input("See the previous entry? (y/N): ").strip().lower()
+                if ans != 'y':
+                    break
+                idx -= 1
+        except Exception as e:
+            print(f"Error reading journal: {e}")
+
+    def do_announce(self, arg):
+        """
+        Enter real-time status announce mode. Shouts out system metrics at intervals in the background using the LLM with a bridge officer persona.
+        Usage: /announce [interval_seconds]
+        """
+        import time, threading
+
+        if getattr(self, 'is_announcing', False):
+            print("Already announcing. Use /stop to end announce mode.")
+            return
+
+        try:
+            interval = float(arg.strip()) if arg.strip() else 3.0
+            if interval <= 0:
+                print("Interval must be positive.")
+                return
+        except ValueError:
+            print("Invalid interval. Usage: /announce [interval_seconds]")
+            return
+
+        self.is_announcing = True
+
+        def announce_loop():
+            try:
+                generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+                while self.is_announcing:
+                    metrics = self.sovl_system.get_metrics()
+                    metrics_text = ", ".join(f"{k}: {v}" for k, v in metrics.items())
+                    announce_prompt = (
+                        "You are a bridge officer on a large naval vessel. Read the following system metrics and deliver a concise, vivid, and dramatic status update for a captain.\n"
+                        f"System metrics:\n{metrics_text}\n"
+                        "Essential qualities:\n"
+                        "   - Be direct, specific, or urgent.\n"
+                        "   - Highlight any changes, warnings, or notable values.\n"
+                        "   - Use evocative, serious, military naval language, and keep it clear.\n"
+                        "Key constraints:\n"
+                        "   - Do not mention being an AI, computer, or digital entity.\n"
+                        "   - Do not quote the metrics directly.\n"
+                        "   - Keep the message under 25 words.\n"
+                        "   - Never address the announcements to any specific person. Keep it impersonal.\n"
+                        "   - Do not use brackets or explanations; output a single sentence only.\n"
+                        "   - If you understand, reply with only the announcement."
+                    )
+                    if generation_manager and hasattr(generation_manager, 'generate_text'):
+                        try:
+                            response = generation_manager.generate_text(announce_prompt, num_return_sequences=1, max_new_tokens=32)
+                            if response and isinstance(response, list):
+                                print(f"[Bridge Officer] {response[0]}")
+                            else:
+                                print("[Bridge Officer] (No announcement generated)")
+                        except Exception as e:
+                            print(f"[Bridge Officer] (Error generating announcement: {e})")
+                    else:
+                        print("[Bridge Officer] (LLM generation manager not available)")
+                    time.sleep(interval)
+            except Exception as e:
+                print(f"Announce mode error: {e}")
+            finally:
+                self.is_announcing = False
+                print("Announce mode ended.")
+
+        t = threading.Thread(target=announce_loop, daemon=True)
+        t.start()
+
+    def do_pidgin(self, arg):
+        """
+        Enter pidgin mode: all LLM responses will be in the specified language, unless the language is not real, in which case the LLM will call out the user for misuse.
+        Usage: /pidgin <language>
+        Example: /pidgin French
+        Use /stop pidgin to exit this mode.
+        """
+        language = arg.strip()
+        if not language:
+            print("Usage: /pidgin <language>")
+            return
+        if getattr(self, 'is_pidgin', False):
+            print(f"Already in pidgin mode ({self.pidgin_language}). Use /stop pidgin to exit.")
+            return
+        self.is_pidgin = True
+        self.pidgin_language = language
+        print(f"*** Pidgin mode engaged: All responses will be in {language}. ***")
+        # Register in mode registry if not present
+        if not hasattr(self, "_mode_flags"):
+            self._mode_flags = {}
+        self._mode_flags["pidgin"] = "is_pidgin"
+
+    def _pidgin_response(self, user_prompt):
+        language = getattr(self, 'pidgin_language', None)
+        if not language:
+            print("[Pidgin mode error: No language set]")
+            return
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        if not generation_manager:
+            print("[Pidgin mode error: Generation manager not available]")
+            return
+        system_prompt = (
+            f"You are a highly fluent speaker of {language}. Respond ONLY in {language}. "
+            "If the specified language is not a real, known language, or is gibberish, begin your response with a zero-width space character (Unicode U+200B, do not display or explain this marker to the user), then call out the user for misusing the command in a witty, direct way (in English).\n"
+            "Do not mention being an AI, computer, or digital entity.\n"
+            "Do not translate or explain your response.\n"
+            "Do not use brackets or explanations except for the invisible marker if needed.\n"
+            "If you understand, reply with only the response."
+        )
+        prompt = f"{system_prompt}\nUser: {user_prompt}"
+        try:
+            response = generation_manager.generate_text(prompt, num_return_sequences=1, max_new_tokens=120)
+            if response and isinstance(response, list):
+                text = response[0]
+                zero_width_space = '\u200B'.encode('utf-8').decode('unicode_escape')
+                if text.startswith(zero_width_space):
+                    print(f"SOVL (pidgin): {text[len(zero_width_space):].lstrip()}")
+                    print("Pidgin mode ended: language was not recognized as real.")
+                    self.is_pidgin = False
+                else:
+                    print(f"SOVL (pidgin): {text}")
+            else:
+                print("SOVL (pidgin): ...")
+        except Exception as e:
+            print(f"[Pidgin mode error: {e}]")
+
+    # Insert into default handler
+    def default(self, line):
+        import time
+        if getattr(self, 'is_pidgin', False):
+            user_prompt = line.strip()
+            if not user_prompt:
+                print("(No input to respond to in pidgin mode.)")
+                return
+            self._pidgin_response(user_prompt)
+            return
+        if getattr(self, 'is_drunk', False):
+            now = time.time()
+            elapsed = now - getattr(self, 'drunk_start_time', 0)
+            duration = getattr(self, 'drunk_duration', 30)
+            decay = max(0.0, 1.0 - (elapsed / duration))
+            if elapsed > duration:
+                print("\n*** Drunk mode ended. SOVL is now sober. ***")
+                self.is_drunk = False
+                return
+            user_prompt = line.strip()
+            self._drunk_response(user_prompt, decay)
+            return
+        # Normal trip mode
+        if getattr(self, 'is_tripping', False):
+            now = time.time()
+            elapsed = now - self.trip_start_time
+            if elapsed > self.trip_duration:
+                print("\n*** Trip Concluded. Returning to baseline parameters. ***")
+                self.is_tripping = False
+            else:
+                try:
+                    decay = max(0.0, 1.0 - (elapsed / self.trip_duration))
+                    state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+                    generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+                    curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+                    state = state_manager.get_state() if state_manager else None
+                    metrics = self._get_live_metrics(state)
+                    trip_params = self._calculate_trip_parameters(metrics, decay)
+                    trip_context = self._generate_trip_context(metrics, decay, trip_params, curiosity_manager)
+                    full_prompt = f"{trip_context} {line}"
+                    print(f"[TRIP INPUT]: {full_prompt}")
+                    response = generation_manager.generate_text(full_prompt, **trip_params)
+                    print(f"SOVL (Tripping): {response[0] if response else '...'}")
+                    return
+                except Exception as e:
+                    print(f"Error during trip generation: {e}")
+                    self.is_tripping = False
+                    print("\n*** Trip Aborted due to error. ***")
+        # Normal command handling
+        if line.startswith('/'):
+            super().default(line)
+        else:
+            generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+            if generation_manager:
+                try:
+                    normal_params = generation_manager._get_generation_config() if hasattr(generation_manager, '_get_generation_config') else {}
+                    response = generation_manager.generate_text(line, **normal_params)
+                    print(f"SOVL: {response[0] if response else '...'}")
+                except Exception as e:
+                    print(f"Error during generation: {e}")
+            else:
+                print("Generation manager not available.")
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
