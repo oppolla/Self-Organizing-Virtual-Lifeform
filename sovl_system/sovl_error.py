@@ -13,6 +13,7 @@ from sovl_memory import GPUMemoryManager
 from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
 from functools import wraps
 from sovl_utils import safe_append_to_file
+from sovl_queue import capture_scribe_event
 
 class ConfigurationError(Exception):
     """Raised when there is an error related to configuration."""
@@ -63,6 +64,19 @@ class ErrorManager(IErrorHandler):
     def handle_error(self, record: ErrorRecord) -> None:
         """Handle error records from the ErrorRecordBridge."""
         try:
+            # Emit minimal scribe event for internal error reflection
+            try:
+                capture_scribe_event(
+                    origin="sovl_error",
+                    event_type="internal_error_reflection",
+                    event_data={"triggering_error_message": record.error_message},
+                    source_metadata={"error_type": record.error_type, "internal_call": True},
+                    session_id=getattr(self.context, "session_id", None),
+                    timestamp=record.timestamp
+                )
+            except Exception as scribe_exc:
+                print(f"[ERROR] Failed to scribe internal error reflection: {scribe_exc}")
+
             # Check severity thresholds
             error_count = ErrorRecordBridge().get_error_count(record.error_type)
             if error_count >= self.severity_thresholds['critical']:
