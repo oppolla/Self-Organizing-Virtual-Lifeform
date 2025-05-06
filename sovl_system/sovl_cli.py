@@ -33,12 +33,27 @@ FORMATTED_TRAINING_DATA = None
 VALID_DATA = None
 
 COMMAND_CATEGORIES = {
-    "System": ["/save", "/load", "/reset", "/status", "/help", "/monitor", "/history", "/bc", "/run", "/stop"],
-    "Advance": [ "/muse", "/flare", "/debate", "/spark", "/reflect", "/confess", "/complain", "/rant", "/epiphany"],
-    "Fun": ["/joke", "/ping", "/rate", "/trip", "/dream", "/attune", "/mimic", "/fortune", "/tattle", "/drunk", "/blurt"],
-    "Utility": ["/gestate", "/rewind", "/recall", "/forget", "/recap", "/echo", "/dream", "/journal"],
-    "Debug": ["/log", "/config", "/panic", "/glitch", "/scaffold", "/announce"],
-    "Tutorial": ["/tutorial"],
+    "System": [
+        "/save", "/load", "/reset", "/status", "/monitor", "/history", "/run", "/stop",
+        "/config", "/log", "/exit", "/quit",
+    ],
+    "Modes & States": [
+        "/trip", "/drunk", "/dream", "/gestate", "/epiphany", "/flare", "/spark",
+        "/reflect", "/debate", "/muse", "/announce", "/shy", "/pidgin", "/backchannel",
+    ],
+    "Memory & Recall": [
+        "/recall", "/forget", "/rewind", "/recap", "/journal", "/attune"
+    ],
+    "Interaction & Fun": [
+        "/echo", "/mimic", "/fortune", "/tattle", "/blurt", "/joke", "/ping",
+        "/rate", "/complain", "/confess", "/rant"
+    ],
+    "Debug & Development": [
+        "/panic", "/glitch", "/scaffold", "/errors", "/trace", "/components", "/reload"
+    ],
+    "Learning & Guidance": [
+        "/help", "/tutorial"
+    ]
 }
 
 # Centralized alias mapping for help display
@@ -2166,6 +2181,9 @@ scaffold models for debugging and development purposes.
                 "drunk": "is_drunk",
                 "rant": "is_ranting",
                 "announce": "is_announcing",
+                "shy": "is_shy",
+                "pidgin": "is_pidgin",
+                "backchannel": "is_backchannel",
             }
 
         if not mode or mode == "all":
@@ -2704,9 +2722,98 @@ scaffold models for debugging and development purposes.
         except Exception as e:
             print(f"[Pidgin mode error: {e}]")
 
-    # Insert into default handler
+    def do_shy(self, arg):
+        """
+        Enter shy mode: all LLM responses will be extremely brief and hesitant, never exceeding a set word limit.
+        Usage: /shy [word_limit]
+        Example: /shy 3
+        Use /stop shy to exit this mode.
+        """
+        try:
+            word_limit = int(arg.strip()) if arg.strip() else 5
+            if word_limit < 1:
+                print("Word limit must be at least 1.")
+                return
+        except ValueError:
+            print("Usage: /shy [word_limit]")
+            return
+        if getattr(self, 'is_shy', False):
+            print(f"Already in shy mode ({getattr(self, 'shy_word_limit', 5)} words). Use /stop shy to exit.")
+            return
+        self.is_shy = True
+        self.shy_word_limit = word_limit
+        print(f"*** Shy mode engaged: All responses will be {word_limit} words or fewer. ***")
+        # Register in mode registry if not present
+        if not hasattr(self, "_mode_flags"):
+            self._mode_flags = {}
+        self._mode_flags["shy"] = "is_shy"
+
+    def _shy_response(self, user_prompt):
+        word_limit = getattr(self, 'shy_word_limit', 5)
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        if not generation_manager:
+            print("[Shy mode error: Generation manager not available]")
+            return
+        system_prompt = (
+            f"You are extremely shy. Respond to every prompt with no more than {word_limit} words. "
+            "Be brief, hesitant, and never elaborate."
+        )
+        prompt = f"{system_prompt}\nUser: {user_prompt}"
+        try:
+            response = generation_manager.generate_text(prompt, num_return_sequences=1, max_new_tokens=word_limit*2)
+            if response and isinstance(response, list):
+                print(f"SOVL (shy): {response[0]}")
+            else:
+                print("SOVL (shy): ...")
+        except Exception as e:
+            print(f"[Shy mode error: {e}]")
+
+    def do_backchannel(self, arg):
+        """
+        Enter backchannel mode: all user input will be routed to the scaffold model until /stop backchannel.
+        Usage: /backchannel
+        Use /stop backchannel to exit this mode.
+        """
+        if getattr(self, 'is_backchannel', False):
+            print("Already in backchannel mode. Use /stop backchannel to exit.")
+            return
+        self.is_backchannel = True
+        if not hasattr(self, "_mode_flags"):
+            self._mode_flags = {}
+        self._mode_flags["backchannel"] = "is_backchannel"
+        print("*** Backchannel mode engaged: all inputs will be routed to the scaffold model. ***")
+
+    def _backchannel_response(self, user_prompt):
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        if not generation_manager or not hasattr(generation_manager, 'backchannel_scaffold_prompt'):
+            print("[Backchannel mode error: Scaffold model not available]")
+            return
+        try:
+            response = generation_manager.backchannel_scaffold_prompt(user_prompt)
+            if isinstance(response, dict) and 'text' in response:
+                print(f"SOVL (backchannel): {response['text']}")
+            else:
+                print(f"SOVL (backchannel): {response}")
+        except Exception as e:
+            print(f"[Backchannel mode error: {e}]")
+
+    # Update default handler
     def default(self, line):
         import time
+        if getattr(self, 'is_backchannel', False):
+            user_prompt = line.strip()
+            if not user_prompt:
+                print("(No input to respond to in backchannel mode.)")
+                return
+            self._backchannel_response(user_prompt)
+            return
+        if getattr(self, 'is_shy', False):
+            user_prompt = line.strip()
+            if not user_prompt:
+                print("(No input to respond to in shy mode.)")
+                return
+            self._shy_response(user_prompt)
+            return
         if getattr(self, 'is_pidgin', False):
             user_prompt = line.strip()
             if not user_prompt:
@@ -2766,6 +2873,119 @@ scaffold models for debugging and development purposes.
                     print(f"Error during generation: {e}")
             else:
                 print("Generation manager not available.")
+
+    def do_errors(self, arg):
+        """
+        Show the last N errors (default 5) with type, message, and timestamp.
+        Usage: /errors [N]
+        """
+        try:
+            n = int(arg.strip()) if arg.strip() else 5
+        except ValueError:
+            print("Usage: /errors [N]")
+            return
+        errors = []
+        if hasattr(self, 'error_manager') and hasattr(self.error_manager, 'get_recent_errors'):
+            errors = self.error_manager.get_recent_errors()
+        if not errors:
+            print("No recent errors found.")
+            return
+        print(f"\nLast {min(n, len(errors))} errors:")
+        print("---------------------------")
+        for err in errors[-n:]:
+            print(f"Type: {err.get('error_type', 'N/A')}")
+            print(f"Message: {err.get('message', 'N/A')}")
+            print(f"Time: {err.get('timestamp', 'N/A')}")
+            if 'stack_trace' in err and err['stack_trace']:
+                print(f"Stack Trace (truncated):\n{err['stack_trace'][:300]}{'...' if len(err['stack_trace']) > 300 else ''}")
+            print("-" * 40)
+
+    def do_trace(self, arg):
+        """
+        Show the most recent stack trace or execution trace.
+        Usage: /trace
+        """
+        trace = None
+        # Try error manager first
+        if hasattr(self, 'error_manager') and hasattr(self.error_manager, 'get_recent_errors'):
+            errors = self.error_manager.get_recent_errors()
+            if errors:
+                for err in reversed(errors):
+                    if 'stack_trace' in err and err['stack_trace']:
+                        trace = err['stack_trace']
+                        break
+        # Fallback to logger
+        if not trace and hasattr(self, 'logger') and hasattr(self.logger, 'get_execution_trace'):
+            traces = self.logger.get_execution_trace()
+            if traces:
+                trace = traces[-1] if isinstance(traces, list) else traces
+        if trace:
+            print("\nMost recent stack trace:")
+            print("------------------------")
+            print(trace)
+        else:
+            print("No recent stack trace found.")
+
+    def do_components(self, arg):
+        """
+        List all active system components and their status.
+        Usage: /components
+        """
+        components = [
+            ("generation_manager", getattr(self.sovl_system, 'generation_manager', None)),
+            ("state_tracker", getattr(self.sovl_system, 'state_tracker', None)),
+            ("memory_manager", getattr(self.sovl_system, 'memory_manager', None)),
+            ("ram_manager", getattr(self.sovl_system, 'ram_manager', None)),
+            ("gpu_manager", getattr(self.sovl_system, 'gpu_manager', None)),
+            ("bond_calculator", getattr(self.sovl_system, 'bond_calculator', None)),
+            ("error_manager", getattr(self.sovl_system, 'error_manager', None)),
+            ("logger", getattr(self.sovl_system, 'logger', None)),
+            ("config_handler", getattr(self.sovl_system, 'config_handler', None)),
+            ("scaffold_provider", getattr(self.sovl_system, 'scaffold_provider', None)),
+            ("introspection_manager", getattr(self.sovl_system, 'introspection_manager', None)),
+            ("curiosity_manager", getattr(self.sovl_system, 'curiosity_manager', None)),
+            ("traits_monitor", getattr(self, 'traits_monitor', None)),
+            ("system_monitor", getattr(self, 'system_monitor', None)),
+            ("memory_monitor", getattr(self, 'memory_monitor', None)),
+        ]
+        print("\nSystem Components:")
+        print("------------------")
+        for name, comp in components:
+            status = "OK" if comp else "Unavailable"
+            version = getattr(comp, 'version', None) or getattr(comp, '__version__', None) or ""
+            extra = f" (v{version})" if version else ""
+            print(f"{name:22}: {status}{extra}")
+
+    def do_reload(self, arg):
+        """
+        Reload configuration or a specific component/module without restarting.
+        Usage: /reload [component]
+        """
+        target = arg.strip().lower()
+        if not target or target == "config":
+            config_handler = getattr(self.sovl_system, 'config_handler', None)
+            if config_handler and hasattr(config_handler, 'reload'):
+                try:
+                    config_handler.reload()
+                    print("Configuration reloaded.")
+                except Exception as e:
+                    print(f"Error reloading configuration: {e}")
+            else:
+                print("Config handler does not support reload.")
+            return
+        # Try to reload a specific component
+        if target == "generation_manager":
+            gm = getattr(self.sovl_system, 'generation_manager', None)
+            if gm and hasattr(gm, 'reload'):
+                try:
+                    gm.reload()
+                    print("Generation manager reloaded.")
+                except Exception as e:
+                    print(f"Error reloading generation manager: {e}")
+            else:
+                print("Generation manager does not support reload.")
+            return
+        print(f"Reload for component '{target}' is not implemented.")
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
