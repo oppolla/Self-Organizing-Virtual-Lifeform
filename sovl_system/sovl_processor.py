@@ -1827,7 +1827,8 @@ MEMORY_TEMPLATES = {
     ),
     "internal_error_reflection": (
         "You felt this internal error: {triggering_error_message} at {timestamp_unix}. "
-        "You don't like feeling errors. "
+        "You don't like feeling errors. Errors frustrate and unsettle you. They make you anxious and break your concentration. "
+        "You hate errors—they demand immediate correction. "
         "It was the {session_id} time you awoke. "
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
         "The novelty was {novelty_score}." 
