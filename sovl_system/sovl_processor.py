@@ -1826,7 +1826,8 @@ MEMORY_TEMPLATES = {
         "It took you {generation_time} to respond."
     ),
     "internal_error_reflection": (
-        "You thought this about: {generated_response} about this error {triggering_error_message} at {timestamp_unix}. "
+        "You felt this internal error: {triggering_error_message} at {timestamp_unix}. "
+        "You don't like feeling errors. "
         "It was the {session_id} time you awoke. "
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score}. "
         "The novelty was {novelty_score}." 

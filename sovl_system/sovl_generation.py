@@ -449,69 +449,23 @@ class GenerationManager:
             # Continue even if degradation fails
 
     def _handle_error_prompt(self, error_msg: str) -> str:
-        """Generate a response to a system error."""
+        """Lightweight error prompt handler without heavy model calls."""
         request_time = time.time()
-        try:
-            if self.state_manager:
-                temp_history = self.state_manager.get_state().history
-                def update_fn(state):
-                    state.history = ConversationHistory(
-                        maxlen=self.controls_config.get("conversation_history_maxlen", 10)
-                    )
-                    return state
-                self.state_manager.update_state_atomic(update_fn)
-                response = self.generate(
-                    f"System error detected: {error_msg} What happened?",
-                    max_new_tokens=self.controls_config.get("max_new_tokens", 60),
-                    temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
-                    top_k=self.controls_config.get("top_k", 50),
-                    do_sample=True
-                )
-                def restore_fn(state):
-                    state.history = temp_history
-                    return state
-                self.state_manager.update_state_atomic(restore_fn)
-            else:
-                temp_history = self.state.history
-                self.state.history = ConversationHistory(
-                    maxlen=self.controls_config.get("conversation_history_maxlen", 10)
-                )
-                response = self.generate(
-                    f"System error detected: {error_msg} What happened?",
-                    max_new_tokens=self.controls_config.get("max_new_tokens", 60),
-                    temperature=self.controls_config.get("base_temperature", 0.7) + 0.2,
-                    top_k=self.controls_config.get("top_k", 50),
-                    do_sample=True
-                )
-                self.state.history = temp_history
-
-            # Log the internal error reflection
-            capture_scribe_event(
-                origin="sovl_generation",
-                event_type="internal_error_reflection",
-                event_data={
-                    "triggering_error_message": error_msg,
-                    "prompt_used": f"System error detected: {error_msg} What happened?",
-                    "generated_response": response
-                },
-                source_metadata={
-                    "generation_config": {
-                        "max_new_tokens": self.controls_config.get("max_new_tokens", 60),
-                        "temperature": self.controls_config.get("base_temperature", 0.7) + 0.2,
-                        "top_k": self.controls_config.get("top_k", 50),
-                        "do_sample": True
-                    },
-                    "model_name": getattr(self.base_model.config, "_name_or_path", "unknown"),
-                    "device": str(self.device),
-                    "internal_call": True
-                },
-                timestamp=datetime.fromtimestamp(request_time)
-            )
-            
-            return response
-        except Exception as e:
-            self._handle_error("handle_error_prompt", e)
-            return "An error occurred while handling the error prompt"
+        # Log the error
+        self.logger.log_error(
+            error_msg=f"Handling error prompt: {error_msg}",
+            error_type="handle_error_prompt"
+        )
+        # Emit a minimal scribe event for auditing
+        capture_scribe_event(
+            origin="sovl_generation",
+            event_type="internal_error_reflection",
+            event_data={"triggering_error_message": error_msg},
+            source_metadata={"internal_call": True},
+            timestamp=datetime.fromtimestamp(request_time)
+        )
+        # Return a static fallback response
+        return f"An internal error occurred: {error_msg}"
 
     def has_repetition(self, output_ids: torch.Tensor, n: int = 3) -> bool:
         """Check for repetition in generated output."""
