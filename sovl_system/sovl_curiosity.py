@@ -457,12 +457,33 @@ class CuriosityPressure:
             )
             raise
 
+    def decay_pressure(self, current_time: float) -> None:
+        """Apply decay to current_pressure based on elapsed time and decay_rate."""
+        elapsed = current_time - self.last_update
+        decay_factor = self.decay_rate * elapsed
+        self.current_pressure = max(
+            self.min_pressure,
+            self.current_pressure * (1.0 - decay_factor)
+        )
+        self.last_update = current_time
+        self._log_event(
+            "curiosity_pressure_decayed",
+            "Curiosity pressure decayed",
+            level="debug",
+            additional_info={
+                "new_pressure": self.current_pressure,
+                "elapsed": elapsed,
+                "decay_factor": decay_factor
+            }
+        )
+
     def check_eruption(self, threshold: float, drop: float) -> bool:
         """
         Check if pressure exceeds threshold and cooldown has elapsed. If so, drop pressure and return True.
         Returns True if an eruption occurred, else False.
         """
         now = time.time()
+        self.decay_pressure(now)  # Apply decay before checking
         if self.current_pressure >= threshold and (now - self._last_eruption_time > self.cooldown):
             old_pressure = self.current_pressure
             self.current_pressure = max(self.min_pressure, self.current_pressure - drop)
@@ -559,6 +580,7 @@ class CuriosityManager():
         logger: Logger,
         error_manager: ErrorManager,
         device: torch.device,
+        generation_manager: Any,  # Required parameter
         state_manager=None,
     ):
         """Initialize the curiosity manager with necessary components and configs."""
@@ -567,6 +589,10 @@ class CuriosityManager():
         self.error_manager = error_manager
         self.device = device
         self.state_manager = state_manager
+        self.generation_manager = generation_manager  # Store explicitly
+        # Validate generation_manager
+        if not hasattr(generation_manager, 'generate_text'):
+            raise ValueError("generation_manager must have a 'generate_text' method")
         
         # Thread safety
         self._lock = threading.RLock()
@@ -1168,7 +1194,7 @@ class CuriosityManager():
         spontaneous: bool = False
     ) -> Optional[str]:
         """
-        On curiosity eruption, select the best pre-generated internal curiosity question and ask the user. If none are available, generate a fallback question.
+        On curiosity eruption, select the best pre-generated internal curiosity question and ask the user. If none are available, generate a fallback question using the most recent prompt as context. If no context is available, skip the question.
         Parameters:
             spontaneous (bool): Whether the question is spontaneous (for logging/analytics).
         Returns:
@@ -1179,29 +1205,50 @@ class CuriosityManager():
             return None  # No eruption, do not ask
 
         fallback = False
-        if self._internal_questions:
-            best_question, q_score, _ = max(self._internal_questions, key=lambda x: x[1])
-            self._internal_questions.clear()
-        else:
-            # Fallback: generate a new question
-            fallback = True
-            score = self.calculate_curiosity_score("")
-            knowns = [self._summarize_knowns("")]
-            unknowns = [self._summarize_unknowns("")]
-            meta = self.build_curiosity_prompt("", knowns, unknowns)
-            best_question = self._build_question(meta, score) or "What should I be curious about?"
-            q_score = score
-            self.logger.log_event(
-                event_type="curiosity_eruption_fallback",
-                message="No internal questions available; generated a fallback curiosity question.",
-                level="info"
-            )
+        with self._lock:
+            if self._internal_questions:
+                best_question, q_score, _ = max(self._internal_questions, key=lambda x: x[1])
+                self._internal_questions.clear()
+            else:
+                # Fallback: use last prompt or skip
+                last_prompt = self.state_manager.get_last_prompt() if self.state_manager and hasattr(self.state_manager, 'get_last_prompt') else None
+                if not last_prompt or not last_prompt.strip():
+                    self._record_warning(
+                        event_type="curiosity_eruption_no_context",
+                        message="No internal questions or recent context available for fallback question."
+                    )
+                    return None
+                if not hasattr(self, 'generation_manager') or not hasattr(self.generation_manager, 'generate_text'):
+                    self._record_error(
+                        message="No generation_manager for fallback question",
+                        error_type="generation_manager_missing"
+                    )
+                    return None
+                fallback = True
+                score = self.calculate_curiosity_score(last_prompt)
+                knowns = [self._summarize_knowns(last_prompt)]
+                unknowns = [self._summarize_unknowns(last_prompt)]
+                meta = self.build_curiosity_prompt(last_prompt, knowns, unknowns)
+                best_question = self._build_question(meta, score)
+                if not best_question:
+                    self._record_warning(
+                        event_type="curiosity_fallback_failed",
+                        message="Failed to generate fallback question."
+                    )
+                    return None
+                q_score = score
+                self.logger.log_event(
+                    event_type="curiosity_eruption_fallback",
+                    message="No internal questions; generated fallback question from last prompt.",
+                    level="info",
+                    additional_info={"prompt": last_prompt}
+                )
 
         # Output the selected question and capture the user's response
         self.output_curiosity_utterance(best_question)
         try:
             user_response = input().strip()
-        except Exception:
+        except (EOFError, KeyboardInterrupt):
             user_response = ""
         # Log the asked question and user response
         capture_scribe_event(
