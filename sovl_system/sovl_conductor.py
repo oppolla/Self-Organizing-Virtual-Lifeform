@@ -8,7 +8,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 from threading import Lock
 from sovl_config import ConfigManager
-from sovl_cli import run_cli
 from sovl_logger import Logger
 from sovl_state import StateManager, StateTracker
 from sovl_error import ErrorManager
@@ -22,7 +21,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger
 from sovl_manager import ModelManager
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
-from sovl_trainer import TrainingCycleManager
+from sovl_trainer import TrainingWorkflowManager
 import threading
 from sovl_resource import ResourceManager
 
@@ -799,8 +798,8 @@ class SOVLOrchestrator(OrchestratorInterface):
         try:
             # Lazy initialization if not already present
             if not hasattr(self, 'training_manager') or self.training_manager is None:
-                from sovl_trainer import TrainingCycleManager
-                self.training_manager = TrainingCycleManager(
+                from sovl_trainer import TrainingWorkflowManager
+                self.training_manager = TrainingWorkflowManager(
                     config_manager=self.config_manager,
                     logger=self.logger,
                     state_manager=self.state_manager,
@@ -809,7 +808,7 @@ class SOVLOrchestrator(OrchestratorInterface):
                 )
             metrics = self.training_manager.validate(valid_data)
             if not isinstance(metrics, dict) or "loss" not in metrics:
-                raise ValueError("Invalid metrics format from TrainingCycleManager")
+                raise ValueError("Invalid metrics format from TrainingWorkflowManager")
             return metrics
         except Exception as e:
             self._log_error("Validation failed", e)
