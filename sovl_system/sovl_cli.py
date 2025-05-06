@@ -220,6 +220,9 @@ class CommandHandler(cmd.Cmd):
         self._last_progress = None
         self._mode_monitor_thread = threading.Thread(target=self._monitor_mode, daemon=True)
         self._mode_monitor_thread.start()
+        # --- Command registry for modularization ---
+        self._command_registry = {}
+        self._register_builtin_commands()
 
     def _monitor_mode(self):
         dot_count = 1
@@ -1872,8 +1875,6 @@ scaffold models for debugging and development purposes.
 
     def register_command(self, name: str, handler: Callable):
         """Register a new command handler for extensibility."""
-        if not hasattr(self, '_command_registry'):
-            self._command_registry = {}
         self._command_registry[name] = handler
 
     def parse_args(self, command_line: str) -> tuple:
@@ -1910,10 +1911,10 @@ scaffold models for debugging and development purposes.
         Returns the result of the command, or None.
         """
         try:
-            # Extensible registry dispatch
-            if hasattr(self, '_command_registry') and command in self._command_registry:
-                return self._command_registry[command](args)
-            # Fallback to do_* methods
+            # Use registry first
+            if command in self._command_registry:
+                return self._command_registry[command](' '.join(args))
+            # Fallback to do_* methods (shouldn't be needed, but for safety)
             method = getattr(self, f'do_{command}', None)
             if method:
                 return method(' '.join(args))
@@ -3073,6 +3074,17 @@ scaffold models for debugging and development purposes.
             if status == "FAIL":
                 fail_count += 1
         print(f"\n{fail_count}/{len(results)} checks failed.")
+
+    def _register_builtin_commands(self):
+        """
+        Register all do_* methods as commands in the registry.
+        In the future, external modules can register their own commands here.
+        """
+        for attr_name in dir(self):
+            if attr_name.startswith('do_'):
+                cmd_name = attr_name[3:]
+                handler = getattr(self, attr_name)
+                self.register_command(cmd_name, handler)
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
