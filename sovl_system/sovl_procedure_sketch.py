@@ -42,17 +42,26 @@ from typing import Dict, Any, List, Optional
 #         # This internal_procedures_store is CRITICAL. It holds the operational procedures.
 #         # It MUST be persisted (e.g., to a database or file) across sessions if procedures
 #         # are to be remembered long-term, independent of the scribe journal.
+#         # The recommended approach is a dedicated SQLite table, see details below.
 #         self.internal_procedures_store = {} 
 #
 #     def add_procedure_to_internal_store(self, name: str, description: str, steps: List[str], metadata: Optional[Dict[str, Any]] = None):
-#         # Logic to add to self.internal_procedures_store, including robust persistence.
-#         self.internal_procedures_store[name] = {
+#         # Logic to add to self.internal_procedures_store, including robust persistence
+#         # (e.g., writing to the dedicated SQLite `procedures` table described below).
+#         self.internal_procedures_store[name] = { # This in-memory dict can act as a cache
 #             "description": description,
 #             "steps": steps,
 #             "metadata": metadata or {},
 #             "defined_at": time.time() # or a proper ISO timestamp
 #         }
+#         # Actual DB write operation would happen here.
 #         self.logger.info(f"Procedure '{name}' added to DCM's internal operational memory.")
+#
+#     def get_procedure_from_internal_store(self, name: str) -> Optional[Dict[str, Any]]:
+#         # Logic to retrieve from self.internal_procedures_store (cache) or fetch from
+#         # the dedicated SQLite `procedures` table if not in cache.
+#         # Remember to deserialize JSON fields (steps, metadata) when reading from DB.
+#         pass
 #
 #     def process_incoming_message_for_procedure(self, content: str, role: str, session_id: str):
 #         # This conceptual method within DialogueContextManager is the primary entry point
@@ -78,6 +87,61 @@ from typing import Dict, Any, List, Optional
 #     def error(self, message: str): print(f"LOG ERROR: {message}")
 #     def record_event(self, event_type: str, message: str, level: str, additional_info: Optional[Dict[str, Any]] = None):
 #        print(f"LOG EVENT ({level}): {event_type} - {message} - {additional_info}")
+
+
+# --- Procedural Memory Storage (within DialogueContextManager) ---
+#
+# Procedures require a dedicated, persistent store managed by DialogueContextManager.
+# Reusing the LongTermMemory (conversational vector store) for primary procedure storage
+# is not recommended due to schema mismatch, different retrieval needs (exact name vs. semantic),
+# and potential for data confusion.
+#
+# **Recommended Approach: Dedicated SQLite Table**
+# - Within the same SQLite database file that LongTermMemory uses (e.g., `conversations.db`),
+#   DialogueContextManager should create and manage a new table, e.g., `procedures`.
+#
+# **Proposed `procedures` Table Schema:**
+#   - `name` (TEXT, PRIMARY KEY, UNIQUE NOT NULL): Unique procedure name.
+#   - `description` (TEXT): Human-readable description of the procedure.
+#   - `steps` (TEXT NOT NULL): JSON string array of procedure steps (e.g., json.dumps(["step1", "step2"])).
+#   - `metadata` (TEXT): JSON string object for additional metadata (e.g., source, version, UI hints).
+#                        Example: json.dumps({"source": "user_defined", "version": 1, "created_by": "user_xyz"})
+#   - `created_at` (REAL or TEXT NOT NULL): Timestamp of creation (e.g., Unix epoch or ISO 8601).
+#   - `updated_at` (REAL or TEXT NOT NULL): Timestamp of last update.
+#   - `embedding` (BLOB, OPTIONAL): If storing embeddings of the description directly for semantic search assistance.
+#
+# **DCM Interaction:**
+#   - **Initialization:** DCM ensures the `procedures` table exists (`CREATE TABLE IF NOT EXISTS`).
+#   - **Adding (`add_procedure_to_internal_store`):** Serializes `steps` and `metadata` to JSON,
+#     then performs an `INSERT OR REPLACE INTO procedures ...` SQL operation.
+#     The `self.internal_procedures_store` dict can act as a write-through cache or load-on-demand cache.
+#   - **Retrieving (`get_procedure_from_internal_store`):** Fetches by `name` from the table, deserializes JSON fields.
+#     Caches frequently accessed procedures in memory if desired.
+#   - **Listing/Updating/Deleting:** Standard SQL operations for these functionalities.
+#
+#   - **Deleting Procedures:**
+#     - **User Intent:** DCM needs to recognize user commands like "delete procedure [name]" or "forget how to [task]".
+#     - **Confirmation:** CRITICAL to confirm with the user before deletion (e.g., "Are you sure you want to delete '{procedure_name}'?").
+#     - **DCM Method:** A `delete_procedure(self, name: str) -> bool` method in DCM.
+#       - Executes `DELETE FROM procedures WHERE name = ?;`.
+#       - Removes the procedure from any in-memory cache.
+#       - Returns success/failure.
+#     - **Feedback:** Inform the user of the outcome.
+#     - **Scribe Event:** Log a `procedure_deleted` event via `scriber.scribe()` for auditing and potential LoRA learning
+#       (e.g., `event_data={"name": procedure_name}, source_metadata={"deleted_by": "user"}`).
+#
+# **Semantic Search for Procedures (Optional Enhancement):**
+#   - While the SQLite table provides exact name lookup, for semantic discovery:
+#     1. When a procedure is added/updated, its `description` (and/or `name`) can be embedded.
+#     2. This embedding, along with the procedure `name` as an identifier, can be added to
+#        the *existing* FAISS index of `LongTermMemory` (perhaps with a special marker/namespace).
+#        If a procedure is deleted, its corresponding entry in the FAISS index should also be removed if possible
+#        (FAISS index removal can sometimes be non-trivial, depending on the index type and library version).
+#     3. A semantic query would hit FAISS, retrieve the `name`, and then DCM would fetch the full
+#        procedure details from the `procedures` SQLite table using the exact name.
+#     This keeps the `procedures` table as the source of truth, with FAISS as an auxiliary search index.
+#
+# --- End of Procedural Memory Storage Section ---
 
 
 # --- Procedure Detection Logic ---
