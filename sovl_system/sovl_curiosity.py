@@ -15,6 +15,7 @@ from sovl_memory import RAMManager, GPUMemoryManager
 import json
 from dataclasses import dataclass
 from sovl_utils import cosine_similarity
+from sovl_recaller import DialogueContextManager
 
 # Unified output function for all utterances (user or system)
 def output_response(text: str):
@@ -843,34 +844,40 @@ class CuriosityManager():
         ]
         return 1.0 - max(similarities) if similarities else 1.0
 
-    def _generate_and_score_answer(self, prompt: str):
-        """Generate an answer and return a (possibly heuristic) quality score."""
-        answer = self.generation_manager.generate_text(prompt, num_return_sequences=1)[0]
-        # Heuristic scoring
-        if not answer or answer.strip() == "":
-            return answer, 0.0
-        if "I don't know" in answer or "unsure" in answer:
-            return answer, 0.2
-        if len(answer.split()) < 5:
-            return answer, 0.4
-        return answer, 0.8
-
     def _calculate_ignorance(self, prompt: str) -> float:
-        """Calculate ignorance as 1.0 - answer quality score."""
-        answer, quality_score = self._generate_and_score_answer(prompt)
-        quality_score = max(0.0, min(1.0, quality_score))
-        ignorance = 1.0 - quality_score
-        self.logger.log_event(
-            event_type="ignorance_calculated",
-            message="Ignorance calculated for prompt",
-            additional_info={
-                "prompt": prompt,
-                "answer": answer,
-                "quality_score": quality_score,
-                "ignorance": ignorance
-            }
-        )
-        return ignorance
+        """Calculate ignorance as 1.0 - similarity to best long-term memory match."""
+        try:
+            # Ensure recaller is available
+            if not hasattr(self, 'recaller') or self.recaller is None:
+                if self.logger:
+                    self.logger.log_error("No recaller (DialogueContextManager) available for ignorance calculation.")
+                return 1.0
+            # Get embedding for the prompt
+            query_embedding = self.recaller.embedding_fn(prompt)
+            # Query long-term memory for top match
+            results = self.recaller.get_long_term_context(query_embedding=query_embedding, top_k=1)
+            if not results or 'embedding' not in results[0]:
+                ignorance = 1.0
+            else:
+                best_embedding = results[0]['embedding']
+                # Compute cosine similarity
+                similarity = cosine_similarity(query_embedding, best_embedding)
+                ignorance = 1.0 - similarity
+                ignorance = max(0.0, min(1.0, ignorance))
+            self.logger.log_event(
+                event_type="ignorance_calculated",
+                message="Ignorance calculated for prompt (retrieval-based)",
+                additional_info={
+                    "prompt": prompt,
+                    "ignorance": ignorance,
+                    "method": "retrieval_confidence"
+                }
+            )
+            return ignorance
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Ignorance calculation (retrieval) failed: {e}")
+            return 1.0
 
     def calculate_curiosity_score(self, prompt: str) -> float:
         novelty_score = self._calculate_novelty(prompt)
