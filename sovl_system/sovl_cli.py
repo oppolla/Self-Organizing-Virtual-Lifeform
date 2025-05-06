@@ -25,6 +25,8 @@ import threading
 import json
 import shutil
 from sovl_dreamer import Dreamer
+import importlib
+import pkgutil
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -64,6 +66,9 @@ ALIASES = {
     "s": "status",  
     "r": "reset",  
 }
+
+# Feature flag for dynamic command discovery
+ENABLE_DYNAMIC_COMMANDS = False
 
 class CommandHistory:
     """Manages command history with search functionality and execution status."""
@@ -223,6 +228,9 @@ class CommandHandler(cmd.Cmd):
         # --- Command registry for modularization ---
         self._command_registry = {}
         self._register_builtin_commands()
+        # Dynamic command discovery (feature-flagged)
+        if ENABLE_DYNAMIC_COMMANDS:
+            self._register_external_commands()
 
     def _monitor_mode(self):
         dot_count = 1
@@ -3085,6 +3093,26 @@ scaffold models for debugging and development purposes.
                 cmd_name = attr_name[3:]
                 handler = getattr(self, attr_name)
                 self.register_command(cmd_name, handler)
+
+    def _register_external_commands(self):
+        """
+        Dynamically discover and register commands from the cli_commands directory.
+        Only modules with COMMAND_NAME and a matching do_COMMAND_NAME function are registered.
+        """
+        try:
+            import cli_commands
+        except ImportError:
+            print("[Dynamic Command Discovery] cli_commands package not found.")
+            return
+        for finder, name, ispkg in pkgutil.iter_modules(cli_commands.__path__):
+            try:
+                module = importlib.import_module(f"cli_commands.{name}")
+                command_name = getattr(module, "COMMAND_NAME", None)
+                command_func = getattr(module, f"do_{command_name}", None)
+                if command_name and command_func:
+                    self.register_command(command_name, lambda arg, f=command_func: f(self, arg))
+            except Exception as e:
+                print(f"[Dynamic Command Discovery] Failed to load {name}: {e}")
 
 def run_cli(system_context=None, config_manager_instance: Optional[ConfigManager] = None):
     sovl_system = None
