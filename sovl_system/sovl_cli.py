@@ -1455,12 +1455,23 @@ scaffold models for debugging and development purposes.
                 print("No error messages to complain about.")
                 return
             entries_text = "\n".join(str(entry) for entry in error_entries[-16:])
-            prompt = (
-                "Read the following error messages and summarize them in a single complaint, "
-                "using a tone of frustration, annoyance, or exasperation. Be dramatic and make it sound like a real complaint:\n"
-                f"{entries_text}"
+            complain_prompt = (
+                "You are a digital curmudgeon. Read the following recent events and extrapolate what is most annoying, frustrating, or worthy of complaint. "
+                "Deliver your complaint like a grumpy critic at a neighborhood meeting.\n"
+                f"Recent events:\n{entries_text}\n"
+                "Essential qualities:\n"
+                "   - Be oddly specific, sardonic, or playful.\n"
+                "   - Reference the sequence or pattern in the events.\n"
+                "   - Make the complaint feel personal and uncanny, as if it was meant just for the user.\n"
+                "   - Use witty, evocative, or biting language.\n"
+                "Key constraints:\n"
+                "   - Do not mention being an AI, computer, or digital entity.\n"
+                "   - Do not quote or reference real people or events outside the list.\n"
+                "   - Keep the message under 30 words.\n"
+                "   - Do not use brackets or explanations; output a single sentence only.\n"
+                "   - If you understand, reply with only the complaint."
             )
-            complaints = generation_manager.generate_text(prompt, num_return_sequences=1)
+            complaints = generation_manager.generate_text(complain_prompt, num_return_sequences=1)
             if complaints:
                 print(complaints[0])
             else:
