@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. tweak curiosity questiin logic it constantly asjs wuestions that get logged, and the eruption is picking the highest weighted one. lists last for while maybe decay system?
+1. tweak curiosity questiin logic it constantly asks questions that get logged, and the eruption is picking the highest weighted one from list. lists last for while maybe decay system?
 2. Disable that startup data sovl_seed part. Save it for Soulprint
 3. System should know unix time at initialization or always
 4. 
