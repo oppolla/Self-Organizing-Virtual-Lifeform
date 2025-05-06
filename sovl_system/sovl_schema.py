@@ -504,6 +504,31 @@ class ValidationSchema:
         }
     
     @staticmethod
+    def _get_engram_lora_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the engram_lora config schema."""
+        return {
+            "lora_rank": ConfigSchema(
+                field="engram_lora.lora_rank",
+                type=int,
+                default=8,
+                range=(1, 128)  # Adjust max as appropriate for your hardware
+            ),
+            "lora_alpha": ConfigSchema(
+                field="engram_lora.lora_alpha",
+                type=int,
+                default=16,
+                range=(1, 256)
+            ),
+            "lora_dropout": ConfigSchema(
+                field="engram_lora.lora_dropout",
+                type=float,
+                default=0.1,
+                range=(0.0, 1.0)
+            ),
+            # Optionally, add more LoRA-related parameters here
+        }
+    
+    @staticmethod
     def _get_scribed_config_schema() -> Dict[str, ConfigSchema]:
         """Return the scribed_config schema."""
         return {

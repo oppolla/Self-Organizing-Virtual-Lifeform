@@ -37,10 +37,10 @@ class LoraAdapterManager:
         self._adapter_cache = {}  # Cache for adapter application
         self._last_applied_model_id = None
         self._last_applied_config = None
-        # Do not perform validation or dependency checks here
-        self.rank = config_manager.get("lora.rank", 8)
-        self.alpha = config_manager.get("lora.alpha", 16)
-        self.dropout = config_manager.get("lora.dropout", 0.1)
+        # LoRA capacity parameters (exposed in config)
+        self.rank = config_manager.get("engram_lora.lora_rank", 8)
+        self.alpha = config_manager.get("engram_lora.lora_alpha", 16)
+        self.dropout = config_manager.get("engram_lora.lora_dropout", 0.1)
         self.target_modules = config_manager.get("lora.target_modules", ["q_proj", "v_proj"])
         self.task_type = config_manager.get("lora.task_type", "CAUSAL_LM")
 

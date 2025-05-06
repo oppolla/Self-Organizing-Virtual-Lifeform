@@ -531,6 +531,11 @@
       "decay": 0.8
     }
   },
+"engram_lora": {
+    "lora_rank": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.1
+  },
   "monitoring": {
     "enable_monitoring": true,
     "monitor_interval": 60,
