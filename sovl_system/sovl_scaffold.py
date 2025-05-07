@@ -19,6 +19,10 @@ import threading
 from sovl_utils import check_model_health as util_check_model_health, calculate_token_map_confidence
 import queue
 import numpy as np
+import os
+import pickle
+import hashlib
+import json
 
 # Centralized handler for scaffold errors and recovery.
 class ScaffoldErrorManager:
@@ -174,6 +178,9 @@ class ScaffoldTokenMapper:
                 self._fallback_strategies.append(UnkStrategy())
         
         self.provider = provider
+        self.min_token_map_confidence = self.config.get('min_token_map_confidence', 0.5)
+        self.max_low_conf_ratio = self.config.get('max_low_conf_ratio', 0.2)
+        self.max_fallback_ratio = self.config.get('max_fallback_ratio', 0.3)
         
     def _check_embedding_availability(self):
         # Check if both models and their input embeddings are available
@@ -278,27 +285,96 @@ class ScaffoldTokenMapper:
         )
         return [self.scaffold_tokenizer.unk_token_id]
         
+    def _get_token_map_cache_key(self):
+        import hashlib, json
+        base_vocab = self.base_tokenizer.get_vocab()
+        scaffold_vocab = self.scaffold_tokenizer.get_vocab()
+        config_str = json.dumps(self.config, sort_keys=True)
+        key_str = json.dumps(base_vocab, sort_keys=True) + json.dumps(scaffold_vocab, sort_keys=True) + config_str
+        return hashlib.md5(key_str.encode()).hexdigest()
+
+    def _try_load_token_map_cache(self):
+        cache_key = self._get_token_map_cache_key()
+        cache_path = f"token_map_cache_{cache_key}.pkl"
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    self.token_map = pickle.load(f)
+                self.logger.record_event(
+                    event_type="token_map_cache_loaded",
+                    message=f"Loaded token_map from cache: {cache_path}",
+                    level="info"
+                )
+                return True
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="token_map_cache_load_failed",
+                    message=f"Failed to load token_map cache: {e}",
+                    level="warning"
+                )
+        return False
+
+    def _save_token_map_cache(self):
+        cache_key = self._get_token_map_cache_key()
+        cache_path = f"token_map_cache_{cache_key}.pkl"
+        try:
+            with open(cache_path, "wb") as f:
+                pickle.dump(dict(self.token_map), f)
+            self.logger.record_event(
+                event_type="token_map_cache_saved",
+                message=f"Saved token_map to cache: {cache_path}",
+                level="info"
+            )
+        except Exception as e:
+            self.logger.record_event(
+                event_type="token_map_cache_save_failed",
+                message=f"Failed to save token_map cache: {e}",
+                level="warning"
+            )
+
     def _build_token_map(self):
-        """Build main token mapping with enhanced strategies and layered fallback."""
+        if self._try_load_token_map_cache():
+            return
         special_tokens = {
             self.base_tokenizer.pad_token_id: self.scaffold_tokenizer.pad_token_id,
             self.base_tokenizer.eos_token_id: self.scaffold_tokenizer.eos_token_id,
             self.base_tokenizer.unk_token_id: self.scaffold_tokenizer.unk_token_id,
         }
-        for base_token, base_id in self.base_tokenizer.get_vocab().items():
-            # 1. Special token strict mapping
+        base_vocab = self.base_tokenizer.get_vocab()
+        total = len(base_vocab)
+        for i, (base_token, base_id) in enumerate(base_vocab.items()):
             if base_id in special_tokens and special_tokens[base_id] is not None:
-                self.token_map[base_id] = {'ids': [special_tokens[base_id]], 'weight': 1.0, 'confidence': 1.0}
+                self.token_map[base_id] = {'ids': [special_tokens[base_id]], 'weight': 1.0, 'confidence': 1.0, 'strategy': 'special'}
                 continue
             normalized = self._normalize_token(base_token)
-            # 2. Exact string match
             if normalized in self.scaffold_tokenizer.get_vocab():
                 scaf_id = self.scaffold_tokenizer.get_vocab()[normalized]
-                self.token_map[base_id] = {'ids': [scaf_id], 'weight': 1.0, 'confidence': 1.0}
+                self.token_map[base_id] = {'ids': [scaf_id], 'weight': 1.0, 'confidence': 1.0, 'strategy': 'exact'}
                 continue
-            # 3. Use fallback strategy pipeline for all other cases
-            fallback_ids = self._handle_fallback(normalized, base_id)
-            self.token_map[base_id] = {'ids': fallback_ids, 'weight': 0.5, 'confidence': 0.5}
+            # Use fallback strategy pipeline for all other cases
+            best_conf = 0.0
+            best_ids = [self.scaffold_tokenizer.unk_token_id]
+            best_strategy = 'unk'
+            for strat in self._fallback_strategies:
+                result = strat.try_map(normalized, {'self': self, 'base_tokenizer': self.base_tokenizer, 'scaffold_tokenizer': self.scaffold_tokenizer, 'max_tokens_per_mapping': self.max_tokens_per_mapping, 'base_id': base_id})
+                if result and isinstance(result, tuple):
+                    ids, conf, strategy = result
+                elif result:
+                    ids, conf, strategy = result, 0.5, strat.__class__.__name__
+                else:
+                    continue
+                if conf > best_conf:
+                    best_conf = conf
+                    best_ids = ids
+                    best_strategy = strategy
+            self.token_map[base_id] = {'ids': best_ids, 'weight': best_conf, 'confidence': best_conf, 'strategy': best_strategy}
+            if (i + 1) % 1000 == 0 or (i + 1) == total:
+                self.logger.record_event(
+                    event_type="token_map_progress",
+                    message=f"Token mapping progress: {i+1}/{total}",
+                    level="info"
+                )
+        self._save_token_map_cache()
 
     def _resolve_conflict(self, base_id: int, new_mapping: Dict, existing_mapping: Dict) -> Dict:
         """Resolve mapping conflicts based on configured strategy."""
@@ -383,7 +459,6 @@ class ScaffoldTokenMapper:
         return self._validate_token_maps()
         
     def tokenize_and_map(self, prompt: str) -> Tuple[List[int], List[float]]:
-        """Tokenize prompt and map to scaffold token space, enforcing minimum confidence and <unk> ratio."""
         try:
             start = time.time()
             base_tokens = self.base_tokenizer.encode(prompt, add_special_tokens=False)
@@ -391,45 +466,67 @@ class ScaffoldTokenMapper:
             weights = []
             low_conf_count = 0
             unk_count = 0
-            min_conf = 0.5  # Minimum allowed confidence for a mapping
-            for base_id in base_tokens:
+            fallback_count = 0
+            failed_tokens = []
+            for idx, base_id in enumerate(base_tokens):
                 mapping = self.token_map[base_id]
                 scaffold_ids.extend(mapping['ids'])
-                weights.extend([mapping['weight']] * len(mapping['ids']))
-                # --- Metrics ---
+                weights.extend([mapping['confidence']] * len(mapping['ids']))
                 with self._metrics_lock:
-                    self._mapping_confidences.append(mapping['weight'])
-                    if 'fallback_type' in mapping:
-                        self._fallback_counts[mapping['fallback_type']] += 1
-                if mapping['weight'] < min_conf:
+                    self._mapping_confidences.append(mapping['confidence'])
+                    if mapping.get('strategy') and mapping['strategy'] not in ('special', 'exact'):
+                        self._fallback_counts[mapping['strategy']] += 1
+                        fallback_count += 1
+                if mapping['confidence'] < self.min_token_map_confidence:
                     low_conf_count += 1
+                    failed_tokens.append({
+                        'base_token': self.base_tokenizer.decode([base_id]) if hasattr(self.base_tokenizer, 'decode') else str(base_id),
+                        'scaffold_token': self.scaffold_tokenizer.decode(mapping['ids']) if hasattr(self.scaffold_tokenizer, 'decode') else str(mapping['ids']),
+                        'confidence': mapping['confidence'],
+                        'strategy': mapping.get('strategy', 'unknown')
+                    })
                 if mapping['ids'] == [self.scaffold_tokenizer.unk_token_id]:
                     unk_count += 1
             total = len(base_tokens) if base_tokens else 1
             low_conf_ratio = low_conf_count / total
             unk_ratio = unk_count / total
-            # Log mapping quality
+            fallback_ratio = fallback_count / total
             self.logger.record_event(
                 event_type="token_mapping_quality",
-                message=f"Token mapping: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens",
-                level="warning" if low_conf_ratio > 0.1 or unk_ratio > 0.1 else "info",
+                message=f"Token mapping: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {self.min_token_map_confidence}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens, {fallback_count}/{total} ({fallback_ratio:.2%}) fallback tokens",
+                level="warning" if low_conf_ratio > self.max_low_conf_ratio or unk_ratio > self.max_low_conf_ratio or fallback_ratio > self.max_fallback_ratio else "info",
                 additional_info={
                     "low_conf_count": low_conf_count,
                     "total_tokens": total,
                     "low_conf_ratio": low_conf_ratio,
                     "unk_count": unk_count,
                     "unk_ratio": unk_ratio,
-                    "min_conf": min_conf,
+                    "fallback_count": fallback_count,
+                    "fallback_ratio": fallback_ratio,
+                    "min_conf": self.min_token_map_confidence,
+                    "failed_tokens": failed_tokens[:10],  # Only log first 10 for brevity
                     "timestamp": time.time()
                 }
             )
-            # Enforce threshold: if >10% of tokens are low-confidence or <unk>, raise error
-            if low_conf_ratio > 0.1 or unk_ratio > 0.1:
+            if fallback_ratio > self.max_fallback_ratio:
+                self.logger.record_event(
+                    event_type="token_mapping_fallback_warning",
+                    message=f"High fallback ratio: {fallback_count}/{total} ({fallback_ratio:.2%}). Tokenizers may be too dissimilar.",
+                    level="warning",
+                    additional_info={"fallback_count": fallback_count, "total": total, "ratio": fallback_ratio}
+                )
+            if low_conf_ratio > self.max_low_conf_ratio or unk_ratio > self.max_low_conf_ratio:
                 with self._metrics_lock:
                     self._mapping_errors += 1
                 raise ScaffoldError(
-                    f"Too many low-confidence or <unk> token mappings: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {min_conf}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens",
-                    operation="tokenize_and_map"
+                    f"Too many low-confidence or <unk> token mappings: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {self.min_token_map_confidence}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens",
+                    operation="tokenize_and_map",
+                    context={
+                        "failed_tokens": failed_tokens,
+                        "low_conf_ratio": low_conf_ratio,
+                        "unk_ratio": unk_ratio,
+                        "fallback_ratio": fallback_ratio
+                    }
                 )
             end = time.time()
             with self._metrics_lock:
@@ -1119,7 +1216,7 @@ class CrossAttentionInjector:
         injection_strategy: str = 'sequential',
         token_map: Optional[Dict] = None
     ) -> nn.Module:
-        """Inject cross-attention into the model with robust error recovery and fallback."""
+        """Inject cross-attention into the model with robust error recovery and fallback. Refactored to inject directly into base_model."""
         try:
             # Robust LoRA conflict detection
             if not self.allow_lora_post_injection:
@@ -1139,7 +1236,6 @@ class CrossAttentionInjector:
                     message="LoRA post-injection is allowed by configuration.",
                     level="info"
                 )
-            # --- Existing injection logic ---
             with self._lock:
                 layers, layer_names = self.find_model_layers(base_model)
                 layer_indices = self.get_cross_attention_layers(base_model, layers_to_inject)
@@ -1147,7 +1243,7 @@ class CrossAttentionInjector:
 
                 self._logger.record_event(
                     event_type="cross_attention_injection_start",
-                    message="Cross-attention injection started",
+                    message="Cross-attention injection started (direct in-place)",
                     level="info",
                     additional_info={
                         "layer_names": self._target_layer_names,
@@ -1155,8 +1251,6 @@ class CrossAttentionInjector:
                     }
                 )
 
-                # Transactional: work on a deep copy
-                model_copy = copy.deepcopy(base_model)
                 successful_layers = []
                 skipped_layers = []
 
@@ -1165,7 +1259,7 @@ class CrossAttentionInjector:
                     for strategy in self._injection_strategies:
                         try:
                             strategy.inject(
-                                model=model_copy,
+                                model=base_model,
                                 scaffold_model=scaffold_model,
                                 layer_idx=layer_idx,
                                 token_map=token_map,
@@ -1189,7 +1283,7 @@ class CrossAttentionInjector:
                     else:
                         successful_layers.append(layer_idx)
 
-                if not self.verify_injection(model_copy, model_copy.config):
+                if not self.verify_injection(base_model, base_model.config):
                     self._logger.record_event(
                         event_type="cross_attention_injection_rollback",
                         message="Verification failed after injection, rolling back to original model.",
@@ -1197,14 +1291,9 @@ class CrossAttentionInjector:
                     )
                     return base_model  # Return original model
 
-                # Commit: copy injected layers back to base_model
-                for name, module in model_copy.named_modules():
-                    if hasattr(base_model, name):
-                        setattr(base_model, name, module)
-
                 self._logger.record_event(
                     event_type="cross_attention_injection_complete",
-                    message="Cross-attention injection completed with fallback and recovery.",
+                    message="Cross-attention injection completed in-place.",
                     level="info",
                     additional_info={
                         "successful_layers": successful_layers,
@@ -1231,7 +1320,7 @@ class CrossAttentionInjector:
         injection_strategy: str,
         token_map: Optional[Dict]
     ) -> None:
-        """Inject cross-attention into a single layer with retry logic."""
+        """Inject cross-attention into a single layer with retry logic. Refactored to use per-layer projection/LayerNorm."""
         try:
             layers, _ = self.find_model_layers(model)
             layer = layers[layer_idx]
@@ -1257,20 +1346,22 @@ class CrossAttentionInjector:
                 scaffold_hidden_size = scaffold_model.config.d_model
             elif hasattr(scaffold_model, 'hidden_size'):
                 scaffold_hidden_size = scaffold_model.hidden_size
-            
+
+            proj = None
+            proj_norm = None
             if base_hidden_size is not None and scaffold_hidden_size is not None:
-                if base_hidden_size != scaffold_hidden_size and self._scaffold_proj is None:
-                    # Create projection layer if needed
-                    self._scaffold_proj = nn.Linear(scaffold_hidden_size, base_hidden_size).to(model.device)
-                    nn.init.xavier_uniform_(self._scaffold_proj.weight)
-                    nn.init.zeros_(self._scaffold_proj.bias)
-                    self._scaffold_proj_norm = nn.LayerNorm(base_hidden_size).to(model.device)
+                if base_hidden_size != scaffold_hidden_size:
+                    # Create per-layer projection and LayerNorm
+                    proj = nn.Linear(scaffold_hidden_size, base_hidden_size).to(model.device)
+                    nn.init.xavier_uniform_(proj.weight)
+                    nn.init.zeros_(proj.bias)
+                    proj_norm = nn.LayerNorm(base_hidden_size).to(model.device)
                     self._logger.record_event(
                         event_type="scaffold_projection_created",
-                        message=f"Created projection layer from {scaffold_hidden_size} to {base_hidden_size} with Xavier init and LayerNorm",
+                        message=f"Created per-layer projection from {scaffold_hidden_size} to {base_hidden_size} with Xavier init and LayerNorm",
                         level="info"
                     )
-            
+
             if base_hidden_size is None:
                 self._logger.record_event(
                     event_type="hidden_size_detection_failed",
@@ -1283,7 +1374,9 @@ class CrossAttentionInjector:
                 cross_attn_layer=cross_attn_layer,
                 scaffold_model=scaffold_model,
                 token_map=token_map,
-                strategy=injection_strategy
+                strategy=injection_strategy,
+                proj=proj,
+                proj_norm=proj_norm
             )
 
             if not self._verify_single_layer(model, layer_idx):
@@ -1301,6 +1394,70 @@ class CrossAttentionInjector:
                 }
             )
             raise
+
+    def _create_wrapped_layer(
+        self,
+        original_layer: nn.Module,
+        cross_attn_layer: CrossAttentionLayer,
+        scaffold_model: nn.Module,
+        token_map: Optional[Dict],
+        strategy: str,
+        proj=None,
+        proj_norm=None
+    ) -> nn.Module:
+        """Wrap the layer with cross-attention injection. Accepts per-layer projection and norm."""
+        original_forward = original_layer.forward
+        scaffold_model = scaffold_model
+        injector = self
+        token_mapper = token_map
+
+        class WrappedLayer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.cross_attn_layer = cross_attn_layer
+                self.proj = proj
+                self.proj_norm = proj_norm
+            def forward(self, *args, **kwargs):
+                output = original_forward(*args, **kwargs)
+                hidden_states = output[0] if isinstance(output, tuple) else output
+                try:
+                    scaffold_output = injector._get_scaffold_output(
+                        scaffold_model=scaffold_model,
+                        token_map=token_mapper,
+                        base_hidden_states=hidden_states
+                    )
+                    # Apply per-layer projection if needed
+                    if self.proj is not None:
+                        scaffold_output = self.proj(scaffold_output)
+                        if self.proj_norm is not None:
+                            scaffold_output = self.proj_norm(scaffold_output)
+                    # Create dynamic factor based on strategy if needed
+                    dynamic_factor = None
+                    if strategy == "progressive":
+                        injector._layer_count += 1
+                        layer_weight = injector._layer_count / 100.0
+                        dynamic_factor = torch.ones_like(hidden_states) * layer_weight
+                    output_with_cross_attn = self.cross_attn_layer(
+                        hidden_states=hidden_states,
+                        cross_states=scaffold_output,
+                        attention_mask=None,
+                        memory_tensors=None,
+                        memory_weight=0.0,
+                        dynamic_factor=dynamic_factor,
+                        use_cache=False
+                    )
+                    if isinstance(output, tuple):
+                        return (output_with_cross_attn,) + output[1:]
+                    return output_with_cross_attn
+                except Exception as e:
+                    injector._logger.record_event(
+                        event_type="cross_attention_failure",
+                        message=f"Cross attention injection failed: {str(e)}",
+                        level="warning",
+                        exc_info=e
+                    )
+                    return output
+        return WrappedLayer()
 
     def get_cross_attention_layers(self, model: nn.Module, mode: Union[str, List[int]]) -> List[int]:
         """Determine which layers to inject cross-attention into."""
@@ -1363,76 +1520,6 @@ class CrossAttentionInjector:
         """Find transformer layers in the model."""
         strategy = LayerDiscoveryStrategy(self._logger)
         return strategy.find_layers(model)
-
-    def _create_wrapped_layer(
-        self,
-        original_layer: nn.Module,
-        cross_attn_layer: CrossAttentionLayer,
-        scaffold_model: nn.Module,
-        token_map: Optional[Dict],
-        strategy: str
-    ) -> nn.Module:
-        """Wrap the layer with cross-attention injection."""
-        original_forward = original_layer.forward
-        scaffold_model = scaffold_model
-        injector = self
-        token_mapper = token_map
-
-        def _wrapped_layer_forward(*args, **kwargs):
-            output = original_forward(*args, **kwargs)
-            hidden_states = output[0] if isinstance(output, tuple) else output
-            
-            try:
-                scaffold_output = injector._get_scaffold_output(
-                    scaffold_model=scaffold_model,
-                    token_map=token_mapper,
-                    base_hidden_states=hidden_states
-                )
-                
-                # Apply projection if needed
-                if injector._scaffold_proj is not None:
-                    scaffold_output = injector._scaffold_proj(scaffold_output)
-                    if hasattr(injector, '_scaffold_proj_norm') and injector._scaffold_proj_norm is not None:
-                        scaffold_output = injector._scaffold_proj_norm(scaffold_output)
-                
-                # Create dynamic factor based on strategy if needed
-                dynamic_factor = None
-                if strategy == "progressive":
-                    # Apply progressive scaling based on layer index
-                    injector._layer_count += 1
-                    layer_weight = injector._layer_count / 100.0  # Simple scaling factor
-                    dynamic_factor = torch.ones_like(hidden_states) * layer_weight
-                
-                # Call with correct parameter names
-                output_with_cross_attn = cross_attn_layer(
-                    hidden_states=hidden_states,
-                    cross_states=scaffold_output,  # renamed from scaffold_output
-                    attention_mask=None,  # Default to None
-                    memory_tensors=None,  # Default to None
-                    memory_weight=0.0,    # Default to 0.0
-                    dynamic_factor=dynamic_factor,
-                    use_cache=False       # Default to False
-                )
-                
-                if isinstance(output, tuple):
-                    return (output_with_cross_attn,) + output[1:]
-                return output_with_cross_attn
-                
-            except Exception as e:
-                # Log the error but continue with original output
-                injector._logger.record_event(
-                    event_type="cross_attention_failure",
-                    message=f"Cross attention injection failed: {str(e)}",
-                    level="warning",
-                    exc_info=e
-                )
-                return output
-
-        return type(
-            "WrappedLayer",
-            (nn.Module,),
-            {"forward": _wrapped_layer_forward, "__init__": lambda self: None}
-        )()
 
     def _verify_single_layer(self, model: nn.Module, layer_idx: int) -> bool:
         """Verify a single layer's cross-attention injection, including forward pass stability."""
@@ -2015,8 +2102,9 @@ class UnkStrategy(TokenMappingStrategy):
         return [context['scaffold_tokenizer'].unk_token_id]
 
 class LevenshteinStrategy(TokenMappingStrategy):
+    _bk_tree = None
+    _bk_tree_vocab = None
     def try_map(self, token, context):
-        # Normalized Levenshtein distance
         def levenshtein_distance(s1, s2):
             if len(s1) < len(s2):
                 return levenshtein_distance(s2, s1)
@@ -2032,16 +2120,19 @@ class LevenshteinStrategy(TokenMappingStrategy):
                     current_row.append(min(insertions, deletions, substitutions))
                 previous_row = current_row
             return previous_row[-1]
-        min_dist = float('inf')
-        best_id = None
         scaffold_tokenizer = context['scaffold_tokenizer']
-        for scaf_token, scaf_id in scaffold_tokenizer.get_vocab().items():
-            dist = levenshtein_distance(token, scaf_token) / max(len(token), len(scaf_token), 1)
-            if dist < min_dist:
-                min_dist = dist
-                best_id = scaf_id
-        if min_dist <= 0.3:
-            return [best_id]
+        vocab_keys = list(scaffold_tokenizer.get_vocab().keys())
+        if (LevenshteinStrategy._bk_tree is None or LevenshteinStrategy._bk_tree_vocab != vocab_keys):
+            LevenshteinStrategy._bk_tree = BKTree(levenshtein_distance, vocab_keys)
+            LevenshteinStrategy._bk_tree_vocab = vocab_keys
+        matches = LevenshteinStrategy._bk_tree.find(token, max_dist=2)
+        if matches:
+            best = min(matches, key=lambda x: (x[0]/max(len(token), len(x[1]), 1), x[0]))
+            norm_dist = best[0] / max(len(token), len(best[1]), 1)
+            if norm_dist <= 0.3:
+                scaf_id = scaffold_tokenizer.get_vocab()[best[1]]
+                confidence = 1.0 - norm_dist
+                return ([scaf_id], confidence, 'levenshtein')
         return None
 
 class SubwordStrategy(TokenMappingStrategy):
@@ -2049,7 +2140,9 @@ class SubwordStrategy(TokenMappingStrategy):
         scaffold_tokenizer = context['scaffold_tokenizer']
         for scaf_token, scaf_id in scaffold_tokenizer.get_vocab().items():
             if token.startswith(scaf_token) or token.endswith(scaf_token):
-                return [scaf_id]
+                # Confidence: ratio of subword length to token length
+                conf = len(scaf_token) / max(len(token), 1)
+                return ([scaf_id], conf, 'subword')
         return None
 
 class CharSimilarityStrategy(TokenMappingStrategy):
@@ -2070,7 +2163,7 @@ class CharSimilarityStrategy(TokenMappingStrategy):
                 best_score = score
                 best_id = scaf_id
         if best_score > 0.0:
-            return [best_id]
+            return ([best_id], best_score, 'char')
         return None
 
 class InjectionStrategy:
@@ -2119,3 +2212,40 @@ class ReplaceInjectionStrategy(InjectionStrategy):
                 raise ConfigurationError(f"Update field '{key}' must be of type {expected_type.__name__}")
         # Optionally, add more granular validation here
         return True
+
+# Minimal BK-tree implementation for Levenshtein
+class BKTree:
+    def __init__(self, dist_fn, words):
+        self.dist_fn = dist_fn
+        self.tree = None
+        for word in words:
+            self.add(word)
+    class Node:
+        def __init__(self, word):
+            self.word = word
+            self.children = {}  # distance -> child node
+    def add(self, word):
+        if self.tree is None:
+            self.tree = self.Node(word)
+            return
+        node = self.tree
+        while True:
+            d = self.dist_fn(word, node.word)
+            if d in node.children:
+                node = node.children[d]
+            else:
+                node.children[d] = self.Node(word)
+                break
+    def find(self, word, max_dist):
+        results = []
+        def rec(node):
+            d = self.dist_fn(word, node.word)
+            if d <= max_dist:
+                results.append((d, node.word))
+            for k in range(d - max_dist, d + max_dist + 1):
+                child = node.children.get(k)
+                if child:
+                    rec(child)
+        if self.tree:
+            rec(self.tree)
+        return results
