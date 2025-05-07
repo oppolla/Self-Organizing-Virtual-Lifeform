@@ -98,7 +98,19 @@ def scaffold_operation(operation_name: str):
 class ScaffoldTokenMapper:
     """Handles token mapping between base and scaffold tokenizers."""
     
-    def __init__(self, base_tokenizer: Any, scaffold_tokenizer: Any, logger: Any, config: Optional[Dict[str, Any]] = None, base_model: Any = None, scaffold_model: Any = None, mapping_strategy: str = None, ram_manager: Optional[RAMManager] = None, gpu_manager: Optional[GPUMemoryManager] = None, provider: Optional[Any] = None):
+    def __init__(
+        self,
+        base_tokenizer: Any,
+        scaffold_tokenizer: Any,
+        logger: Any,
+        config: Optional[Dict[str, Any]] = None,
+        base_model: Any = None,
+        scaffold_model: Any = None,
+        mapping_strategy: str = None,
+        ram_manager: Optional[RAMManager] = None,
+        gpu_manager: Optional[GPUMemoryManager] = None,
+        provider: Optional[Any] = None,
+    ):
         self.base_tokenizer = base_tokenizer
         self.scaffold_tokenizer = scaffold_tokenizer
         self.logger = logger
@@ -356,7 +368,13 @@ class ScaffoldTokenMapper:
             best_ids = [self.scaffold_tokenizer.unk_token_id]
             best_strategy = 'unk'
             for strat in self._fallback_strategies:
-                result = strat.try_map(normalized, {'self': self, 'base_tokenizer': self.base_tokenizer, 'scaffold_tokenizer': self.scaffold_tokenizer, 'max_tokens_per_mapping': self.max_tokens_per_mapping, 'base_id': base_id})
+                result = strat.try_map(normalized, {
+                    'self': self,
+                    'base_tokenizer': self.base_tokenizer,
+                    'scaffold_tokenizer': self.scaffold_tokenizer,
+                    'max_tokens_per_mapping': self.max_tokens_per_mapping,
+                    'base_id': base_id,
+                })
                 if result and isinstance(result, tuple):
                     ids, conf, strategy = result
                 elif result:
@@ -493,7 +511,11 @@ class ScaffoldTokenMapper:
             fallback_ratio = fallback_count / total
             self.logger.record_event(
                 event_type="token_mapping_quality",
-                message=f"Token mapping: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {self.min_token_map_confidence}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens, {fallback_count}/{total} ({fallback_ratio:.2%}) fallback tokens",
+                message=(
+                    f"Token mapping: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {self.min_token_map_confidence}, "
+                    f"{unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens, "
+                    f"{fallback_count}/{total} ({fallback_ratio:.2%}) fallback tokens"
+                ),
                 level="warning" if low_conf_ratio > self.max_low_conf_ratio or unk_ratio > self.max_low_conf_ratio or fallback_ratio > self.max_fallback_ratio else "info",
                 additional_info={
                     "low_conf_count": low_conf_count,
@@ -519,7 +541,11 @@ class ScaffoldTokenMapper:
                 with self._metrics_lock:
                     self._mapping_errors += 1
                 raise ScaffoldError(
-                    f"Too many low-confidence or <unk> token mappings: {low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {self.min_token_map_confidence}, {unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens",
+                    (
+                        f"Too many low-confidence or <unk> token mappings: "
+                        f"{low_conf_count}/{total} ({low_conf_ratio:.2%}) below confidence {self.min_token_map_confidence}, "
+                        f"{unk_count}/{total} ({unk_ratio:.2%}) <unk> tokens"
+                    ),
                     operation="tokenize_and_map",
                     context={
                         "failed_tokens": failed_tokens,
@@ -1007,7 +1033,15 @@ class CrossAttentionLayer(nn.Module):
 class CrossAttentionInjector:
     """Injector for adding cross-attention layers to a transformer model."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger, ram_manager: Optional[RAMManager] = None, gpu_manager: Optional[GPUMemoryManager] = None, lora_manager: Optional[Any] = None, provider: Optional[Any] = None):
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        logger: Logger,
+        ram_manager: Optional[RAMManager] = None,
+        gpu_manager: Optional[GPUMemoryManager] = None,
+        lora_manager: Optional[Any] = None,
+        provider: Optional[Any] = None,
+    ):
         self._config_manager = config_manager
         self._logger = logger
         self._lock = Lock()
@@ -1759,7 +1793,13 @@ class InsufficientDataError(Exception):
 class ScaffoldProvider:
     """Provides scaffold functionality for the SOVL system with atomic, thread-safe state management."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger, error_handler: ErrorManager, ram_manager: Optional[RAMManager] = None, gpu_manager: Optional[GPUMemoryManager] = None):
+    def __init__(
+            self, config_manager: ConfigManager, 
+            logger: Logger, 
+            error_handler: ErrorManager, 
+            ram_manager: Optional[RAMManager] = None, 
+            gpu_manager: Optional[GPUMemoryManager] = None
+    ):
         self.config_manager = config_manager
         self.logger = logger
         self._error_handler = error_handler
