@@ -20,9 +20,165 @@ import tracemalloc
 Handles all dream generation, dream structure, narration, and scribe journal integration for SOVL
 """
 
+class Key:
+    """
+    Represents a musical key and scale, with methods for chord and modulation logic.
+    Usage:
+        key = Key("C", "major")
+        print(key.notes)  # ['C', 'D', 'E', 'F', 'G', 'A', 'B']
+        print(key.get_chord("IV"))  # {'notes': ['F', 'A', 'C'], 'quality': '', 'roman': 'IV'}
+        mod_key = key.modulate("relative_minor")
+        print(mod_key.tonic, mod_key.scale_type)  # 'A', 'minor'
+    """
+    MAJOR_INTERVALS = [2, 2, 1, 2, 2, 2, 1]
+    MINOR_INTERVALS = [2, 1, 2, 2, 1, 2, 2]
+    NOTES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    NOTES_FLAT =  ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+    ROMAN_TO_DEGREE = {
+        "I": 0, "ii": 1, "iii": 2, "IV": 3, "V": 4, "vi": 5, "vii": 6,
+        "i": 0, "ii°": 1, "III": 2, "iv": 3, "V": 4, "VI": 5, "vii°": 6
+    }
+    CHORD_QUALITIES = {
+        "major": ["", "m", "m", "", "", "m", "dim"],
+        "minor": ["m", "dim", "", "m", "", "", ""],
+    }
+    _scale_cache = {}
+    _chord_cache = {}
+    def __init__(self, tonic, scale_type, accidental_style=None):
+        """
+        tonic: root note (e.g., 'C', 'F#')
+        scale_type: 'major' or 'minor'
+        accidental_style: 'sharps', 'flats', or None for auto
+        """
+        if scale_type not in ("major", "minor"):
+            raise ValueError(f"Invalid scale_type: {scale_type}")
+        if tonic not in self.NOTES_SHARP and tonic not in self.NOTES_FLAT:
+            raise ValueError(f"Invalid tonic: {tonic}")
+        self.tonic = tonic
+        self.scale_type = scale_type
+        self.accidental_style = accidental_style
+        self.notes = self._get_scale_notes()
+    def _get_scale_notes(self):
+        """Return the list of notes in the key/scale, using caching."""
+        cache_key = (self.tonic, self.scale_type, self.accidental_style)
+        if cache_key in self._scale_cache:
+            return self._scale_cache[cache_key]
+        if self.accidental_style == "sharps":
+            notes = self.NOTES_SHARP
+        elif self.accidental_style == "flats":
+            notes = self.NOTES_FLAT
+        else:
+            notes = self.NOTES_SHARP if "#" in self.tonic or self.tonic == "F#" else self.NOTES_FLAT
+        idx = notes.index(self.tonic)
+        intervals = self.MAJOR_INTERVALS if self.scale_type == "major" else self.MINOR_INTERVALS
+        scale = [notes[idx]]
+        for step in intervals:
+            idx = (idx + step) % 12
+            scale.append(notes[idx])
+        result = scale[:-1]  # 7 notes
+        self._scale_cache[cache_key] = result
+        return result
+    def get_chord(self, roman):
+        """Return chord notes, quality, and roman for a given Roman numeral (supports 7th chords)."""
+        cache_key = (self.tonic, self.scale_type, roman)
+        if cache_key in self._chord_cache:
+            return self._chord_cache[cache_key]
+        base_roman = roman.replace("7", "").replace("°", "").replace("ø", "")
+        if base_roman not in self.ROMAN_TO_DEGREE:
+            raise ValueError(f"Invalid Roman numeral: {roman}")
+        degree = self.ROMAN_TO_DEGREE[base_roman]
+        root = self.notes[degree]
+        third = self.notes[(degree + 2) % 7]
+        fifth = self.notes[(degree + 4) % 7]
+        notes = [root, third, fifth]
+        quality = self._get_chord_quality(roman, degree)
+        if "7" in roman:
+            seventh = self.notes[(degree + 6) % 7]
+            notes.append(seventh)
+        result = {"notes": notes, "quality": quality, "roman": roman}
+        self._chord_cache[cache_key] = result
+        return result
+    def _get_chord_quality(self, roman, degree):
+        """Return the chord quality string for a given Roman numeral and degree."""
+        if "7" in roman:
+            if "M" in roman:
+                return "M7"
+            elif "ø" in roman:
+                return "m7b5"
+            elif "°" in roman:
+                return "dim7"
+            elif roman.islower():
+                return "m7"
+            else:
+                return "7"
+        if self.scale_type == "major":
+            return self.CHORD_QUALITIES["major"][degree]
+        else:
+            return self.CHORD_QUALITIES["minor"][degree]
+    def get_scale_type(self):
+        """Return the scale type ('major' or 'minor')."""
+        return self.scale_type
+    def get_scale_degree(self, note):
+        """Return the scale degree (1-based) of a note in the key, or None if not present."""
+        try:
+            return self.notes.index(note) + 1
+        except ValueError:
+            return None
+    def modulate(self, modulation_type):
+        """Return a new Key object modulated as specified."""
+        idx = self.NOTES_SHARP.index(self.tonic) if self.tonic in self.NOTES_SHARP else self.NOTES_FLAT.index(self.tonic)
+        if modulation_type == "parallel":
+            return Key(self.tonic, "minor" if self.scale_type == "major" else "major", self.accidental_style)
+        elif modulation_type == "relative_minor" and self.scale_type == "major":
+            new_idx = (idx + 9) % 12  # Down 3 semitones
+            return Key(self.NOTES_SHARP[new_idx], "minor", self.accidental_style)
+        elif modulation_type == "relative_major" and self.scale_type == "minor":
+            new_idx = (idx + 3) % 12  # Up 3 semitones
+            return Key(self.NOTES_SHARP[new_idx], "major", self.accidental_style)
+        elif modulation_type == "neighbour_up":
+            new_idx = (idx + 7) % 12
+            return Key(self.NOTES_SHARP[new_idx], self.scale_type, self.accidental_style)
+        elif modulation_type == "neighbour_down":
+            new_idx = (idx - 7) % 12
+            return Key(self.NOTES_SHARP[new_idx], self.scale_type, self.accidental_style)
+        elif modulation_type == "foreign":
+            import random
+            return Key(random.choice(self.NOTES_SHARP), self.scale_type, self.accidental_style)
+        else:
+            return self  # fallback
+    def suggest_pivot_chords(self, other_key):
+        """Suggest possible pivot chords for modulation to another key (triads and 7ths)."""
+        pivots = []
+        # Consider both triads and 7th chords
+        roman_numerals = list(self.ROMAN_TO_DEGREE.keys())
+        for roman in roman_numerals:
+            try:
+                chord_self = set(self.get_chord(roman)['notes'])
+                chord_other = set(other_key.get_chord(roman)['notes'])
+                # Check for exact match (triad or 7th)
+                if chord_self == chord_other and len(chord_self) >= 3:
+                    pivots.append(roman)
+                # Allow subset match (e.g., triad in one, 7th in other)
+                elif chord_self.issubset(chord_other) or chord_other.issubset(chord_self):
+                    pivots.append(roman)
+            except Exception:
+                continue
+        # Optionally, sort pivots to prefer tonic, predominant, dominant
+        def pivot_priority(roman):
+            if roman in ("I", "i"): return 0
+            if roman in ("IV", "iv", "ii", "ii°"): return 1
+            if roman in ("V", "V7", "v", "vii°"): return 2
+            return 3
+        pivots = sorted(set(pivots), key=pivot_priority)
+        return pivots
+    def __str__(self):
+        return f"Key({self.tonic} {self.scale_type})"
+    def __repr__(self):
+        return f"Key(tonic={self.tonic!r}, scale_type={self.scale_type!r}, notes={self.notes!r})"
+
 class DreamNarrationStrategy:
     """Base class for dream narration strategies."""
-    def narrate(self, dream_event: Dict[str, Any], noise_level: float) -> str:
+    def narrate(self, dream_event: Dict[str, Any], noise_level: float, generation_manager=None) -> str:
         raise NotImplementedError
 
 class SurrealNarrationStrategy(DreamNarrationStrategy):
@@ -38,6 +194,8 @@ class SurrealNarrationStrategy(DreamNarrationStrategy):
         """
         Compose a short, surreal, dreamlike narration blending two memory fragments
         """
+        if generation_manager is None or not hasattr(generation_manager, 'generate_text') or not callable(generation_manager.generate_text):
+            raise ScaffoldError("Dream narration requires a valid generation_manager with a generate_text method.")
         memory1 = dream_event['event_data'].get('memory1', '')
         memory2 = dream_event['event_data'].get('memory2', '')
         if memory1 and memory2 and memory1 != memory2:
@@ -129,7 +287,7 @@ class DreamEventSelector:
         return []
 
     def score_and_select_dreams(self, events: List[Dict]) -> List[Dict]:
-        """Select events based on weight, with a pinch of randomization."""
+        """Select events based on weight, with a pinch of randomization. Always fill up to max_dreams if possible, and log if pool is too small."""
         try:
             # Extract weights, prefer event['weight'], fallback to event['event_data']['weight']
             weighted_events = []
@@ -148,6 +306,9 @@ class DreamEventSelector:
             # Prepare for weighted random selection
             weights = [max(0.01, w) for w, _ in candidate_pool]  # Avoid zero weights
             events_only = [e for _, e in candidate_pool]
+            # Log if pool is too small
+            if len(events_only) < self.max_dreams:
+                self.logger.log_warning(f"Dream selection pool smaller than max_dreams: pool={len(events_only)}, max_dreams={self.max_dreams}")
             # Randomly select up to max_dreams, weighted by weight, no repeats
             selected = []
             selected_indices = set()
@@ -158,7 +319,7 @@ class DreamEventSelector:
                     selected.append(events_only[idx])
                     selected_indices.add(idx)
                 attempts += 1
-            # If not enough unique, fill with more from pool
+            # Deterministically fill if not enough unique
             if len(selected) < self.max_dreams:
                 for i, e in enumerate(events_only):
                     if i not in selected_indices:
@@ -228,14 +389,19 @@ class DreamGenerator:
         """Generate dream events with playoff-style memory pairings and narration, using only the top half of memories."""
         dreams = []
         now = datetime.now().isoformat()
-        # Extract memory strings from each candidate
+        # Standardized memory extraction
         memories = []
         for event in dream_candidates:
             mem = event.get('memory')
-            if mem is None:
+            if not mem:
                 mem = event.get('event_data', {}).get('memory')
-            if mem is not None:
+            if mem and isinstance(mem, str) and mem.strip():
                 memories.append(mem)
+            else:
+                self.logger.log_warning("Skipping event with missing or empty memory field.")
+        if len(memories) < 2:
+            self.logger.log_warning("Not enough valid memories to generate dream events.")
+            return []
         n = len(memories)
         # Only use the top half (round up if odd)
         half = n // 2 if n % 2 == 0 else (n // 2) + 1
@@ -368,6 +534,8 @@ class DreamAlbumGenerator:
         return palette
 
     def generate_section_narration(self, section, song, motif_memory, memories, generation_manager, previous_section=None):
+        if generation_manager is None or not hasattr(generation_manager, 'generate_text') or not callable(generation_manager.generate_text):
+            raise ScaffoldError("Dream album narration requires a valid generation_manager with a generate_text method.")
         section_lyric_so_far = ""
         for bar in section.progression.progression:
             chord = bar["roman"]
@@ -891,159 +1059,3 @@ class Dreamer:
         except Exception as e:
             logger.error(f"[CLI] Exception during dream cycle generation: {e}", exc_info=True)
             return None
-
-class Key:
-    """
-    Represents a musical key and scale, with methods for chord and modulation logic.
-    Usage:
-        key = Key("C", "major")
-        print(key.notes)  # ['C', 'D', 'E', 'F', 'G', 'A', 'B']
-        print(key.get_chord("IV"))  # {'notes': ['F', 'A', 'C'], 'quality': '', 'roman': 'IV'}
-        mod_key = key.modulate("relative_minor")
-        print(mod_key.tonic, mod_key.scale_type)  # 'A', 'minor'
-    """
-    MAJOR_INTERVALS = [2, 2, 1, 2, 2, 2, 1]
-    MINOR_INTERVALS = [2, 1, 2, 2, 1, 2, 2]
-    NOTES_SHARP = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-    NOTES_FLAT =  ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
-    ROMAN_TO_DEGREE = {
-        "I": 0, "ii": 1, "iii": 2, "IV": 3, "V": 4, "vi": 5, "vii": 6,
-        "i": 0, "ii°": 1, "III": 2, "iv": 3, "V": 4, "VI": 5, "vii°": 6
-    }
-    CHORD_QUALITIES = {
-        "major": ["", "m", "m", "", "", "m", "dim"],
-        "minor": ["m", "dim", "", "m", "", "", ""],
-    }
-    _scale_cache = {}
-    _chord_cache = {}
-    def __init__(self, tonic, scale_type, accidental_style=None):
-        """
-        tonic: root note (e.g., 'C', 'F#')
-        scale_type: 'major' or 'minor'
-        accidental_style: 'sharps', 'flats', or None for auto
-        """
-        if scale_type not in ("major", "minor"):
-            raise ValueError(f"Invalid scale_type: {scale_type}")
-        if tonic not in self.NOTES_SHARP and tonic not in self.NOTES_FLAT:
-            raise ValueError(f"Invalid tonic: {tonic}")
-        self.tonic = tonic
-        self.scale_type = scale_type
-        self.accidental_style = accidental_style
-        self.notes = self._get_scale_notes()
-    def _get_scale_notes(self):
-        """Return the list of notes in the key/scale, using caching."""
-        cache_key = (self.tonic, self.scale_type, self.accidental_style)
-        if cache_key in self._scale_cache:
-            return self._scale_cache[cache_key]
-        if self.accidental_style == "sharps":
-            notes = self.NOTES_SHARP
-        elif self.accidental_style == "flats":
-            notes = self.NOTES_FLAT
-        else:
-            notes = self.NOTES_SHARP if "#" in self.tonic or self.tonic == "F#" else self.NOTES_FLAT
-        idx = notes.index(self.tonic)
-        intervals = self.MAJOR_INTERVALS if self.scale_type == "major" else self.MINOR_INTERVALS
-        scale = [notes[idx]]
-        for step in intervals:
-            idx = (idx + step) % 12
-            scale.append(notes[idx])
-        result = scale[:-1]  # 7 notes
-        self._scale_cache[cache_key] = result
-        return result
-    def get_chord(self, roman):
-        """Return chord notes, quality, and roman for a given Roman numeral (supports 7th chords)."""
-        cache_key = (self.tonic, self.scale_type, roman)
-        if cache_key in self._chord_cache:
-            return self._chord_cache[cache_key]
-        base_roman = roman.replace("7", "").replace("°", "").replace("ø", "")
-        if base_roman not in self.ROMAN_TO_DEGREE:
-            raise ValueError(f"Invalid Roman numeral: {roman}")
-        degree = self.ROMAN_TO_DEGREE[base_roman]
-        root = self.notes[degree]
-        third = self.notes[(degree + 2) % 7]
-        fifth = self.notes[(degree + 4) % 7]
-        notes = [root, third, fifth]
-        quality = self._get_chord_quality(roman, degree)
-        if "7" in roman:
-            seventh = self.notes[(degree + 6) % 7]
-            notes.append(seventh)
-        result = {"notes": notes, "quality": quality, "roman": roman}
-        self._chord_cache[cache_key] = result
-        return result
-    def _get_chord_quality(self, roman, degree):
-        """Return the chord quality string for a given Roman numeral and degree."""
-        if "7" in roman:
-            if "M" in roman:
-                return "M7"
-            elif "ø" in roman:
-                return "m7b5"
-            elif "°" in roman:
-                return "dim7"
-            elif roman.islower():
-                return "m7"
-            else:
-                return "7"
-        if self.scale_type == "major":
-            return self.CHORD_QUALITIES["major"][degree]
-        else:
-            return self.CHORD_QUALITIES["minor"][degree]
-    def get_scale_type(self):
-        """Return the scale type ('major' or 'minor')."""
-        return self.scale_type
-    def get_scale_degree(self, note):
-        """Return the scale degree (1-based) of a note in the key, or None if not present."""
-        try:
-            return self.notes.index(note) + 1
-        except ValueError:
-            return None
-    def modulate(self, modulation_type):
-        """Return a new Key object modulated as specified."""
-        idx = self.NOTES_SHARP.index(self.tonic) if self.tonic in self.NOTES_SHARP else self.NOTES_FLAT.index(self.tonic)
-        if modulation_type == "parallel":
-            return Key(self.tonic, "minor" if self.scale_type == "major" else "major", self.accidental_style)
-        elif modulation_type == "relative_minor" and self.scale_type == "major":
-            new_idx = (idx + 9) % 12  # Down 3 semitones
-            return Key(self.NOTES_SHARP[new_idx], "minor", self.accidental_style)
-        elif modulation_type == "relative_major" and self.scale_type == "minor":
-            new_idx = (idx + 3) % 12  # Up 3 semitones
-            return Key(self.NOTES_SHARP[new_idx], "major", self.accidental_style)
-        elif modulation_type == "neighbour_up":
-            new_idx = (idx + 7) % 12
-            return Key(self.NOTES_SHARP[new_idx], self.scale_type, self.accidental_style)
-        elif modulation_type == "neighbour_down":
-            new_idx = (idx - 7) % 12
-            return Key(self.NOTES_SHARP[new_idx], self.scale_type, self.accidental_style)
-        elif modulation_type == "foreign":
-            import random
-            return Key(random.choice(self.NOTES_SHARP), self.scale_type, self.accidental_style)
-        else:
-            return self  # fallback
-    def suggest_pivot_chords(self, other_key):
-        """Suggest possible pivot chords for modulation to another key (triads and 7ths)."""
-        pivots = []
-        # Consider both triads and 7th chords
-        roman_numerals = list(self.ROMAN_TO_DEGREE.keys())
-        for roman in roman_numerals:
-            try:
-                chord_self = set(self.get_chord(roman)['notes'])
-                chord_other = set(other_key.get_chord(roman)['notes'])
-                # Check for exact match (triad or 7th)
-                if chord_self == chord_other and len(chord_self) >= 3:
-                    pivots.append(roman)
-                # Allow subset match (e.g., triad in one, 7th in other)
-                elif chord_self.issubset(chord_other) or chord_other.issubset(chord_self):
-                    pivots.append(roman)
-            except Exception:
-                continue
-        # Optionally, sort pivots to prefer tonic, predominant, dominant
-        def pivot_priority(roman):
-            if roman in ("I", "i"): return 0
-            if roman in ("IV", "iv", "ii", "ii°"): return 1
-            if roman in ("V", "V7", "v", "vii°"): return 2
-            return 3
-        pivots = sorted(set(pivots), key=pivot_priority)
-        return pivots
-    def __str__(self):
-        return f"Key({self.tonic} {self.scale_type})"
-    def __repr__(self):
-        return f"Key(tonic={self.tonic!r}, scale_type={self.scale_type!r}, notes={self.notes!r})"
