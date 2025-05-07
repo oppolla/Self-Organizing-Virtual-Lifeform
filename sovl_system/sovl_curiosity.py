@@ -73,7 +73,7 @@ class Curiosity:
         self.cosine_similarity = nn.CosineSimilarity(dim=-1, eps=1e-8)
         self.metrics = deque(maxlen=self.metrics_maxlen)
         self.embedding_cache = {}
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.curiosity_score = 0.0  # For external nudges
         # For incremental/background pruning
         self._prune_in_progress = False
@@ -98,6 +98,14 @@ class Curiosity:
                 with self.lock:
                     ram_stats = self.ram_manager.check_memory_health()
                     gpu_stats = self.gpu_manager.get_gpu_usage()
+                    ram_ok = self._validate_usage_percentage(ram_stats.get("usage_percentage", -1), "RAMManager", self.logger)
+                    gpu_ok = self._validate_usage_percentage(gpu_stats.get("usage_percentage", -1), "GPUMemoryManager", self.logger)
+                    if not ram_ok or not gpu_ok:
+                        if self.logger:
+                            self.logger.log_error(
+                                error_msg="Invalid memory manager output; assuming high usage.",
+                                error_type="curiosity_memory_error"
+                            )
                     if self.logger:
                         self.logger.record_event(
                             event_type="memory_usage_updated",
@@ -122,13 +130,23 @@ class Curiosity:
     def _prune_cache(self) -> None:
         """Signal background thread to prune cache if needed."""
         usage_high = False
+        fallback_triggered = False
         if self.ram_manager and self.gpu_manager:
             try:
                 ram_stats = self.ram_manager.check_memory_health()
                 gpu_stats = self.gpu_manager.get_gpu_usage()
-                if ram_stats.get("usage_percentage", 0) > 0.8 or gpu_stats.get("usage_percentage", 0) > 0.8:
+                ram_usage = ram_stats.get("usage_percentage", -1)
+                gpu_usage = gpu_stats.get("usage_percentage", -1)
+                ram_ok = self._validate_usage_percentage(ram_usage, "RAMManager", self.logger)
+                gpu_ok = self._validate_usage_percentage(gpu_usage, "GPUMemoryManager", self.logger)
+                if not ram_ok or not gpu_ok:
+                    usage_high = True
+                    fallback_triggered = True
+                elif ram_usage > 80 or gpu_usage > 80:
                     usage_high = True
             except Exception as e:
+                usage_high = True
+                fallback_triggered = True
                 if self.logger:
                     self.logger.log_error(
                         error_msg=f"Cache pruning memory check failed: {str(e)}",
@@ -138,14 +156,29 @@ class Curiosity:
         else:
             if len(self.embedding_cache) > self.embedding_cache_maxlen:
                 usage_high = True
+        # Always enforce hard cap
+        if len(self.embedding_cache) > self.embedding_cache_maxlen:
+            usage_high = True
+            fallback_triggered = True
         if usage_high and self.background_pruning_enabled:
             self._prune_event.set()
         elif usage_high:
             # Fallback: prune on main thread if background pruning is disabled
             self._prune_cache_main_thread()
+        if fallback_triggered and self.logger:
+            self.logger.log_event(
+                event_type="curiosity_memory_fallback",
+                message="Fallback triggered: high usage assumed or hard cap enforced.",
+                level="warning",
+                additional_info={
+                    "embedding_cache_size": len(self.embedding_cache),
+                    "embedding_cache_maxlen": self.embedding_cache_maxlen
+                }
+            )
 
     def _prune_cache_main_thread(self):
         """Prune cache on the main thread (used if background pruning is disabled)."""
+        # Step 1: Collect items to prune and backup under lock
         with self.lock:
             sorted_cache = sorted(
                 self.embedding_cache.items(),
@@ -154,25 +187,29 @@ class Curiosity:
             initial_cache_size = len(self.embedding_cache)
             prune_batch = self.embedding_cache_prune_batch
             prune_limit = min(prune_batch, initial_cache_size)
+            pruned_items = sorted_cache[:prune_limit]
             pruned_count = 0
-            if self.embedding_cache_backup_enabled and prune_limit > 0:
-                try:
-                    backup_path = self.embedding_cache_backup_path
-                    with open(backup_path, "a", encoding="utf-8") as f:
-                        for key, value in sorted_cache[:prune_limit]:
-                            json.dump({"key": key, "value": value}, f, default=str)
-                            f.write("\n")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.log_error(
-                            error_msg=f"Failed to backup pruned embeddings: {str(e)}",
-                            error_type="curiosity_prune_backup_error",
-                            stack_trace=traceback.format_exc()
-                        )
-            for i in range(prune_limit):
-                key, _ = sorted_cache[i]
-                del self.embedding_cache[key]
-                pruned_count += 1
+        # Step 2: Backup to file outside lock
+        if self.embedding_cache_backup_enabled and prune_limit > 0:
+            try:
+                backup_path = self.embedding_cache_backup_path
+                with open(backup_path, "a", encoding="utf-8") as f:
+                    for key, value in pruned_items:
+                        json.dump({"key": key, "value": value}, f, default=str)
+                        f.write("\n")
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg=f"Failed to backup pruned embeddings: {str(e)}",
+                        error_type="curiosity_prune_backup_error",
+                        stack_trace=traceback.format_exc()
+                    )
+        # Step 3: Remove items from cache under lock
+        with self.lock:
+            for key, _ in pruned_items:
+                if key in self.embedding_cache:
+                    del self.embedding_cache[key]
+                    pruned_count += 1
             if self.logger:
                 self.logger.record_event(
                     event_type="embedding_cache_pruned",
@@ -190,6 +227,7 @@ class Curiosity:
         while not self._prune_shutdown:
             self._prune_event.wait()
             while True:
+                # Step 1: Collect items to prune and backup under lock
                 with self.lock:
                     if len(self.embedding_cache) <= self.embedding_cache_maxlen or self._prune_shutdown:
                         break
@@ -200,25 +238,29 @@ class Curiosity:
                     initial_cache_size = len(self.embedding_cache)
                     prune_batch = self.embedding_cache_prune_batch
                     prune_limit = min(prune_batch, initial_cache_size)
+                    pruned_items = sorted_cache[:prune_limit]
                     pruned_count = 0
-                    if self.embedding_cache_backup_enabled and prune_limit > 0:
-                        try:
-                            backup_path = self.embedding_cache_backup_path
-                            with open(backup_path, "a", encoding="utf-8") as f:
-                                for key, value in sorted_cache[:prune_limit]:
-                                    json.dump({"key": key, "value": value}, f, default=str)
-                                    f.write("\n")
-                        except Exception as e:
-                            if self.logger:
-                                self.logger.log_error(
-                                    error_msg=f"Failed to backup pruned embeddings: {str(e)}",
-                                    error_type="curiosity_prune_backup_error",
-                                    stack_trace=traceback.format_exc()
-                                )
-                    for i in range(prune_limit):
-                        key, _ = sorted_cache[i]
-                        del self.embedding_cache[key]
-                        pruned_count += 1
+                # Step 2: Backup to file outside lock
+                if self.embedding_cache_backup_enabled and prune_limit > 0:
+                    try:
+                        backup_path = self.embedding_cache_backup_path
+                        with open(backup_path, "a", encoding="utf-8") as f:
+                            for key, value in pruned_items:
+                                json.dump({"key": key, "value": value}, f, default=str)
+                                f.write("\n")
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.log_error(
+                                error_msg=f"Failed to backup pruned embeddings: {str(e)}",
+                                error_type="curiosity_prune_backup_error",
+                                stack_trace=traceback.format_exc()
+                            )
+                # Step 3: Remove items from cache under lock
+                with self.lock:
+                    for key, _ in pruned_items:
+                        if key in self.embedding_cache:
+                            del self.embedding_cache[key]
+                            pruned_count += 1
                     if self.logger:
                         self.logger.record_event(
                             event_type="embedding_cache_pruned",
@@ -244,14 +286,17 @@ class Curiosity:
     def _compress_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
         """Compress tensor to reduce memory usage, using GPU manager if available."""
         try:
+            usage_high = False
             if self.gpu_manager:
                 gpu_stats = self.gpu_manager.get_gpu_usage()
-                if gpu_stats.get("usage_percentage", 0) > 0.8:
-                    if tensor.dtype == torch.float32:
-                        return tensor.half()
+                gpu_usage = gpu_stats.get("usage_percentage", -1)
+                gpu_ok = self._validate_usage_percentage(gpu_usage, "GPUMemoryManager", self.logger)
+                if not gpu_ok or gpu_usage > 80:
+                    usage_high = True
             else:
-                if tensor.dtype == torch.float32:
-                    return tensor.half()
+                usage_high = True  # No manager, be conservative
+            if usage_high and tensor.dtype == torch.float32:
+                return tensor.half()
             return tensor
         except Exception as e:
             if self.logger:
@@ -1023,14 +1068,23 @@ class CuriosityManager():
         return prompt
 
     def _build_question(self, meta_prompt: str, score: float) -> Optional[str]:
-        """Helper to generate a single question using the generation manager."""
+        """Helper to generate a single question using the generation manager. Logs and propagates errors if generation_manager fails."""
+        if not hasattr(self, 'generation_manager') or not hasattr(self.generation_manager, 'generate_text'):
+            if self.logger:
+                self.logger.log_error("CuriosityManager: generation_manager is missing or does not have generate_text.", error_type="curiosity_generation_manager_missing")
+            return None
         try:
             out = self.generation_manager.generate_text(meta_prompt, num_return_sequences=1)
             if out and isinstance(out, list) and out[0]:
                 return out[0].strip()
+            else:
+                if self.logger:
+                    self.logger.log_error("CuriosityManager: generation_manager.generate_text returned no output.", error_type="curiosity_generation_failed")
+                return None
         except Exception as e:
-            self.logger.log_error(f"Curiosity: failed to build question: {e}")
-        return None
+            if self.logger:
+                self.logger.log_error(f"CuriosityManager: Exception in generate_text: {e}", error_type="curiosity_generation_failed")
+            return None
 
     def _maybe_generate_internal_question(self, prompt: str, context: str = None) -> None:
         """Continuously generate and store internal questions at the lower threshold."""
@@ -1231,9 +1285,9 @@ class CuriosityManager():
                 meta = self.build_curiosity_prompt(last_prompt, knowns, unknowns)
                 best_question = self._build_question(meta, score)
                 if not best_question:
-                    self._record_warning(
-                        event_type="curiosity_fallback_failed",
-                        message="Failed to generate fallback question."
+                    self._record_error(
+                        message="CuriosityManager: generation_manager failed to generate a fallback question.",
+                        error_type="curiosity_generation_failed"
                     )
                     return None
                 q_score = score
@@ -1274,3 +1328,23 @@ class CuriosityManager():
     def output_curiosity_utterance(self, text: str) -> None:
         """Outputs the curiosity utterance using the unified output function (no labels)."""
         output_response(text)
+
+# Utility for validating usage percentage
+@staticmethod
+def _validate_usage_percentage(val, manager_name, logger=None):
+    try:
+        if not isinstance(val, (int, float)) or not (0 <= val <= 100):
+            if logger:
+                logger.log_error(
+                    error_msg=f"Invalid usage_percentage from {manager_name}: {val}",
+                    error_type="curiosity_memory_manager_validation_error"
+                )
+            return False
+        return True
+    except Exception as e:
+        if logger:
+            logger.log_error(
+                error_msg=f"Exception validating usage_percentage from {manager_name}: {e}",
+                error_type="curiosity_memory_manager_validation_error"
+            )
+        return False
