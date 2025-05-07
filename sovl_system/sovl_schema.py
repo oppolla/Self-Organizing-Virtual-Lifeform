@@ -317,6 +317,35 @@ class ValidationSchema:
             "max_log_size_mb": ConfigSchema(field="logging_config.max_log_size_mb", type=int, default=10, range=(1, None)),
             "backup_count": ConfigSchema(field="logging_config.backup_count", type=int, default=5, range=(0, None)),
         }
+    
+    @staticmethod
+    def _get_token_mapping_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the token_mapping config schema."""
+        return {
+            "min_token_map_confidence": ConfigSchema(
+                field="token_mapping.min_token_map_confidence",
+                type=float,
+                default=0.5,
+                range=(0.0, 1.0)
+            ),
+            "max_low_conf_ratio": ConfigSchema(
+                field="token_mapping.max_low_conf_ratio",
+                type=float,
+                default=0.2,
+                range=(0.0, 1.0)
+            ),
+            "max_fallback_ratio": ConfigSchema(
+                field="token_mapping.max_fallback_ratio",
+                type=float,
+                default=0.3,
+                range=(0.0, 1.0)
+            ),
+            "token_mapping_fallback_order": ConfigSchema(
+                field="token_mapping.token_mapping_fallback_order",
+                type=list,
+                default=["levenshtein", "subword", "char", "split", "merge", "nearest", "unk"]
+            ),
+        }
 
     @staticmethod
     def _get_error_config_schema() -> Dict[str, ConfigSchema]:
