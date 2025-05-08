@@ -46,17 +46,19 @@ class VibeProfile:
         )
 
 class VibeSculptor:
-    """Sculpts conversational vibes as dynamic, empathetic fingerprints."""
+    """Sculpts conversational vibes as dynamic, empathetic fingerprints. Requires a TemperamentSystem instance."""
 
     def __init__(
         self,
         config_manager: ConfigManager,
         logger: Logger,
-        temperament_system: Optional['TemperamentSystem'] = None,
+        temperament_system: 'TemperamentSystem',  # Now required, not Optional
     ):
-        """Initialize with config, logger, and optional system components."""
+        """Initialize with config, logger, and required temperament_system."""
         if not config_manager or not logger:
             raise ValueError("config_manager and logger cannot be None")
+        if temperament_system is None:
+            raise ConfigurationError("temperament_system is required for VibeSculptor and cannot be None")
         self.config_manager = config_manager
         self.logger = logger
         self.temperament_system = temperament_system
@@ -211,21 +213,39 @@ class VibeSculptor:
         }
 
     def _compute_resonance(self, text: str, state: SOVLState, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
-        """Measure topic consistency and temperament alignment as vibe resonance."""
+        """Measure topic consistency and temperament alignment as vibe resonance. Requires temperament_system."""
         topic_consistency = 0.5
         temperament_alignment = 0.5
         coherence = 0.5
 
         profile = state.user_profile_state.get(state.history.conversation_id, {})
         inputs = profile.get("inputs", deque(maxlen=10))
+        # Optimization: cache precomputed word sets for each input
+        word_set_cache = profile.setdefault("word_set_cache", deque(maxlen=10))
+        # Ensure cache is up to date with inputs
+        while len(word_set_cache) < len(inputs):
+            # Add missing sets for new inputs
+            word_set_cache.append(set(re.findall(r'\w+', inputs[len(word_set_cache)].lower())))
+        while len(word_set_cache) > len(inputs):
+            # Remove extra sets if inputs shrank
+            word_set_cache.popleft()
+
         text_words = set(re.findall(r'\w+', text.lower()))
 
-        if inputs and text_words:
-            topic_consistency = sum(
-                len(text_words & set(re.findall(r'\w+', h.lower()))) /
-                len(text_words | set(re.findall(r'\w+', h.lower()))) if h else 0.0
-                for h in inputs
-            ) / len(inputs)
+        # Only use the last 3 inputs for topic consistency
+        num_to_use = 3
+        if not inputs or not text_words:
+            topic_consistency = 0.5
+        else:
+            relevant_inputs = list(inputs)[-num_to_use:]
+            relevant_word_sets = list(word_set_cache)[-num_to_use:]
+            if not relevant_inputs or not relevant_word_sets:
+                topic_consistency = 0.5
+            else:
+                topic_consistency = sum(
+                    len(text_words & word_set) / len(text_words | word_set) if word_set else 0.0
+                    for word_set in relevant_word_sets
+                ) / len(relevant_word_sets)
 
         if metadata:
             reference_tracking = metadata.get("relationship_context", {}).get("reference_tracking", {})
@@ -240,7 +260,7 @@ class VibeSculptor:
 
             # Temperament alignment
             user_energy = self._compute_energy(text, metadata).get("base_energy", 0.5)
-            temperament_score = self.temperament_system.get_temperament_score() if self.temperament_system else 0.5
+            temperament_score = self.temperament_system.get_temperament_score()
             temperament_alignment = 1.0 - abs(temperament_score - user_energy)
 
             # Coherence
@@ -302,6 +322,16 @@ class VibeSculptor:
             "engagement_score": engagement_score
         }
 
+    def _validate_turn_metadata(self, metadata: Optional[dict]) -> bool:
+        """Validate that turn_metadata has required structure and keys."""
+        required_keys = ["prompt_metrics", "confidence_score", "relationship_context"]
+        if not isinstance(metadata, dict):
+            return False
+        for key in required_keys:
+            if key not in metadata:
+                return False
+        return True
+
     @synchronized()
     def sculpt_vibe(
         self,
@@ -315,6 +345,16 @@ class VibeSculptor:
     ) -> VibeProfile:
         """Sculpt a vibe score that resonates with user and system energy."""
         try:
+            # Validate turn_metadata structure before proceeding
+            if not self._validate_turn_metadata(turn_metadata):
+                self.logger.record_event(
+                    event_type="vibe_metadata_invalid",
+                    message="Invalid or missing turn_metadata in sculpt_vibe",
+                    level="error",
+                    additional_info={"turn_metadata": str(turn_metadata)[:200]}
+                )
+                raise ConfigurationError("Invalid or missing turn_metadata in sculpt_vibe")
+
             if not isinstance(user_input, str):
                 raise ValueError("user_input must be a string")
             
@@ -418,8 +458,9 @@ class VibeSculptor:
             )
             return self._get_default_vibe_profile()
 
+    @synchronized()
     def predict_vibe_shift(self, current_vibe_profile: VibeProfile) -> bool:
-        """Predict if a vibe shift is occurring based on recent trends."""
+        """Predict if a vibe shift is occurring based on recent trends. Thread-safe access to self.vibes."""
         if len(self.vibes) < 3:
             return False
         recent_overall_scores = [vp.overall_score for vp in list(self.vibes)[-3:-1]]
@@ -439,8 +480,9 @@ class VibeSculptor:
             return True
         return False
 
+    @synchronized()
     def get_vibe_aura(self, state: SOVLState) -> Dict[str, Any]:
-        """Generate a vibe 'aura' for visualization, using VibeProfile."""
+        """Generate a vibe 'aura' for visualization, using VibeProfile. Thread-safe access to self.vibes."""
         profile_data = state.user_profile_state.get(state.history.conversation_id, {})
         
         if self.vibes:
