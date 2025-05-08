@@ -12,7 +12,7 @@ from sovl_logger import Logger
 from sovl_config import ConfigManager
 from sovl_state import SOVLState, StateManager
 from transformers import PreTrainedTokenizer, LogitsProcessor
-from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManager
+from sovl_confidence import ConfidenceCalculator, SystemContext
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 from sovl_schema import get_default_trainer_weighting
 import threading
