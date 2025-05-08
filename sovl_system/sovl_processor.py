@@ -18,137 +18,6 @@ from sovl_schema import get_default_trainer_weighting
 import threading
 import hashlib
 
-class TensorValidator:
-    """Handles tensor validation and conversion for logits and generated IDs."""
-    
-    def __init__(self, device: torch.device, logger: Logger):
-        self.device = device
-        self.logger = logger
-        self._valid_dtypes = (torch.float16, torch.float32, torch.float64)
-        self._valid_dims = (2, 3)
-        self._clamp_range = (-100.0, 100.0)  # Reasonable range for logits
-
-    def validate_logits(self, logits: Union[List[torch.Tensor], torch.Tensor]) -> torch.Tensor:
-        """
-        Convert and validate logits to a 3D tensor (batch, seq_len, vocab_size).
-
-        Args:
-            logits: Input logits, single tensor or list of tensors.
-
-        Returns:
-            Validated 3D tensor on the specified device.
-
-        Raises:
-            LogitsError: If validation fails.
-        """
-        try:
-            # Fast path for common case: single tensor on correct device
-            if isinstance(logits, torch.Tensor) and logits.device == self.device:
-                if logits.dim() in self._valid_dims and logits.dtype in self._valid_dtypes:
-                    return self._handle_nan_inf(logits)
-                
-            # Handle list of tensors
-            if isinstance(logits, list):
-                logits = torch.stack(logits)
-                
-            # Type check
-            if not isinstance(logits, torch.Tensor):
-                raise LogitsError(f"Expected tensor/list, got {type(logits)}")
-                
-            # Dimension check
-            if logits.dim() not in self._valid_dims:
-                raise LogitsError(f"Logits must be 2D or 3D, got {logits.dim()}D")
-                
-            # Dtype check
-            if logits.dtype not in self._valid_dtypes:
-                raise LogitsError(f"Logits must be float type, got {logits.dtype}")
-                
-            # Move to device and handle NaN/Inf
-            logits = logits.to(self.device)
-            return self._handle_nan_inf(logits)
-            
-        except Exception as e:
-            self._log_error("Logits validation failed", str(e), logits=logits)
-            raise LogitsError(f"Logits validation failed: {str(e)}")
-
-    def _handle_nan_inf(self, logits: torch.Tensor) -> torch.Tensor:
-        """Handle NaN and Inf values in logits with logging and fallback strategy."""
-        if not torch.isfinite(logits).all():
-            # Count problematic values
-            nan_count = torch.isnan(logits).sum().item()
-            inf_count = torch.isinf(logits).sum().item()
-            total_elements = logits.numel()
-            
-            # Log the issue
-            self.logger.record({
-                "event": EventType.WARNING.value,
-                "message": "Logits contain NaN/Inf values",
-                "timestamp": time.time(),
-                "nan_count": nan_count,
-                "inf_count": inf_count,
-                "total_elements": total_elements,
-                "nan_percentage": (nan_count / total_elements) * 100,
-                "inf_percentage": (inf_count / total_elements) * 100
-            })
-            
-            # Apply fallback strategy: clamp values and replace NaN with 0
-            logits = torch.nan_to_num(logits, nan=0.0, posinf=self._clamp_range[1], neginf=self._clamp_range[0])
-            logits = torch.clamp(logits, *self._clamp_range)
-            
-        return logits
-
-    def validate_generated_ids(self, generated_ids: Optional[torch.Tensor], logits: torch.Tensor) -> Optional[torch.Tensor]:
-        """
-        Validate generated IDs against logits.
-
-        Args:
-            generated_ids: Optional tensor of generated IDs (batch, seq_len).
-            logits: Reference logits tensor.
-
-        Returns:
-            Validated generated IDs tensor or None.
-
-        Raises:
-            LogitsError: If validation fails.
-        """
-        if generated_ids is None:
-            return None
-            
-        try:
-            # Fast path for common case: tensor on correct device with matching shape
-            if (isinstance(generated_ids, torch.Tensor) and 
-                generated_ids.device == self.device and 
-                generated_ids.dtype == torch.long and
-                generated_ids.dim() == 2 and 
-                generated_ids.shape[:2] == logits.shape[:2]):
-                return generated_ids
-                
-            # Basic validation
-            if not isinstance(generated_ids, torch.Tensor) or generated_ids.dtype != torch.long:
-                raise LogitsError("Generated IDs must be LongTensor")
-                
-            if generated_ids.dim() != 2 or generated_ids.shape[:2] != logits.shape[:2]:
-                raise LogitsError("Generated IDs shape mismatch with logits")
-                
-            return generated_ids.to(self.device)
-            
-        except Exception as e:
-            self._log_error(
-                "Generated IDs validation failed", str(e),
-                generated_ids=generated_ids, logits=logits
-            )
-            raise LogitsError(f"Generated IDs validation failed: {str(e)}")
-
-    def _log_error(self, message: str, error: str, **kwargs) -> None:
-        """Log validation errors with context."""
-        self.logger.log_error(
-            error_msg=f"{message}: {error}",
-            error_type="validation_error",
-            stack_trace=traceback.format_exc(),
-            additional_info={f"{key}_shape": str(getattr(value, 'shape', 'N/A')) for key, value in kwargs.items()}
-        )
-
-
 class SoulLogitsProcessor(LogitsProcessor):
     """Boosts token probabilities for .soul file keywords during generation.
 
@@ -192,7 +61,7 @@ class SoulLogitsProcessor(LogitsProcessor):
             )
             return scores
     
-# --- SimpleTokenizer fallback ---
+
 class SimpleTokenizer:
     def __init__(self, special_tokens=None):
         self.special_tokens = special_tokens or []
