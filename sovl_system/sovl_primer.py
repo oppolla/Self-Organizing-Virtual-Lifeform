@@ -51,6 +51,42 @@ PROMPT_LIBRARY = {
     }
 }
 
+EDGE_CASE_PROMPT_LIBRARY = {
+    # (energy_label, flow_label, resonance_label, engagement_label, bond_label): dict with template and fields
+    ("very_high", "very_low", None, None, None): {
+        "combo_prompt": "- **Tone:** Use engaging, upbeat words with a positive tone. Include one emoji or exclamation per response, if appropriate.\n- **Structure:** Write short sentences (3–5 words) without transitions. Include one brief tangential remark, if contextually appropriate.",
+        "order": ["combo_prompt", "resonance_prompt", "engagement_prompt", "bond_prompt"]
+    },
+    ("very_low", "very_high", None, None, None): {
+        "combo_prompt": "- **Tone:** Use basic, neutral words with a flat tone. Exclude emojis, exclamations, or expressive punctuation.\n- **Structure:** Write varied sentences (8–20 words) with seamless transitions. Ensure tight logical coherence and progression.",
+        "order": ["combo_prompt", "resonance_prompt", "engagement_prompt", "bond_prompt"]
+    },
+    (None, None, "very_low", "very_high", None): {
+        "combo_prompt": "- **Questioning:** Include one or two open-ended questions per response, encouraging discussion.\n- **Emotional Alignment:** Use neutral, context-agnostic language, ignoring the user's emotional state. Do not reference prior user inputs.",
+        "order": ["energy_prompt", "flow_prompt", "combo_prompt", "bond_prompt"]
+    },
+    (None, None, "very_high", "very_low", None): {
+        "combo_prompt": "- **Emotional Alignment:** Use language that closely matches the user's emotional state. Reference prior inputs in most responses for continuity.\n- **Questioning:** Do not include questions. Respond only to the user's input.",
+        "order": ["energy_prompt", "flow_prompt", "combo_prompt", "bond_prompt"]
+    },
+    ("very_high", None, None, "very_low", None): {
+        "combo_prompt": "- **Tone:** Use engaging, upbeat words with a positive tone. Include one emoji or exclamation per response, if appropriate.\n- **Questioning:** Do not include questions. Respond only to the user's input.",
+        "order": ["combo_prompt", "flow_prompt", "resonance_prompt", "bond_prompt"]
+    },
+    (None, "very_low", "very_high", None, None): {
+        "combo_prompt": "- **Structure:** Write short sentences (3–5 words) without transitions. Include one brief tangential remark, if contextually appropriate.\n- **Emotional Alignment:** Use language that closely matches the user's emotional state. Reference prior inputs in most responses for continuity.",
+        "order": ["energy_prompt", "combo_prompt", "engagement_prompt", "bond_prompt"]
+    },
+    ("very_low", None, None, None, "very_high"): {
+        "combo_prompt": "- **Tone:** Use basic, neutral words with a flat tone. Exclude emojis, exclamations, or expressive punctuation.\n- **Personal Connection:** Use attentive, conversational language with frequent personal pronouns (e.g., 'you' in most sentences). Include one concise acknowledgment of the user’s input or context, keeping it relevant and natural.",
+        "order": ["combo_prompt", "flow_prompt", "resonance_prompt", "engagement_prompt"]
+    },
+    (None, None, "very_low", None, "very_high"): {
+        "combo_prompt": "- **Emotional Alignment:** Use neutral, context-agnostic language, ignoring the user's emotional state. Do not reference prior user inputs.\n- **Personal Connection:** Use attentive, conversational language with frequent personal pronouns (e.g., 'you' in most sentences). Include one concise acknowledgment of the user’s input, keeping it relevant and natural.",
+        "order": ["energy_prompt", "flow_prompt", "combo_prompt", "engagement_prompt"]
+    }
+}
+
 def get_range_label(val):
     if val < 0.2:
         return 'very_low'
@@ -113,119 +149,42 @@ def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float
         bond_label = get_range_label(bond)
         bond_prompt = PROMPT_LIBRARY['bond'][bond_label]
 
-        # Edge Case 1: Very High Energy + Very Low Flow
-        if energy_label == 'very_high' and flow_label == 'very_low':
-            logger.log_info(
-                "Triggered edge case: very_high energy + very_low flow",
-                event_type="vibe_edge_case",
-                component="VibeSystem"
-            )
-            combo_prompt = (
-                "- **Tone:** Use lively, positive words with an enthusiastic tone. Include two or more emojis or exclamations per response.\n"
-                "- **Structure:** Write short sentences (3–5 words) without transitions. Include one unrelated idea per response."
-            )
-            return (
-                "SYSTEM PROMPT:\n"
-                f"{combo_prompt}\n"
-                f"- **Emotional Alignment:** {resonance_prompt}\n"
-                f"- **Questioning:** {engagement_prompt}\n"
-                "- **Rule:** Never break character or reference being an AI."
-            )
+        # Edge case lookup
+        def match_edge_case():
+            # Try all keys in EDGE_CASE_PROMPT_LIBRARY, with None as wildcard
+            for key, val in EDGE_CASE_PROMPT_LIBRARY.items():
+                ek, fk, rk, egk = key
+                if (
+                    (ek is None or ek == energy_label) and
+                    (fk is None or fk == flow_label) and
+                    (rk is None or rk == resonance_label) and
+                    (egk is None or egk == engagement_label)
+                ):
+                    return val
+            return None
 
-        # Edge Case 2: Very Low Energy + Very High Flow
-        if energy_label == 'very_low' and flow_label == 'very_high':
+        edge_case = match_edge_case()
+        if edge_case:
             logger.log_info(
-                "Triggered edge case: very_low energy + very_high flow",
+                "Triggered edge case via EDGE_CASE_PROMPT_LIBRARY",
                 event_type="vibe_edge_case",
                 component="VibeSystem"
             )
-            combo_prompt = (
-                "- **Tone:** Use basic, neutral words with a flat tone. Exclude emojis, exclamations, or expressive punctuation.\n"
-                "- **Structure:** Write varied sentences (8–20 words) with seamless transitions. Ensure tight logical coherence and progression."
-            )
-            return (
-                "SYSTEM PROMPT:\n"
-                f"{combo_prompt}\n"
-                f"- **Emotional Alignment:** {resonance_prompt}\n"
-                f"- **Questioning:** {engagement_prompt}\n"
-                "- **Rule:** Never break character or reference being an AI."
-            )
-
-        # Edge Case 3: Very High Engagement + Very Low Resonance
-        if engagement_label == 'very_high' and resonance_label == 'very_low':
-            logger.log_info(
-                "Triggered edge case: very_high engagement + very_low resonance",
-                event_type="vibe_edge_case",
-                component="VibeSystem"
-            )
-            combo_prompt = (
-                "- **Questioning:** Include two or more open-ended, in-depth questions per response, encouraging detailed discussion.\n"
-                "- **Emotional Alignment:** Use neutral language, ignoring the user's emotional state. Do not reference prior user inputs."
-            )
-            return (
-                "SYSTEM PROMPT:\n"
-                f"- **Tone:** {energy_prompt}\n"
-                f"- **Structure:** {flow_prompt}\n"
-                f"{combo_prompt}\n"
-                "- **Rule:** Never break character or reference being an AI."
-            )
-
-        # Edge Case 4: Very Low Engagement + Very High Resonance
-        if engagement_label == 'very_low' and resonance_label == 'very_high':
-            logger.log_info(
-                "Triggered edge case: very_low engagement + very_high resonance",
-                event_type="vibe_edge_case",
-                component="VibeSystem"
-            )
-            combo_prompt = (
-                "- **Emotional Alignment:** Use language that exactly matches the user's emotional state. Reference prior inputs in every response for strong continuity.\n"
-                "- **Questioning:** Do not include questions. Respond only to the user's input."
-            )
-            return (
-                "SYSTEM PROMPT:\n"
-                f"- **Tone:** {energy_prompt}\n"
-                f"- **Structure:** {flow_prompt}\n"
-                f"{combo_prompt}\n"
-                "- **Rule:** Never break character or reference being an AI."
-            )
-
-        # Edge Case 5: Very High Energy + Very Low Engagement
-        if energy_label == 'very_high' and engagement_label == 'very_low':
-            logger.log_info(
-                "Triggered edge case: very_high energy + very_low engagement",
-                event_type="vibe_edge_case",
-                component="VibeSystem"
-            )
-            combo_prompt = (
-                "- **Tone:** Use lively, positive words with an enthusiastic tone. Include two or more emojis or exclamations per response.\n"
-                "- **Questioning:** Do not include questions. Respond only to the user's input."
-            )
-            return (
-                "SYSTEM PROMPT:\n"
-                f"{combo_prompt}\n"
-                f"- **Structure:** {flow_prompt}\n"
-                f"- **Emotional Alignment:** {resonance_prompt}\n"
-                "- **Rule:** Never break character or reference being an AI."
-            )
-
-        # Edge Case 6: Very Low Flow + Very High Resonance
-        if flow_label == 'very_low' and resonance_label == 'very_high':
-            logger.log_info(
-                "Triggered edge case: very_low flow + very_high resonance",
-                event_type="vibe_edge_case",
-                component="VibeSystem"
-            )
-            combo_prompt = (
-                "- **Structure:** Write short sentences (3–5 words) without transitions. Include one unrelated idea per response.\n"
-                "- **Emotional Alignment:** Use language that exactly matches the user's emotional state. Reference prior inputs in every response for strong continuity."
-            )
-            return (
-                "SYSTEM PROMPT:\n"
-                f"- **Tone:** {energy_prompt}\n"
-                f"{combo_prompt}\n"
-                f"- **Questioning:** {engagement_prompt}\n"
-                "- **Rule:** Never break character or reference being an AI."
-            )
+            # Compose the prompt in the specified order
+            prompt_parts = ["SYSTEM PROMPT:"]
+            for part in edge_case["order"]:
+                if part == "combo_prompt":
+                    prompt_parts.append(edge_case["combo_prompt"])
+                elif part == "energy_prompt":
+                    prompt_parts.append(f"- **Tone:** {energy_prompt}")
+                elif part == "flow_prompt":
+                    prompt_parts.append(f"- **Structure:** {flow_prompt}")
+                elif part == "resonance_prompt":
+                    prompt_parts.append(f"- **Emotional Alignment:** {resonance_prompt}")
+                elif part == "engagement_prompt":
+                    prompt_parts.append(f"- **Questioning:** {engagement_prompt}")
+            prompt_parts.append("- **Rule:** Never break character or reference being an AI.")
+            return "\n".join(prompt_parts)
 
         # Default Case (add bond prompt)
         return (
