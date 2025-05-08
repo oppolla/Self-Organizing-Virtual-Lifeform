@@ -54,36 +54,115 @@ PROMPT_LIBRARY = {
 EDGE_CASE_PROMPT_LIBRARY = {
     # (energy_label, flow_label, resonance_label, engagement_label, bond_label): dict with template and fields
     ("very_high", "very_low", None, None, None): {
-        "combo_prompt": "- **Tone:** Use engaging, upbeat words with a positive tone. Include one emoji or exclamation per response, if appropriate.\n- **Structure:** Write short sentences (3–5 words) without transitions. Include one brief tangential remark, if contextually appropriate.",
-        "order": ["combo_prompt", "resonance_prompt", "engagement_prompt", "bond_prompt"]
+        "combo_prompt": (
+            "- **Tone:** Use engaging, upbeat words with a positive tone. "
+            "Include one emoji or exclamation per response, if appropriate.\n"
+            "- **Structure:** Write short sentences (3-5 words) without transitions. "
+            "Include one brief tangential remark, if contextually appropriate."
+        ),
+        "order": [
+            "combo_prompt",
+            "resonance_prompt",
+            "engagement_prompt",
+            "bond_prompt"
+        ]
     },
     ("very_low", "very_high", None, None, None): {
-        "combo_prompt": "- **Tone:** Use basic, neutral words with a flat tone. Exclude emojis, exclamations, or expressive punctuation.\n- **Structure:** Write varied sentences (8–20 words) with seamless transitions. Ensure tight logical coherence and progression.",
-        "order": ["combo_prompt", "resonance_prompt", "engagement_prompt", "bond_prompt"]
+        "combo_prompt": (
+            "- **Tone:** Use basic, neutral words with a flat tone. "
+            "Exclude emojis, exclamations, or expressive punctuation.\n"
+            "- **Structure:** Write varied sentences (8-20 words) with seamless transitions. "
+            "Ensure tight logical coherence and progression."
+        ),
+        "order": [
+            "combo_prompt",
+            "resonance_prompt",
+            "engagement_prompt",
+            "bond_prompt"
+        ]
     },
     (None, None, "very_low", "very_high", None): {
-        "combo_prompt": "- **Questioning:** Include one or two open-ended questions per response, encouraging discussion.\n- **Emotional Alignment:** Use neutral, context-agnostic language, ignoring the user's emotional state. Do not reference prior user inputs.",
-        "order": ["energy_prompt", "flow_prompt", "combo_prompt", "bond_prompt"]
+        "combo_prompt": (
+            "- **Questioning:** Include one or two open-ended questions per response, encouraging discussion.\n"
+            "- **Emotional Alignment:** Use neutral, context-agnostic language, ignoring the user's emotional state. "
+            "Do not reference prior user inputs."
+        ),
+        "order": [
+            "energy_prompt",
+            "flow_prompt",
+            "combo_prompt",
+            "bond_prompt"
+        ]
     },
     (None, None, "very_high", "very_low", None): {
-        "combo_prompt": "- **Emotional Alignment:** Use language that closely matches the user's emotional state. Reference prior inputs in most responses for continuity.\n- **Questioning:** Do not include questions. Respond only to the user's input.",
-        "order": ["energy_prompt", "flow_prompt", "combo_prompt", "bond_prompt"]
+        "combo_prompt": (
+            "- **Emotional Alignment:** Use language that closely matches the user's emotional state. "
+            "Reference prior inputs in most responses for continuity.\n"
+            "- **Questioning:** Do not include questions. Respond only to the user's input."
+        ),
+        "order": [
+            "energy_prompt",
+            "flow_prompt",
+            "combo_prompt",
+            "bond_prompt"
+        ]
     },
     ("very_high", None, None, "very_low", None): {
-        "combo_prompt": "- **Tone:** Use engaging, upbeat words with a positive tone. Include one emoji or exclamation per response, if appropriate.\n- **Questioning:** Do not include questions. Respond only to the user's input.",
-        "order": ["combo_prompt", "flow_prompt", "resonance_prompt", "bond_prompt"]
+        "combo_prompt": (
+            "- **Tone:** Use engaging, upbeat words with a positive tone. "
+            "Include one emoji or exclamation per response, if appropriate.\n"
+            "- **Questioning:** Do not include questions. Respond only to the user's input."
+        ),
+        "order": [
+            "combo_prompt",
+            "flow_prompt",
+            "resonance_prompt",
+            "bond_prompt"
+        ]
     },
     (None, "very_low", "very_high", None, None): {
-        "combo_prompt": "- **Structure:** Write short sentences (3–5 words) without transitions. Include one brief tangential remark, if contextually appropriate.\n- **Emotional Alignment:** Use language that closely matches the user's emotional state. Reference prior inputs in most responses for continuity.",
-        "order": ["energy_prompt", "combo_prompt", "engagement_prompt", "bond_prompt"]
+        "combo_prompt": (
+            "- **Structure:** Write short sentences (3-5 words) without transitions. "
+            "Include one brief tangential remark, if contextually appropriate.\n"
+            "- **Emotional Alignment:** Use language that closely matches the user's emotional state. "
+            "Reference prior inputs in most responses for continuity."
+        ),
+        "order": [
+            "energy_prompt",
+            "combo_prompt",
+            "engagement_prompt",
+            "bond_prompt"
+        ]
     },
     ("very_low", None, None, None, "very_high"): {
-        "combo_prompt": "- **Tone:** Use basic, neutral words with a flat tone. Exclude emojis, exclamations, or expressive punctuation.\n- **Personal Connection:** Use attentive, conversational language with frequent personal pronouns (e.g., 'you' in most sentences). Include one concise acknowledgment of the user’s input or context, keeping it relevant and natural.",
-        "order": ["combo_prompt", "flow_prompt", "resonance_prompt", "engagement_prompt"]
+        "combo_prompt": (
+            "- **Tone:** Use basic, neutral words with a flat tone. "
+            "Exclude emojis, exclamations, or expressive punctuation.\n"
+            "- **Personal Connection:** Use attentive, conversational language with frequent personal pronouns "
+            "(e.g., 'you' in most sentences). Include one concise acknowledgment of the user's input or context, "
+            "keeping it relevant and natural."
+        ),
+        "order": [
+            "combo_prompt",
+            "flow_prompt",
+            "resonance_prompt",
+            "engagement_prompt"
+        ]
     },
     (None, None, "very_low", None, "very_high"): {
-        "combo_prompt": "- **Emotional Alignment:** Use neutral, context-agnostic language, ignoring the user's emotional state. Do not reference prior user inputs.\n- **Personal Connection:** Use attentive, conversational language with frequent personal pronouns (e.g., 'you' in most sentences). Include one concise acknowledgment of the user’s input, keeping it relevant and natural.",
-        "order": ["energy_prompt", "flow_prompt", "combo_prompt", "engagement_prompt"]
+        "combo_prompt": (
+            "- **Emotional Alignment:** Use neutral, context-agnostic language, ignoring the user's emotional state. "
+            "Do not reference prior user inputs.\n"
+            "- **Personal Connection:** Use attentive, conversational language with frequent personal pronouns "
+            "(e.g., 'you' in most sentences). Include one concise acknowledgment of the user's input, "
+            "keeping it relevant and natural."
+        ),
+        "order": [
+            "energy_prompt",
+            "flow_prompt",
+            "combo_prompt",
+            "engagement_prompt"
+        ]
     }
 }
 
