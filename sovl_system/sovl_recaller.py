@@ -12,12 +12,18 @@ from sovl_memory import RAMManager
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ConfigurationError
 from sovl_config import ConfigManager
+from sovl_viber import VibeSculptor, VibeProfile
 import hashlib
 import threading
 
 class ShortTermMemory:
     """
     Handles in-memory, per-session short-term conversation history.
+    Message structure:
+        - 'role': str
+        - 'content': str
+        - 'timestamp': float
+        - 'vibe_profile': dict (optional, recommended)
     """
     def __init__(self, max_short_term: int = 50, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, expiry_seconds: Optional[int] = None, logging_level: str = "info"):
         # Use config_manager for max_short_term, expiry_seconds, and logging_level if provided
@@ -92,6 +98,12 @@ class ShortTermMemory:
             level=self.logging_level,
             additional_info={"msg": msg}
         )
+        if "vibe_profile" not in msg:
+            self.logger.record_event(
+                event_type="short_term_memory_missing_vibe",
+                message="Message added without vibe_profile.",
+                level="debug"
+            )
 
     def get(self) -> List[Dict[str, Any]]:
         start_wait = time.perf_counter()
@@ -160,6 +172,29 @@ class ShortTermMemory:
                     level="warning",
                     additional_info={"removed": removed}
                 )
+
+    def add_with_vibe(self, role: str, content: str, vibe_profile: Optional[VibeProfile] = None, **kwargs):
+        msg = {
+            "role": role,
+            "content": content,
+            "timestamp": time.time(),
+            **kwargs
+        }
+        if vibe_profile is not None:
+            msg["vibe_profile"] = vibe_profile.to_dict()
+        self.add(msg)
+
+    def get_recent_vibes(self, n: int = 10) -> List[VibeProfile]:
+        messages = self.get()[-n:]
+        vibes = []
+        for msg in messages:
+            vibe_dict = msg.get("vibe_profile")
+            if vibe_dict:
+                try:
+                    vibes.append(VibeProfile.from_dict(vibe_dict))
+                except Exception:
+                    continue
+        return vibes
 
 class LongTermMemory:
     """
@@ -546,11 +581,12 @@ class DialogueContextManager:
             and embedding.dtype == np.float32
         )
 
-    def add_message(self, role: str, content: str, user_id: str = "default"):
+    def add_message(self, role: str, content: str, user_id: str = "default", vibe_profile: Optional[VibeProfile] = None):
         """
         Transactionally add a message to both short-term and long-term memory.
         If long-term add fails, rollback short-term add.
         Raises MemoryPressureError if RAM usage is critically high even after cleanup.
+        Optionally stores a VibeProfile with the message for empathic context.
         """
         try:
             if self.ram_manager:
@@ -594,7 +630,8 @@ class DialogueContextManager:
                 "user_id": user_id,
                 "session_id": self.session_id
             }
-            self.short_term.add(msg)
+            # Use add_with_vibe to store the vibe_profile if provided
+            self.short_term.add_with_vibe(role, content, vibe_profile, embedding=embedding, timestamp=timestamp, user_id=user_id, session_id=self.session_id)
             try:
                 self.long_term.add(msg)
             except Exception as e:

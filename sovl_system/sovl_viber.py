@@ -76,7 +76,7 @@ class VibeSculptor:
                 "energy": vibe_config.get("energy_weight", 0.25),
                 "flow": vibe_config.get("flow_weight", 0.25),
                 "resonance": vibe_config.get("resonance_weight", 0.25),
-                "curiosity": vibe_config.get("curiosity_weight", 0.25)
+                "engagement": vibe_config.get("engagement_weight", 0.25)
             }
             if abs(sum(self.weights.values()) - 1.0) > 1e-6:
                 raise ValueError("Vibe weights must sum to 1.0")
@@ -102,7 +102,7 @@ class VibeSculptor:
         """Returns a default VibeProfile."""
         return VibeProfile(
             overall_score=self.default_vibe_score,
-            dimensions={"default_energy": 0.5, "default_flow": 0.5, "default_resonance": 0.5, "default_curiosity": 0.5},
+            dimensions={"default_energy": 0.5, "default_flow": 0.5, "default_resonance": 0.5, "default_engagement": 0.5},
             intensity=0.5,
             confidence=0.1,
             salient_phrases=[],
@@ -262,8 +262,8 @@ class VibeSculptor:
             "coherence": coherence
         }
 
-    def _compute_curiosity(self, text: str, curiosity_manager: Optional[CuriosityManager], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
-        """Measure engagement with curiosity-driven questions and novelty."""
+    def _compute_engagement(self, text: str, engagement_manager: Optional[CuriosityManager], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+        """Measure engagement with engagement-driven questions and novelty."""
         question_intensity = 0.5
         novelty = 0.5
         diversity = 0.5
@@ -283,23 +283,23 @@ class VibeSculptor:
             )
 
             # Novelty
-            novelty = novelty_score if curiosity_manager else 0.7 * novelty_score + 0.3 * min(conversation_tracking.get("thread_depth", 1) / 10.0, 1.0)
+            novelty = novelty_score if engagement_manager else 0.7 * novelty_score + 0.3 * min(conversation_tracking.get("thread_depth", 1) / 10.0, 1.0)
 
             # Diversity
             diversity = token_stats.get("pattern_stats", {}).get("trigram_diversity", 0.5)
 
-        curiosity_score = (
+        engagement_score = (
             0.4 * question_intensity +
             0.3 * novelty +
             0.3 * diversity
         )
-        curiosity_score = max(0.0, min(1.0, curiosity_score))
+        engagement_score = max(0.0, min(1.0, engagement_score))
 
         return {
             "question_intensity": question_intensity,
             "novelty": novelty,
             "diversity": diversity,
-            "curiosity_score": curiosity_score
+            "engagement_score": engagement_score
         }
 
     @synchronized()
@@ -309,7 +309,7 @@ class VibeSculptor:
         state: SOVLState,
         error_manager: ErrorManager,
         context: SystemContext,
-        curiosity_manager: Optional[CuriosityManager] = None,
+        engagement_manager: Optional[CuriosityManager] = None,
         turn_metadata: Optional[Dict[str, Any]] = None,
         short_term_memory: Optional[List[Dict[str, Any]]] = None
     ) -> VibeProfile:
@@ -336,18 +336,18 @@ class VibeSculptor:
             energy_components = self._compute_energy(user_input, turn_metadata)
             flow_components = self._compute_flow(user_input, profile_data, turn_metadata)
             resonance_components = self._compute_resonance(user_input, state, turn_metadata)
-            curiosity_components = self._compute_curiosity(user_input, curiosity_manager, turn_metadata)
+            engagement_components = self._compute_engagement(user_input, engagement_manager, turn_metadata)
 
             decayed_energy = energy_components["base_energy"] * decay
             decayed_flow = flow_components["rhythm_score"] * decay
             decayed_resonance = resonance_components["topic_consistency"] * decay
-            decayed_curiosity = curiosity_components["curiosity_score"] * decay
+            decayed_engagement = engagement_components["engagement_score"] * decay
             
             overall_score = (
                 self.weights["energy"] * decayed_energy +
                 self.weights["flow"] * decayed_flow +
                 self.weights["resonance"] * decayed_resonance +
-                self.weights["curiosity"] * decayed_curiosity
+                self.weights["engagement"] * decayed_engagement
             )
             overall_score = max(self.min_vibe, min(self.max_vibe, overall_score))
 
@@ -355,10 +355,10 @@ class VibeSculptor:
                 **{f"energy_{k}": v for k, v in energy_components.items()},
                 **{f"flow_{k}": v for k, v in flow_components.items()},
                 **{f"resonance_{k}": v for k, v in resonance_components.items()},
-                **{f"curiosity_{k}": v for k, v in curiosity_components.items()}
+                **{f"engagement_{k}": v for k, v in engagement_components.items()}
             }
 
-            intensity = (decayed_energy + decayed_flow + decayed_resonance + decayed_curiosity) / 4.0
+            intensity = (decayed_energy + decayed_flow + decayed_resonance + decayed_engagement) / 4.0
             intensity = max(0.0, min(1.0, intensity))
 
             confidence = 0.6
@@ -395,8 +395,8 @@ class VibeSculptor:
             if turn_metadata is not None:
                 turn_metadata["tone_boost"] = {"positive": 0.5 * energy_components["base_energy"]}
                 turn_metadata["max_length"] = 50 * (0.5 + flow_components["rhythm_score"])
-                if curiosity_manager:
-                    curiosity_manager.update_pressure(curiosity_components["curiosity_score"] * 0.05)
+                if engagement_manager:
+                    engagement_manager.update_pressure(engagement_components["engagement_score"] * 0.05)
 
             self.logger.record_event(
                 event_type="vibe_sculpted",

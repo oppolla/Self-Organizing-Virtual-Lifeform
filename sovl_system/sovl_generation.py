@@ -617,9 +617,11 @@ class GenerationManager:
                     error_type="missing_dialogue_context"
                 )
             traits = self.primer.prepare_for_generation(prompt, user_id=user_id, metadata_entries=metadata_entries, **kwargs)
-            composite_prompt = prompt
-            if memory_context:
-                composite_prompt = f"{memory_context}\n\n{composite_prompt}"
+            # Use the universal prompt assembler from sovl_primer for all context and vibe injection
+            composite_prompt = self.primer.assemble_full_prompt(
+                user_prompt=prompt,
+                memory_context=memory_context or ""
+            )
             # --- Prepare input batch ---
             inputs = self.base_tokenizer(
                 composite_prompt,
