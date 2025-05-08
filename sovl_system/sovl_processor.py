@@ -16,6 +16,7 @@ from sovl_confidence import ConfidenceCalculator, SystemContext, CuriosityManage
 from sovl_error import ErrorManager, ErrorRecord, ConfigurationError
 from sovl_schema import get_default_trainer_weighting
 import threading
+import hashlib
 
 # Placeholder for SOVLState until we can properly import it
 try:
@@ -926,19 +927,28 @@ class SoulLogitsProcessor(LogitsProcessor):
             )
             return scores
     
+# --- SimpleTokenizer fallback ---
+class SimpleTokenizer:
+    def __init__(self, special_tokens=None):
+        self.special_tokens = special_tokens or []
+
+    def stable_token_id(self, token):
+        return int(hashlib.md5(token.encode()).hexdigest(), 16) % 10000
+
+    def __call__(self, text):
+        tokens = text.split()
+        input_ids = [self.stable_token_id(token) for token in tokens]
+        return type('TokenOutput', (), {'input_ids': input_ids})
+
+    @property
+    def all_special_ids(self):
+        return [self.stable_token_id(tok) for tok in self.special_tokens]
+
 class MetadataProcessor:
     """Central authority for defining, validating, and enriching metadata for events logged by sovl_scribe.
     
-    This class serves as the definitive source of truth for metadata structure and validation
-    in the SOVL logging system. It ensures that all logged events have consistent, well-structured
-    metadata that includes both source-specific information and global system context.
-    
-    Responsibilities:
-    1. Define canonical metadata schemas for different event types
-    2. Validate incoming metadata against these schemas
-    3. Enrich metadata with global system context
-    4. Ensure consistent metadata structure across all logged events
-    5. Calculate and enrich content metrics for text-based events
+    This class uses only the built-in SimpleTokenizer for all tokenization tasks. No other tokenizers are supported.
+    All enrichment methods are thread-safe via a single enrichment lock.
     """
     
     # Mapping of event types to their text fields that need content metrics
@@ -957,17 +967,19 @@ class MetadataProcessor:
         logger: Logger,
         state_accessor: Optional[Any] = None
     ):
-        """Initialize the metadata processor.
-        
-        Args:
-            config_manager: Configuration manager instance
-            logger: Logger instance for validation warnings and errors
-            state_accessor: Optional accessor for global system state
-        """
         self.config_manager = config_manager
         self.logger = logger
         self.state_accessor = state_accessor
+        # Always use SimpleTokenizer
+        self.tokenizer = SimpleTokenizer()
+        self.logger.record_event(
+            event_type="tokenizer_init",
+            message="Using built-in SimpleTokenizer (whitespace, deterministic).",
+            level="info"
+        )
         self._schemas = self._define_event_schemas()
+        # Thread safety for enrichment
+        self._enrich_lock = threading.Lock()
         
         # Log initialization
         self.logger.record_event(
@@ -1116,63 +1128,51 @@ class MetadataProcessor:
         return is_valid
 
     def _calculate_content_metrics(self, content: str) -> Dict[str, Any]:
-        """Calculate content and quality metrics for a given text.
-        
-        Args:
-            content: The text content to analyze
-            
-        Returns:
-            Dictionary containing content and quality metrics
-        """
-        try:
-            if not isinstance(content, str):
-                raise ValueError("Content must be a string")
-                
-            # Split content into words and sentences
-            words = content.split()
-            sentences = [s.strip() for s in content.split('.') if s.strip()]
-            
-            # Calculate basic metrics
-            word_count = len(words)
-            sentence_count = len(sentences)
-            
-            # Calculate averages using safe_divide
-            avg_word_length = safe_divide(sum(len(w) for w in words), word_count)
-            avg_sentence_length = safe_divide(word_count, sentence_count)
-            
-            # Calculate quality metrics
-            quality_metrics = {
-                'has_code': '```' in content,
-                'has_url': 'http' in content,
-                'has_question': '?' in content,
-                'has_exclamation': '!' in content,
-                'has_emoji': any(c in content for c in '😀😃😄😁😆😅😂🤣😊😇')
-            }
-            
-            return {
-                'content_metrics': {
-                    'word_count': word_count,
-                    'sentence_count': sentence_count,
-                    'avg_word_length': avg_word_length,
-                    'avg_sentence_length': avg_sentence_length
-                },
-                'quality_metrics': quality_metrics
-            }
-            
-        except Exception as e:
-            self.logger.record_event(
-                event_type="content_metrics_error",
-                message=f"Failed to calculate content metrics: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "content_length": len(content) if isinstance(content, str) else 0
+        """Calculate content and quality metrics for a given text. Thread-safe."""
+        with self._enrich_lock:
+            try:
+                if not isinstance(content, str):
+                    raise ValueError("Content must be a string")
+                # Split content into words and sentences
+                words = content.split()
+                sentences = [s.strip() for s in content.split('.') if s.strip()]
+                # Calculate basic metrics
+                word_count = len(words)
+                sentence_count = len(sentences)
+                # Calculate averages using safe_divide
+                avg_word_length = safe_divide(sum(len(w) for w in words), word_count)
+                avg_sentence_length = safe_divide(word_count, sentence_count)
+                # Calculate quality metrics
+                quality_metrics = {
+                    'has_code': '```' in content,
+                    'has_url': 'http' in content,
+                    'has_question': '?' in content,
+                    'has_exclamation': '!' in content,
+                    'has_emoji': any(c in content for c in '😀😃😄😁😆😅😂🤣😊😇')
                 }
-            )
-            return {
-                'content_metrics': {},
-                'quality_metrics': {}
-            }
+                return {
+                    'content_metrics': {
+                        'word_count': word_count,
+                        'sentence_count': sentence_count,
+                        'avg_word_length': avg_word_length,
+                        'avg_sentence_length': avg_sentence_length
+                    },
+                    'quality_metrics': quality_metrics
+                }
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="content_metrics_error",
+                    message=f"Failed to calculate content metrics: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "content_length": len(content) if isinstance(content, str) else 0
+                    }
+                )
+                return {
+                    'content_metrics': {},
+                    'quality_metrics': {}
+                }
 
     def _enrich_common_fields(
         self,
@@ -1232,209 +1232,208 @@ class MetadataProcessor:
         event_type: str,
         event_data: Dict[str, Any]
     ) -> None:
-        """Enrich metadata with content metrics for text-based events.
-        
-        Args:
-            final_metadata: The metadata dictionary to enrich
-            event_type: Type of event being logged
-            event_data: Event-specific data
-        """
-        try:
-            # Check if this event type needs content metrics
-            if event_type not in self._CONTENT_METRICS_FIELDS:
-                return
-                
-            # Get the list of fields that need content metrics for this event type
-            fields_to_analyze = self._CONTENT_METRICS_FIELDS[event_type]
-            
-            # Calculate metrics for each field
-            for field_name in fields_to_analyze:
-                if content := event_data.get(field_name):
-                    # Basic content metrics
-                    metrics = self._calculate_content_metrics(content)
-                    final_metadata[f"{field_name}_metrics"] = metrics
-                    
-                    # Enhanced token statistics
-                    token_stats = self._compute_enhanced_token_statistics(content)
-                    final_metadata[f"{field_name}_token_stats"] = token_stats
-                    
-                    # Structure metrics
-                    structure_metrics = self._calculate_basic_structure_metrics(content)
-                    final_metadata[f"{field_name}_structure"] = structure_metrics
-            
-            # Add performance metrics if available
-            if generation_stats := event_data.get("generation_stats"):
-                performance_metrics = self._calculate_performance_metrics(generation_stats)
-                final_metadata["performance_metrics"] = performance_metrics
-            
-            # Add relationship context if available
-            if conversation_context := event_data.get("conversation_context"):
-                relationship_metrics = self._calculate_relationship_context(conversation_context)
-                final_metadata["relationship_context"] = relationship_metrics
-                    
-        except Exception as e:
-            self.logger.record_event(
-                event_type="content_metrics_enrichment_error",
-                message=f"Failed to enrich content metrics: {str(e)}",
-                level="error",
-                additional_info={
-                    "event_type": event_type,
-                    "error": str(e)
-                }
-            )
+        """Enrich metadata with content metrics for text-based events. Thread-safe."""
+        with self._enrich_lock:
+            try:
+                # Check if this event type needs content metrics
+                if event_type not in self._CONTENT_METRICS_FIELDS:
+                    return
+                # Log warnings for missing expected fields
+                if "confidence_score" not in event_data:
+                    self.logger.record_event(
+                        event_type="metadata_missing_field",
+                        message="Missing confidence_score in event_data",
+                        level="warning",
+                        additional_info={"event_type": event_type}
+                    )
+                if "conversation_context" not in event_data:
+                    self.logger.record_event(
+                        event_type="metadata_missing_field",
+                        message="Missing conversation_context in event_data",
+                        level="warning",
+                        additional_info={"event_type": event_type}
+                    )
+                if "generation_stats" not in event_data:
+                    self.logger.record_event(
+                        event_type="metadata_missing_field",
+                        message="Missing generation_stats in event_data",
+                        level="warning",
+                        additional_info={"event_type": event_type}
+                    )
+                # Get the list of fields that need content metrics for this event type
+                fields_to_analyze = self._CONTENT_METRICS_FIELDS[event_type]
+                # Calculate metrics for each field
+                for field_name in fields_to_analyze:
+                    if content := event_data.get(field_name):
+                        # Basic content metrics
+                        metrics = self._calculate_content_metrics(content)
+                        final_metadata[f"{field_name}_metrics"] = metrics
+                        # Enhanced token statistics
+                        token_stats = self._compute_enhanced_token_statistics(content)
+                        final_metadata[f"{field_name}_token_stats"] = token_stats
+                        # Structure metrics
+                        structure_metrics = self._calculate_basic_structure_metrics(content)
+                        final_metadata[f"{field_name}_structure"] = structure_metrics
+                # Add performance metrics if available
+                if generation_stats := event_data.get("generation_stats"):
+                    performance_metrics = self._calculate_performance_metrics(generation_stats)
+                    final_metadata["performance_metrics"] = performance_metrics
+                # Add relationship context if available
+                if conversation_context := event_data.get("conversation_context"):
+                    relationship_metrics = self._calculate_relationship_context(conversation_context)
+                    final_metadata["relationship_context"] = relationship_metrics
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="content_metrics_enrichment_error",
+                    message=f"Failed to enrich content metrics: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "event_type": event_type,
+                        "error": str(e)
+                    }
+                )
 
     def _compute_enhanced_token_statistics(self, text: str) -> Dict[str, Any]:
-        """Compute enhanced token statistics including basic and pattern analysis."""
-        try:
-            # Validate tokenizer availability
-            if not hasattr(self, 'tokenizer'):
+        """Compute enhanced token statistics including basic and pattern analysis. Thread-safe."""
+        with self._enrich_lock:
+            try:
+                # Validate tokenizer availability
+                if not hasattr(self, 'tokenizer'):
+                    self.logger.record_event(
+                        event_type="tokenizer_missing",
+                        message="Tokenizer not available for token statistics",
+                        level="warning",
+                        additional_info={"text_length": len(text)}
+                    )
+                    return self._get_default_token_stats()
+                # Tokenize input
+                tokens = self.tokenizer(text).input_ids
+                token_count = len(tokens)
+                if token_count == 0:
+                    return self._get_default_token_stats()
+                # Basic token statistics
+                unique_tokens = set(tokens)
+                basic_stats = {
+                    "total_tokens": token_count,
+                    "unique_tokens": len(unique_tokens),
+                    "token_diversity": len(unique_tokens) / token_count
+                }
+                # N-gram analysis
+                bigrams = list(zip(tokens[:-1], tokens[1:]))
+                trigrams = list(zip(tokens[:-2], tokens[1:-1], tokens[2:]))
+                pattern_stats = {
+                    "unique_bigrams": len(set(bigrams)),
+                    "unique_trigrams": len(set(trigrams)),
+                    "bigram_diversity": len(set(bigrams)) / len(bigrams) if bigrams else 0,
+                    "trigram_diversity": len(set(trigrams)) / len(trigrams) if trigrams else 0
+                }
+                # Special token analysis
+                special_tokens = [t for t in tokens if t in self.tokenizer.all_special_ids]
+                special_stats = {
+                    "special_token_count": len(special_tokens),
+                    "special_token_ratio": len(special_tokens) / token_count,
+                    "special_token_types": list(set(special_tokens))
+                }
+                return {
+                    "basic_stats": basic_stats,
+                    "pattern_stats": pattern_stats,
+                    "special_token_stats": special_stats
+                }
+            except Exception as e:
                 self.logger.record_event(
-                    event_type="tokenizer_missing",
-                    message="Tokenizer not available for token statistics",
-                    level="warning",
-                    additional_info={"text_length": len(text)}
+                    event_type="token_statistics_error",
+                    message=f"Error computing enhanced token statistics: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "text_length": len(text)
+                    }
                 )
                 return self._get_default_token_stats()
 
-            # Tokenize input
-            tokens = self.tokenizer(text).input_ids
-            token_count = len(tokens)
-            if token_count == 0:
-                return self._get_default_token_stats()
-
-            # Basic token statistics
-            unique_tokens = set(tokens)
-            basic_stats = {
-                "total_tokens": token_count,
-                "unique_tokens": len(unique_tokens),
-                "token_diversity": len(unique_tokens) / token_count
-            }
-
-            # N-gram analysis
-            bigrams = list(zip(tokens[:-1], tokens[1:]))
-            trigrams = list(zip(tokens[:-2], tokens[1:-1], tokens[2:]))
-            pattern_stats = {
-                "unique_bigrams": len(set(bigrams)),
-                "unique_trigrams": len(set(trigrams)),
-                "bigram_diversity": len(set(bigrams)) / len(bigrams) if bigrams else 0,
-                "trigram_diversity": len(set(trigrams)) / len(trigrams) if trigrams else 0
-            }
-
-            # Special token analysis
-            special_tokens = [t for t in tokens if t in self.tokenizer.all_special_ids]
-            special_stats = {
-                "special_token_count": len(special_tokens),
-                "special_token_ratio": len(special_tokens) / token_count,
-                "special_token_types": list(set(special_tokens))
-            }
-
-            return {
-                "basic_stats": basic_stats,
-                "pattern_stats": pattern_stats,
-                "special_token_stats": special_stats
-            }
-
-        except Exception as e:
-            self.logger.record_event(
-                event_type="token_statistics_error",
-                message=f"Error computing enhanced token statistics: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "text_length": len(text)
-                }
-            )
-            return self._get_default_token_stats()
-
     def _calculate_performance_metrics(self, generation_stats: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate performance-related metrics from generation statistics."""
-        try:
-            # Extract basic metrics
-            ram_usage = generation_stats.get("ram_usage_mb", 0)
-            gpu_usage = generation_stats.get("gpu_usage_mb", 0)
-            tokens_per_second = generation_stats.get("tokens_per_second", 0)
-            generation_time = generation_stats.get("generation_time_ms", 0)
-            
-            # Calculate derived metrics
-            total_memory = ram_usage + gpu_usage
-            memory_efficiency = tokens_per_second / total_memory if total_memory > 0 else 0
-            
-            return {
-                "timing": {
-                    "generation_time_ms": generation_time,
-                    "tokens_per_second": tokens_per_second,
-                    "total_processing_time": generation_stats.get("total_time_ms", 0)
-                },
-                "memory": {
-                    "ram_mb": ram_usage,
-                    "gpu_mb": gpu_usage,
-                    "peak_memory": generation_stats.get("peak_memory_mb", 0)
-                },
-                "efficiency": {
-                    "memory_efficiency": memory_efficiency,
-                    "tokens_per_mb": tokens_per_second / total_memory if total_memory > 0 else 0,
-                    "optimization_level": self._determine_optimization_level(generation_stats)
+        """Calculate performance-related metrics from generation statistics. Thread-safe."""
+        with self._enrich_lock:
+            try:
+                # Extract basic metrics
+                ram_usage = generation_stats.get("ram_usage_mb", 0)
+                gpu_usage = generation_stats.get("gpu_usage_mb", 0)
+                tokens_per_second = generation_stats.get("tokens_per_second", 0)
+                generation_time = generation_stats.get("generation_time_ms", 0)
+                # Calculate derived metrics
+                total_memory = ram_usage + gpu_usage
+                memory_efficiency = tokens_per_second / total_memory if total_memory > 0 else 0
+                return {
+                    "timing": {
+                        "generation_time_ms": generation_time,
+                        "tokens_per_second": tokens_per_second,
+                        "total_processing_time": generation_stats.get("total_time_ms", 0)
+                    },
+                    "memory": {
+                        "ram_mb": ram_usage,
+                        "gpu_mb": gpu_usage,
+                        "peak_memory": generation_stats.get("peak_memory_mb", 0)
+                    },
+                    "efficiency": {
+                        "memory_efficiency": memory_efficiency,
+                        "tokens_per_mb": tokens_per_second / total_memory if total_memory > 0 else 0,
+                        "optimization_level": self._determine_optimization_level(generation_stats)
+                    }
                 }
-            }
-
-        except Exception as e:
-            self.logger.record_event(
-                event_type="performance_metrics_error",
-                message=f"Error calculating performance metrics: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "generation_stats": str(generation_stats)
-                }
-            )
-            return self._get_default_performance_metrics()
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="performance_metrics_error",
+                    message=f"Error calculating performance metrics: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "generation_stats": str(generation_stats)
+                    }
+                )
+                return self._get_default_performance_metrics()
 
     def _calculate_basic_structure_metrics(self, text: str) -> Dict[str, Any]:
-        """Calculate basic structural metrics for text."""
-        try:
-            # Split text into lines and sentences
-            lines = text.split('\n')
-            sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
-            
-            # Calculate length metrics
-            word_count = len(text.split())
-            char_count = len(text)
-            
-            # Calculate averages
-            avg_sentence_length = sum(len(s.split()) for s in sentences) / len(sentences) if sentences else 0
-            avg_line_length = sum(len(l.split()) for l in lines) / len(lines) if lines else 0
-            
-            # Analyze whitespace
-            blank_lines = sum(1 for l in lines if not l.strip())
-            indentation_levels = self._count_indentation_levels(lines)
-            
-            return {
-                "length_metrics": {
-                    "character_count": char_count,
-                    "word_count": word_count,
-                    "line_count": len(lines),
-                    "sentence_count": len(sentences),
-                    "avg_sentence_length": avg_sentence_length,
-                    "avg_line_length": avg_line_length
-                },
-                "whitespace_metrics": {
-                    "blank_line_count": blank_lines,
-                    "indentation_levels": indentation_levels,
-                    "whitespace_ratio": sum(len(l) - len(l.strip()) for l in lines) / char_count if char_count > 0 else 0
+        """Calculate basic structural metrics for text. Thread-safe."""
+        with self._enrich_lock:
+            try:
+                # Split text into lines and sentences
+                lines = text.split('\n')
+                sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+                # Calculate length metrics
+                word_count = len(text.split())
+                char_count = len(text)
+                # Calculate averages
+                avg_sentence_length = sum(len(s.split()) for s in sentences) / len(sentences) if sentences else 0
+                avg_line_length = sum(len(l.split()) for l in lines) / len(lines) if lines else 0
+                # Analyze whitespace
+                blank_lines = sum(1 for l in lines if not l.strip())
+                indentation_levels = self._count_indentation_levels(lines)
+                return {
+                    "length_metrics": {
+                        "character_count": char_count,
+                        "word_count": word_count,
+                        "line_count": len(lines),
+                        "sentence_count": len(sentences),
+                        "avg_sentence_length": avg_sentence_length,
+                        "avg_line_length": avg_line_length
+                    },
+                    "whitespace_metrics": {
+                        "blank_line_count": blank_lines,
+                        "indentation_levels": indentation_levels,
+                        "whitespace_ratio": sum(len(l) - len(l.strip()) for l in lines) / char_count if char_count > 0 else 0
+                    }
                 }
-            }
-
-        except Exception as e:
-            self.logger.record_event(
-                event_type="structure_metrics_error",
-                message=f"Error calculating basic structure metrics: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "text_length": len(text)
-                }
-            )
-            return self._get_default_structure_metrics()
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="structure_metrics_error",
+                    message=f"Error calculating basic structure metrics: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "text_length": len(text)
+                    }
+                )
+                return self._get_default_structure_metrics()
 
     def _count_indentation_levels(self, lines: List[str]) -> int:
         """Count the number of different indentation levels in the text."""
@@ -1452,40 +1451,39 @@ class MetadataProcessor:
         self, 
         conversation_context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Calculate contextual relationship metadata from conversation context."""
-        try:
-            if not conversation_context:
+        """Calculate contextual relationship metadata from conversation context. Thread-safe."""
+        with self._enrich_lock:
+            try:
+                if not conversation_context:
+                    return self._get_default_relationship_context()
+                return {
+                    "conversation_tracking": {
+                        "conversation_id": conversation_context.get("conversation_id"),
+                        "message_index": conversation_context.get("message_index", 0),
+                        "thread_depth": conversation_context.get("thread_depth", 1)
+                    },
+                    "reference_tracking": {
+                        "references": conversation_context.get("references", []),
+                        "parent_message_id": conversation_context.get("parent_id"),
+                        "root_message_id": conversation_context.get("root_id")
+                    },
+                    "temporal_tracking": {
+                        "timestamp": conversation_context.get("timestamp", time.time()),
+                        "elapsed_time": conversation_context.get("elapsed_time_ms", 0),
+                        "session_duration": conversation_context.get("session_duration_ms", 0)
+                    }
+                }
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="relationship_context_error",
+                    message=f"Error calculating relationship context: {str(e)}",
+                    level="error",
+                    additional_info={
+                        "error": str(e),
+                        "conversation_context": str(conversation_context)
+                    }
+                )
                 return self._get_default_relationship_context()
-            
-            return {
-                "conversation_tracking": {
-                    "conversation_id": conversation_context.get("conversation_id"),
-                    "message_index": conversation_context.get("message_index", 0),
-                    "thread_depth": conversation_context.get("thread_depth", 1)
-                },
-                "reference_tracking": {
-                    "references": conversation_context.get("references", []),
-                    "parent_message_id": conversation_context.get("parent_id"),
-                    "root_message_id": conversation_context.get("root_id")
-                },
-                "temporal_tracking": {
-                    "timestamp": conversation_context.get("timestamp", time.time()),
-                    "elapsed_time": conversation_context.get("elapsed_time_ms", 0),
-                    "session_duration": conversation_context.get("session_duration_ms", 0)
-                }
-            }
-
-        except Exception as e:
-            self.logger.record_event(
-                event_type="relationship_context_error",
-                message=f"Error calculating relationship context: {str(e)}",
-                level="error",
-                additional_info={
-                    "error": str(e),
-                    "conversation_context": str(conversation_context)
-                }
-            )
-            return self._get_default_relationship_context()
 
     # Default value helper methods
     def _get_default_token_stats(self) -> Dict[str, Any]:
@@ -1555,50 +1553,29 @@ class MetadataProcessor:
         source_metadata: Dict[str, Any],
         session_id: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Enrich and validate event metadata.
-        
-        This method:
-        1. Validates the event data and metadata against the schema
-        2. Adds common metadata fields
-        3. Enriches with global system state if available
-        4. Calculates and adds content metrics for text-based events
-        
-        Args:
-            origin: Source module identifier
-            event_type: Type of event being logged
-            event_data: Event-specific data
-            source_metadata: Metadata provided by the source
-            session_id: Optional session identifier
-            
-        Returns:
-            Tuple of (event_data, enriched_metadata)
-        """
-        # Validate against schema
-        is_valid = self._validate_against_schema(event_type, event_data, source_metadata)
-        if not is_valid:
-            self.logger.record_event(
-                event_type="metadata_validation_warning",
-                message="Event validation failed, proceeding with enrichment",
-                level="warning",
-                additional_info={
-                    "event_type": event_type,
-                    "origin": origin
-                }
-            )
-            
-        # Create enriched metadata
-        final_metadata = source_metadata.copy()
-        
-        # Add common fields
-        self._enrich_common_fields(final_metadata, origin, session_id)
-        
-        # Add global state
-        self._enrich_global_state(final_metadata)
-        
-        # Add content metrics
-        self._enrich_content_metrics(final_metadata, event_type, event_data)
-                
-        return event_data, final_metadata
+        """Enrich and validate event metadata. Thread-safe."""
+        with self._enrich_lock:
+            # Validate against schema
+            is_valid = self._validate_against_schema(event_type, event_data, source_metadata)
+            if not is_valid:
+                self.logger.record_event(
+                    event_type="metadata_validation_warning",
+                    message="Event validation failed, proceeding with enrichment",
+                    level="warning",
+                    additional_info={
+                        "event_type": event_type,
+                        "origin": origin
+                    }
+                )
+            # Create enriched metadata
+            final_metadata = source_metadata.copy()
+            # Add common fields
+            self._enrich_common_fields(final_metadata, origin, session_id)
+            # Add global state
+            self._enrich_global_state(final_metadata)
+            # Add content metrics
+            self._enrich_content_metrics(final_metadata, event_type, event_data)
+            return event_data, final_metadata
 
 MEMORY_TEMPLATES = {
     "user_interaction": (

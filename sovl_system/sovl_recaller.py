@@ -19,29 +19,44 @@ import threading
 class ShortTermMemory:
     """
     Handles in-memory, per-session short-term conversation history.
-    Message structure:
-        - 'role': str
-        - 'content': str
-        - 'timestamp': float
-        - 'vibe_profile': dict (optional, recommended)
+    Unified Message Structure:
+        - 'role': str (required, e.g., 'user')
+        - 'content': str (required, message text)
+        - 'timestamp_unix': float (required, Unix timestamp)
+        - 'session_id': str (required, e.g., 'test_session')
+        - 'user_id': str (required, e.g., 'user1')
+        - 'origin': str (required, e.g., 'dialogue_manager')
+        - 'vibe_profile': dict (optional, from VibeProfile)
+        - 'message_index': int (optional, message order)
+        - 'parent_message_id': str (optional, parent ID)
+        - 'root_message_id': str (optional, root ID)
+        - '_timestamp_unix': float (internal, for pruning)
+        - 'embedding': np.ndarray (optional, excluded from logging)
     """
-    def __init__(self, max_short_term: int = 50, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, expiry_seconds: Optional[int] = None, logging_level: str = "info"):
-        # Use config_manager for max_short_term, expiry_seconds, and logging_level if provided
+    def __init__(self, max_short_term: int = 50, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, expiry_seconds: Optional[int] = None, logging_level: str = "info", default_origin: str = "dialogue_manager", default_session_id: str = "default", default_user_id: str = "default"):
+        # Use config_manager for max_short_term, expiry_seconds, logging_level, and defaults if provided
         if config_manager is not None:
             try:
                 max_short_term = config_manager.get("memory.max_short_term", max_short_term)
                 expiry_seconds = config_manager.get("memory.short_term_expiry_seconds", expiry_seconds)
                 logging_level = config_manager.get("memory.memory_logging_level", logging_level)
+                default_origin = config_manager.get("memory.default_origin", default_origin)
+                default_session_id = config_manager.get("memory.default_session_id", default_session_id)
+                default_user_id = config_manager.get("memory.default_user_id", default_user_id)
             except Exception as e:
                 if logger:
                     logger.log_error(f"ShortTermMemory failed to get config values: {e}", error_type="ShortTermMemoryError")
         self.max_short_term = max_short_term
         self.expiry_seconds = expiry_seconds
-        self.memory = []  # List of dicts, each with a timestamp
+        self.memory = []  # List of dicts, each with unified message structure
         self._read_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self.logger = logger or Logger.get_instance()
         self.logging_level = logging_level
+        self.default_origin = default_origin
+        self.default_session_id = default_session_id
+        self.default_user_id = default_user_id
+        self._message_index_counter = 0  # Automatic message index counter
         try:
             self.logger.record_event(
                 event_type="short_term_memory_init",
@@ -51,7 +66,64 @@ class ShortTermMemory:
         except Exception as e:
             self.logger.log_error(f"ShortTermMemory.__init__ failed: {e}", error_type="ShortTermMemoryError")
 
+    def add_message(self, role: str, content: str, vibe_profile: Optional[VibeProfile] = None, session_id: Optional[str] = None, user_id: Optional[str] = None, origin: Optional[str] = None, message_index: Optional[int] = None, parent_message_id: Optional[str] = None, root_message_id: Optional[str] = None, embedding: Optional[Any] = None):
+        """
+        Add a general context message to short-term memory. Optionally includes a vibe_profile.
+        Automatically assigns a unique, incrementing message_index if not provided.
+        """
+        now = time.time()
+        msg = {
+            "role": role,
+            "content": content,
+            "timestamp_unix": now,
+            "session_id": session_id if session_id is not None else self.default_session_id,
+            "user_id": user_id if user_id is not None else self.default_user_id,
+            "origin": origin if origin is not None else self.default_origin,
+            "_timestamp_unix": now,
+        }
+        # Automatic message_index assignment
+        if message_index is not None:
+            msg["message_index"] = message_index
+            self._message_index_counter = max(self._message_index_counter, message_index + 1)
+        else:
+            msg["message_index"] = self._message_index_counter
+            self._message_index_counter += 1
+        if vibe_profile is not None:
+            msg["vibe_profile"] = vibe_profile.to_dict() if hasattr(vibe_profile, "to_dict") else vibe_profile
+        if parent_message_id is not None:
+            msg["parent_message_id"] = parent_message_id
+        if root_message_id is not None:
+            msg["root_message_id"] = root_message_id
+        if embedding is not None:
+            msg["embedding"] = embedding
+        self.add(msg)
+
     def add(self, msg: Dict[str, Any]):
+        required_fields = ["role", "content", "timestamp_unix", "session_id", "user_id", "origin"]
+        # Fill missing required fields with defaults and log warning
+        for field in required_fields:
+            if field not in msg or msg[field] is None:
+                default_val = getattr(self, f"default_{field}", None)
+                msg[field] = default_val if default_val is not None else "unknown"
+                self.logger.record_event(
+                    event_type="short_term_memory_missing_field",
+                    message=f"Missing required field '{field}', using default.",
+                    level="warning",
+                    additional_info={"field": field, "default": msg[field]}
+                )
+        # Remove legacy timestamp if present
+        if "timestamp" in msg:
+            del msg["timestamp"]
+        # Always set timestamp_unix and _timestamp_unix
+        now = time.time()
+        msg["timestamp_unix"] = msg.get("timestamp_unix", now)
+        msg["_timestamp_unix"] = msg["timestamp_unix"]
+        # Automatic message_index assignment if not present
+        if "message_index" not in msg or msg["message_index"] is None:
+            msg["message_index"] = self._message_index_counter
+            self._message_index_counter += 1
+        else:
+            self._message_index_counter = max(self._message_index_counter, msg["message_index"] + 1)
         start_wait = time.perf_counter()
         with self._write_lock:
             wait_time = time.perf_counter() - start_wait
@@ -62,7 +134,6 @@ class ShortTermMemory:
             )
             start_hold = time.perf_counter()
             msg_with_time = dict(msg)
-            msg_with_time["_timestamp"] = time.time()
             self.memory.append(msg_with_time)
             # Prune by count
             if len(self.memory) > self.max_short_term:
@@ -77,7 +148,7 @@ class ShortTermMemory:
             if self.expiry_seconds is not None:
                 now = time.time()
                 before = len(self.memory)
-                self.memory = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
+                self.memory = [m for m in self.memory if now - m["_timestamp_unix"] <= self.expiry_seconds]
                 after = len(self.memory)
                 if before != after:
                     self.logger.record_event(
@@ -105,28 +176,22 @@ class ShortTermMemory:
                 level="debug"
             )
 
-    def get(self) -> List[Dict[str, Any]]:
-        start_wait = time.perf_counter()
+    def get(self, exclude_fields: Optional[list] = None) -> List[Dict[str, Any]]:
+        """
+        Return messages, excluding internal fields by default (['_timestamp_unix', 'embedding']).
+        """
+        if exclude_fields is None:
+            exclude_fields = ["_timestamp_unix", "embedding"]
         with self._read_lock:
-            wait_time = time.perf_counter() - start_wait
-            self.logger.record_event(
-                event_type="short_term_memory_read_lock_acquired",
-                message=f"Read lock acquired in {wait_time:.6f} seconds.",
-                level="debug"
-            )
             now = time.time()
             if self.expiry_seconds is not None:
-                filtered = [m for m in self.memory if now - m["_timestamp"] <= self.expiry_seconds]
+                filtered = [m for m in self.memory if now - m["_timestamp_unix"] <= self.expiry_seconds]
             else:
                 filtered = list(self.memory)
-            self.logger.record_event(
-                event_type="short_term_memory_get",
-                message="ShortTermMemory context retrieved.",
-                level=self.logging_level,
-                additional_info={"size": len(filtered)}
-            )
-            # Remove _timestamp before returning
-            result = [{k: v for k, v in m.items() if k != "_timestamp"} for m in filtered]
+            result = [
+                {k: v for k, v in m.items() if k not in exclude_fields}
+                for m in filtered
+            ]
         self.logger.record_event(
             event_type="short_term_memory_get",
             message="ShortTermMemory context retrieved.",
@@ -157,9 +222,13 @@ class ShortTermMemory:
             return list(self.memory)
 
     def from_dict(self, memory_list):
-        """Restore short-term memory from saved state."""
+        """
+        Load memory from a list of messages. Sets message_index counter to one more than the highest present.
+        """
         with self._write_lock:
             self.memory = list(memory_list)
+            max_index = max((m.get("message_index", -1) for m in self.memory), default=-1)
+            self._message_index_counter = max_index + 1
 
     def remove_last(self):
         """Remove the most recently added message (for transactional rollback)."""
@@ -173,18 +242,10 @@ class ShortTermMemory:
                     additional_info={"removed": removed}
                 )
 
-    def add_with_vibe(self, role: str, content: str, vibe_profile: Optional[VibeProfile] = None, **kwargs):
-        msg = {
-            "role": role,
-            "content": content,
-            "timestamp": time.time(),
-            **kwargs
-        }
-        if vibe_profile is not None:
-            msg["vibe_profile"] = vibe_profile.to_dict()
-        self.add(msg)
-
-    def get_recent_vibes(self, n: int = 10) -> List[VibeProfile]:
+    def get_recent_vibe_profiles(self, n: int = 10) -> List[VibeProfile]:
+        """
+        Return the most recent n VibeProfiles from short-term memory (if present in messages).
+        """
         messages = self.get()[-n:]
         vibes = []
         for msg in messages:
@@ -273,18 +334,18 @@ class LongTermMemory:
                     role TEXT,
                     content TEXT,
                     embedding BLOB,
-                    timestamp REAL,
+                    timestamp_unix REAL,
                     user_id TEXT,
                     session_id TEXT
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_id ON conversations (session_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON conversations (user_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON conversations (timestamp)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp_unix ON conversations (timestamp_unix)")
             self._db_conn.commit()
             cursor.execute("PRAGMA table_info(conversations)")
             columns = {row[1] for row in cursor.fetchall()}
-            required = {"id", "role", "content", "embedding", "timestamp", "user_id", "session_id"}
+            required = {"id", "role", "content", "embedding", "timestamp_unix", "user_id", "session_id"}
             if not required.issubset(columns):
                 raise ConfigurationError(f"Conversations table schema invalid. Missing columns: {required - columns}")
             self.logger.record_event(
@@ -301,7 +362,7 @@ class LongTermMemory:
         try:
             with self._read_lock:
                 cursor = self._db_conn.cursor()
-                cursor.execute("SELECT id, embedding, timestamp FROM conversations WHERE session_id = ? ORDER BY id ASC", (self.session_id,))
+                cursor.execute("SELECT id, embedding, timestamp_unix FROM conversations WHERE session_id = ? ORDER BY id ASC", (self.session_id,))
                 rows = cursor.fetchall()
                 if rows:
                     embeddings = np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
@@ -331,14 +392,14 @@ class LongTermMemory:
         try:
             cursor = self._db_conn.cursor()
             cursor.execute(
-                "INSERT INTO conversations (role, content, embedding, timestamp, user_id, session_id) VALUES (?, ?, ?, ?, ?, ?)",
-                (msg["role"], msg["content"], msg["embedding"].tobytes(), msg["timestamp"], msg["user_id"], self.session_id)
+                "INSERT INTO conversations (role, content, embedding, timestamp_unix, user_id, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (msg["role"], msg["content"], msg["embedding"].tobytes(), msg["timestamp_unix"], msg["user_id"], self.session_id)
             )
             msg_id = cursor.lastrowid
             self._db_conn.commit()
             with self._write_lock:
                 self.message_ids.append(msg_id)
-                self.message_timestamps[msg_id] = msg["timestamp"]
+                self.message_timestamps[msg_id] = msg["timestamp_unix"]
                 # Throttle FAISS index rebuilds
                 self._faiss_pending_changes += 1
                 if self._faiss_pending_changes >= self._faiss_rebuild_threshold:
@@ -355,7 +416,7 @@ class LongTermMemory:
             self.logger.log_error(f"LongTermMemory.add failed: {e}", error_type="LongTermMemoryError")
             raise
 
-    def query(self, query_embedding: np.ndarray, user_id: Optional[str] = None, top_k: int = 5, min_timestamp: Optional[float] = None, short_term_memory: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    def query(self, query_embedding: np.ndarray, user_id: Optional[str] = None, top_k: int = 5, min_timestamp_unix: Optional[float] = None, short_term_memory: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         start_time = time.perf_counter()
         with self._read_lock:
             if len(self.message_ids) == 0:
@@ -366,8 +427,8 @@ class LongTermMemory:
                 )
                 return []
             filtered_ids = self.message_ids
-            if min_timestamp is not None:
-                filtered_ids = [mid for mid in self.message_ids if self.message_timestamps.get(mid, 0) >= min_timestamp]
+            if min_timestamp_unix is not None:
+                filtered_ids = [mid for mid in self.message_ids if self.message_timestamps.get(mid, 0) >= min_timestamp_unix]
             if not filtered_ids:
                 self.logger.record_event(
                     event_type="long_term_memory_query_empty",
@@ -376,7 +437,7 @@ class LongTermMemory:
                 )
                 return []
             k = min(top_k, len(filtered_ids))
-            if min_timestamp is not None:
+            if min_timestamp_unix is not None:
                 cursor = self._db_conn.cursor()
                 placeholders = ','.join('?' for _ in filtered_ids)
                 cursor.execute(f"SELECT id, embedding FROM conversations WHERE id IN ({placeholders})", filtered_ids)
@@ -399,7 +460,7 @@ class LongTermMemory:
             if user_id:
                 where += " AND user_id = ?"
                 params.append(user_id)
-            cursor.execute(f"SELECT id, role, content, embedding, timestamp, user_id FROM conversations {where}", params)
+            cursor.execute(f"SELECT id, role, content, embedding, timestamp_unix, user_id FROM conversations {where}", params)
             rows = cursor.fetchall()
             id_to_row = {row[0]: row for row in rows}
             results = [
@@ -407,7 +468,7 @@ class LongTermMemory:
                     "id": id_to_row[rid][0],
                     "role": id_to_row[rid][1],
                     "content": id_to_row[rid][2],
-                    "timestamp": id_to_row[rid][4],
+                    "timestamp_unix": id_to_row[rid][4],
                     "user_id": id_to_row[rid][5],
                     "session_id": self.session_id
                 }
@@ -581,7 +642,7 @@ class DialogueContextManager:
             and embedding.dtype == np.float32
         )
 
-    def add_message(self, role: str, content: str, user_id: str = "default", vibe_profile: Optional[VibeProfile] = None):
+    def add_message(self, role: str, content: str, user_id: str = "default", vibe_profile: Optional[VibeProfile] = None, origin: Optional[str] = None, message_index: Optional[int] = None, parent_message_id: Optional[str] = None, root_message_id: Optional[str] = None):
         """
         Transactionally add a message to both short-term and long-term memory.
         If long-term add fails, rollback short-term add.
@@ -621,17 +682,30 @@ class DialogueContextManager:
                 if self.logger:
                     self.logger.log_error("Invalid embedding generated. Skipping message.", error_type="EmbeddingError")
                 return
-            timestamp = time.time()
+            timestamp_unix = time.time()
             msg = {
                 "role": role,
                 "content": content,
                 "embedding": embedding,
-                "timestamp": timestamp,
+                "timestamp_unix": timestamp_unix,
                 "user_id": user_id,
-                "session_id": self.session_id
+                "session_id": self.session_id,
+                "origin": origin if origin is not None else "dialogue_manager",
             }
-            # Use add_with_vibe to store the vibe_profile if provided
-            self.short_term.add_with_vibe(role, content, vibe_profile, embedding=embedding, timestamp=timestamp, user_id=user_id, session_id=self.session_id)
+            # Use add_message to store the vibe_profile and threading info if provided
+            self.short_term.add_message(
+                role=role,
+                content=content,
+                vibe_profile=vibe_profile,
+                session_id=self.session_id,
+                user_id=user_id,
+                origin=origin if origin is not None else "dialogue_manager",
+                message_index=message_index,
+                parent_message_id=parent_message_id,
+                root_message_id=root_message_id,
+                embedding=embedding,
+                # timestamp_unix is handled internally by add_message
+            )
             try:
                 self.long_term.add(msg)
             except Exception as e:
@@ -647,9 +721,15 @@ class DialogueContextManager:
             if self.error_manager:
                 self.error_manager.record_error(e, error_type="MemoryConsistencyError")
 
-    def get_short_term_context(self) -> List[Dict[str, Any]]:
+    def get_short_term_context(self, include_embeddings: bool = False) -> List[Dict[str, Any]]:
+        """
+        Return short-term memory context. If include_embeddings is True, includes embedding field.
+        """
         try:
-            return self.short_term.get()
+            if include_embeddings:
+                return self.short_term.get(exclude_fields=["_timestamp_unix"])  # Only exclude internal timestamp
+            else:
+                return self.short_term.get()  # Exclude embedding and internal timestamp by default
         except Exception as e:
             if self.logger:
                 self.logger.log_error(f"DialogueContextManager.get_short_term_context failed: {e}", error_type="DialogueContextManagerError")
@@ -660,7 +740,7 @@ class DialogueContextManager:
     def get_long_term_context(self, user_id: Optional[str] = None, query_embedding: Optional[np.ndarray] = None, top_k: int = 5) -> List[Dict[str, Any]]:
         try:
             if query_embedding is None:
-                stm = self.short_term.get()
+                stm = self.short_term.get(exclude_fields=[])
                 if stm:
                     query_embedding = stm[-1]["embedding"]
                 else:
@@ -694,7 +774,7 @@ class DialogueContextManager:
     def forward(self, input_message: str, role: str = "user", user_id: str = "default") -> np.ndarray:
         try:
             self.add_message(role, input_message, user_id)
-            stm = self.short_term.get()
+            stm = self.short_term.get(exclude_fields=[])
             # Only use messages with valid embeddings
             valid_stm = [msg for msg in stm if self._validate_embedding(msg.get("embedding"))]
             short_term_emb = np.stack([msg["embedding"] for msg in valid_stm]) if valid_stm else np.empty((0, self.embedding_dim), dtype=np.float32)
