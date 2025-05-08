@@ -82,20 +82,20 @@ PROMPT_LIBRARY = {
     },
     'engagement': {
         'very_low': (
-            "Do not include questions. "
+            "Do not include questions or follow-ups. "
             "Respond only to the user's input."
         ),
         'low': (
-            "Include one simple question only if the user's input contains a question or clear invitation."
+            "Respond only to the user's input. Rarely include simple questions if the user's input suggests a natural follow-up."
         ),
         'normal': (
-            "Include one concise, relevant question in 80% of responses, aligned with the user's topic."
+            "Be open to including a concise, relevant follow-up question in responses where that makes sense, aligned with the user's topic."
         ),
         'high': (
-            "Include one or two in-depth questions per response, exploring the user's topic further."
+            "Be open to including one or two in-depth questions in responses where that makes sense, to explore the user's topic further."
         ),
         'very_high': (
-            "Include two or more open-ended, in-depth questions per response, encouraging detailed discussion."
+            "Be open to including more open-ended, in-depth questions in responses where that makes sense, encouraging detailed discussion."
         )
     },
     'bond': {
@@ -123,7 +123,6 @@ PROMPT_LIBRARY = {
 }
 
 EDGE_CASE_PROMPT_LIBRARY = {
-    # (energy_label, flow_label, resonance_label, engagement_label, bond_label): dict with template and fields
     ("very_high", "very_low", None, None, None): {
         "combo_prompt": (
             "- **Tone:** Use engaging, upbeat words with a positive tone.\n"
