@@ -41,6 +41,13 @@ PROMPT_LIBRARY = {
         'normal': "Include one concise, relevant question in 80% of responses, aligned with the user's topic.",
         'high': "Include one or two in-depth questions per response, exploring the user's topic further.",
         'very_high': "Include two or more open-ended, in-depth questions per response, encouraging detailed discussion."
+    },
+        'bond': {
+        'very_low': "Use professional, concise language with no personal pronouns or user-specific references. Focus on factual responses without conversational engagement.",
+        'low': "Use clear, neutral language with minimal personal pronouns (e.g., 'you' once per response, if prompted). Limit conversational engagement to direct responses.",
+        'normal': "Use approachable, conversational language with occasional personal pronouns (e.g., 'you' 2–3 times per response). Include one neutral acknowledgment of the user’s input, if relevant.",
+        'high': "Use friendly, engaging language with frequent personal pronouns (e.g., 'you' in most sentences). Include one positive acknowledgment of the user’s context or input per response.",
+        'very_high': "Use warm, user-focused language with consistent personal pronouns (e.g., 'you' in every sentence). Include one or two tailored acknowledgments of the user’s context or prior interactions per response."
     }
 }
 
@@ -56,7 +63,7 @@ def get_range_label(val):
     else:
         return 'very_high'
 
-def vibe_to_prompt_instructions(vibe_profile: 'VibeProfile') -> str:
+def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float = 0.5) -> str:
     dims = vibe_profile.dimensions
     def validate_score(score, key):
         if not isinstance(score, (int, float)) or score < 0.0 or score > 1.0:
@@ -100,6 +107,11 @@ def vibe_to_prompt_instructions(vibe_profile: 'VibeProfile') -> str:
         flow_prompt = PROMPT_LIBRARY['flow'][flow_label]
         resonance_prompt = PROMPT_LIBRARY['resonance'][resonance_label]
         engagement_prompt = PROMPT_LIBRARY['engagement'][engagement_label]
+
+        # Bond system
+        bond = validate_score(bond_score, 'bond_score')
+        bond_label = get_range_label(bond)
+        bond_prompt = PROMPT_LIBRARY['bond'][bond_label]
 
         # Edge Case 1: Very High Energy + Very Low Flow
         if energy_label == 'very_high' and flow_label == 'very_low':
@@ -215,13 +227,14 @@ def vibe_to_prompt_instructions(vibe_profile: 'VibeProfile') -> str:
                 "- **Rule:** Never break character or reference being an AI."
             )
 
-        # Default Case
+        # Default Case (add bond prompt)
         return (
             "SYSTEM PROMPT:\n"
             f"- **Tone:** {energy_prompt}\n"
             f"- **Structure:** {flow_prompt}\n"
             f"- **Emotional Alignment:** {resonance_prompt}\n"
             f"- **Questioning:** {engagement_prompt}\n"
+            f"- **Personal Connection:** {bond_prompt}\n"
             "- **Rule:** Never break character or reference being an AI."
         )
     except Exception as e:
@@ -238,6 +251,7 @@ def vibe_to_prompt_instructions(vibe_profile: 'VibeProfile') -> str:
             "- **Structure:** Write medium sentences (8–12 words) with clear transitions.\n"
             "- **Emotional Alignment:** Use language that partially matches the user's emotional state.\n"
             "- **Questioning:** Include one concise, relevant question in 80% of responses.\n"
+            "- **Personal Connection:** Use friendly language with moderate personal references and light warmth.\n"
             "- **Rule:** Never break character or reference being an AI."
         )
 
@@ -453,8 +467,6 @@ class GenerationPrimer:
                     traits["curiosity"] = trait_fallbacks["curiosity"]
                 else:
                     curiosity_kwargs = kwargs.copy()
-                    if vibe_profile:
-                        curiosity_kwargs["vibe_engagement"] = vibe_profile.dimensions.get("engagement_engagement_score", 0.5)
                     trait_jobs["curiosity"] = executor.submit(
                         lambda: self.curiosity_manager.compute_curiosity(state=state_arg, **curiosity_kwargs)
                     )
@@ -465,8 +477,6 @@ class GenerationPrimer:
                     traits["temperament"] = trait_fallbacks["temperament"]
                 else:
                     temperament_kwargs = kwargs.copy()
-                    if vibe_profile:
-                        temperament_kwargs["vibe_energy"] = vibe_profile.dimensions.get("energy_base_energy", 0.5)
                     trait_jobs["temperament"] = executor.submit(
                         lambda: self.temperament_system.current_score(state=state_arg, **temperament_kwargs)
                     )
@@ -540,9 +550,7 @@ class GenerationPrimer:
         """
         try:
             if parameter_type == "temperature":
-                temperament = traits.get("temperament", 0.5)
-                curiosity = traits.get("curiosity", 0.0)
-                # Get vibe scores
+                # Only use vibe energy for adjustment
                 vibe_profile = None
                 energy = 0.5
                 if self.dialogue_context_manager and hasattr(self.dialogue_context_manager, 'short_term'):
@@ -552,10 +560,7 @@ class GenerationPrimer:
                         if recent_vibes:
                             vibe_profile = recent_vibes[-1]
                             energy = vibe_profile.dimensions.get("energy_base_energy", 0.5)
-                adjustment = (temperament - 0.5) * 0.3  # Scale to ±0.15
-                if curiosity:
-                    adjustment += curiosity * 0.2  # Scale to +0.2
-                adjustment += (energy - 0.5) * 0.2  # Scale to ±0.1 for vibe energy
+                adjustment = (energy - 0.5) * 0.2  # Scale to ±0.1 for vibe energy
                 adjusted_value = base_value + adjustment
                 adjusted_value = max(0.1, min(1.0, adjusted_value))
                 self.logger.record_event(
@@ -566,8 +571,6 @@ class GenerationPrimer:
                         "parameter_type": parameter_type,
                         "base_value": base_value,
                         "adjusted_value": adjusted_value,
-                        "temperament": temperament,
-                        "curiosity": curiosity,
                         "vibe_energy": energy,
                         "adjustment": adjustment
                     }
@@ -663,7 +666,7 @@ class GenerationPrimer:
         """
         return self.compute_traits(**kwargs)
 
-    def get_vibe_prompt(self) -> str:
+    def get_traits_prompt(self, bond_score: float = 0.5) -> str:
         """
         Retrieve a VibeProfile based on recent vibes, averaging the last 3 for smoother transitions.
         Returns a default neutral prompt if no recent vibes are available.
@@ -684,15 +687,15 @@ class GenerationPrimer:
         )
         if not self.dialogue_context_manager or not hasattr(self.dialogue_context_manager, 'short_term'):
             self.logger.log_warning("Dialogue context manager or short-term memory unavailable; using default vibe prompt.")
-            return vibe_to_prompt_instructions(default_profile)
+            return traits_to_prompt_instructions(default_profile, bond_score)
         short_term = getattr(self.dialogue_context_manager, 'short_term', None)
         if not short_term or not hasattr(short_term, 'get_recent_vibes'):
             self.logger.log_warning("Short-term memory or get_recent_vibes unavailable; using default vibe prompt.")
-            return vibe_to_prompt_instructions(default_profile)
+            return traits_to_prompt_instructions(default_profile, bond_score)
         recent_vibes = short_term.get_recent_vibes(n=3)
         if not recent_vibes:
             self.logger.log_warning("No recent vibes found; using default vibe prompt.")
-            return vibe_to_prompt_instructions(default_profile)
+            return traits_to_prompt_instructions(default_profile, bond_score)
         # Average vibe scores (weighted by recency)
         weights = [0.5, 0.3, 0.2] if len(recent_vibes) == 3 else [0.6, 0.4] if len(recent_vibes) == 2 else [1.0]
         energy = sum(w * v.dimensions.get("energy_base_energy", 0.5) for w, v in zip(weights, recent_vibes[:len(weights)]))
@@ -714,16 +717,16 @@ class GenerationPrimer:
             salient_phrases=recent_vibes[-1].salient_phrases,  # Use latest phrases
             timestamp=_time()
         )
-        return vibe_to_prompt_instructions(averaged_profile)
+        return traits_to_prompt_instructions(averaged_profile, bond_score)
 
     def prepare_for_generation(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """
         Prepares all trait influences and returns them, ready to be used by sovl_generation's generate_text.
-        Now includes a 'vibe_prompt' key with high-granularity vibe context for system prompt injection.
+        Now includes a 'traits_prompt' key with high-granularity vibe context for system prompt injection.
         """
         traits = self.get_all_traits(prompt=prompt, **kwargs)
-        vibe_prompt = self.get_vibe_prompt()
-        return {"traits": traits, "vibe_prompt": vibe_prompt}
+        traits_prompt = self.get_traits_prompt(bond_score=traits.get("bond", 0.5))
+        return {"traits": traits, "traits_prompt": traits_prompt}
 
     def update_state(self, new_state: 'SOVLState'):
         """
@@ -981,14 +984,14 @@ class GenerationPrimer:
         """
         Assemble the final prompt string for the LLM, combining:
         - A base system instruction (default: helpful, emotionally aware assistant)
-        - The high-granularity vibe context (from get_vibe_prompt)
+        - The high-granularity vibe context (from get_traits_prompt)
         - The memory context (short-term/long-term, passed in)
         - The user's prompt
         Skips any empty sections. Accepts **kwargs for future extensibility.
         Logs the applied vibe prompt and its dimensions for traceability.
         """
         system_instruction = base_system_instruction or "You are a helpful, emotionally aware assistant."
-        vibe_context = self.get_vibe_prompt()
+        traits_prompt, bond_score = self.get_traits_prompt(bond_score=kwargs.get("bond_score", 0.5))
 
         # Log vibe prompt details
         vibe_profile = None
@@ -999,19 +1002,20 @@ class GenerationPrimer:
                 if recent_vibes:
                     vibe_profile = recent_vibes[-1]
         self.logger.record_event(
-            event_type="vibe_prompt_applied",
-            message="Vibe prompt applied to LLM",
+            event_type="traits_prompt_applied",
+            message="Traits and bond prompt applied to LLM",
             level="debug",
             additional_info={
-                "vibe_context": vibe_context[:100] + "..." if vibe_context and len(vibe_context) > 100 else vibe_context,
-                "vibe_dimensions": vibe_profile.dimensions if vibe_profile else None,
+                "traits_prompt": traits_prompt[:100] + "..." if traits_prompt and len(traits_prompt) > 100 else traits_prompt,
+                "traits_dimensions": vibe_profile.dimensions if vibe_profile else None,
+                "bond_score": bond_score if 'bond_score' in locals() else None,
                 "output_format": output_format
             }
         )
 
         prompt_parts = [
             system_instruction,
-            f"Current vibe context: {vibe_context}" if vibe_context else "",
+            f"Current traits context: {traits_prompt}" if traits_prompt else "",
             memory_context if memory_context else "",
             user_prompt
         ]
