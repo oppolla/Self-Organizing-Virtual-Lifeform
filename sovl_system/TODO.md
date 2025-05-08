@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. Look into the feedback process of all modules that go into sovl_primer. The new main driver of persona is now through vibes.
+1. Look into the feedback process of all modules that go into sovl_primer. The new main driver of persona is now through vibes. The scribe system may need refinement of metadata to maximize info for training and feedback loop
 2. Trace the vibe logic to make sure it is sound
 3. 
 4. System should know unix time at initialization or always
