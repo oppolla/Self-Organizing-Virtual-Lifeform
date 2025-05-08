@@ -31,7 +31,7 @@ from sovl_volition import AutonomyManager
 
 # Model and processing
 from sovl_manager import ModelManager
-from sovl_processor import SOVLProcessor, MetadataProcessor
+from sovl_processor import MetadataProcessor
 from sovl_generation import GenerationManager
 
 # Memory and state management
