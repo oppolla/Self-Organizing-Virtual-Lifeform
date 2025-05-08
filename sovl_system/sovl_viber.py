@@ -22,7 +22,7 @@ class VibeProfile:
     intensity: float
     confidence: float
     salient_phrases: List[Tuple[str, Dict[str, float]]]  # e.g., [("really great", {"joy": 0.9})]
-    timestamp: float
+    timestamp_unix: float
 
     def to_dict(self) -> dict:
         return {
@@ -31,7 +31,7 @@ class VibeProfile:
             "intensity": self.intensity,
             "confidence": self.confidence,
             "salient_phrases": self.salient_phrases,
-            "timestamp": self.timestamp,
+            "timestamp_unix": self.timestamp_unix,
         }
 
     @staticmethod
@@ -42,7 +42,7 @@ class VibeProfile:
             intensity=d["intensity"],
             confidence=d["confidence"],
             salient_phrases=d["salient_phrases"],
-            timestamp=d["timestamp"],
+            timestamp_unix=d["timestamp_unix"],
         )
 
 class VibeSculptor:
@@ -106,7 +106,7 @@ class VibeSculptor:
             intensity=0.5,
             confidence=0.1,
             salient_phrases=[],
-            timestamp=time.time()
+            timestamp_unix=time.time()
         )
 
     def _compute_energy(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
@@ -387,7 +387,7 @@ class VibeSculptor:
                 intensity=intensity,
                 confidence=confidence,
                 salient_phrases=salient_phrases,
-                timestamp=now
+                timestamp_unix=now
             )
             self.vibes.append(current_profile)
 
