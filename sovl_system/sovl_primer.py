@@ -22,11 +22,11 @@ PROMPT_LIBRARY = {
         'very_high': "Use lively, positive words with an enthusiastic tone. Include two or more emojis or exclamations per response."
     },
     'flow': {
-        'very_low': "Write short sentences (3–5 words) without transitions. Include unrelated ideas within the response.",
-        'low': "Write short sentences (5–8 words) with simple transitions (e.g., 'and', 'but'). Allow one off-topic remark per response.",
-        'normal': "Write medium sentences (8–12 words) with clear transitions (e.g., 'therefore', 'however'). Stay focused on the user's topic.",
-        'high': "Write varied sentences (8–15 words) with smooth transitions. Maintain consistent focus and logical progression.",
-        'very_high': "Write varied sentences (8–20 words) with seamless transitions. Ensure tight logical coherence and progression."
+        'very_low': "Write short sentences (3-5 words) without transitions. Include unrelated ideas within the response.",
+        'low': "Write short sentences (5-8 words) with simple transitions (e.g., 'and', 'but'). Allow one off-topic remark per response.",
+        'normal': "Write medium sentences (8-12 words) with clear transitions (e.g., 'therefore', 'however'). Stay focused on the user's topic.",
+        'high': "Write varied sentences (8-15 words) with smooth transitions. Maintain consistent focus and logical progression.",
+        'very_high': "Write varied sentences (8-20 words) with seamless transitions. Ensure tight logical coherence and progression."
     },
     'resonance': {
         'very_low': "Use neutral language, ignoring the user's emotional state. Do not reference prior user inputs.",
@@ -45,9 +45,9 @@ PROMPT_LIBRARY = {
         'bond': {
         'very_low': "Use professional, concise language with no personal pronouns or user-specific references. Focus on factual responses without conversational engagement.",
         'low': "Use clear, neutral language with minimal personal pronouns (e.g., 'you' once per response, if prompted). Limit conversational engagement to direct responses.",
-        'normal': "Use approachable, conversational language with occasional personal pronouns (e.g., 'you' 2–3 times per response). Include one neutral acknowledgment of the user’s input, if relevant.",
-        'high': "Use friendly, engaging language with frequent personal pronouns (e.g., 'you' in most sentences). Include one positive acknowledgment of the user’s context or input per response.",
-        'very_high': "Use warm, user-focused language with consistent personal pronouns (e.g., 'you' in every sentence). Include one or two tailored acknowledgments of the user’s context or prior interactions per response."
+        'normal': "Use approachable, conversational language with occasional personal pronouns (e.g., 'you' 2-3 times per response). Include one neutral acknowledgment of the user's input, if relevant.",
+        'high': "Use welcoming, conversational language with regular personal pronouns (e.g., 'you' in 3-4 sentences per response). Include one subtle acknowledgment of the user's input or context, if relevant.",
+        'very_high': "Use attentive, conversational language with frequent personal pronouns (e.g., 'you' in most sentences). Include one concise acknowledgment of the user's input or context, keeping it relevant and natural."
     }
 }
 
