@@ -147,6 +147,7 @@ graph TD
     sovl_swarm --> sovl_engram
     sovl_scribe -- creates --> chronicle
     chronicle -- used by --> sovl_trainer
+    sovl_recaller --> sovl_generation
 
     %% 6. Action and Output
     sovl_volition <--> sovl_main
@@ -166,7 +167,8 @@ graph TD
     sovl_state --> sovl_interfaces
     sovl_conductor --> sovl_interfaces
 
-     %% 7. State
+     %% 8. State
     sovl_state --> sovl_data
     sovl_main --> sovl_state
     sovl_bonder --> sovl_state
+
