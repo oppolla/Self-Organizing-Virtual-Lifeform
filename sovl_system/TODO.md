@@ -4,7 +4,7 @@
 
 1. Look into the feedback process of all modules that go into sovl_primer. The new main driver of persona is now through vibes. The scribe system may need refinement of metadata to maximize info for training and feedback loop
 2. Trace the vibe logic to make sure it is sound
-3. 
+3. cobfirm that the format from shorttermmemory is compatible with metadataprocessor. maybe extra step to prep the data
 4. System should know unix time at initialization or always
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. Disable that startup data sovl_seed part. Save it for Soulprint
