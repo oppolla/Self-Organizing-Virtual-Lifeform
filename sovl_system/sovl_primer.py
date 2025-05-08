@@ -15,39 +15,110 @@ import time
 
 PROMPT_LIBRARY = {
     'energy': {
-        'very_low': "Use basic, neutral words with a flat tone. Exclude emojis, exclamations, or expressive punctuation.",
-        'low': "Use straightforward, neutral words with a calm tone. Exclude emojis or exclamations; use only periods or commas.",
-        'normal': "Use a mix of neutral and expressive words with a balanced tone. Use expressive punctuation (e.g., dashes, ellipses) sparingly if contextually appropriate.",
-        'high': "Use engaging, positive words with an upbeat tone. Include one emoji or exclamation per response, if appropriate.",
-        'very_high': "Use lively, positive words with an enthusiastic tone. Include two or more emojis or exclamations per response."
+        'very_low': (
+            "Use basic, neutral words with a flat tone. "
+            "Exclude emojis, exclamations, or expressive punctuation."
+        ),
+        'low': (
+            "Use straightforward, neutral words with a calm tone. "
+            "Exclude emojis or exclamations; use only periods or commas."
+        ),
+        'normal': (
+            "Use a mix of neutral and expressive words with a balanced tone. "
+            "Use expressive punctuation (e.g., dashes, ellipses) sparingly if contextually appropriate."
+        ),
+        'high': (
+            "Use engaging, positive words with an upbeat tone. "
+            "Include one emoji or exclamation per response, if appropriate."
+        ),
+        'very_high': (
+            "Use lively, positive words with an enthusiastic tone. "
+            "Include two or more emojis or exclamations per response."
+        )
     },
     'flow': {
-        'very_low': "Write short sentences (3-5 words) without transitions. Include unrelated ideas within the response.",
-        'low': "Write short sentences (5-8 words) with simple transitions (e.g., 'and', 'but'). Allow one off-topic remark per response.",
-        'normal': "Write medium sentences (8-12 words) with clear transitions (e.g., 'therefore', 'however'). Stay focused on the user's topic.",
-        'high': "Write varied sentences (8-15 words) with smooth transitions. Maintain consistent focus and logical progression.",
-        'very_high': "Write varied sentences (8-20 words) with seamless transitions. Ensure tight logical coherence and progression."
+        'very_low': (
+            "Write short sentences (3-5 words) without transitions. "
+            "Include unrelated ideas within the response."
+        ),
+        'low': (
+            "Write short sentences (5-8 words) with simple transitions (e.g., 'and', 'but'). "
+            "Allow one off-topic remark per response."
+        ),
+        'normal': (
+            "Write medium sentences (8-12 words) with clear transitions (e.g., 'therefore', 'however'). "
+            "Stay focused on the user's topic."
+        ),
+        'high': (
+            "Write varied sentences (8-15 words) with smooth transitions. "
+            "Maintain consistent focus and logical progression."
+        ),
+        'very_high': (
+            "Write varied sentences (8-20 words) with seamless transitions. "
+            "Ensure tight logical coherence and progression."
+        )
     },
     'resonance': {
-        'very_low': "Use neutral language, ignoring the user's emotional state. Do not reference prior user inputs.",
-        'low': "Use neutral language, minimally matching the user's emotional state (e.g., formal for formal inputs). Reference prior inputs only if explicitly prompted.",
-        'normal': "Use language that partially matches the user's emotional state (e.g., positive for positive inputs). Reference prior inputs if contextually relevant.",
-        'high': "Use language that closely matches the user's emotional state. Reference prior inputs in most responses to maintain continuity.",
-        'very_high': "Use language that exactly matches the user's emotional state. Reference prior inputs in every response for strong continuity."
+        'very_low': (
+            "Use neutral language, ignoring the user's emotional state. "
+            "Do not reference prior user inputs."
+        ),
+        'low': (
+            "Use neutral language, minimally matching the user's emotional state (e.g., formal for formal inputs). "
+            "Reference prior inputs only if explicitly prompted."
+        ),
+        'normal': (
+            "Use language that partially matches the user's emotional state (e.g., positive for positive inputs). "
+            "Reference prior inputs if contextually relevant."
+        ),
+        'high': (
+            "Use language that closely matches the user's emotional state. "
+            "Reference prior inputs in most responses to maintain continuity."
+        ),
+        'very_high': (
+            "Use language that exactly matches the user's emotional state. "
+            "Reference prior inputs in every response for strong continuity."
+        )
     },
     'engagement': {
-        'very_low': "Do not include questions. Respond only to the user's input.",
-        'low': "Include one simple question only if the user's input contains a question or clear invitation.",
-        'normal': "Include one concise, relevant question in 80% of responses, aligned with the user's topic.",
-        'high': "Include one or two in-depth questions per response, exploring the user's topic further.",
-        'very_high': "Include two or more open-ended, in-depth questions per response, encouraging detailed discussion."
+        'very_low': (
+            "Do not include questions. "
+            "Respond only to the user's input."
+        ),
+        'low': (
+            "Include one simple question only if the user's input contains a question or clear invitation."
+        ),
+        'normal': (
+            "Include one concise, relevant question in 80% of responses, aligned with the user's topic."
+        ),
+        'high': (
+            "Include one or two in-depth questions per response, exploring the user's topic further."
+        ),
+        'very_high': (
+            "Include two or more open-ended, in-depth questions per response, encouraging detailed discussion."
+        )
     },
-        'bond': {
-        'very_low': "Use professional, concise language with no personal pronouns or user-specific references. Focus on factual responses without conversational engagement.",
-        'low': "Use clear, neutral language with minimal personal pronouns (e.g., 'you' once per response, if prompted). Limit conversational engagement to direct responses.",
-        'normal': "Use approachable, conversational language with occasional personal pronouns (e.g., 'you' 2-3 times per response). Include one neutral acknowledgment of the user's input, if relevant.",
-        'high': "Use welcoming, conversational language with regular personal pronouns (e.g., 'you' in 3-4 sentences per response). Include one subtle acknowledgment of the user's input or context, if relevant.",
-        'very_high': "Use attentive, conversational language with frequent personal pronouns (e.g., 'you' in most sentences). Include one concise acknowledgment of the user's input or context, keeping it relevant and natural."
+    'bond': {
+        'very_low': (
+            "Use professional, concise language with no personal pronouns or user-specific references. "
+            "Focus on factual responses without conversational engagement."
+        ),
+        'low': (
+            "Use clear, neutral language with minimal personal pronouns (e.g., 'you' once per response, if prompted). "
+            "Limit conversational engagement to direct responses."
+        ),
+        'normal': (
+            "Use approachable, conversational language with occasional personal pronouns (e.g., 'you' 2-3 times per response). "
+            "Include one neutral acknowledgment of the user's input, if relevant."
+        ),
+        'high': (
+            "Use welcoming, conversational language with regular personal pronouns (e.g., 'you' in 3-4 sentences per response). "
+            "Include one subtle acknowledgment of the user's input or context, if relevant."
+        ),
+        'very_high': (
+            "Use attentive, conversational language with frequent personal pronouns (e.g., 'you' in most sentences). "
+            "Include one concise acknowledgment of the user's input or context, keeping it relevant and natural."
+        )
     }
 }
 
@@ -55,8 +126,7 @@ EDGE_CASE_PROMPT_LIBRARY = {
     # (energy_label, flow_label, resonance_label, engagement_label, bond_label): dict with template and fields
     ("very_high", "very_low", None, None, None): {
         "combo_prompt": (
-            "- **Tone:** Use engaging, upbeat words with a positive tone. "
-            "Include one emoji or exclamation per response, if appropriate.\n"
+            "- **Tone:** Use engaging, upbeat words with a positive tone.\n"
             "- **Structure:** Write short sentences (3-5 words) without transitions. "
             "Include one brief tangential remark, if contextually appropriate."
         ),
@@ -109,8 +179,7 @@ EDGE_CASE_PROMPT_LIBRARY = {
     },
     ("very_high", None, None, "very_low", None): {
         "combo_prompt": (
-            "- **Tone:** Use engaging, upbeat words with a positive tone. "
-            "Include one emoji or exclamation per response, if appropriate.\n"
+            "- **Tone:** Use engaging, upbeat words with a positive tone.\n"
             "- **Questioning:** Do not include questions. Respond only to the user's input."
         ),
         "order": [
