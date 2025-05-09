@@ -42,6 +42,7 @@ graph TD
         sovl_confidence[Confidence]
         sovl_bonder[Bonder]
         sovl_meditator[Meditator]
+        sovl_viber[Viber]
     end
 
     %% Hippocampus
@@ -172,3 +173,9 @@ graph TD
     sovl_main --> sovl_state
     sovl_bonder --> sovl_state
 
+     %% 9. Generation
+    sovl_primer --> sovl_generation
+    sovl_curiosity --> sovl_viber
+    sovl_temperament --> sovl_viber
+    sovl_bonder --> sovl_primer
+    sovl_viber --> sovl_ primer
