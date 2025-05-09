@@ -3,9 +3,9 @@
 ## General Taks:
 
 1. Look into the feedback process of all modules that go into sovl_primer. The new main driver of persona is now through vibes. The scribe system may need refinement of metadata to maximize info for training and feedback loop
-2. 
+2. add new modes to mediatate so each tine it triggers, its a random type like delving deep into a topic from recent convo. like going home and delving studying something your friend told you about. 
 3. 
-4. System should know unix time at initialization or always
+4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. Disable that startup data sovl_seed part. Save it for Soulprint
 7. Consider an "offline" mode for maintainence
