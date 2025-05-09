@@ -3,7 +3,7 @@
 ## General Taks:
 
 1. Look into the feedback process of all modules that go into sovl_primer. The new main driver of persona is now through vibes. The scribe system may need refinement of metadata to maximize info for training and feedback loop
-2. Deterministic vibe calculation need a mechanism to avoid gaming and a reset or decay mechanism
+2. 
 3. Add scribe_journal entry count to sovl_monitor
 4. System should know unix time at initialization or always
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
