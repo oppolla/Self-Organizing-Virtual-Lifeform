@@ -11,6 +11,7 @@ from sovl_state import StateManager, UserProfileState
 from sovl_error import ErrorManager
 from sovl_queue import check_scribe_queue_health
 from sovl_bonder import BondCalculator, BondModulator  # Add import
+from sovl_io import count_jsonl_entries
 import time
 import traceback
 import curses
@@ -82,8 +83,17 @@ class SystemMonitor:
         
         self.user_profile_state = user_profile_state
         
+    def get_metrics(self) -> dict:
+        """
+        Return a dictionary of all current system metrics for UI/CLI/monitoring use.
+        This is the standard interface for retrieving system health and status.
+        """
+        return self._collect_metrics()
+
     def _collect_metrics(self) -> Dict[str, Any]:
-        """Collect system metrics."""
+        """
+        Collect system metrics. For internal use only; use get_metrics() for external access.
+        """
         try:
             # Get memory stats from managers
             ram_stats = self.ram_manager.check_memory_health()
@@ -92,13 +102,17 @@ class SystemMonitor:
             # Get queue health status
             queue_status, queue_fill_ratio = check_scribe_queue_health()
             
+            # Get scribe journal entry count
+            scribe_journal_entry_count = self.get_scribe_journal_entry_count()
+            
             metrics = {
                 "ram_stats": ram_stats,
                 "gpu_stats": gpu_stats,
                 "queue_stats": {
                     "status": queue_status,
                     "fill_ratio": queue_fill_ratio
-                }
+                },
+                "scribe_journal_entry_count": scribe_journal_entry_count
             }
             
             # Check for concerning metrics using configured thresholds
@@ -135,7 +149,8 @@ class SystemMonitor:
             return {
                 "ram_stats": {"status": "error"},
                 "gpu_stats": {"status": "error"},
-                "queue_stats": {"status": "error"}
+                "queue_stats": {"status": "error"},
+                "scribe_journal_entry_count": None
             }
 
     def record_bond_score(self, user_id, bond_score):
@@ -247,6 +262,11 @@ class SystemMonitor:
             return f"Dreaming {percent}% {dots:<3}"
         else:
             return f"Dreaming {dots:<3}"
+
+    def get_scribe_journal_entry_count(self):
+        """Return the number of entries in the scribe journal JSONL file."""
+        path = self._config_manager.get('scribed_config.output_path', 'scribe/sovl_scribe.jsonl')
+        return count_jsonl_entries(path)
 
 class MemoryMonitor:
     """Monitors system memory usage."""

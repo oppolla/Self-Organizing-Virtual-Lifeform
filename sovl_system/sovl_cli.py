@@ -27,6 +27,7 @@ import shutil
 from sovl_dreamer import Dreamer
 import importlib
 import pkgutil
+import argparse
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -1109,7 +1110,7 @@ scaffold models for debugging and development purposes.
 
     def _print_monitor_metrics(self):
         try:
-            metrics = self.system_monitor._collect_metrics()
+            metrics = self.system_monitor.get_metrics()
             section_order = ["System", "Memory", "GPU", "Scaffold", "Traits"]
             printed_sections = set()
             print_section_header("System Monitor Metrics:")
@@ -1136,6 +1137,9 @@ scaffold models for debugging and development purposes.
                 else:
                     print(f"  {stats}")
                 print()
+            # Display scribe journal entry count clearly
+            if 'scribe_journal_entry_count' in metrics:
+                print(f"Scribe Journal Entries: {metrics['scribe_journal_entry_count']}")
             scaffold_provider = getattr(self.sovl_system, 'scaffold_provider', None)
             scaffold_metrics = None
             if scaffold_provider and hasattr(scaffold_provider, 'get_scaffold_metrics'):
@@ -3344,4 +3348,24 @@ def cleanup_resources(sovl_system: SOVLSystem):
         )
 
 if __name__ == "__main__":
-    run_cli()
+    parser = argparse.ArgumentParser(description="SOVL CLI")
+    parser.add_argument("--monitor", "-m", action="store_true", help="Show system monitor and exit")
+    args = parser.parse_args()
+
+    if args.monitor:
+        # Minimal system init for monitor
+        try:
+            config_manager = ConfigManager("sovl_config.json")
+            sovl_system = SOVLSystem(config_manager)
+            sovl_system.wake_up()
+            handler = CommandHandler(sovl_system)
+            if handler.system_monitor:
+                handler.do_monitor("once")
+            else:
+                print_error("System monitor not available.")
+        except Exception as e:
+            print_error(f"Monitor mode failed: {e}")
+            sys.exit(1)
+        sys.exit(0)
+    else:
+        run_cli()

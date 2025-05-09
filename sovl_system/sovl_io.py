@@ -1052,3 +1052,20 @@ def prune_scribe_journal(trained_memories: set, scribe_path: str, backup: bool =
     # Write back pruned file
     with open(scribe_path, "w", encoding="utf-8") as f:
         f.writelines(pruned_lines)
+
+def count_jsonl_entries(file_path: str) -> int:
+    """
+    Count the number of entries (lines) in a JSONL file. Supports .jsonl and .jsonl.gz files.
+    Returns 0 if the file does not exist.
+    """
+    import gzip
+    import os
+    if not os.path.exists(file_path):
+        return 0
+    open_func = gzip.open if file_path.endswith('.gz') else open
+    mode = 'rt' if file_path.endswith('.gz') else 'r'
+    try:
+        with open_func(file_path, mode, encoding='utf-8') as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
