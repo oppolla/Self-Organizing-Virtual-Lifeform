@@ -525,11 +525,13 @@ class SOVLState(StateBase, DictSerializable):
         super().__init__(config_manager, logger)
         self.device = device
         self._initialize_state()
-        # Replace legacy ConfidenceHistory with a simple deque
         from collections import deque
         self.confidence_history = deque(maxlen=self.config_manager.get("controls_config.confidence_history_maxlen", 100))
         self.data_stats = DataStats()
         self.state_version = 0  # Version for optimistic locking and concurrency control
+        # --- Conversation context for per-conversation interaction data ---
+        self.conversation_context: Dict[str, Dict[str, Any]] = {}
+        self._context_lock = Lock()
 
     def _initialize_state(self) -> None:
         """Initialize state components with safe defaults."""
@@ -567,6 +569,9 @@ class SOVLState(StateBase, DictSerializable):
             self.mode: str = "online"  # online, gestating, offline, pending_gestation, dreaming
             self.gestation_progress: float = 0.0  # 0.0 to 1.0
             self.dreaming_progress: float = 0.0  # 0.0 to 1.0
+            # --- Initialize conversation_context ---
+            self.conversation_context = {}
+            self._context_lock = Lock()
             
             self.log_event(
                 "state_initialized",
@@ -725,6 +730,17 @@ class SOVLState(StateBase, DictSerializable):
                 result["dreaming_progress"] = self.dreaming_progress
                 if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
                     result['short_term_memory'] = self.short_term_memory.to_dict()
+                # --- Serialize conversation_context ---
+                from collections import deque
+                result["conversation_context"] = {}
+                for cid, ctx in self.conversation_context.items():
+                    result["conversation_context"][cid] = {
+                        "last_interaction_time": ctx.get("last_interaction_time", 0.0),
+                        "inputs": list(ctx.get("inputs", deque())),
+                        "word_set_cache": [list(ws) for ws in ctx.get("word_set_cache", deque())],
+                        # Optionally add 'repetition_history' if present
+                        **({"repetition_history": ctx["repetition_history"]} if "repetition_history" in ctx else {})
+                    }
                 return result
             except Exception as e:
                 self.log_error(f"Failed to convert state to dict: {str(e)}")
@@ -770,6 +786,17 @@ class SOVLState(StateBase, DictSerializable):
             self.mode = data.get("mode", "online")
             self.gestation_progress = float(data.get("gestation_progress", 0.0))
             self.dreaming_progress = float(data.get("dreaming_progress", 0.0))
+            # --- Deserialize conversation_context ---
+            self.conversation_context = {}
+            cc_data = data.get("conversation_context", {})
+            for cid, ctx in cc_data.items():
+                self.conversation_context[cid] = {
+                    "last_interaction_time": ctx.get("last_interaction_time", 0.0),
+                    "inputs": deque(ctx.get("inputs", []), maxlen=10),
+                    "word_set_cache": deque([set(ws) for ws in ctx.get("word_set_cache", [])], maxlen=10),
+                    # Optionally add 'repetition_history' if present
+                    **({"repetition_history": ctx["repetition_history"]} if "repetition_history" in ctx else {})
+                }
             self._validate_state()
         except Exception as e:
             self.log_error(f"Failed to populate state from dict: {str(e)}")
@@ -903,6 +930,37 @@ class SOVLState(StateBase, DictSerializable):
         if hasattr(self, "short_term_memory"):
             result.extend([msg["embedding"] for msg in self.short_term_memory if "embedding" in msg])
         return result
+
+    @synchronized("_context_lock")
+    def get_conversation_context(self, conversation_id: str) -> Dict[str, Any]:
+        """Get or initialize the context for a conversation."""
+        from collections import deque
+        if conversation_id not in self.conversation_context:
+            self.conversation_context[conversation_id] = {
+                "last_interaction_time": time.time(),
+                "inputs": deque(maxlen=10),
+                "word_set_cache": deque(maxlen=10),
+                "consecutive_repetitions": 0,
+                "extreme_streak": 0
+            }
+        ctx = self.conversation_context[conversation_id]
+        # Ensure all required fields exist (for robustness if context was partially loaded)
+        if "inputs" not in ctx or not isinstance(ctx["inputs"], deque):
+            ctx["inputs"] = deque(maxlen=10)
+        if "word_set_cache" not in ctx or not isinstance(ctx["word_set_cache"], deque):
+            ctx["word_set_cache"] = deque(maxlen=10)
+        if "last_interaction_time" not in ctx:
+            ctx["last_interaction_time"] = time.time()
+        if "consecutive_repetitions" not in ctx:
+            ctx["consecutive_repetitions"] = 0
+        if "extreme_streak" not in ctx:
+            ctx["extreme_streak"] = 0
+        return ctx
+
+    @synchronized("_context_lock")
+    def update_conversation_context(self, conversation_id: str, data: Dict[str, Any]) -> None:
+        """Update the context for a conversation with new data (thread-safe)."""
+        self.conversation_context[conversation_id] = data
 
 class StateManager(StateAccessor):
     """Manages the global state with thread-safe operations.

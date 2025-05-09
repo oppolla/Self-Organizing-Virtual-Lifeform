@@ -80,6 +80,12 @@ class VibeSculptor:
                 "resonance": vibe_config.get("resonance_weight", 0.25),
                 "engagement": vibe_config.get("engagement_weight", 0.25)
             }
+            self.repetition_threshold = vibe_config.get("repetition_threshold", 0.8)
+            self.repetition_factor_min = vibe_config.get("repetition_factor_min", 0.2)
+            self.repetition_factor_max = vibe_config.get("repetition_factor_max", 0.8)
+            self.extremity_weight = vibe_config.get("extremity_weight", 0.5)
+            self.balance_force = vibe_config.get("balance_force", 0.1)
+            self.coupling_factor = vibe_config.get("coupling_factor", 0.05)
             if abs(sum(self.weights.values()) - 1.0) > 1e-6:
                 raise ValueError("Vibe weights must sum to 1.0")
             self.logger.record_event(
@@ -111,7 +117,7 @@ class VibeSculptor:
             timestamp_unix=time.time()
         )
 
-    def _compute_energy(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    def _compute_energy(self, text: str, metadata: Optional[Dict[str, Any]] = None, repetition_factor: float = 1.0, decay: float = 1.0, perturbation_scale: float = 0.0, seed: Optional[int] = None) -> Dict[str, float]:
         """Measure lexical diversity, sentiment, and expressiveness as conversational energy."""
         words = re.findall(r'\w+', text.lower())
         base_energy = 0.5
@@ -151,14 +157,22 @@ class VibeSculptor:
             # Adjust sentiment with metadata
             sentiment = 0.7 * sentiment + 0.3 * (content_metrics.get("avg_word_length", 5) / 10)
 
+        # Apply repetition factor
+        sentiment = 0.5 + repetition_factor * (sentiment - 0.5)
+        expressiveness = 0.5 + repetition_factor * (expressiveness - 0.5)
         energy_score = (
             0.4 * sentiment +
             0.3 * expressiveness +
             0.2 * diversity +
             0.1 * confidence_adj
         )
-        energy_score = max(0.0, min(1.0, energy_score))
-
+        energy_score = max(0.0, min(1.0, energy_score)) * decay
+        # Apply perturbation
+        if seed is not None and perturbation_scale > 0:
+            import random
+            random.seed(seed)
+            perturbation = random.uniform(-perturbation_scale, perturbation_scale)
+            energy_score = max(0.0, min(1.0, energy_score + perturbation))
         return {
             "base_energy": energy_score,
             "sentiment": sentiment,
@@ -167,7 +181,7 @@ class VibeSculptor:
             "confidence_adj": confidence_adj
         }
 
-    def _compute_flow(self, text: str, profile: Dict, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    def _compute_flow(self, text: str, profile: Dict, metadata: Optional[Dict[str, Any]] = None, repetition_factor: float = 1.0, decay: float = 1.0, perturbation_scale: float = 0.0, seed: Optional[int] = None) -> Dict[str, float]:
         """Measure syntactic complexity and interaction rhythm as conversational flow."""
         sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
         syntactic_complexity = 0.5
@@ -199,35 +213,41 @@ class VibeSculptor:
                 0.3 * (1.0 - min(structure_metrics.get("blank_line_count", 0) / 10.0, 1.0))
             )
 
+        # Apply repetition factor
+        rhythm = 0.5 + repetition_factor * (rhythm - 0.5)
         flow_score = (
             0.5 * syntactic_complexity +
             0.3 * rhythm +
             0.2 * organization
         )
-        flow_score = max(0.0, min(1.0, flow_score))
-
+        flow_score = max(0.0, min(1.0, flow_score)) * decay
+        # Apply perturbation
+        if seed is not None and perturbation_scale > 0:
+            import random
+            random.seed(seed)
+            perturbation = random.uniform(-perturbation_scale, perturbation_scale)
+            flow_score = max(0.0, min(1.0, flow_score + perturbation))
         return {
             "syntactic_complexity": syntactic_complexity,
-            "rhythm_score": rhythm,
+            "rhythm_score": flow_score,
             "organization": organization
         }
 
-    def _compute_resonance(self, text: str, state: SOVLState, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    def _compute_resonance(self, text: str, state: SOVLState, metadata: Optional[Dict[str, Any]] = None, repetition_factor: float = 1.0, decay: float = 1.0, perturbation_scale: float = 0.0, seed: Optional[int] = None) -> Dict[str, float]:
         """Measure topic consistency and temperament alignment as vibe resonance. Requires temperament_system."""
         topic_consistency = 0.5
         temperament_alignment = 0.5
         coherence = 0.5
 
-        profile = state.user_profile_state.get(state.history.conversation_id, {})
-        inputs = profile.get("inputs", deque(maxlen=10))
-        # Optimization: cache precomputed word sets for each input
-        word_set_cache = profile.setdefault("word_set_cache", deque(maxlen=10))
+        # Use conversation_context instead of user_profile_state
+        conversation_id = getattr(state.history, 'conversation_id', "unknown_conv_id")
+        context_data = state.get_conversation_context(conversation_id)
+        inputs = context_data.get("inputs", deque(maxlen=10))
+        word_set_cache = context_data.get("word_set_cache", deque(maxlen=10))
         # Ensure cache is up to date with inputs
         while len(word_set_cache) < len(inputs):
-            # Add missing sets for new inputs
             word_set_cache.append(set(re.findall(r'\w+', inputs[len(word_set_cache)].lower())))
         while len(word_set_cache) > len(inputs):
-            # Remove extra sets if inputs shrank
             word_set_cache.popleft()
 
         text_words = set(re.findall(r'\w+', text.lower()))
@@ -259,7 +279,7 @@ class VibeSculptor:
             topic_consistency = 0.7 * topic_consistency + 0.3 * token_stats.get("pattern_stats", {}).get("bigram_diversity", 0.5)
 
             # Temperament alignment
-            user_energy = self._compute_energy(text, metadata).get("base_energy", 0.5)
+            user_energy = self._compute_energy(text, metadata, repetition_factor, decay, perturbation_scale, seed).get("base_energy", 0.5)
             temperament_score = self.temperament_system.get_temperament_score()
             temperament_alignment = 1.0 - abs(temperament_score - user_energy)
 
@@ -274,15 +294,23 @@ class VibeSculptor:
             0.3 * temperament_alignment +
             0.3 * coherence
         )
-        resonance_score = max(0.0, min(1.0, resonance_score))
-
+        resonance_score = max(0.0, min(1.0, resonance_score)) * decay
+        # Apply perturbation
+        if seed is not None and perturbation_scale > 0:
+            import random
+            random.seed(seed)
+            perturbation = random.uniform(-perturbation_scale, perturbation_scale)
+            resonance_score = max(0.0, min(1.0, resonance_score + perturbation))
+        # Persist updated word_set_cache to conversation_context
+        context_data["word_set_cache"] = word_set_cache
+        state.update_conversation_context(conversation_id, context_data)
         return {
-            "topic_consistency": topic_consistency,
+            "topic_consistency": resonance_score,
             "temperament_alignment": temperament_alignment,
             "coherence": coherence
         }
 
-    def _compute_engagement(self, text: str, engagement_manager: Optional[CuriosityManager], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    def _compute_engagement(self, text: str, engagement_manager: Optional[CuriosityManager], metadata: Optional[Dict[str, Any]] = None, repetition_factor: float = 1.0, decay: float = 1.0, perturbation_scale: float = 0.0, seed: Optional[int] = None) -> Dict[str, float]:
         """Measure engagement with engagement-driven questions and novelty."""
         question_intensity = 0.5
         novelty = 0.5
@@ -308,13 +336,20 @@ class VibeSculptor:
             # Diversity
             diversity = token_stats.get("pattern_stats", {}).get("trigram_diversity", 0.5)
 
+        # Apply repetition factor
+        question_intensity = 0.5 + repetition_factor * (question_intensity - 0.5)
         engagement_score = (
             0.4 * question_intensity +
             0.3 * novelty +
             0.3 * diversity
         )
-        engagement_score = max(0.0, min(1.0, engagement_score))
-
+        engagement_score = max(0.0, min(1.0, engagement_score)) * decay
+        # Apply perturbation
+        if seed is not None and perturbation_scale > 0:
+            import random
+            random.seed(seed)
+            perturbation = random.uniform(-perturbation_scale, perturbation_scale)
+            engagement_score = max(0.0, min(1.0, engagement_score + perturbation))
         return {
             "question_intensity": question_intensity,
             "novelty": novelty,
@@ -344,6 +379,7 @@ class VibeSculptor:
         short_term_memory: Optional[List[Dict[str, Any]]] = None
     ) -> VibeProfile:
         """Sculpt a vibe score that resonates with user and system energy."""
+        import random
         try:
             # Validate turn_metadata structure before proceeding
             if not self._validate_turn_metadata(turn_metadata):
@@ -359,48 +395,83 @@ class VibeSculptor:
                 raise ValueError("user_input must be a string")
             
             conversation_id = getattr(state.history, 'conversation_id', "unknown_conv_id")
-            profile_data = state.user_profile_state.get(conversation_id, {})
+            context_data = state.get_conversation_context(conversation_id)
             now = time.time()
-            last_interaction_time = profile_data.get("last_interaction", now)
+            last_interaction_time = context_data.get("last_interaction_time", now)
             if last_interaction_time > now:
                 last_interaction_time = now
-            decay = self.decay_factor ** ((now - last_interaction_time) / 86400.0)
-
-            # Adjust vibe calculation based on short-term memory context
+            time_delta = now - last_interaction_time
+            current_words = set(re.findall(r'\w+', user_input.lower()))
+            word_set_cache = context_data.get("word_set_cache", deque(maxlen=10))
+            inputs = context_data.get("inputs", deque(maxlen=10))
+            similarities = []
+            for ws in list(word_set_cache)[-3:]:
+                if ws:
+                    sim = len(current_words & ws) / len(current_words | ws) if (current_words and ws) else 0.0
+                    similarities.append(sim)
+            max_similarity = max(similarities) if similarities else 0.0
+            consecutive_repetitions = context_data.get("consecutive_repetitions", 0)
+            if max_similarity > self.repetition_threshold:
+                consecutive_repetitions += 1
+            else:
+                consecutive_repetitions = 0
+            repetition_factor = self.repetition_factor_max
+            if max_similarity > self.repetition_threshold:
+                repetition_factor = self.repetition_factor_max - (
+                    (self.repetition_factor_max - self.repetition_factor_min) * (max_similarity - self.repetition_threshold) / (1.0 - self.repetition_threshold)
+                ) * (0.9 ** consecutive_repetitions)
+                repetition_factor = max(self.repetition_factor_min, min(self.repetition_factor_max, repetition_factor))
+            prev_score = self.vibes[-1].overall_score if self.vibes else self.default_vibe_score
+            extremity = abs(prev_score - 0.5)
+            reset_time = 12 * 60  # 12 minutes in seconds
+            raw = min(time_delta / reset_time, 1.0)
+            def smoothstep(x):
+                return 3 * x**2 - 2 * x**3
+            time_weight = smoothstep(raw)
+            decay = self.decay_factor * (1 + self.extremity_weight * extremity * time_weight)
             if short_term_memory:
                 recent_vibes = [entry.get('vibe_profile', {}).get('overall_score', 0.5) for entry in short_term_memory if 'vibe_profile' in entry]
                 if recent_vibes:
                     average_recent_vibe = sum(recent_vibes) / len(recent_vibes)
-                    decay *= (1 + (average_recent_vibe - 0.5))  # Example adjustment
-
-            energy_components = self._compute_energy(user_input, turn_metadata)
-            flow_components = self._compute_flow(user_input, profile_data, turn_metadata)
-            resonance_components = self._compute_resonance(user_input, state, turn_metadata)
-            engagement_components = self._compute_engagement(user_input, engagement_manager, turn_metadata)
-
+                    decay *= (1 + (average_recent_vibe - 0.5))
+            if max_similarity > self.repetition_threshold:
+                decay *= (1 + 0.2 * (1 - repetition_factor))
+            def apply_repetition(val):
+                return 0.5 + repetition_factor * (val - 0.5)
+            energy_components = self._compute_energy(user_input, turn_metadata, repetition_factor, decay, 0.0, None)
+            flow_components = self._compute_flow(user_input, context_data, turn_metadata, repetition_factor, decay, 0.0, None)
+            resonance_components = self._compute_resonance(user_input, state, turn_metadata, repetition_factor, decay, 0.0, None)
+            engagement_components = self._compute_engagement(user_input, engagement_manager, turn_metadata, repetition_factor, decay, 0.0, None)
+            energy_components["base_energy"] = apply_repetition(energy_components["base_energy"])
+            if "sentiment" in energy_components:
+                energy_components["sentiment"] = apply_repetition(energy_components["sentiment"])
+            flow_components["rhythm_score"] = apply_repetition(flow_components["rhythm_score"])
+            resonance_components["topic_consistency"] = apply_repetition(resonance_components["topic_consistency"])
+            engagement_components["engagement_score"] = apply_repetition(engagement_components["engagement_score"])
+            energy_components["base_energy"] *= (1 - self.coupling_factor * max(0, flow_components["rhythm_score"] - 0.5))
+            flow_components["rhythm_score"] *= (1 - self.coupling_factor * max(0, resonance_components["topic_consistency"] - 0.5))
+            resonance_components["topic_consistency"] *= (1 - self.coupling_factor * max(0, engagement_components["engagement_score"] - 0.5))
+            engagement_components["engagement_score"] *= (1 - self.coupling_factor * max(0, energy_components["base_energy"] - 0.5))
             decayed_energy = energy_components["base_energy"] * decay
             decayed_flow = flow_components["rhythm_score"] * decay
             decayed_resonance = resonance_components["topic_consistency"] * decay
             decayed_engagement = engagement_components["engagement_score"] * decay
-            
-            overall_score = (
-                self.weights["energy"] * decayed_energy +
-                self.weights["flow"] * decayed_flow +
-                self.weights["resonance"] * decayed_resonance +
-                self.weights["engagement"] * decayed_engagement
-            )
-            overall_score = max(self.min_vibe, min(self.max_vibe, overall_score))
-
-            all_dimensions = {
-                **{f"energy_{k}": v for k, v in energy_components.items()},
-                **{f"flow_{k}": v for k, v in flow_components.items()},
-                **{f"resonance_{k}": v for k, v in resonance_components.items()},
-                **{f"engagement_{k}": v for k, v in engagement_components.items()}
-            }
-
-            intensity = (decayed_energy + decayed_flow + decayed_resonance + decayed_engagement) / 4.0
-            intensity = max(0.0, min(1.0, intensity))
-
+            extreme_streak = context_data.get("extreme_streak", 0)
+            if time_delta > 12 * 60:
+                extreme_streak = 0
+            elif prev_score > 0.8 or prev_score < 0.2:
+                extreme_streak += 1
+            else:
+                extreme_streak = 0
+            balance_adjust = 0.0
+            if extreme_streak >= 3:
+                balance_adjust = self.balance_force * (0.5 - prev_score)
+                self.logger.record_event(
+                    event_type="vibe_balancing",
+                    message="Homeostatic balancing applied",
+                    level="info",
+                    additional_info={"prev_score": prev_score, "balance_adjust": balance_adjust, "extreme_streak": extreme_streak}
+                )
             confidence = 0.6
             if turn_metadata:
                 confidence += 0.1
@@ -411,8 +482,39 @@ class VibeSculptor:
                 elif word_count > 50:
                     confidence += 0.1
             confidence = max(0.1, min(1.0, confidence))
-
-            # Add salient phrases (simplified)
+            perturbation_scale = 0.05 * (1 - confidence)
+            seed = (int(now * 1000) ^ (hash(user_input[:50]) & 0xFFFFFFFF)) & 0xFFFFFFFF
+            random.seed(seed)
+            perturbation = random.uniform(-perturbation_scale, perturbation_scale)
+            overall_score = (
+                self.weights["energy"] * decayed_energy +
+                self.weights["flow"] * decayed_flow +
+                self.weights["resonance"] * decayed_resonance +
+                self.weights["engagement"] * decayed_engagement
+            ) + balance_adjust + perturbation
+            overall_score = max(self.min_vibe, min(self.max_vibe, overall_score))
+            if max_similarity > self.repetition_threshold:
+                self.logger.record_event(
+                    event_type="repetition_detected",
+                    message="Repetition detected in input",
+                    level="info",
+                    additional_info={"similarity": max_similarity, "consecutive_repetitions": consecutive_repetitions, "repetition_factor": repetition_factor}
+                )
+            inputs.append(user_input)
+            word_set_cache.append(current_words)
+            context_data["last_interaction_time"] = now
+            context_data["inputs"] = inputs
+            context_data["word_set_cache"] = word_set_cache
+            context_data["consecutive_repetitions"] = consecutive_repetitions
+            context_data["extreme_streak"] = extreme_streak
+            all_dimensions = {
+                **{f"energy_{k}": v for k, v in energy_components.items()},
+                **{f"flow_{k}": v for k, v in flow_components.items()},
+                **{f"resonance_{k}": v for k, v in resonance_components.items()},
+                **{f"engagement_{k}": v for k, v in engagement_components.items()}
+            }
+            intensity = (decayed_energy + decayed_flow + decayed_resonance + decayed_engagement) / 4.0
+            intensity = max(0.0, min(1.0, intensity))
             salient_phrases = []
             if turn_metadata and turn_metadata.get("prompt_metrics", {}).get("token_stats", {}):
                 words = re.findall(r'\w+', user_input.lower())
@@ -420,7 +522,6 @@ class VibeSculptor:
                 for word in words:
                     if word in pos_words:
                         salient_phrases.append((word, {"joy": 0.9}))
-
             current_profile = VibeProfile(
                 overall_score=overall_score,
                 dimensions=all_dimensions,
@@ -430,25 +531,27 @@ class VibeSculptor:
                 timestamp_unix=now
             )
             self.vibes.append(current_profile)
-
-            # Add sculpting hints to metadata
             if turn_metadata is not None:
                 turn_metadata["tone_boost"] = {"positive": 0.5 * energy_components["base_energy"]}
                 turn_metadata["max_length"] = 50 * (0.5 + flow_components["rhythm_score"])
                 if engagement_manager:
                     engagement_manager.update_pressure(engagement_components["engagement_score"] * 0.05)
-
             self.logger.record_event(
                 event_type="vibe_sculpted",
                 message="Vibe profile sculpted",
                 level="info",
                 additional_info={
                     "profile": vars(current_profile),
-                    "conversation_id": conversation_id
+                    "conversation_id": conversation_id,
+                    "repetition_factor": repetition_factor,
+                    "perturbation": perturbation,
+                    "decay": decay,
+                    "balance_adjust": balance_adjust
                 }
             )
+            # Persist context changes
+            state.update_conversation_context(conversation_id, context_data)
             return current_profile
-
         except Exception as e:
             error_manager.record_error(
                 "vibe_sculpt_error",
@@ -483,7 +586,7 @@ class VibeSculptor:
     @synchronized()
     def get_vibe_aura(self, state: SOVLState) -> Dict[str, Any]:
         """Generate a vibe 'aura' for visualization, using VibeProfile. Thread-safe access to self.vibes."""
-        profile_data = state.user_profile_state.get(state.history.conversation_id, {})
+        profile_data = state.get_conversation_context(state.history.conversation_id)
         
         if self.vibes:
             latest_profile = self.vibes[-1]
