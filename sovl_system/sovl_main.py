@@ -74,7 +74,7 @@ from sovl_utils import (
 )
 from sovl_confidence import calculate_confidence_score
 from sovl_io import  InsufficientDataError, prune_scribe_journal
-from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingCycleManager
+from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingWorkflowManager
 
 # Type checking imports
 if TYPE_CHECKING:

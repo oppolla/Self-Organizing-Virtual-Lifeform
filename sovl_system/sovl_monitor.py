@@ -2,7 +2,7 @@ from typing import Dict, Any, List
 from threading import Thread, Event, Lock
 from collections import deque
 from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_trainer import TrainingCycleManager
+from sovl_trainer import TrainingWorkflowManager
 from sovl_curiosity import CuriosityManager
 from sovl_config import ConfigManager
 from sovl_logger import Logger
@@ -366,7 +366,7 @@ class TraitsMonitor:
         logger: Logger,
         state_manager: StateManager,
         curiosity_manager: CuriosityManager,
-        training_manager: TrainingCycleManager,
+        training_manager: TrainingWorkflowManager,
         error_manager: ErrorManager,
         user_profile_state: UserProfileState = None,
         bond_calculator: BondCalculator = None,
@@ -381,7 +381,7 @@ class TraitsMonitor:
             logger: Logger instance for logging events
             state_manager: StateManager for atomic SOVLState access
             curiosity_manager: CuriosityManager for curiosity metrics
-            training_manager: TrainingCycleManager for lifecycle metrics
+            training_manager: TrainingWorkflowManager for lifecycle metrics
             error_manager: ErrorManager instance for error handling
             user_profile_state: UserProfileState instance for user profile management
             bond_calculator: BondCalculator instance for bond score calculation
