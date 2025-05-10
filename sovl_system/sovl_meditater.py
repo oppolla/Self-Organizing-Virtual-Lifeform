@@ -367,7 +367,12 @@ class DeepStudyIntrospection(IntrospectionTechnique):
         )
 
 class RelationalIntrospection(IntrospectionTechnique):
-    """Introspection technique for emotional and relational dynamics with a user."""
+    """Introspection technique for emotional and relational dynamics with a user.
+
+    Note: Requires a unique, non-default user_id for correct operation. If user_id is not provided,
+    an error will be raised. BondCalculator and DialogueContextManager must support the user_id used.
+    """
+
     def __init__(self, context: 'SystemContext', manager: 'IntrospectionManager'):
         super().__init__(context, manager)
         self.max_depth = self.config_handler.config_manager.get("introspection_config.relational_introspection.max_depth", 3)
@@ -379,12 +384,21 @@ class RelationalIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, user_id: str = None, topic: str = None, show_status: bool = True) -> Dict:
-        """Execute relational introspection to understand user_id and the AI's relationship with them."""
+        """Execute relational introspection to understand user_id and the AI's relationship with them.
+
+        user_id must be a unique, non-default identifier (e.g., UUID or session ID).
+        """
+        if not user_id or user_id == "default":
+            self.logger.record_event(
+                event_type="relational_introspection_invalid_user_id",
+                message="RelationalIntrospection requires a unique, non-default user_id.",
+                level="error"
+            )
+            raise ValueError("RelationalIntrospection requires a unique, non-default user_id.")
         dialogue_id = str(uuid.uuid4())
         if show_status:
             self.manager._show_processing_status()
         topic = topic or "recent emotional interaction"
-        user_id = user_id or "default"
         questions = await self._generate_initial_questions(user_id, topic)
         answers = []
         for question in questions:
@@ -474,11 +488,25 @@ class RelationalIntrospection(IntrospectionTechnique):
                 msg for msg in self.manager.dialogue_context_manager.get_short_term_context()[-10:]
                 if msg.get("user_id") == user_id
             ]
+        if not messages:
+            self.logger.record_event(
+                event_type="relational_introspection_no_sentiment",
+                message=f"No messages found for user_id: {user_id}. Using neutral sentiment score.",
+                level="warning"
+            )
+            return 0.0
         sentiment_scores = [msg.get("vibe_embedding", {}).get("sentiment", 0.0) for msg in messages]
         return sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0.0
 
     def _get_bond_score(self, user_id: str) -> float:
         try:
+            if not user_id or user_id == "default":
+                self.logger.record_event(
+                    event_type="relational_introspection_invalid_bond_user_id",
+                    message="Attempted to get bond score with invalid user_id.",
+                    level="error"
+                )
+                return 0.5
             if self.manager.bond_calculator and hasattr(self.manager.bond_calculator, 'get_bond'):
                 return self.manager.bond_calculator.get_bond(user_id=user_id)
             return 0.5
@@ -492,6 +520,13 @@ class RelationalIntrospection(IntrospectionTechnique):
 
     def _adjust_bond(self, user_id: str, is_approved: bool):
         try:
+            if not user_id or user_id == "default":
+                self.logger.record_event(
+                    event_type="relational_introspection_invalid_bond_adjust_user_id",
+                    message="Attempted to adjust bond with invalid user_id.",
+                    level="error"
+                )
+                return
             if self.manager.bond_calculator and hasattr(self.manager.bond_calculator, 'adjust_bond'):
                 delta = self.bond_adjustment_factor if is_approved else -self.bond_adjustment_factor
                 self.manager.bond_calculator.adjust_bond(user_id=user_id, delta=delta)
@@ -499,7 +534,7 @@ class RelationalIntrospection(IntrospectionTechnique):
                     event_type="relational_bond_adjusted",
                     message=f"Bond adjusted for user {user_id} by {delta}",
                     level="info",
-                    additional_info={"user_id": user_id, "bond_delta": bond_delta}
+                    additional_info={"user_id": user_id, "bond_delta": delta}
                 )
         except Exception as e:
             self.logger.record_event(
@@ -513,7 +548,14 @@ class RelationalIntrospection(IntrospectionTechnique):
             msg for msg in self.manager.dialogue_context_manager.get_short_term_context()[-10:]
             if msg.get("user_id") == user_id
         ]
-        return " ".join(msg.get("content", "") for msg in messages) or "No recent context available."
+        if not messages:
+            self.logger.record_event(
+                event_type="relational_introspection_no_user_context",
+                message=f"No recent context found for user_id: {user_id}. Using neutral context.",
+                level="warning"
+            )
+            return "No recent context available."
+        return " ".join(msg.get("content", "") for msg in messages)
 
     def _reach_conclusion(self, answers: List[Dict], sentiment_score: float, bond_score: float) -> Dict:
         try:
@@ -1159,10 +1201,15 @@ class IntrospectionManager:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={"operation": "on_config_change"})
 
     def _sync_state(self) -> None:
-        """Synchronize dialogues with SOVLState."""
+        """
+        Synchronize dialogues with SOVLState.
+        If state is locked or stale for too long, enter degraded mode and fall back to an empty dialogue deque.
+        """
         max_retries = 3
         retry_delay = 0.5
+        max_retry_duration = 5.0  # seconds
         attempt = 0
+        start_time = time.time()
         while attempt < max_retries:
             try:
                 state = self.state_manager.get_state()
@@ -1172,6 +1219,8 @@ class IntrospectionManager:
                         message=f"State locked. Retry {attempt+1}/{max_retries}",
                         level="warning"
                     )
+                    if time.time() - start_time > max_retry_duration:
+                        break
                     time.sleep(retry_delay)
                     attempt += 1
                     continue
@@ -1181,6 +1230,8 @@ class IntrospectionManager:
                         message=f"State stale. Retry {attempt+1}/{max_retries}",
                         level="warning"
                     )
+                    if time.time() - start_time > max_retry_duration:
+                        break
                     time.sleep(retry_delay)
                     attempt += 1
                     continue
@@ -1197,7 +1248,8 @@ class IntrospectionManager:
             except StateError as e:
                 self.state_inconsistent = True
                 self.error_manager.handle_curiosity_error(e, pressure=0.0, context={"operation": "sync_state"})
-                raise
+                # Do not raise here; fall through to fallback below
+                break
             except Exception as e:
                 self.state_inconsistent = True
                 self.logger.record_event(
@@ -1206,15 +1258,53 @@ class IntrospectionManager:
                     level="critical",
                     additional_info={"traceback": traceback.format_exc()}
                 )
-                raise
+                # Do not raise here; fall through to fallback below
+                break
             attempt += 1
+
+        # Fallback: degraded mode
         self.state_inconsistent = True
         self.logger.record_event(
             event_type="introspection_state_sync_failed",
-            message="Failed to sync state after retries.",
+            message="Failed to sync state after retries or timeout. Entering degraded mode with empty dialogue deque.",
             level="critical"
         )
-        raise StateError("Failed to sync state after retries.")
+        with self._lock:
+            self.dialogues = deque(maxlen=self.config_handler.config_manager.get("introspection_config.dialogue_maxlen", 100))
+        # Do not raise StateError; degraded mode is now active
+
+    def force_resync_state(self) -> bool:
+        """
+        Attempt to forcibly resolve locked or stale state and resynchronize.
+        Requires StateManager to implement force_unlock or refresh_state.
+        """
+        try:
+            if hasattr(self.state_manager, 'force_unlock'):
+                self.state_manager.force_unlock()
+            if hasattr(self.state_manager, 'refresh_state'):
+                self.state_manager.refresh_state()
+            self._sync_state()
+            if not self.state_inconsistent:
+                self.logger.record_event(
+                    event_type="introspection_state_force_resync_success",
+                    message="State forcibly resynchronized successfully.",
+                    level="info"
+                )
+                return True
+            else:
+                self.logger.record_event(
+                    event_type="introspection_state_force_resync_failed",
+                    message="Force resync attempted but inconsistency remains.",
+                    level="warning"
+                )
+                return False
+        except Exception as e:
+            self.logger.record_event(
+                event_type="introspection_state_force_resync_failed",
+                message=f"Force resync failed: {type(e).__name__}: {e}",
+                level="error"
+            )
+            return False
 
     def _init_trigger_conditions(self):
         """Initialize dynamic triggering conditions."""
