@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from sovl_processor import MetadataProcessor
 from sovl_config import ConfigManager
 from sovl_logger import Logger
-from sovl_state import SOVLState, StateManager
+from sovl_state import StateManager
 from sovl_error import ErrorManager, ConfigurationError
 from sovl_main import SystemContext
 from sovl_utils import synchronized
@@ -236,7 +236,7 @@ class VibeSculptor:
             "flow_score": flow_score
         }
 
-    def _compute_resonance(self, text: str, state: SOVLState, metadata: Optional[Dict[str, Any]] = None, repetition_factor: float = 1.0, perturbation_scale: float = 0.0, seed: Optional[int] = None) -> Dict[str, float]:
+    def _compute_resonance(self, text: str, state: StateManager, metadata: Optional[Dict[str, Any]] = None, repetition_factor: float = 1.0, perturbation_scale: float = 0.0, seed: Optional[int] = None) -> Dict[str, float]:
         """Measure topic consistency and temperament alignment as vibe resonance. Requires temperament_system."""
         topic_consistency = 0.5
         temperament_alignment = 0.5
@@ -377,7 +377,7 @@ class VibeSculptor:
     def sculpt_vibe(
         self,
         user_input: str,
-        state: SOVLState,
+        state: StateManager,
         error_manager: ErrorManager,
         context: SystemContext,
         engagement_manager: Optional[CuriosityManager] = None,
@@ -671,7 +671,7 @@ class VibeSculptor:
         return False
 
     @synchronized()
-    def get_vibe_aura(self, state: SOVLState) -> Dict[str, Any]:
+    def get_vibe_aura(self, state: StateManager) -> Dict[str, Any]:
         """Generate a vibe 'aura' for visualization, using VibeProfile. Thread-safe access to self.vibes."""
         conversation_id = getattr(state.history, 'conversation_id', "unknown_conv_id") if hasattr(state, 'history') else "unknown_conv_id"
         profile_data = state.get_conversation_context(conversation_id)

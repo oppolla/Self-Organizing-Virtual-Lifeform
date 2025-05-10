@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List, Tuple, Union, TYPE_CHECKING
+from typing import Optional, Dict, Any, List, Tuple, Union, TYPE_CHECKING, Protocol
 import traceback
 import time
 from threading import Lock
@@ -395,6 +395,16 @@ class StateAccessor(ABC):
             bool: True if state is valid, False otherwise.
         """
         pass
+
+class HasSessionID(Protocol):
+    @property
+    def session_id(self) -> Optional[str]:
+        ...
+
+class HasLogger(Protocol):
+    @property
+    def logger(self) -> Any:
+        ...
 
 # Usage example
 if __name__ == "__main__":

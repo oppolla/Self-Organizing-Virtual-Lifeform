@@ -4,7 +4,7 @@ import time
 from collections import defaultdict, deque
 from threading import Lock
 from sovl_logger import Logger
-from sovl_state import SOVLState, StateTracker
+from sovl_state import StateTracker
 from sovl_config import ConfigManager
 import torch
 from dataclasses import dataclass
@@ -14,6 +14,7 @@ from sovl_records import ErrorRecordBridge, IErrorHandler, ErrorRecord
 from functools import wraps
 from sovl_utils import safe_append_to_file
 from sovl_queue import capture_scribe_event
+from sovl_interfaces import HasSessionID, HasLogger
 
 class ConfigurationError(Exception):
     """Raised when there is an error related to configuration."""
@@ -33,7 +34,7 @@ class ErrorManager(IErrorHandler):
     
     def __init__(
         self,
-        context: SystemContext,
+        context: HasSessionID,
         state_tracker: StateTracker,
         config_manager: ConfigManager,
         error_cooldown: float = 1.0,
@@ -50,7 +51,7 @@ class ErrorManager(IErrorHandler):
         self.context = context
         self.state_tracker = state_tracker
         self.config_manager = config_manager
-        self.logger = Logger.get_instance()
+        self.logger = getattr(context, 'logger', Logger.get_instance())
         
         # Initialize configuration
         self._initialize_config()

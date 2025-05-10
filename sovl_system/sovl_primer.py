@@ -408,7 +408,7 @@ class GenerationPrimer:
                     hasattr(getattr(dialogue_context_manager, 'short_term', None), 'get_recent_vibes')):
                 raise ValueError("dialogue_context_manager must have short_term.get_recent_vibes method")
         self.dialogue_context_manager = dialogue_context_manager
-        # Validate SOVLState interface
+        # Validate StateManager interface
         state = self.state_manager.get_state()
         required_attrs = ['confidence', 'temperament_score']
         missing = [attr for attr in required_attrs if not hasattr(state, attr)]
