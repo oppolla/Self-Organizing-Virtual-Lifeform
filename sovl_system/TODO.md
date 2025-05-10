@@ -3,7 +3,7 @@
 ## General Taks:
 
 1. Bonder logic needs another look. user_id system can be refined
-2. 
+2. meditating is a system state like gestation
 3. 
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
