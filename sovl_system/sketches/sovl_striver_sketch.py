@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 import time
+from sovl_recaller import DialogueContextManager  # For long_term_memory access
+from sovl_viber import VibeProfile               # For vibe_profile metadata
+from sovl_state import StateManager  
 
 # --- Data Classes ---
 @dataclass
