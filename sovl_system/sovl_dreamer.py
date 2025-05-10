@@ -13,6 +13,7 @@ from sovl_logger import Logger
 from sovl_error import ErrorManager, ScaffoldError
 from sovl_queue import get_scribe_queue, capture_scribe_event
 from sovl_processor import ScribeIngestionProcessor
+from sovl_striver import AspirationSystem
 from sovl_schema import ConfigSchema
 import tracemalloc
 
@@ -961,6 +962,15 @@ class Dreamer:
                 state_manager.set_dreaming_progress((idx + 1) / len(dreams))
         if state_manager and hasattr(state_manager, 'set_dreaming_progress'):
             state_manager.set_dreaming_progress(1.0)
+        
+        # --- Aspiration update integration ---
+        if hasattr(self, 'aspiration_manager') and self.aspiration_manager is not None:
+            dream_summary = None  # Optionally, generate or fetch a dream summary here
+            llm = getattr(self, 'llm', None) or generation_manager
+            self.aspiration_manager.update_aspiration(llm, dream_summary)
+            new_doctrine = self.aspiration_manager.get_current_doctrine()
+            self.logger.info(f"[Aspiration Phase] New doctrine for next cycle: {new_doctrine}")
+        
         if state_manager and hasattr(state_manager, 'set_mode'):
             state_manager.set_mode('online')
 
@@ -1048,7 +1058,7 @@ class Dreamer:
             )
             if generation_manager is None:
                 try:
-                    from sovl_generate import GenerationManager
+                    from sovl_generation import GenerationManager
                     generation_manager = GenerationManager(config_manager=config_manager, logger=logger)
                 except ImportError:
                     logger.error("Could not import GenerationManager. Please provide a generation_manager.")
