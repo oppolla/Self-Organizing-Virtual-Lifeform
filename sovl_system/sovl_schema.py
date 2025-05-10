@@ -253,6 +253,48 @@ class ValidationSchema:
             "enable_dynamic_scaling": ConfigSchema(field="dynamic_weighting.enable_dynamic_scaling", type=bool, default=True),
             "weight_curves": ConfigSchema(field="dynamic_weighting.weight_curves", type=list, default=["linear", "sigmoid_linear"]),
         }
+    
+    @staticmethod
+    def _get_introspection_config_schema() -> Dict[str, ConfigSchema]:
+        """Return the introspection_config schema."""
+        return {
+            "enable": ConfigSchema(field="introspection_config.enable", type=bool, default=True),
+            "min_curiosity_trigger": ConfigSchema(field="introspection_config.min_curiosity_trigger", type=float, default=0.7, range=(0.0, 1.0)),
+            "max_confidence_trigger": ConfigSchema(field="introspection_config.max_confidence_trigger", type=float, default=0.4, range=(0.0, 1.0)),
+            "triggering_moods": ConfigSchema(field="introspection_config.triggering_moods", type=list, default=["cautious", "melancholy"]),
+            "cooldown_seconds": ConfigSchema(field="introspection_config.cooldown_seconds", type=int, default=30, range=(1, None)),
+            "base_approval_threshold": ConfigSchema(field="introspection_config.base_approval_threshold", type=float, default=0.6, range=(0.0, 1.0)),
+            "status_phrases": ConfigSchema(field="introspection_config.status_phrases", type=list, default=["Processing...", "Considering carefully...", "Reviewing perspectives..."]),
+            "debug_mode": ConfigSchema(field="introspection_config.debug_mode", type=bool, default=False),
+            "followup_depth": ConfigSchema(field="introspection_config.followup_depth", type=int, default=3, range=(1, None)),
+            "max_followup_depth": ConfigSchema(field="introspection_config.max_followup_depth", type=int, default=4, range=(1, None)),
+            "confidence_threshold": ConfigSchema(field="introspection_config.confidence_threshold", type=float, default=None, range=(0.0, 1.0)),
+            "batch_size": ConfigSchema(field="introspection_config.batch_size", type=int, default=4, range=(1, None)),
+            "dialogue_maxlen": ConfigSchema(field="introspection_config.dialogue_maxlen", type=int, default=100, range=(1, None)),
+            "introspect_min_interval": ConfigSchema(field="introspection_config.introspect_min_interval", type=float, default=0.5, range=(0.0, None)),
+            "topic_window_messages": ConfigSchema(field="introspection_config.topic_window_messages", type=int, default=15, range=(1, None)),
+            "time_window_seconds": ConfigSchema(field="introspection_config.time_window_seconds", type=int, default=600, range=(1, None)),
+            "ethical_introspection": ConfigSchema(
+                field="introspection_config.ethical_introspection",
+                type=dict,
+                default={
+                    "keywords": ["ethics", "privacy", "fairness", "harm", "trust", "consent"],
+                    "min_messages": 3,
+                    "min_word_count": 100
+                }
+            ),
+            "deep_study": ConfigSchema(
+                field="introspection_config.deep_study",
+                type=dict,
+                default={
+                    "keywords": ["explain", "how does", "what is", "why", "quantum", "blockchain"],
+                    "min_messages": 3,
+                    "min_word_count": 100,
+                    "min_curiosity": 0.8,
+                    "max_depth": 5
+                }
+            ),
+        }
 
     @staticmethod
     def _get_curiosity_config_schema() -> Dict[str, ConfigSchema]:
