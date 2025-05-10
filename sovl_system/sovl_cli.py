@@ -253,6 +253,10 @@ class CommandHandler(cmd.Cmd):
                         message = system_monitor.get_dreaming_message(dot_count)
                         print(f"\r{message}", end="")
                         dot_count = dot_count % 3 + 1
+                    elif mode == 'meditating' and system_monitor and hasattr(system_monitor, 'get_meditating_message'):
+                        message = system_monitor.get_meditating_message(dot_count)
+                        print(f"\r{message}", end="")
+                        dot_count = dot_count % 3 + 1
             except Exception:
                 pass
             time.sleep(1)
@@ -268,6 +272,10 @@ class CommandHandler(cmd.Cmd):
             print("\n[ONLINE] System is ready for use.")
         elif mode == "gestating":
             print("\n[GESTATING] Training in progress. Please wait...")
+        elif mode == "meditating":
+            print("\n[MEDITATING] Introspection in progress. Please wait or /stop to abort...")
+        elif mode == "dreaming":
+            print("\n[DREAMING] Dreaming in progress. Please wait or /stop to abort...")
         elif mode == "offline":
             print("\n[OFFLINE] System is unavailable.")
 

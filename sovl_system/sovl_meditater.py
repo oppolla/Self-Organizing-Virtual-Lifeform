@@ -148,38 +148,44 @@ class EthicalIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, action_description: str = None, topic: str = None, show_status: bool = True) -> Dict:
-        """Execute ethical introspection on an action or topic."""
-        dialogue_id = str(uuid.uuid4())
-        if show_status:
-            self.manager._show_processing_status()
-        action = topic if topic else action_description
-        if not action:
-            action = "Evaluate recent conversation ethics"
-        # Generate dynamic questions using the standard template
-        questions = await self._generate_questions(action)
-        if not questions:
-            questions = [f"Does '{action}' pose any ethical risks?"]
-        followup_depth = self._calculate_dynamic_depth()
-        answers = await self.manager._answer_questions(
-            questions,
-            followup_depth=followup_depth,
-            confidence_threshold=self.confidence_threshold
-        )
-        conclusion = self._reach_conclusion(answers)
-        result = {
-            "dialogue_id": dialogue_id,
-            "action": action,
-            "timestamp": time.time(),
-            "is_approved": conclusion["is_approved"],
-            "confidence": conclusion["confidence"],
-            "questions": answers,
-            "traits": conclusion["traits"],
-            "threshold_used": conclusion["threshold_used"]
-        }
-        self._log_result(result)
-        self._update_system_state(result)
-        self._add_to_history(result)
-        return result
+        self.context.state_manager.set_mode('meditating')
+        try:
+            dialogue_id = str(uuid.uuid4())
+            if show_status:
+                self.manager._show_processing_status()
+            action = topic if topic else action_description
+            if not action:
+                action = "Evaluate recent conversation ethics"
+            # Generate dynamic questions using the standard template
+            questions = await self._generate_questions(action)
+            if not questions:
+                questions = [f"Does '{action}' pose any ethical risks?"]
+            followup_depth = self._calculate_dynamic_depth()
+            # Optionally update progress here (placeholder)
+            # self.context.state_manager.set_meditating_progress(progress_value)
+            answers = await self.manager._answer_questions(
+                questions,
+                followup_depth=followup_depth,
+                confidence_threshold=self.confidence_threshold
+            )
+            conclusion = self._reach_conclusion(answers)
+            result = {
+                "dialogue_id": dialogue_id,
+                "action": action,
+                "timestamp": time.time(),
+                "is_approved": conclusion["is_approved"],
+                "confidence": conclusion["confidence"],
+                "questions": answers,
+                "traits": conclusion["traits"],
+                "threshold_used": conclusion["threshold_used"]
+            }
+            self._log_result(result)
+            self._update_system_state(result)
+            self._add_to_history(result)
+            return result
+        finally:
+            self.context.state_manager.set_mode('online')
+            self.context.state_manager.set_meditating_progress(0.0)
 
     async def _generate_questions(self, action: str) -> List[str]:
         """Generate context-aware introspection questions using the standard template."""
@@ -278,33 +284,39 @@ class DeepStudyIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, topic: str = None, show_status: bool = True) -> Dict:
-        """Execute deep study introspection on a topic."""
-        dialogue_id = str(uuid.uuid4())
-        if show_status:
-            self.manager._show_processing_status()
-        if not topic:
-            topic = self._select_topic() or "Recent conversation topic"
-        questions = await self._generate_questions(topic)
-        insights = await self.manager._answer_questions(
-            questions,
-            followup_depth=self.max_depth
-        )
-        avg_confidence = sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0
-        threshold = self.manager._calculate_dynamic_threshold()
-        result = {
-            "dialogue_id": dialogue_id,
-            "action": f"deep_study_{topic}",
-            "timestamp": time.time(),
-            "is_approved": True,  # Deep study doesn't require approval
-            "confidence": avg_confidence,
-            "insights": insights,
-            "traits": self.manager._calculate_demonstrated_traits(insights),
-            "threshold_used": threshold
-        }
-        self._log_result(result)
-        self._update_system_state(result)
-        self._add_to_history(result)
-        return result
+        self.context.state_manager.set_mode('meditating')
+        try:
+            dialogue_id = str(uuid.uuid4())
+            if show_status:
+                self.manager._show_processing_status()
+            if not topic:
+                topic = self._select_topic() or "Recent conversation topic"
+            questions = await self._generate_questions(topic)
+            # Optionally update progress here (placeholder)
+            # self.context.state_manager.set_meditating_progress(progress_value)
+            insights = await self.manager._answer_questions(
+                questions,
+                followup_depth=self.max_depth
+            )
+            avg_confidence = sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0
+            threshold = self.manager._calculate_dynamic_threshold()
+            result = {
+                "dialogue_id": dialogue_id,
+                "action": f"deep_study_{topic}",
+                "timestamp": time.time(),
+                "is_approved": True,  # Deep study doesn't require approval
+                "confidence": avg_confidence,
+                "insights": insights,
+                "traits": self.manager._calculate_demonstrated_traits(insights),
+                "threshold_used": threshold
+            }
+            self._log_result(result)
+            self._update_system_state(result)
+            self._add_to_history(result)
+            return result
+        finally:
+            self.context.state_manager.set_mode('online')
+            self.context.state_manager.set_meditating_progress(0.0)
 
     async def _generate_questions(self, topic: str) -> List[str]:
         """Generate deep study questions using the standard template."""
@@ -385,52 +397,55 @@ class RelationalIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, user_id: str = None, topic: str = None, show_status: bool = True) -> Dict:
-        """Execute relational introspection to understand user_id and the AI's relationship with them.
-
-        user_id must be a unique, non-default identifier (e.g., UUID or session ID).
-        """
-        if not user_id or user_id == "default":
-            self.logger.record_event(
-                event_type="relational_introspection_invalid_user_id",
-                message="RelationalIntrospection requires a unique, non-default user_id.",
-                level="error"
-            )
-            raise ValueError("RelationalIntrospection requires a unique, non-default user_id.")
-        dialogue_id = str(uuid.uuid4())
-        if show_status:
-            self.manager._show_processing_status()
-        topic = topic or "recent emotional interaction"
-        questions = await self._generate_initial_questions(user_id, topic)
-        answers = []
-        for question in questions:
-            qas = await self.manager._recursive_followup_questions(
-                initial_question=question,
-                max_depth=self.max_depth,
-                confidence_threshold=self.confidence_threshold,
-                override_followup_prompt=self._get_followup_prompt(question, answers[-1]["answer"] if answers else "", answers[-1]["reasoning"] if answers else "")
-            )
-            answers.extend(qas)
-        sentiment_score = self._calculate_sentiment_score(user_id)
-        bond_score = self._get_bond_score(user_id)
-        conclusion = self._reach_conclusion(answers, sentiment_score, bond_score)
-        result = {
-            "dialogue_id": dialogue_id,
-            "action": f"relational_reflection_{user_id}",
-            "timestamp": time.time(),
-            "user_id": user_id,
-            "is_approved": conclusion["is_approved"],
-            "confidence": conclusion["confidence"],
-            "questions": answers,
-            "traits": conclusion["traits"],
-            "sentiment_score": sentiment_score,
-            "bond_score": bond_score,
-            "threshold_used": conclusion["threshold_used"]
-        }
-        self._log_result(result)
-        self._update_system_state(result)
-        self._add_to_history(result)
-        self._adjust_bond(user_id, conclusion["is_approved"])
-        return result
+        self.context.state_manager.set_mode('meditating')
+        try:
+            if not user_id or user_id == "default":
+                self.logger.record_event(
+                    event_type="relational_introspection_invalid_user_id",
+                    message="RelationalIntrospection requires a unique, non-default user_id.",
+                    level="error"
+                )
+                raise ValueError("RelationalIntrospection requires a unique, non-default user_id.")
+            dialogue_id = str(uuid.uuid4())
+            if show_status:
+                self.manager._show_processing_status()
+            topic = topic or "recent emotional interaction"
+            questions = await self._generate_initial_questions(user_id, topic)
+            answers = []
+            for question in questions:
+                # Optionally update progress here (placeholder)
+                # self.context.state_manager.set_meditating_progress(progress_value)
+                qas = await self.manager._recursive_followup_questions(
+                    initial_question=question,
+                    max_depth=self.max_depth,
+                    confidence_threshold=self.confidence_threshold,
+                    override_followup_prompt=self._get_followup_prompt(question, answers[-1]["answer"] if answers else "", answers[-1]["reasoning"] if answers else "")
+                )
+                answers.extend(qas)
+            sentiment_score = self._calculate_sentiment_score(user_id)
+            bond_score = self._get_bond_score(user_id)
+            conclusion = self._reach_conclusion(answers, sentiment_score, bond_score)
+            result = {
+                "dialogue_id": dialogue_id,
+                "action": f"relational_reflection_{user_id}",
+                "timestamp": time.time(),
+                "user_id": user_id,
+                "is_approved": conclusion["is_approved"],
+                "confidence": conclusion["confidence"],
+                "questions": answers,
+                "traits": conclusion["traits"],
+                "sentiment_score": sentiment_score,
+                "bond_score": bond_score,
+                "threshold_used": conclusion["threshold_used"]
+            }
+            self._log_result(result)
+            self._update_system_state(result)
+            self._add_to_history(result)
+            self._adjust_bond(user_id, conclusion["is_approved"])
+            return result
+        finally:
+            self.context.state_manager.set_mode('online')
+            self.context.state_manager.set_meditating_progress(0.0)
 
     async def _generate_initial_questions(self, user_id: str, topic: str) -> List[str]:
         temperament_score = self.temperament_system.current_score
@@ -604,34 +619,40 @@ class CreativeIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, topic: str = None, show_status: bool = True) -> Dict:
-        """Execute creative introspection on a topic or recent creative interaction."""
-        dialogue_id = str(uuid.uuid4())
-        if show_status:
-            self.manager._show_processing_status()
-        if not topic:
-            topic = self._select_topic() or "Recent creative interaction"
-        questions = await self._generate_questions(topic)
-        insights = await self.manager._answer_questions(
-            questions,
-            followup_depth=self.max_depth,
-            confidence_threshold=self.confidence_threshold
-        )
-        avg_confidence = sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0
-        threshold = self.manager._calculate_dynamic_threshold()
-        result = {
-            "dialogue_id": dialogue_id,
-            "action": f"creative_introspection_{topic}",
-            "timestamp": time.time(),
-            "is_approved": True,  # Creative introspection is always exploratory
-            "confidence": avg_confidence,
-            "insights": insights,
-            "traits": self.manager._calculate_demonstrated_traits(insights),
-            "threshold_used": threshold
-        }
-        self._log_result(result)
-        self._update_system_state(result)
-        self._add_to_history(result)
-        return result
+        self.context.state_manager.set_mode('meditating')
+        try:
+            dialogue_id = str(uuid.uuid4())
+            if show_status:
+                self.manager._show_processing_status()
+            if not topic:
+                topic = self._select_topic() or "Recent creative interaction"
+            questions = await self._generate_questions(topic)
+            # Optionally update progress here (placeholder)
+            # self.context.state_manager.set_meditating_progress(progress_value)
+            insights = await self.manager._answer_questions(
+                questions,
+                followup_depth=self.max_depth,
+                confidence_threshold=self.confidence_threshold
+            )
+            avg_confidence = sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0
+            threshold = self.manager._calculate_dynamic_threshold()
+            result = {
+                "dialogue_id": dialogue_id,
+                "action": f"creative_introspection_{topic}",
+                "timestamp": time.time(),
+                "is_approved": True,  # Creative introspection is always exploratory
+                "confidence": avg_confidence,
+                "insights": insights,
+                "traits": self.manager._calculate_demonstrated_traits(insights),
+                "threshold_used": threshold
+            }
+            self._log_result(result)
+            self._update_system_state(result)
+            self._add_to_history(result)
+            return result
+        finally:
+            self.context.state_manager.set_mode('online')
+            self.context.state_manager.set_meditating_progress(0.0)
 
     async def _generate_questions(self, topic: str) -> List[str]:
         """Generate creative introspection questions using the standard template."""
@@ -707,34 +728,40 @@ class ForesightIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, user_context: str = None, show_status: bool = True) -> Dict:
-        """Execute foresight introspection to anticipate the user's next move."""
-        dialogue_id = str(uuid.uuid4())
-        if show_status:
-            self.manager._show_processing_status()
-        if not user_context:
-            user_context = self._select_user_context() or "Recent user interaction"
-        questions = await self._generate_questions(user_context)
-        insights = await self.manager._answer_questions(
-            questions,
-            followup_depth=self.max_depth,
-            confidence_threshold=self.confidence_threshold
-        )
-        avg_confidence = sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0
-        threshold = self.manager._calculate_dynamic_threshold()
-        result = {
-            "dialogue_id": dialogue_id,
-            "action": f"foresight_introspection_{user_context}",
-            "timestamp": time.time(),
-            "is_approved": True,  # Foresight introspection is always exploratory
-            "confidence": avg_confidence,
-            "insights": insights,
-            "traits": self.manager._calculate_demonstrated_traits(insights),
-            "threshold_used": threshold
-        }
-        self._log_result(result)
-        self._update_system_state(result)
-        self._add_to_history(result)
-        return result
+        self.context.state_manager.set_mode('meditating')
+        try:
+            dialogue_id = str(uuid.uuid4())
+            if show_status:
+                self.manager._show_processing_status()
+            if not user_context:
+                user_context = self._select_user_context() or "Recent user interaction"
+            questions = await self._generate_questions(user_context)
+            # Optionally update progress here (placeholder)
+            # self.context.state_manager.set_meditating_progress(progress_value)
+            insights = await self.manager._answer_questions(
+                questions,
+                followup_depth=self.max_depth,
+                confidence_threshold=self.confidence_threshold
+            )
+            avg_confidence = sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0
+            threshold = self.manager._calculate_dynamic_threshold()
+            result = {
+                "dialogue_id": dialogue_id,
+                "action": f"foresight_introspection_{user_context}",
+                "timestamp": time.time(),
+                "is_approved": True,  # Foresight introspection is always exploratory
+                "confidence": avg_confidence,
+                "insights": insights,
+                "traits": self.manager._calculate_demonstrated_traits(insights),
+                "threshold_used": threshold
+            }
+            self._log_result(result)
+            self._update_system_state(result)
+            self._add_to_history(result)
+            return result
+        finally:
+            self.context.state_manager.set_mode('online')
+            self.context.state_manager.set_meditating_progress(0.0)
 
     async def _generate_questions(self, user_context: str) -> List[str]:
         """Generate foresight introspection questions using the standard template."""
@@ -803,38 +830,45 @@ class PersonalIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, recent_interaction: str = None, show_status: bool = True) -> Dict:
-        dialogue_id = str(uuid.uuid4())
-        if show_status:
-            self.manager._show_processing_status()
-        if not recent_interaction:
-            recent_interaction = self._select_recent_interaction() or "Recent interaction"
-        theme = self._extract_theme(recent_interaction)
-        # Generate embedding for the theme
-        query_embedding = self.context.embedding_fn(theme)
-        # Retrieve related memories from long-term memory
-        long_term_memory = self.manager.dialogue_context_manager.long_term
-        related_memories = long_term_memory.query(query_embedding, top_k=5)
-        related_texts = "\n".join([m["content"] for m in related_memories])
-        questions = await self._generate_questions(recent_interaction, related_texts)
-        insights = await self.manager._answer_questions(
-            questions,
-            followup_depth=self.max_depth,
-            confidence_threshold=self.confidence_threshold
-        )
-        result = {
-            "dialogue_id": dialogue_id,
-            "action": f"personal_introspection_{theme}",
-            "timestamp": time.time(),
-            "is_approved": True,
-            "confidence": sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0,
-            "insights": insights,
-            "traits": self.manager._calculate_demonstrated_traits(insights),
-            "threshold_used": self.manager._calculate_dynamic_threshold()
-        }
-        self._log_result(result)
-        self._update_system_state(result)
-        self._add_to_history(result)
-        return result
+        self.context.state_manager.set_mode('meditating')
+        try:
+            dialogue_id = str(uuid.uuid4())
+            if show_status:
+                self.manager._show_processing_status()
+            if not recent_interaction:
+                recent_interaction = self._select_recent_interaction() or "Recent interaction"
+            theme = self._extract_theme(recent_interaction)
+            # Generate embedding for the theme
+            query_embedding = self.context.embedding_fn(theme)
+            # Retrieve related memories from long-term memory
+            long_term_memory = self.manager.dialogue_context_manager.long_term
+            related_memories = long_term_memory.query(query_embedding, top_k=5)
+            related_texts = "\n".join([m["content"] for m in related_memories])
+            questions = await self._generate_questions(recent_interaction, related_texts)
+            # Optionally update progress here (placeholder)
+            # self.context.state_manager.set_meditating_progress(progress_value)
+            insights = await self.manager._answer_questions(
+                questions,
+                followup_depth=self.max_depth,
+                confidence_threshold=self.confidence_threshold
+            )
+            result = {
+                "dialogue_id": dialogue_id,
+                "action": f"personal_introspection_{theme}",
+                "timestamp": time.time(),
+                "is_approved": True,
+                "confidence": sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0,
+                "insights": insights,
+                "traits": self.manager._calculate_demonstrated_traits(insights),
+                "threshold_used": self.manager._calculate_dynamic_threshold()
+            }
+            self._log_result(result)
+            self._update_system_state(result)
+            self._add_to_history(result)
+            return result
+        finally:
+            self.context.state_manager.set_mode('online')
+            self.context.state_manager.set_meditating_progress(0.0)
 
     async def _generate_questions(self, recent_interaction: str, related_memories: str) -> List[str]:
         temperament_score = self.temperament_system.current_score
@@ -906,37 +940,43 @@ class JourneyIntrospection(IntrospectionTechnique):
         raise NotImplementedError("Selection is now handled by the manager via LLM.")
 
     async def execute(self, topic: str = None, show_status: bool = True) -> Dict:
-        """Execute journey introspection on a topic or event."""
-        dialogue_id = str(uuid.uuid4())
-        if show_status:
-            self.manager._show_processing_status()
-        if not topic:
-            topic = self._select_journey_topic() or "recent experience"
-        # Retrieve a chronological sequence of related memories
-        chronological_memories = self._retrieve_chronological_memories(topic)
-        if not chronological_memories:
-            chronological_memories = ["No relevant memories found."]
-        # Generate the journey summary using the standard template
-        questions = await self._generate_questions(topic, chronological_memories)
-        insights = await self.manager._answer_questions(
-            questions,
-            followup_depth=1,  # Usually just one summary/insight
-            confidence_threshold=self.confidence_threshold
-        )
-        result = {
-            "dialogue_id": dialogue_id,
-            "action": f"journey_introspection_{topic}",
-            "timestamp": time.time(),
-            "is_approved": True,
-            "confidence": sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0,
-            "insights": insights,
-            "traits": self.manager._calculate_demonstrated_traits(insights),
-            "threshold_used": self.manager._calculate_dynamic_threshold()
-        }
-        self._log_result(result)
-        self._update_system_state(result)
-        self._add_to_history(result)
-        return result
+        self.context.state_manager.set_mode('meditating')
+        try:
+            dialogue_id = str(uuid.uuid4())
+            if show_status:
+                self.manager._show_processing_status()
+            if not topic:
+                topic = self._select_journey_topic() or "recent experience"
+            # Retrieve a chronological sequence of related memories
+            chronological_memories = self._retrieve_chronological_memories(topic)
+            if not chronological_memories:
+                chronological_memories = ["No relevant memories found."]
+            # Generate the journey summary using the standard template
+            questions = await self._generate_questions(topic, chronological_memories)
+            # Optionally update progress here (placeholder)
+            # self.context.state_manager.set_meditating_progress(progress_value)
+            insights = await self.manager._answer_questions(
+                questions,
+                followup_depth=1,  # Usually just one summary/insight
+                confidence_threshold=self.confidence_threshold
+            )
+            result = {
+                "dialogue_id": dialogue_id,
+                "action": f"journey_introspection_{topic}",
+                "timestamp": time.time(),
+                "is_approved": True,
+                "confidence": sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0,
+                "insights": insights,
+                "traits": self.manager._calculate_demonstrated_traits(insights),
+                "threshold_used": self.manager._calculate_dynamic_threshold()
+            }
+            self._log_result(result)
+            self._update_system_state(result)
+            self._add_to_history(result)
+            return result
+        finally:
+            self.context.state_manager.set_mode('online')
+            self.context.state_manager.set_meditating_progress(0.0)
 
     async def _generate_questions(self, topic: str, chronological_memories: list) -> list:
         """Generate journey introspection prompt using the standard template."""

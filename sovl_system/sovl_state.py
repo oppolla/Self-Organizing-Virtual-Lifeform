@@ -566,9 +566,10 @@ class SOVLState(StateBase, DictSerializable):
             )
             
             self.version = self.STATE_VERSION
-            self.mode: str = "online"  # online, gestating, offline, pending_gestation, dreaming
+            self.mode: str = "online"  # online, gestating, offline, pending_gestation, dreaming, meditating
             self.gestation_progress: float = 0.0  # 0.0 to 1.0
             self.dreaming_progress: float = 0.0  # 0.0 to 1.0
+            self.meditating_progress: float = 0.0  # 0.0 to 1.0
             # --- Initialize conversation_context ---
             self.conversation_context = {}
             self._context_lock = Lock()
@@ -728,6 +729,7 @@ class SOVLState(StateBase, DictSerializable):
                 result["mode"] = self.mode
                 result["gestation_progress"] = self.gestation_progress
                 result["dreaming_progress"] = self.dreaming_progress
+                result["meditating_progress"] = self.meditating_progress
                 if hasattr(self, 'short_term_memory') and hasattr(self.short_term_memory, 'to_dict'):
                     result['short_term_memory'] = self.short_term_memory.to_dict()
                 # --- Serialize conversation_context ---
@@ -755,7 +757,7 @@ class SOVLState(StateBase, DictSerializable):
                     "confidence_history", "temperament_history", "seen_prompts", "training_state",
                     "conversation_history", "conversation_metadata", "goals", "curiosity_metrics",
                     "curiosity_exploration_queue", "short_term_memory", "mode", "gestation_progress",
-                    "dreaming_progress", "version"
+                    "dreaming_progress", "meditating_progress", "version"
                 ]:
                     continue  # handled below
                 setattr(self, k, v)
@@ -786,6 +788,7 @@ class SOVLState(StateBase, DictSerializable):
             self.mode = data.get("mode", "online")
             self.gestation_progress = float(data.get("gestation_progress", 0.0))
             self.dreaming_progress = float(data.get("dreaming_progress", 0.0))
+            self.meditating_progress = float(data.get("meditating_progress", 0.0))
             # --- Deserialize conversation_context ---
             self.conversation_context = {}
             cc_data = data.get("conversation_context", {})
@@ -869,7 +872,8 @@ class SOVLState(StateBase, DictSerializable):
             "confidence_history": tuple(self.confidence_history),
             "temperament_history": tuple(self.temperament_history),
             "gestation_progress": self.gestation_progress,
-            "dreaming_progress": self.dreaming_progress
+            "dreaming_progress": self.dreaming_progress,
+            "meditating_progress": self.meditating_progress
         }
         return hashlib.md5(json.dumps(state_dict, sort_keys=True).encode()).hexdigest()
 
@@ -1206,6 +1210,16 @@ class StateManager(StateAccessor):
         with self._lock:
             if self._current_state and hasattr(self._current_state, 'dreaming_progress'):
                 return self._current_state.dreaming_progress
+            return 0.0
+
+    def set_meditating_progress(self, value: float):
+        with self._lock:
+            if self._current_state:
+                self._current_state.meditating_progress = value
+    def get_meditating_progress(self) -> float:
+        with self._lock:
+            if self._current_state and hasattr(self._current_state, 'meditating_progress'):
+                return self._current_state.meditating_progress
             return 0.0
 
 class StateTracker(StateBase):

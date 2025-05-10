@@ -263,6 +263,29 @@ class SystemMonitor:
         else:
             return f"Dreaming {dots:<3}"
 
+    def get_meditating_status(self) -> dict:
+        mode = None
+        progress = None
+        if hasattr(self, 'state_manager') and self.state_manager:
+            mode = self.state_manager.get_mode()
+            if mode == 'meditating':
+                progress = self.state_manager.get_meditating_progress()
+        return {
+            'mode': mode,
+            'progress': progress,
+        }
+
+    def get_meditating_message(self, dot_count=1):
+        status = self.get_meditating_status()
+        mode = status.get('mode', 'unknown')
+        progress = status.get('progress', None)
+        percent = int(progress * 100) if progress is not None else None
+        dots = '.' * dot_count
+        if percent is not None:
+            return f"Meditating {percent}% {dots:<3}"
+        else:
+            return f"Meditating {dots:<3}"
+
     def get_scribe_journal_entry_count(self):
         """Return the number of entries in the scribe journal JSONL file."""
         path = self._config_manager.get('scribed_config.output_path', 'scribe/sovl_scribe.jsonl')

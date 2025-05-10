@@ -2018,3 +2018,82 @@ class SOVLSystem(SystemInterface):
         finally:
             self.state_manager.set_mode('online')
             print("\nDreaming complete. Returning to online mode.")
+
+    def run_meditation_cycle_with_abort(self, *args, **kwargs):
+        """Set mode to 'meditating', run meditation/introspection, allow abort, then return to 'online'."""
+        import time
+        import sys
+        import select
+        from threading import Thread
+        self.state_manager.set_mode('meditating')
+        logger = getattr(self, 'logger', None)
+        introspection_manager = getattr(self, 'introspection_manager', None)
+        if introspection_manager is None:
+            print("[ERROR] IntrospectionManager not available. Cannot meditate.")
+            self.state_manager.set_mode('online')
+            return
+        meditation_done = [False]
+        abort_flag = [False]
+        meditation_result = [None]
+        def meditation_thread():
+            try:
+                # This should be replaced with the actual meditation/introspection call
+                # For now, we call the LLM-based select_and_execute
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                meditation_result[0] = loop.run_until_complete(introspection_manager._select_and_execute())
+                meditation_done[0] = True
+            except Exception as e:
+                if logger:
+                    logger.log_error(f"Meditation failed: {e}")
+                meditation_done[0] = True
+        t = Thread(target=meditation_thread)
+        t.start()
+        try:
+            while not meditation_done[0]:
+                print("\rMeditating... (press any key to abort)", end="", flush=True)
+                if sys.platform.startswith('win') or os.name == 'nt':
+                    import msvcrt
+                    time.sleep(0.1)
+                    if msvcrt.kbhit():
+                        msvcrt.getch()  # Clear the input buffer
+                        print("\nAre you sure you want to abort meditation? (y/N): ", end="", flush=True)
+                        ans = msvcrt.getch().decode(errors='ignore').lower()
+                        print(ans)  # Echo the key
+                        if ans == 'y':
+                            abort_flag[0] = True
+                            if logger:
+                                logger.info("Meditation aborted by user.")
+                            break
+                        else:
+                            print("Resuming meditation...")
+                else:
+                    dr, _, _ = select.select([sys.stdin], [], [], 0.5)
+                    if dr:
+                        print("\nAre you sure you want to abort meditation? (y/N): ", end="", flush=True)
+                        ans = sys.stdin.readline().strip().lower()
+                        if ans == 'y':
+                            abort_flag[0] = True
+                            if logger:
+                                logger.info("Meditation aborted by user.")
+                            break
+                        else:
+                            print("Resuming meditation...")
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\nAre you sure you want to abort meditation? (y/N): ", end="", flush=True)
+            ans = sys.stdin.readline().strip().lower()
+            if ans == 'y':
+                abort_flag[0] = True
+                if logger:
+                    logger.info("Meditation aborted by user (KeyboardInterrupt).")
+            else:
+                print("Resuming meditation...")
+        finally:
+            self.state_manager.set_mode('online')
+            self.state_manager.set_meditating_progress(0.0)
+            print("\nMeditation complete. Returning to online mode.")
+        # Optionally, handle abort logic (not implemented: need to make meditation cancellable)
+        # Return result for further processing if needed
+        return meditation_result[0]
