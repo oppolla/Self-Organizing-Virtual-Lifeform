@@ -2068,19 +2068,34 @@ class IntrospectionManager:
         qa_list = result.get("questions") or result.get("insights") or []
         summary = f"Approved: {result.get('is_approved')}, Confidence: {result.get('confidence'):.2f}, Traits: {result.get('traits')}"
         full_text = summary + "\n\n" + flatten_recursive_qa(qa_list)
+        # Gather required metadata fields
+        session_id = result.get("user_id") or getattr(self.context, "session_id", None)
+        current_mood_label = getattr(self.temperament_system, "current_mood", "unknown")
+        current_temperament_score = getattr(self.temperament_system, "current_score", "unknown")
+        try:
+            novelty_score = self.curiosity_manager.calculate_curiosity_score(self.context.state_summary)
+        except Exception:
+            novelty_score = "unknown"
+        confidence_score = result.get("confidence", "unknown")
+        current_lifecycle_stage = getattr(self.context, "current_lifecycle_stage", "unknown")
         source_metadata = {
             "dialogue_id": result.get("dialogue_id"),
             "action": result.get("action"),
             "traits": result.get("traits"),
             "sentiment_score": result.get("sentiment_score"),
             "bond_score": result.get("bond_score"),
+            "current_mood_label": current_mood_label,
+            "current_temperament_score": current_temperament_score,
+            "novelty_score": novelty_score,
+            "confidence_score": confidence_score,
+            "current_lifecycle_stage": current_lifecycle_stage,
         }
         capture_scribe_event(
             origin="sovl_meditater",
             event_type="introspection_insight",
             event_data={"full_text": full_text},
             source_metadata=source_metadata,
-            session_id=result.get("user_id") or getattr(self.context, "session_id", None),
+            session_id=session_id,
             timestamp=datetime.fromtimestamp(result["timestamp"]) if "timestamp" in result else None
         )
 
