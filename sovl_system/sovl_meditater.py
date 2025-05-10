@@ -61,6 +61,38 @@ FOLLOWUP_PROMPT_TEMPLATE = (
     "If you understand, reply with only the follow-up question."
 )
 
+# Descriptions for each introspection technique for LLM selection
+INTROSPECTION_TECHNIQUE_DESCRIPTIONS = {
+    "Ethical": (
+        "Concerns with moral values, fairness, justice, right and wrong, or ethical dilemmas—"
+        "including questions of harm, benefit, or alignment with principles."
+    ),
+    "DeepStudy": (
+        "Thorough, focused analysis or exploration of a specific topic, problem, or concept—"
+        "emphasizing depth, detail, and comprehensive understanding."
+    ),
+    "Relational": (
+        "Examination of emotional, social, or interpersonal dynamics—"
+        "including empathy, rapport, trust, or the quality of the relationship between system and user."
+    ),
+    "Creative": (
+        "Processes involving imagination, novel idea generation, brainstorming, or creative synthesis—"
+        "emphasizing originality, innovation, and lateral thinking."
+    ),
+    "Foresight": (
+        "Anticipation or prediction of the user's likely next move, question, concern, or intent—"
+        "focused on preparing for future user actions or conversational directions."
+    ),
+    "Personal": (
+        "Integration and synthesis of the system's own past experiences, memories, or learnings—"
+        "connecting previous events to form new insights or a coherent self-narrative."
+    ),
+    "Journey": (
+        "Reflection on external change, trends, or evolution over time—"
+        "tracking how beliefs, behaviors, interests, or relationships have developed or shifted."
+    )
+}
+
 class IntrospectionTechnique(ABC):
     """Base class for introspection techniques."""
     
@@ -619,6 +651,321 @@ class CreativeIntrospection(IntrospectionTechnique):
             extra_constraints="   - Focus on enhancing creative output.\n"
         )
 
+class ForesightIntrospection(IntrospectionTechnique):
+    """Introspection technique for anticipating the user's likely next move, question, or concern."""
+    def __init__(self, context: 'SystemContext', manager: 'IntrospectionManager'):
+        super().__init__(context, manager)
+        self.max_depth = self.config_handler.config_manager.get("introspection_config.foresight_introspection.max_depth", 3)
+        self.confidence_threshold = self.config_handler.config_manager.get("introspection_config.foresight_introspection.confidence_threshold", 0.8)
+
+    def should_trigger(self) -> bool:
+        raise NotImplementedError("Selection is now handled by the manager via LLM.")
+
+    async def execute(self, user_context: str = None, show_status: bool = True) -> Dict:
+        """Execute foresight introspection to anticipate the user's next move."""
+        dialogue_id = str(uuid.uuid4())
+        if show_status:
+            self.manager._show_processing_status()
+        if not user_context:
+            user_context = self._select_user_context() or "Recent user interaction"
+        questions = await self._generate_questions(user_context)
+        insights = await self.manager._answer_questions(
+            questions,
+            followup_depth=self.max_depth,
+            confidence_threshold=self.confidence_threshold
+        )
+        avg_confidence = sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0
+        threshold = self.manager._calculate_dynamic_threshold()
+        result = {
+            "dialogue_id": dialogue_id,
+            "action": f"foresight_introspection_{user_context}",
+            "timestamp": time.time(),
+            "is_approved": True,  # Foresight introspection is always exploratory
+            "confidence": avg_confidence,
+            "insights": insights,
+            "traits": self.manager._calculate_demonstrated_traits(insights),
+            "threshold_used": threshold
+        }
+        self._log_result(result)
+        self._update_system_state(result)
+        self._add_to_history(result)
+        return result
+
+    async def _generate_questions(self, user_context: str) -> List[str]:
+        """Generate foresight introspection questions using the standard template."""
+        temperament_score = self.temperament_system.current_score
+        prompt = INTROSPECTION_PROMPT_TEMPLATE.format(
+            technique="foresight",
+            context_type="recent user interaction",
+            output_type="question",
+            context_label="Recent User Context",
+            context=user_context,
+            temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
+            focus_area="the user's likely next question, concern, or intent"
+        )
+        try:
+            if self.generation_manager is None:
+                raise RuntimeError("GenerationManager not available.")
+            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
+            llm_question = results[0].strip() if results else f"What is the user likely to do or ask next, given: {user_context}?"
+            self.logger.record_event(
+                event_type="introspection_questions_generated",
+                message="Generated foresight introspection question",
+                level="debug" if self.manager.debug_mode else "info",
+                additional_info={"user_context": user_context, "question": llm_question}
+            )
+            return [llm_question]
+        except Exception as e:
+            self.manager.error_manager.handle_curiosity_error(
+                e, pressure=0.0, context={"operation": "generate_questions"}
+            )
+            return []
+
+    def _select_user_context(self) -> str:
+        """Select recent user context from conversation history."""
+        try:
+            state = self.state_manager.get_state()
+            recent_messages = state.history.messages[-10:]
+            user_messages = [msg["content"] for msg in recent_messages if msg["role"] == "user"]
+            return "\n".join(user_messages[-3:]) if user_messages else None
+        except Exception as e:
+            self.manager.error_manager.handle_curiosity_error(
+                e, pressure=0.0, context={"operation": "select_user_context"}
+            )
+            return None
+
+    def _get_followup_prompt(self, prev_question, answer, reasoning) -> str:
+        temperament_score = self.temperament_system.current_score
+        return FOLLOWUP_PROMPT_TEMPLATE.format(
+            technique="foresight",
+            focus_area="the user's likely next question, concern, or intent",
+            prev_question=prev_question,
+            answer=answer,
+            reasoning=reasoning,
+            temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
+            extra_qualities="   - Emphasize anticipation and user perspective.\n",
+            extra_constraints="   - Focus on predicting user behavior.\n"
+        )
+
+class PersonalIntrospection(IntrospectionTechnique):
+    """Introspection technique for synthesizing and integrating related past experiences."""
+    def __init__(self, context: 'SystemContext', manager: 'IntrospectionManager'):
+        super().__init__(context, manager)
+        self.max_depth = self.config_handler.config_manager.get("introspection_config.personal_introspection.max_depth", 2)
+        self.confidence_threshold = self.config_handler.config_manager.get("introspection_config.personal_introspection.confidence_threshold", 0.8)
+
+    def should_trigger(self) -> bool:
+        raise NotImplementedError("Selection is now handled by the manager via LLM.")
+
+    async def execute(self, recent_interaction: str = None, show_status: bool = True) -> Dict:
+        dialogue_id = str(uuid.uuid4())
+        if show_status:
+            self.manager._show_processing_status()
+        if not recent_interaction:
+            recent_interaction = self._select_recent_interaction() or "Recent interaction"
+        theme = self._extract_theme(recent_interaction)
+        # Generate embedding for the theme
+        query_embedding = self.context.embedding_fn(theme)
+        # Retrieve related memories from long-term memory
+        long_term_memory = self.manager.dialogue_context_manager.long_term
+        related_memories = long_term_memory.query(query_embedding, top_k=5)
+        related_texts = "\n".join([m["content"] for m in related_memories])
+        questions = await self._generate_questions(recent_interaction, related_texts)
+        insights = await self.manager._answer_questions(
+            questions,
+            followup_depth=self.max_depth,
+            confidence_threshold=self.confidence_threshold
+        )
+        result = {
+            "dialogue_id": dialogue_id,
+            "action": f"personal_introspection_{theme}",
+            "timestamp": time.time(),
+            "is_approved": True,
+            "confidence": sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0,
+            "insights": insights,
+            "traits": self.manager._calculate_demonstrated_traits(insights),
+            "threshold_used": self.manager._calculate_dynamic_threshold()
+        }
+        self._log_result(result)
+        self._update_system_state(result)
+        self._add_to_history(result)
+        return result
+
+    async def _generate_questions(self, recent_interaction: str, related_memories: str) -> List[str]:
+        temperament_score = self.temperament_system.current_score
+        prompt = INTROSPECTION_PROMPT_TEMPLATE.format(
+            technique="personal",
+            context_type="recent interaction and related memories",
+            output_type="summary or insight",
+            context_label="Recent Interaction and Related Memories",
+            context=f"{recent_interaction}\n\nRelated Past Experiences:\n{related_memories}",
+            temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
+            focus_area="connecting past and present, extracting patterns or lessons"
+        )
+        try:
+            if self.generation_manager is None:
+                raise RuntimeError("GenerationManager not available.")
+            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
+            llm_summary = results[0].strip() if results else "No summary generated."
+            self.logger.record_event(
+                event_type="introspection_summary_generated",
+                message="Generated personal introspection summary",
+                level="debug" if self.manager.debug_mode else "info",
+                additional_info={"prompt": prompt, "summary": llm_summary}
+            )
+            return [llm_summary]
+        except Exception as e:
+            self.manager.error_manager.handle_curiosity_error(
+                e, pressure=0.0, context={"operation": "generate_questions"}
+            )
+            return []
+
+    def _select_recent_interaction(self) -> str:
+        try:
+            state = self.state_manager.get_state()
+            recent_messages = state.history.messages[-10:]
+            user_messages = [msg["content"] for msg in recent_messages if msg["role"] == "user"]
+            return user_messages[-1] if user_messages else None
+        except Exception as e:
+            self.manager.error_manager.handle_curiosity_error(
+                e, pressure=0.0, context={"operation": "select_recent_interaction"}
+            )
+            return None
+
+    def _extract_theme(self, text: str) -> str:
+        # Simple placeholder: use the text itself, or implement NLP/entity extraction for more sophistication
+        return text
+
+    def _get_followup_prompt(self, prev_question, answer, reasoning) -> str:
+        temperament_score = self.temperament_system.current_score
+        return FOLLOWUP_PROMPT_TEMPLATE.format(
+            technique="personal",
+            focus_area="connecting past and present, extracting patterns or lessons",
+            prev_question=prev_question,
+            answer=answer,
+            reasoning=reasoning,
+            temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
+            extra_qualities="   - Emphasize synthesis and integration.\n",
+            extra_constraints="   - Focus on meaningful connection of experiences.\n"
+        )
+
+class JourneyIntrospection(IntrospectionTechnique):
+    """Introspection technique for reflecting on change over time and synthesizing a journey or trend."""
+
+    def __init__(self, context: 'SystemContext', manager: 'IntrospectionManager'):
+        super().__init__(context, manager)
+        self.max_memories = self.config_handler.config_manager.get("introspection_config.journey_introspection.max_memories", 20)
+        self.confidence_threshold = self.config_handler.config_manager.get("introspection_config.journey_introspection.confidence_threshold", 0.8)
+
+    def should_trigger(self) -> bool:
+        raise NotImplementedError("Selection is now handled by the manager via LLM.")
+
+    async def execute(self, topic: str = None, show_status: bool = True) -> Dict:
+        """Execute journey introspection on a topic or event."""
+        dialogue_id = str(uuid.uuid4())
+        if show_status:
+            self.manager._show_processing_status()
+        if not topic:
+            topic = self._select_journey_topic() or "recent experience"
+        # Retrieve a chronological sequence of related memories
+        chronological_memories = self._retrieve_chronological_memories(topic)
+        if not chronological_memories:
+            chronological_memories = ["No relevant memories found."]
+        # Generate the journey summary using the standard template
+        questions = await self._generate_questions(topic, chronological_memories)
+        insights = await self.manager._answer_questions(
+            questions,
+            followup_depth=1,  # Usually just one summary/insight
+            confidence_threshold=self.confidence_threshold
+        )
+        result = {
+            "dialogue_id": dialogue_id,
+            "action": f"journey_introspection_{topic}",
+            "timestamp": time.time(),
+            "is_approved": True,
+            "confidence": sum(i["confidence"] for i in insights) / len(insights) if insights else 0.0,
+            "insights": insights,
+            "traits": self.manager._calculate_demonstrated_traits(insights),
+            "threshold_used": self.manager._calculate_dynamic_threshold()
+        }
+        self._log_result(result)
+        self._update_system_state(result)
+        self._add_to_history(result)
+        return result
+
+    async def _generate_questions(self, topic: str, chronological_memories: list) -> list:
+        """Generate journey introspection prompt using the standard template."""
+        temperament_score = self.temperament_system.current_score
+        memories_text = "\n".join(chronological_memories)
+        prompt = INTROSPECTION_PROMPT_TEMPLATE.format(
+            technique="journey",
+            context_type="chronological sequence of experiences",
+            output_type="summary or insight",
+            context_label="Past Experiences",
+            context=f"Topic: {topic}\n\n{memories_text}",
+            temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
+            focus_area="change, progress, and trends over time"
+        )
+        try:
+            if self.generation_manager is None:
+                raise RuntimeError("GenerationManager not available.")
+            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
+            llm_summary = results[0].strip() if results else "No journey summary generated."
+            self.logger.record_event(
+                event_type="introspection_journey_generated",
+                message="Generated journey introspection summary",
+                level="debug" if self.manager.debug_mode else "info",
+                additional_info={"prompt": prompt, "summary": llm_summary}
+            )
+            return [llm_summary]
+        except Exception as e:
+            self.manager.error_manager.handle_curiosity_error(
+                e, pressure=0.0, context={"operation": "generate_questions"}
+            )
+            return []
+
+    def _select_journey_topic(self) -> str:
+        """Select a topic for journey introspection (placeholder: use recent user message)."""
+        try:
+            state = self.state_manager.get_state()
+            recent_messages = state.history.messages[-10:]
+            user_messages = [msg["content"] for msg in recent_messages if msg["role"] == "user"]
+            # Simple heuristic: use the most recent user message as the topic
+            return user_messages[-1] if user_messages else None
+        except Exception as e:
+            self.manager.error_manager.handle_curiosity_error(
+                e, pressure=0.0, context={"operation": "select_journey_topic"}
+            )
+            return None
+
+    def _retrieve_chronological_memories(self, topic: str) -> list:
+        """Retrieve a chronological sequence of memories related to the topic."""
+        try:
+            query_embedding = self.context.embedding_fn(topic)
+            long_term_memory = self.manager.dialogue_context_manager.long_term
+            all_memories = long_term_memory.query(query_embedding, top_k=self.max_memories)
+            # Sort by timestamp to ensure chronological order
+            chronological = sorted(all_memories, key=lambda m: m.get('timestamp_unix', 0))
+            return [m["content"] for m in chronological]
+        except Exception as e:
+            self.manager.error_manager.handle_curiosity_error(
+                e, pressure=0.0, context={"operation": "retrieve_chronological_memories"}
+            )
+            return []
+
+    def _get_followup_prompt(self, prev_question, answer, reasoning) -> str:
+        temperament_score = self.temperament_system.current_score
+        return FOLLOWUP_PROMPT_TEMPLATE.format(
+            technique="journey",
+            focus_area="change, progress, and trends over time",
+            prev_question=prev_question,
+            answer=answer,
+            reasoning=reasoning,
+            temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
+            extra_qualities="   - Emphasize narrative and evolution.\n",
+            extra_constraints="   - Focus on meaningful change and milestones.\n"
+        )
+
 class IntrospectionManager:
     """Manages introspection system, orchestrating multiple introspection techniques with topic engagement triggers."""
 
@@ -1022,9 +1369,13 @@ class IntrospectionManager:
     async def _llm_select_technique(self, topic, context):
         """Use the LLM to select the best introspection technique for a topic/context with a robust prompt."""
         technique_names = [cls.__name__.replace("Introspection", "") for cls in type(self).get_available_technique_classes()]
+        # Build the techniques section with descriptions
+        techniques_desc = "\n".join([
+            f"- {name}: {INTROSPECTION_TECHNIQUE_DESCRIPTIONS.get(name, name)}" for name in technique_names
+        ])
         prompt = (
             "You are an expert self-reflective system. Read the following topic and context, and select the most appropriate introspection technique.\n"
-            f"Techniques: {', '.join(technique_names)}\n"
+            f"Techniques:\n{techniques_desc}\n"
             "Instructions:\n"
             "   - Respond with only the technique name from the list above.\n"
             "   - Do not explain your answer.\n"
@@ -1054,7 +1405,15 @@ class IntrospectionManager:
     @classmethod
     def get_available_technique_classes(cls):
         """Return a list of available introspection technique classes."""
-        return [EthicalIntrospection, DeepStudyIntrospection, RelationalIntrospection, CreativeIntrospection]  # Add more as needed
+        return [
+            EthicalIntrospection, 
+            DeepStudyIntrospection, 
+            RelationalIntrospection, 
+            CreativeIntrospection, 
+            ForesightIntrospection, 
+            PersonalIntrospection, 
+            JourneyIntrospection
+            ]
 
     async def _select_and_execute(self, **kwargs) -> Dict:
         """Select and execute an introspection technique using LLM-based selection."""
