@@ -25,6 +25,7 @@ from sovl_recaller import DialogueContextManager
 import threading
 import queue
 from collections import defaultdict
+from datetime import datetime
 
 # Standardized introspection prompt template for all techniques
 INTROSPECTION_PROMPT_TEMPLATE = (
@@ -1009,6 +1010,22 @@ class JourneyIntrospection(IntrospectionTechnique):
             extra_qualities="   - Emphasize narrative and evolution.\n",
             extra_constraints="   - Focus on meaningful change and milestones.\n"
         )
+
+def flatten_recursive_qa(qa_list):
+    lines = []
+    for qa in qa_list:
+        indent = "  " * qa.get("depth", 0)
+        q = qa.get("question", "")
+        a = qa.get("answer", "")
+        conf = qa.get("confidence", None)
+        reasoning = qa.get("reasoning", None)
+        line = f"{indent}Q: {q}\n{indent}A: {a}"
+        if conf is not None:
+            line += f" (Confidence: {conf:.2f})"
+        if reasoning:
+            line += f"\n{indent}Reasoning: {reasoning}"
+        lines.append(line)
+    return "\n".join(lines)
 
 class IntrospectionManager:
     """Manages introspection system, orchestrating multiple introspection techniques with topic engagement triggers."""
@@ -2038,4 +2055,32 @@ class IntrospectionManager:
             level="critical"
         )
         return None
+
+    def _log_result(self, result: Dict):
+        """Log the introspection result and capture for scribe."""
+        self.manager._log_dialogue(result) if hasattr(self, 'manager') else self.logger.record_event(
+            event_type="introspection_result_logged",
+            message="Introspection result logged.",
+            level="info",
+            additional_info=result
+        )
+        # --- Scribe capture logic ---
+        qa_list = result.get("questions") or result.get("insights") or []
+        summary = f"Approved: {result.get('is_approved')}, Confidence: {result.get('confidence'):.2f}, Traits: {result.get('traits')}"
+        full_text = summary + "\n\n" + flatten_recursive_qa(qa_list)
+        source_metadata = {
+            "dialogue_id": result.get("dialogue_id"),
+            "action": result.get("action"),
+            "traits": result.get("traits"),
+            "sentiment_score": result.get("sentiment_score"),
+            "bond_score": result.get("bond_score"),
+        }
+        capture_scribe_event(
+            origin="sovl_meditater",
+            event_type="introspection_insight",
+            event_data={"full_text": full_text},
+            source_metadata=source_metadata,
+            session_id=result.get("user_id") or getattr(self.context, "session_id", None),
+            timestamp=datetime.fromtimestamp(result["timestamp"]) if "timestamp" in result else None
+        )
 
