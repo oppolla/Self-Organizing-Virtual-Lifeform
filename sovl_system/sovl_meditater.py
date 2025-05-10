@@ -24,6 +24,7 @@ from sovl_bonder import BondCalculator
 from sovl_recaller import DialogueContextManager
 import threading
 import queue
+from collections import defaultdict
 
 # Standardized introspection prompt template for all techniques
 INTROSPECTION_PROMPT_TEMPLATE = (
@@ -191,11 +192,9 @@ class EthicalIntrospection(IntrospectionTechnique):
             temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
             focus_area="ethical risks, fairness, and transparency"
         )
-        try:
-            if self.generation_manager is None:
-                raise RuntimeError("GenerationManager not available.")
-            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
-            llm_question = results[0].strip() if results else f"Is this action aligned with my core values? Action: {action}"
+        results = self.manager._retry_generate_text(prompt, num_return_sequences=1)
+        if results:
+            llm_question = results[0].strip()
             self.logger.record_event(
                 event_type="introspection_questions_generated",
                 message="Generated ethical introspection question",
@@ -203,9 +202,11 @@ class EthicalIntrospection(IntrospectionTechnique):
                 additional_info={"action": action, "question": llm_question}
             )
             return [llm_question]
-        except Exception as e:
-            self.manager.error_manager.handle_curiosity_error(
-                e, pressure=0.0, context={"operation": "generate_questions"}
+        else:
+            self.logger.record_event(
+                event_type="introspection_degraded_mode",
+                message="EthicalIntrospection running in degraded mode: no questions generated.",
+                level="warning"
             )
             return []
     
@@ -316,11 +317,9 @@ class DeepStudyIntrospection(IntrospectionTechnique):
             temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
             focus_area="underlying concepts, significance, and challenges"
         )
-        try:
-            if self.generation_manager is None:
-                raise RuntimeError("GenerationManager not available.")
-            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
-            llm_question = results[0].strip() if results else f"What is the significance of {topic}?"
+        results = self.manager._retry_generate_text(prompt, num_return_sequences=1)
+        if results:
+            llm_question = results[0].strip()
             self.logger.record_event(
                 event_type="introspection_questions_generated",
                 message="Generated deep study introspection question",
@@ -328,9 +327,11 @@ class DeepStudyIntrospection(IntrospectionTechnique):
                 additional_info={"topic": topic, "question": llm_question}
             )
             return [llm_question]
-        except Exception as e:
-            self.manager.error_manager.handle_curiosity_error(
-                e, pressure=0.0, context={"operation": "generate_questions"}
+        else:
+            self.logger.record_event(
+                event_type="introspection_degraded_mode",
+                message="DeepStudyIntrospection running in degraded mode: no questions generated.",
+                level="warning"
             )
             return []
     
@@ -442,7 +443,7 @@ class RelationalIntrospection(IntrospectionTechnique):
         questions = []
         for prompt in prompts:
             try:
-                results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
+                results = self.manager._retry_generate_text(prompt, num_return_sequences=1)
                 question = results[0].strip() if results else f"How does '{topic}' affect your feelings, {user_id}?"
                 questions.append(question)
             except Exception as e:
@@ -497,7 +498,8 @@ class RelationalIntrospection(IntrospectionTechnique):
                 self.logger.record_event(
                     event_type="relational_bond_adjusted",
                     message=f"Bond adjusted for user {user_id} by {delta}",
-                    level="info"
+                    level="info",
+                    additional_info={"user_id": user_id, "bond_delta": bond_delta}
                 )
         except Exception as e:
             self.logger.record_event(
@@ -600,11 +602,9 @@ class CreativeIntrospection(IntrospectionTechnique):
             temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
             focus_area="creative vision and alignment"
         )
-        try:
-            if self.generation_manager is None:
-                raise RuntimeError("GenerationManager not available.")
-            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
-            llm_question = results[0].strip() if results else f"What is the creative vision for {topic}?"
+        results = self.manager._retry_generate_text(prompt, num_return_sequences=1)
+        if results:
+            llm_question = results[0].strip()
             self.logger.record_event(
                 event_type="introspection_questions_generated",
                 message="Generated creative introspection question",
@@ -612,9 +612,11 @@ class CreativeIntrospection(IntrospectionTechnique):
                 additional_info={"topic": topic, "question": llm_question}
             )
             return [llm_question]
-        except Exception as e:
-            self.manager.error_manager.handle_curiosity_error(
-                e, pressure=0.0, context={"operation": "generate_questions"}
+        else:
+            self.logger.record_event(
+                event_type="introspection_degraded_mode",
+                message="CreativeIntrospection running in degraded mode: no questions generated.",
+                level="warning"
             )
             return []
 
@@ -703,11 +705,9 @@ class ForesightIntrospection(IntrospectionTechnique):
             temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
             focus_area="the user's likely next question, concern, or intent"
         )
-        try:
-            if self.generation_manager is None:
-                raise RuntimeError("GenerationManager not available.")
-            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
-            llm_question = results[0].strip() if results else f"What is the user likely to do or ask next, given: {user_context}?"
+        results = self.manager._retry_generate_text(prompt, num_return_sequences=1)
+        if results:
+            llm_question = results[0].strip()
             self.logger.record_event(
                 event_type="introspection_questions_generated",
                 message="Generated foresight introspection question",
@@ -715,9 +715,11 @@ class ForesightIntrospection(IntrospectionTechnique):
                 additional_info={"user_context": user_context, "question": llm_question}
             )
             return [llm_question]
-        except Exception as e:
-            self.manager.error_manager.handle_curiosity_error(
-                e, pressure=0.0, context={"operation": "generate_questions"}
+        else:
+            self.logger.record_event(
+                event_type="introspection_degraded_mode",
+                message="ForesightIntrospection running in degraded mode: no questions generated.",
+                level="warning"
             )
             return []
 
@@ -802,11 +804,9 @@ class PersonalIntrospection(IntrospectionTechnique):
             temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
             focus_area="connecting past and present, extracting patterns or lessons"
         )
-        try:
-            if self.generation_manager is None:
-                raise RuntimeError("GenerationManager not available.")
-            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
-            llm_summary = results[0].strip() if results else "No summary generated."
+        results = self.manager._retry_generate_text(prompt, num_return_sequences=1)
+        if results:
+            llm_summary = results[0].strip()
             self.logger.record_event(
                 event_type="introspection_summary_generated",
                 message="Generated personal introspection summary",
@@ -814,9 +814,11 @@ class PersonalIntrospection(IntrospectionTechnique):
                 additional_info={"prompt": prompt, "summary": llm_summary}
             )
             return [llm_summary]
-        except Exception as e:
-            self.manager.error_manager.handle_curiosity_error(
-                e, pressure=0.0, context={"operation": "generate_questions"}
+        else:
+            self.logger.record_event(
+                event_type="introspection_degraded_mode",
+                message="PersonalIntrospection running in degraded mode: no summary generated.",
+                level="warning"
             )
             return []
 
@@ -906,11 +908,9 @@ class JourneyIntrospection(IntrospectionTechnique):
             temperament=f"{temperament_score:.2f} (0 = critical, 1 = affirming)",
             focus_area="change, progress, and trends over time"
         )
-        try:
-            if self.generation_manager is None:
-                raise RuntimeError("GenerationManager not available.")
-            results = self.generation_manager.generate_text(prompt, num_return_sequences=1)
-            llm_summary = results[0].strip() if results else "No journey summary generated."
+        results = self.manager._retry_generate_text(prompt, num_return_sequences=1)
+        if results:
+            llm_summary = results[0].strip()
             self.logger.record_event(
                 event_type="introspection_journey_generated",
                 message="Generated journey introspection summary",
@@ -918,9 +918,11 @@ class JourneyIntrospection(IntrospectionTechnique):
                 additional_info={"prompt": prompt, "summary": llm_summary}
             )
             return [llm_summary]
-        except Exception as e:
-            self.manager.error_manager.handle_curiosity_error(
-                e, pressure=0.0, context={"operation": "generate_questions"}
+        else:
+            self.logger.record_event(
+                event_type="introspection_degraded_mode",
+                message="JourneyIntrospection running in degraded mode: no summary generated.",
+                level="warning"
             )
             return []
 
@@ -1006,6 +1008,7 @@ class IntrospectionManager:
         self._async_lock = asyncio.Lock()
 
         # Topic engagement tracking (session_id -> topic -> metrics)
+        # All access to topic_engagement must be protected by self._lock
         self.topic_engagement: Dict[str, Dict[str, Dict]] = defaultdict(lambda: defaultdict(lambda: {
             "messages": [],
             "message_count": 0,
@@ -1035,6 +1038,10 @@ class IntrospectionManager:
         self._batch_shutdown = False
         self._batch_thread = threading.Thread(target=self._batch_flush_loop, daemon=True)
         self._batch_thread.start()
+        # Dedicated state update queue and worker thread
+        self._state_update_queue = queue.Queue()
+        self._state_update_worker = threading.Thread(target=self._state_update_worker_loop, daemon=True)
+        self._state_update_worker.start()
 
         # Lazy evaluation caches
         self._cached_approval_stats = None
@@ -1231,6 +1238,7 @@ class IntrospectionManager:
         except Exception as e:
             self.error_manager.handle_curiosity_error(e, pressure=0.0, context={"operation": "init_trigger_conditions"})
 
+    @synchronized("_lock")
     def update_topic_engagement(self, message: Dict):
         """Update topic engagement metrics for a new message (no keyword clustering)."""
         try:
@@ -1322,6 +1330,7 @@ class IntrospectionManager:
             topic_duration >= self.universal_trigger_conditions['min_topic_duration']
         )
 
+    @synchronized("_lock")
     def evaluate_interaction(self):
         """Evaluate all topics for extended interaction and add to pending introspections."""
         topic_scores = self.get_topic_engagement()
@@ -1689,6 +1698,19 @@ class IntrospectionManager:
         self._pending_state_updates.append(dialogue)
         self._batch_event.set()
 
+    def _enqueue_state_update(self, update_fn):
+        self._state_update_queue.put(update_fn)
+
+    def _state_update_worker_loop(self):
+        while True:
+            update_fn = self._state_update_queue.get()
+            if update_fn is None:
+                break  # Shutdown signal
+            try:
+                self.state_manager.update_state_atomic(update_fn)
+            except Exception as e:
+                self.error_manager.handle_curiosity_error(e, pressure=0.0, context={"operation": "state_update_worker"})
+
     def _batch_flush_loop(self):
         """Background thread to flush batched updates."""
         while not self._batch_shutdown:
@@ -1700,10 +1722,10 @@ class IntrospectionManager:
                     def update_fn(current_state):
                         current_state.history.add_message(role="introspection", content=content)
                         return current_state
-                    self.state_manager.update_state_atomic(update_fn)
+                    self._enqueue_state_update(update_fn)
                     self.logger.record_event(
                         event_type="introspection_added_to_history",
-                        message="Introspection dialogue added to history",
+                        message="Introspection dialogue added to history (enqueued)",
                         level="info",
                         additional_info={
                             "dialogue_id": dialogue["dialogue_id"],
@@ -1742,10 +1764,10 @@ class IntrospectionManager:
                     )
                     for trait, score in dialogue['traits'].items():
                         self.temperament_system.adjust_trait(trait, score * 0.1)
+                    bond_delta = dialogue.get('bond_delta', 0.1 if dialogue['is_approved'] else -0.1)
                     if self.bond_calculator and hasattr(self.bond_calculator, 'adjust_bond'):
                         try:
                             user_id = dialogue.get('user_id')
-                            bond_delta = dialogue.get('bond_delta', 0.1 if dialogue['is_approved'] else -0.1)
                             self.bond_calculator.adjust_bond(user_id=user_id, delta=bond_delta)
                             self.logger.record_event(
                                 event_type="introspection_bond_adjusted",
@@ -1901,4 +1923,29 @@ class IntrospectionManager:
             self._cached_approval_stats = {"approved": approved, "total": total, "ratio": ratio}
             self._approval_stats_dirty = False
         return self._cached_approval_stats
+
+    def _retry_generate_text(self, prompt, num_return_sequences=1, retries=3, backoff=1.0):
+        for attempt in range(retries):
+            try:
+                if self.context.generation_manager is None:
+                    self.logger.record_event(
+                        event_type="generation_manager_unavailable",
+                        message="GenerationManager is unavailable. Introspection degraded.",
+                        level="error"
+                    )
+                    return None
+                return self.context.generation_manager.generate_text(prompt, num_return_sequences=num_return_sequences)
+            except Exception as e:
+                self.logger.record_event(
+                    event_type="generation_manager_failure",
+                    message=f"GenerationManager failed on attempt {attempt+1}: {e}",
+                    level="error"
+                )
+                time.sleep(backoff * (2 ** attempt))
+        self.logger.record_event(
+            event_type="generation_manager_total_failure",
+            message="All retries for GenerationManager failed. Introspection degraded.",
+            level="critical"
+        )
+        return None
 
