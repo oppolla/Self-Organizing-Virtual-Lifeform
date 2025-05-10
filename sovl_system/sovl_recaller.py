@@ -692,7 +692,9 @@ class DialogueContextManager:
                 "session_id": self.session_id,
                 "origin": origin if origin is not None else "dialogue_manager",
             }
-            # Use add_message to store the vibe_profile and threading info if provided
+            # Always include vibe_profile in long-term memory if provided
+            if vibe_profile is not None:
+                msg["vibe_profile"] = vibe_profile.to_dict() if hasattr(vibe_profile, "to_dict") else vibe_profile
             self.short_term.add_message(
                 role=role,
                 content=content,
