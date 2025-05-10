@@ -1089,40 +1089,44 @@ class GenerationPrimer:
     ) -> str:
         """
         Assemble the final prompt string for the LLM, combining:
+        - Doctrine (aspiration/mission statement) from state_manager
         - A base system instruction (default: helpful, emotionally aware assistant)
-        - The high-granularity vibe context (from get_traits_prompt)
+        - The high-granularity vibe context (from get_traits_prompt, includes bond)
         - The memory context (short-term/long-term, passed in)
         - The user's prompt
         Skips any empty sections. Accepts **kwargs for future extensibility.
-        Logs the applied vibe prompt and its dimensions for traceability.
+        Logs the applied system prompt for traceability.
         """
-        system_instruction = base_system_instruction or "You are a helpful, emotionally aware assistant."
-        traits_prompt, bond_score = self.get_traits_prompt(bond_score=kwargs.get("bond_score", 0.5))
+        # 1. Doctrine
+        doctrine = self.state_manager.get_aspiration_doctrine() or ""
+        doctrine_section = f"DOCTRINE: {doctrine}" if doctrine else ""
 
-        # Log vibe prompt details
-        vibe_profile = None
-        if self.dialogue_context_manager and hasattr(self.dialogue_context_manager, 'short_term'):
-            short_term = getattr(self.dialogue_context_manager, 'short_term', None)
-            if short_term and hasattr(short_term, 'get_recent_vibes'):
-                recent_vibes = short_term.get_recent_vibes(n=1)
-                if recent_vibes:
-                    vibe_profile = recent_vibes[-1]
-        self.logger.record_event(
-            event_type="traits_prompt_applied",
-            message="Traits and bond prompt applied to LLM",
-            level="debug",
-            additional_info={
-                "traits_prompt": traits_prompt[:100] + "..." if traits_prompt and len(traits_prompt) > 100 else traits_prompt,
-                "traits_dimensions": vibe_profile.dimensions if vibe_profile else None,
-                "bond_score": bond_score if 'bond_score' in locals() else None,
-                "output_format": output_format
-            }
-        )
+        # 2. Base system instruction (if any)
+        system_instruction = base_system_instruction if base_system_instruction is not None else ""
 
-        prompt_parts = [
+        # 3. Vibe and Bond prompt (traits_prompt includes bond)
+        bond_score = kwargs.get("bond_score", 0.5)
+        traits_prompt = self.get_traits_prompt(bond_score=bond_score)
+
+        # 4. Compose all system prompt parts in unified order
+        system_prompt_parts = [
+            doctrine_section,
             system_instruction,
-            f"Current traits context: {traits_prompt}" if traits_prompt else "",
+            f"TRAITS: {traits_prompt}" if traits_prompt else "",
             memory_context if memory_context else "",
             user_prompt
         ]
-        return "\n\n".join([part for part in prompt_parts if part])
+        full_prompt = "\n\n".join([part for part in system_prompt_parts if part])
+
+        # Log the full system prompt for traceability
+        self.logger.record_event(
+            event_type="system_prompt_assembled",
+            message="Unified system prompt assembled for LLM",
+            level="debug",
+            additional_info={
+                "doctrine": doctrine,
+                "traits_prompt": traits_prompt[:100] + "..." if traits_prompt and len(traits_prompt) > 100 else traits_prompt,
+                "output_format": output_format
+            }
+        )
+        return full_prompt

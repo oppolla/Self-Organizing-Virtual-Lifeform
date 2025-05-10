@@ -1222,6 +1222,20 @@ class StateManager(StateAccessor):
                 return self._current_state.meditating_progress
             return 0.0
 
+    def set_aspiration_doctrine(self, doctrine: str):
+        """Set the current aspiration doctrine and persist it."""
+        with self._lock:
+            if self._current_state is not None:
+                self._current_state.aspiration_doctrine = doctrine
+                self._state_version += 1
+
+    def get_aspiration_doctrine(self) -> str:
+        """Get the current aspiration doctrine, or a default if not set."""
+        with self._lock:
+            if self._current_state is not None and hasattr(self._current_state, 'aspiration_doctrine'):
+                return getattr(self._current_state, 'aspiration_doctrine', "Be open to new experiences.")
+            return "Be open to new experiences."
+
 class StateTracker(StateBase):
     """Tracks component states and their changes."""
     
