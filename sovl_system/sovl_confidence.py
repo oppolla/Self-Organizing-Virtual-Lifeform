@@ -4,12 +4,11 @@ from threading import Lock
 from collections import deque
 from sovl_logger import Logger
 import traceback
-from sovl_state import SOVLState, StateManager
+from sovl_state import StateManager
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
 from sovl_utils import synchronized, NumericalGuard
 from sovl_config import ConfigManager
-from sovl_recaller import DialogueContextManager
 import time
 import threading
 import math
@@ -39,14 +38,14 @@ class ConfidenceCalculator:
         self, 
         config_manager: ConfigManager, 
         logger: Logger, 
-        state_manager: Optional[Any] = None
+        state_manager: StateManager
     ):
         """Initialize the confidence calculator with configuration and logging.
         
         Args:
             config_manager: ConfigManager instance for configuration handling
             logger: Logger instance for logging
-            state_manager: Optional StateManager for atomic state updates
+            state_manager: StateManager for atomic state updates
             
         Raises:
             ValueError: If config_manager or logger is None
@@ -160,11 +159,8 @@ class ConfidenceCalculator:
         self,
         logits: torch.Tensor,
         generated_ids: torch.Tensor,
-        state: SOVLState,
         error_manager: ErrorManager,
         context: SystemContext,
-        state_manager: Optional[Any] = None,
-        recaller: Optional[Any] = None,  # DialogueContextManager
         user_id: str = "default",
         strategy: str = "blended",  # "classic", "experience", "entropy", "margin", "blended"
         top_k: int = 5,
@@ -172,9 +168,11 @@ class ConfidenceCalculator:
     ) -> float:
         """Calculate confidence score with robust error recovery and thread safety.
         Supports multiple strategies: classic, experience, entropy, margin, blended.
+        All state access is via StateManager.
         """
         with self.lock:
             try:
+                state = self.state_manager.get_state()
                 self.logger.record_event(
                     event_type="confidence_calculation_start",
                     message="Starting confidence calculation",
@@ -229,7 +227,7 @@ class ConfidenceCalculator:
                 # Clamp to valid range
                 confidence = max(self.min_confidence, min(self.max_confidence, confidence))
                 # Finalize and update history
-                final_confidence = self.__finalize_confidence(confidence, state)
+                final_confidence = self.__finalize_confidence(confidence)
                 self.logger.record_event(
                     event_type="confidence_calculation_success",
                     message="Confidence calculation completed",
@@ -247,6 +245,7 @@ class ConfidenceCalculator:
                 return final_confidence
             except Exception as e:
                 # Log error and attempt recovery
+                state = self.state_manager.get_state()
                 error_manager.record_error(
                     error_type="confidence_calculation_error",
                     message=str(e),
@@ -260,7 +259,7 @@ class ConfidenceCalculator:
                     additional_info={"error": str(e)}
                 )
                 # Attempt recovery
-                recovered_confidence = self.__recover_confidence(e, state, error_manager)
+                recovered_confidence = self.__recover_confidence(e, error_manager)
                 # Clamp recovered confidence
                 recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
                 return recovered_confidence
@@ -297,28 +296,24 @@ class ConfidenceCalculator:
         max_probs = probs.max(dim=-1).values
         return max_probs.mean().item()
 
-    def __finalize_confidence(self, confidence: float, state: SOVLState) -> float:
+    def __finalize_confidence(self, confidence: float) -> float:
         """Finalize confidence score and update history atomically using StateManager."""
-        if self.state_manager:
-            def update_fn(s):
-                c = max(self.min_confidence, min(self.max_confidence, confidence))
-                if hasattr(s, 'confidence_history') and isinstance(s.confidence_history, deque):
-                    s.confidence_history.append(c)
-                    while len(s.confidence_history) > 100:
-                        s.confidence_history.popleft()
-                else:
-                    s.confidence_history = deque([c], maxlen=100)
-                return s
-            self.state_manager.update_state_atomic(update_fn)
-            return confidence
-        else:
-            # Deprecated: direct mutation fallback. StateManager is required for atomic updates.
-            raise RuntimeError("StateManager is required for atomic confidence updates.")
+        def update_fn(s):
+            c = max(self.min_confidence, min(self.max_confidence, confidence))
+            if hasattr(s, 'confidence_history') and isinstance(s.confidence_history, deque):
+                s.confidence_history.append(c)
+                while len(s.confidence_history) > 100:
+                    s.confidence_history.popleft()
+            else:
+                s.confidence_history = deque([c], maxlen=100)
+            return s
+        self.state_manager.update_state_atomic(update_fn)
+        return confidence
 
-    def __recover_confidence(self, error: Exception, state: SOVLState, error_manager: ErrorManager) -> float:
+    def __recover_confidence(self, error: Exception, error_manager: ErrorManager) -> float:
         """Attempt to recover confidence from history or use default, with defensive checks and logging."""
+        state = self.state_manager.get_state()
         try:
-            # Validate confidence history
             if not hasattr(state, 'confidence_history') or not isinstance(state.confidence_history, deque):
                 error_manager.logger.record_event(
                     event_type="confidence_history_error",
@@ -327,7 +322,6 @@ class ConfidenceCalculator:
                     additional_info={"error": str(error)}
                 )
                 return self.default_confidence
-
             if len(state.confidence_history) < self.min_history_length:
                 error_manager.logger.record_event(
                     event_type="confidence_history_insufficient",
@@ -339,13 +333,11 @@ class ConfidenceCalculator:
                     }
                 )
                 return self.default_confidence
-
             recent_confidences = list(state.confidence_history)[-self.min_history_length:]
             valid_confidences = [
                 c for c in recent_confidences
                 if isinstance(c, (int, float)) and self.min_confidence <= c <= self.max_confidence
             ]
-
             if not valid_confidences:
                 error_manager.logger.record_event(
                     event_type="confidence_history_no_valid_entries",
@@ -357,8 +349,6 @@ class ConfidenceCalculator:
                     }
                 )
                 return self.default_confidence
-
-            # Use simple mean of valid confidences for recovery
             recovered_confidence = sum(valid_confidences) / len(valid_confidences)
             recovered_confidence = max(self.min_confidence, min(self.max_confidence, recovered_confidence))
             error_manager.logger.record_event(
@@ -372,7 +362,6 @@ class ConfidenceCalculator:
                 }
             )
             return recovered_confidence
-
         except Exception as recovery_error:
             error_manager.logger.record_event(
                 event_type="confidence_recovery_failed",
@@ -452,50 +441,28 @@ _confidence_calculator_lock = Lock()
 def calculate_confidence_score(
     logits: torch.Tensor,
     generated_ids: torch.Tensor,
-    state: SOVLState,
     error_manager: ErrorManager,
     context: SystemContext,
-    state_manager: Optional[Any] = None,
-    recaller: Optional[Any] = None,  # DialogueContextManager
+    state_manager: StateManager,
     user_id: str = "default",
     strategy: str = "blended",  # "classic", "experience", "entropy", "margin", "blended"
     top_k: int = 5,
     weights: Optional[dict] = None
 ) -> float:
     """Calculate confidence score with robust error recovery.
-    
-    Args:
-        logits: Model output logits
-        generated_ids: Generated token IDs
-        state: Current SOVL state
-        error_manager: Error handling manager
-        context: System context
-        state_manager: Optional StateManager for atomic state updates
-        recaller: DialogueContextManager for experience-based adjustment
-        user_id: User identifier for experience-based adjustment
-        strategy: Confidence strategy ("classic", "experience", "entropy", "margin", "blended")
-        top_k: Top k similar messages for experience-based adjustment
-        weights: Optional weights for blended confidence calculation
-        
-    Returns:
-        float: Confidence score between 0.0 and 1.0
+    All state access is via StateManager.
     """
     global _confidence_calculator
     with _confidence_calculator_lock:
         if _confidence_calculator is None:
-            if not hasattr(state, 'config_manager') or not hasattr(state, 'logger'):
-                raise ValueError("State missing required config_manager or logger")
-            if not isinstance(state.config_manager, ConfigManager) or not isinstance(state.logger, Logger):
-                raise TypeError("Invalid config_manager or logger types")
-            _confidence_calculator = ConfidenceCalculator(state.config_manager, state.logger, state_manager=state_manager)
+            config_manager = state_manager.config_manager if hasattr(state_manager, 'config_manager') else None
+            logger = state_manager.logger if hasattr(state_manager, 'logger') else None
+            _confidence_calculator = ConfidenceCalculator(config_manager, logger, state_manager=state_manager)
     return _confidence_calculator.calculate_confidence_score(
         logits=logits,
         generated_ids=generated_ids,
-        state=state,
         error_manager=error_manager,
         context=context,
-        state_manager=state_manager,
-        recaller=recaller,
         user_id=user_id,
         strategy=strategy,
         top_k=top_k,

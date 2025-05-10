@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from datetime import datetime
 from sovl_error import ErrorManager
-from sovl_state import SOVLState, StateManager
+from sovl_state import StateManager
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_queue import capture_scribe_event
@@ -309,7 +309,7 @@ class Curiosity:
 
     def compute_curiosity(
         self,
-        state: SOVLState,
+        state: StateManager,
         query_embedding: torch.Tensor,
         device: torch.device
     ) -> float:
@@ -814,16 +814,16 @@ class CuriosityManager():
 
     def _get_valid_memory_embeddings(self) -> List[torch.Tensor]:
         """Get valid memory embeddings with memory constraints."""
+        if not self.state_manager:
+            raise RuntimeError("CuriosityManager requires a StateManager for state access.")
         try:
             valid_embeddings = []
             batch_size = self.curiosity.batch_size
-
-            embeddings = self.state_manager.get_state().embeddings
-
+            state = self.state_manager.get_state()
+            embeddings = getattr(state, 'embeddings', [])
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i + batch_size]
                 valid_embeddings.extend(batch)
-
             return valid_embeddings
         except Exception as e:
             self._record_error(f"Failed to get valid memory embeddings: {str(e)}")
@@ -890,7 +890,9 @@ class CuriosityManager():
             )
 
     def update_metrics(self, metric_name: str, value: float) -> bool:
-        """Update curiosity metrics atomically in SOVLState."""
+        """Update curiosity metrics atomically in StateManager."""
+        if not self.state_manager:
+            raise RuntimeError("CuriosityManager requires a StateManager for state access.")
         try:
             def update_fn(state):
                 if not hasattr(state, "curiosity_metrics"):
@@ -900,6 +902,7 @@ class CuriosityManager():
                 maxlen = self.config_manager.get("metrics_maxlen")
                 if len(state.curiosity_metrics[metric_name]) > maxlen:
                     state.curiosity_metrics[metric_name] = state.curiosity_metrics[metric_name][-maxlen:]
+                return state
             self.state_manager.update_state_atomic(update_fn)
             return True
         except Exception as e:
@@ -912,7 +915,10 @@ class CuriosityManager():
             
     def _calculate_novelty(self, prompt: str) -> float:
         """Calculate novelty score for a prompt (1.0 = most novel, 0.0 = not novel)."""
-        seen_prompts = self.state_manager.get_seen_prompts()
+        if not self.state_manager:
+            raise RuntimeError("CuriosityManager requires a StateManager for state access.")
+        state = self.state_manager.get_state()
+        seen_prompts = getattr(state, 'seen_prompts', [])
         if not seen_prompts:
             return 1.0
         similarities = [
@@ -926,6 +932,8 @@ class CuriosityManager():
 
     def _calculate_ignorance(self, prompt: str) -> float:
         """Calculate ignorance as 1.0 - similarity to best long-term memory match."""
+        if not self.state_manager:
+            raise RuntimeError("CuriosityManager requires a StateManager for state access.")
         try:
             # Ensure recaller is available
             if not hasattr(self, 'recaller') or self.recaller is None:
@@ -979,11 +987,15 @@ class CuriosityManager():
         """Summarize what the system knows about the prompt."""
         if not isinstance(prompt, str) or not prompt.strip():
             return "Prompt is invalid or empty."
-        seen_prompts = self.state_manager.get_seen_prompts()
+        if not self.state_manager:
+            raise RuntimeError("CuriosityManager requires a StateManager for state access.")
+        state = self.state_manager.get_state()
+        seen_prompts = getattr(state, 'seen_prompts', [])
         if not seen_prompts:
             return "Prompt is new to the system."
         # Use Counter for large lists
         if len(seen_prompts) > 1000:
+            from collections import Counter
             prompt_counts = Counter(seen_prompts)
             count = prompt_counts.get(prompt, 0)
         else:
