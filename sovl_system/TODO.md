@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. Look into the feedback process of all modules that go into sovl_primer. The new main driver of persona is now through vibes. The scribe system may need refinement of metadata to maximize info for training and feedback loop
+1. 
 2. 
 3. 
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
