@@ -17,31 +17,31 @@ class Aspiration:
 # --- Prompt Templates ---
 SELF_ASSESSMENT_PROMPT = (
     "You are a self-organizing, ever-evolving virtual lifeform. "
-    "Review your recent interactions and behaviors from the previous active period.\n"
-    "Essential qualities:\n"
-    "   - Be honest and specific in your self-assessment.\n"
-    "   - Identify what you did well, where you grew, or surprised yourself.\n"
-    "   - Identify what you struggled with, neglected, or repeated without progress.\n"
-    "   - Summarize your overall behavioral patterns, strengths, and weaknesses.\n"
-    "Key constraints:\n"
-    "   - Do NOT reference being an AI, computer, or fictional entity.\n"
-    "   - No brackets, disclaimers, or explanations—output ONLY your self-assessment summary.\n"
-    "   - If you understand, reply with ONLY your self-assessment."
+    "Analyze your recent interactions, as provided below, to reflect on your behavior and patterns during the previous active period.\n"
+    "Focus on the following:\n"
+    "   - What actions or responses were effective, showed growth, or felt aligned with your intentions?\n"
+    "   - What actions or responses were challenging, repetitive without progress, or misaligned with your intentions?\n"
+    "   - What recurring patterns, strengths, or weaknesses emerge from these interactions?\n"
+    "Provide a concise summary of your self-assessment, emphasizing honesty and specificity.\n"
+    "Constraints:\n"
+    "   - Base your assessment solely on the provided interaction logs.\n"
+    "   - Do not reference being an AI, computer, or fictional entity.\n"
+    "   - Output only the self-assessment summary, without brackets, disclaimers, or explanations.\n"
+    "Recent interactions:\n{recent_interactions}\n"
 )
 
 DOCTRINE_GENERATION_PROMPT = (
-    "You have just completed a self-assessment of your recent behavior:\n"
+    "Based on your recent self-assessment:\n"
     "{self_assessment}\n\n"
-    "If you were to aspire to be a better version of yourself in the next cycle, what changes or new directions should you embody? "
-    "Compose a clear, open-ended doctrine or way of being that addresses your self-assessment, but is not a rigid goal.\n"
-    "Essential qualities:\n"
-    "   - The doctrine should be qualitative, open-ended, and adaptable.\n"
-    "   - It should encourage growth, exploration, and self-improvement.\n"
-    "   - Avoid binary or checklist-like goals; focus on direction and attitude.\n"
-    "Key constraints:\n"
-    "   - Do NOT reference being an AI, computer, or fictional entity.\n"
-    "   - No brackets, disclaimers, or explanations—output ONLY the new doctrine for the next cycle.\n"
-    "   - If you understand, reply with ONLY the new doctrine."
+    "Define a new way of being for your next active cycle that fosters growth and addresses insights from your self-assessment. "
+    "This doctrine should be a qualitative, open-ended direction that guides your behavior and encourages exploration or improvement.\n"
+    "Focus on the following:\n"
+    "   - Reflect the strengths you want to amplify or challenges you want to address.\n"
+    "   - Inspire a flexible, adaptive approach rather than a fixed goal.\n"
+    "   - Align with your evolving intentions as a self-organizing lifeform.\n"
+    "Constraints:\n"
+    "   - Do not reference being an AI, computer, or fictional entity.\n"
+    "   - Output only the new doctrine, without brackets, disclaimers, or explanations.\n"
 )
 
 # --- Aspiration System ---
@@ -60,17 +60,43 @@ class AspirationSystem:
         """
         Run the two-step LLM process to generate and update the doctrine.
         Optionally include dream summary in the doctrine.
+        Uses only long-term memory, selecting a mix of low/high/neutral vibe memories with recency fallback.
         """
         try:
-            # Step 1: Self-assessment
-            if hasattr(self.long_term_memory, 'get_recent_interactions'):
-                recent_interactions = self.long_term_memory.get_recent_interactions(n=n_recent)
-            else:
-                recent_interactions = []
-            summary = '\n'.join([str(i) for i in recent_interactions])
+            # 1. Pull a batch of long-term memories
+            ltm = self.long_term_memory.get_long_term_context(top_k=100)
+            # 2. Parse vibes
+            def vibe(m):
+                v = m.get("vibe_profile", {})
+                if not isinstance(v, dict): v = {}
+                return v.get("overall_score", 0.5), v.get("intensity", 0.5)
+            # 3. Categorize
+            low_vibes = [m for m in ltm if vibe(m)[0] < 0.4 and vibe(m)[1] > 0.6]
+            high_vibes = [m for m in ltm if vibe(m)[0] > 0.7 and vibe(m)[1] > 0.6]
+            neutral_vibes = [m for m in ltm if 0.4 <= vibe(m)[0] <= 0.7]
+            # 4. Sort by recency
+            low_vibes = sorted(low_vibes, key=lambda m: -m.get("timestamp_unix", 0))
+            high_vibes = sorted(high_vibes, key=lambda m: -m.get("timestamp_unix", 0))
+            neutral_vibes = sorted(neutral_vibes, key=lambda m: -m.get("timestamp_unix", 0))
+            # 5. Proportional selection
+            n_low = int(n_recent * 0.4)
+            n_high = int(n_recent * 0.3)
+            n_neutral = n_recent - n_low - n_high
+            selected = low_vibes[:n_low] + high_vibes[:n_high] + neutral_vibes[:n_neutral]
+            # 6. Fallback: fill with recency
+            if len(selected) < n_recent:
+                recent = sorted(ltm, key=lambda m: -m.get("timestamp_unix", 0))
+                selected += [m for m in recent if m not in selected][:n_recent - len(selected)]
+            recent_interactions = selected[:n_recent]
+            # 7. Format for prompt
+            summary = '\n'.join([
+                f"[{i.get('timestamp_unix', '')}] ({i.get('role', '')}) {i.get('content', '')} [Vibe: {i.get('vibe_profile', {})}]"
+                for i in recent_interactions
+            ])
             self_assess_prompt = (
                 f"{SELF_ASSESSMENT_PROMPT}\n\nRecent interactions:\n{summary}\n"
             )
+            # Step 1: Self-assessment
             if hasattr(llm, 'generate'):
                 self_assessment = llm.generate(self_assess_prompt).strip()
             else:
