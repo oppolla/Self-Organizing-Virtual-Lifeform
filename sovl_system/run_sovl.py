@@ -371,7 +371,6 @@ class SOVLRunner:
             "error_manager": {"state_tracker"},
             "memory_monitor": {"error_manager", "ram_manager", "gpu_manager"},
             "curiosity_manager": {"error_manager", "state_tracker"},
-            "memoria_manager": {"error_manager", "state_tracker"}
         }
 
         components = {}
@@ -422,13 +421,6 @@ class SOVLRunner:
                     error_manager=components["error_manager"],
                     device=context.device,
                     state_manager=components["state_tracker"]
-                )
-            elif name == "memoria_manager":
-                components[name] = MemoriaManager(
-                    config_manager=context.config_manager,
-                    logger=context.logger,
-                    error_manager=components["error_manager"],
-                    state_tracker=components["state_tracker"]
                 )
 
             initialized.add(name)
