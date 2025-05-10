@@ -433,12 +433,11 @@ class SOVLOrchestrator(OrchestratorInterface):
 
     @property
     def state(self):
-        """Always access the canonical SOVLState via StateManager."""
+        """Always access the canonical StateManager via StateManager."""
         return getattr(self.state_manager, '_system_state', None)
 
     @state.setter
     def state(self, value):
-        """Set the canonical SOVLState in StateManager."""
         self.state_manager._system_state = value
 
     def sync_state(self) -> None:
@@ -835,7 +834,6 @@ class Conductor:
         """
         self._config_manager = config_manager
         self._logger = logger
-        self.memoria_manager = memoria_manager
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         self._lock = Lock()

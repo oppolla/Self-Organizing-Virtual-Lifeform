@@ -9,7 +9,7 @@ from datetime import datetime
 from threading import Lock
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sovl_logger import Logger
-from sovl_state import SOVLState, ConversationHistory
+from sovl_state import StateManager, ConversationHistory
 from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
@@ -38,7 +38,7 @@ class GenerationManager:
         config_manager: ConfigManager,
         base_model: AutoModelForCausalLM,
         base_tokenizer: AutoTokenizer,
-        state: SOVLState,
+        state: StateManager,
         logger: Logger,
         error_manager: ErrorManager,
         device: torch.device,

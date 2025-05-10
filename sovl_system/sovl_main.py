@@ -20,7 +20,7 @@ import bitsandbytes as bnb
 
 # Core components
 from sovl_config import ConfigManager, ValidationSchema
-from sovl_state import SOVLState, ConversationHistory, StateManager, StateTracker
+from sovl_state import StateManager, StateTracker
 from sovl_error import ErrorManager
 from sovl_logger import Logger
 from sovl_events import EventDispatcher

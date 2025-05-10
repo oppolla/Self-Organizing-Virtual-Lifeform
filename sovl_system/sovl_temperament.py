@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 import traceback
 from sovl_config import ConfigManager
-from sovl_state import SOVLState, StateManager, StateTracker
+from sovl_state import StateManager, StateTracker
 from sovl_logger import Logger
 from sovl_events import EventDispatcher
 import math
@@ -114,7 +114,7 @@ class TemperamentConfig:
 
 class TemperamentSystem:
     """Manages the temperament state and updates. Uses ErrorManager for structured error handling."""
-    # NOTE: All mutations to SOVLState must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
+    # NOTE: All mutations to StateManager must use StateManager.update_state_atomic(update_fn) for atomicity, versioning, and validation.
     def __init__(self, state_manager: StateManager, config_manager: ConfigManager, error_manager: ErrorManager):
         """
         Initialize temperament system.
@@ -413,7 +413,7 @@ class TemperamentAdjuster:
                 stack_trace=traceback.format_exc()
             )
             
-    def _on_state_update(self, state: SOVLState) -> None:
+    def _on_state_update(self, state: StateManager) -> None:
         """Handle state updates by synchronizing with the TemperamentSystem."""
         with self._lock:
             original_score = getattr(state, "temperament_score", None)
@@ -487,13 +487,13 @@ class TemperamentAdjuster:
                     }
                 )
             
-    def _validate_state_consistency(self, state: SOVLState, new_score: float) -> bool:
+    def _validate_state_consistency(self, state: StateManager, new_score: float) -> bool:
         """
         Validate consistency between the potential new score and the existing history.
         Checks for large jumps and parameter changes.
         
         Args:
-            state: The current SOVLState object (before update).
+            state: The current StateManager object (before update).
             new_score: The new temperament score calculated by TemperamentSystem.
 
         Returns:
@@ -556,7 +556,7 @@ class TemperamentAdjuster:
             )
             return False # Assume inconsistent on error
             
-    def _compute_state_hash(self, state: SOVLState) -> str:
+    def _compute_state_hash(self, state: StateManager) -> str:
         """Compute a hash of the current state."""
         return str({
             "temperament_score": state.temperament_score,
@@ -717,7 +717,7 @@ class TemperamentPressure:
 
 class TemperamentManager:
     """Manages temperament state updates and triggers system utterances based on pressure eruptions."""
-    def __init__(self, config_manager: ConfigManager, logger: Logger, state: SOVLState, generation_manager: Any, error_manager: ErrorManager, state_manager: Optional[StateManager] = None):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, state: StateManager, generation_manager: Any, error_manager: ErrorManager, state_manager: Optional[StateManager] = None):
         self.config_manager = config_manager
         self.logger = logger
         self.state = state

@@ -8,7 +8,7 @@ import torch
 if TYPE_CHECKING:
     from sovl_config import ConfigManager
     from sovl_logger import Logger
-    from sovl_state import SOVLState, StateManager
+    from sovl_state import StateManager
     from sovl_error import ErrorManager
     from sovl_memory import RAMManager, GPUMemoryManager
     from sovl_main import SOVLSystem, SystemContext

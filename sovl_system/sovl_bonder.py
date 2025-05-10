@@ -2,7 +2,7 @@ from typing import Optional, Dict
 import torch
 from threading import Lock
 from sovl_logger import Logger
-from sovl_state import SOVLState, StateManager, UserProfileState
+from sovl_state import StateManager, UserProfileState
 from sovl_error import ErrorManager
 from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
@@ -287,7 +287,7 @@ class BondCalculator:
     def calculate_bonding_score(
         self,
         user_input: str,
-        state: SOVLState,
+        state: StateManager,
         error_manager: ErrorManager,
         context: SystemContext,
         curiosity_manager: Optional[CuriosityManager] = None,
@@ -425,11 +425,11 @@ class BondCalculator:
         knowing_score = 0.7 * familiarity + 0.3 * duration
         return max(0.0, min(1.0, knowing_score))
 
-    def _compute_stability_score(self, state: SOVLState) -> float:
+    def _compute_stability_score(self, state: StateManager) -> float:
         """Placeholder for stability score (system health/errors)."""
         return 0.5  # Neutral default
 
-    def _compute_coherence_score(self, user_input: str, state: SOVLState) -> float:
+    def _compute_coherence_score(self, user_input: str, state: StateManager) -> float:
         """Placeholder for coherence score (input-response alignment)."""
         return 0.5  # Neutral default
 

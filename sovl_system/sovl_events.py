@@ -8,7 +8,7 @@ from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Generator, Union, cast, AsyncGenerator
 from sovl_logger import Logger, LoggerConfig
 from sovl_config import ConfigManager
-from sovl_state import StateManager, SOVLState
+from sovl_state import StateManager
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_error import ErrorManager, ErrorRecord
 import traceback
@@ -884,7 +884,7 @@ class EventDispatcher:
             # Reset state event handling
             if "state" in record.context:
                 state = record.context["state"]
-                if isinstance(state, SOVLState):
+                if isinstance(state, StateManager):
                     # Reinitialize state handling
                     self._initialize_state_handling()
             
@@ -995,7 +995,7 @@ class StateEventDispatcher(EventDispatcher):
                     pass
                     
             state = event_data.get('state')
-            if not isinstance(state, SOVLState):
+            if not isinstance(state, StateManager):
                 raise ValueError("Invalid state object in event data")
                 
             # Create copies of what we need to avoid holding locks during state update
