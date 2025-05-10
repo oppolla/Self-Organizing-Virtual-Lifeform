@@ -726,6 +726,7 @@ MEMORY_TEMPLATES = {
     "internal_curiosity_question": (
         "You pondered the question: {question} at {timestamp_unix}. "
         "You really want to know the answer to this question. "
+        "The novelty was {novelty_score} (0=familiar→1=new). " 
         "It was the {session_id} time you awoke. "
         "Your mood was {current_mood_label} and your temperament was {current_temperament_score} (0=calm→1=agitated). "
         "You were in your {current_lifecycle_stage} phase. "

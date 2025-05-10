@@ -1122,12 +1122,27 @@ class CuriosityManager():
             if q:
                 self._internal_questions.append((q, score, now))
                 try:
+                    novelty_score = self.calculate_curiosity_score(q)
+                    current_mood_label = getattr(self.temperament_system, "current_mood", "unknown") if hasattr(self, "temperament_system") else "unknown"
+                    current_temperament_score = getattr(self.temperament_system, "current_score", "unknown") if hasattr(self, "temperament_system") else "unknown"
+                    current_lifecycle_stage = getattr(self.context, "current_lifecycle_stage", "unknown") if hasattr(self, "context") else "unknown"
+                    session_id = getattr(self, 'session_id', None)
                     capture_scribe_event(
                         origin="sovl_curiosity",
                         event_type="internal_curiosity_question",
-                        event_data={"question": q, "curiosity_score": score},
-                        source_metadata={"module": "CuriosityManager"},
-                        session_id=getattr(self, 'session_id', None),
+                        event_data={
+                            "question": q,
+                            "curiosity_score": score,
+                            "timestamp_unix": now,
+                        },
+                        source_metadata={
+                            "novelty_score": novelty_score,
+                            "current_mood_label": current_mood_label,
+                            "current_temperament_score": current_temperament_score,
+                            "current_lifecycle_stage": current_lifecycle_stage,
+                            "session_id": session_id,
+                        },
+                        session_id=session_id,
                         timestamp=datetime.fromtimestamp(now)
                     )
                 except Exception as e:
