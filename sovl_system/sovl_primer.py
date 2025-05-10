@@ -6,7 +6,7 @@ from sovl_bonder import BondCalculator, BondModulator, get_bond_calculator
 from sovl_logger import Logger 
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
-from sovl_state import SOVLState, StateManager 
+from sovl_state import StateManager 
 from sovl_viber import VibeProfile
 import traceback
 import threading
@@ -413,7 +413,7 @@ class GenerationPrimer:
         required_attrs = ['confidence', 'temperament_score']
         missing = [attr for attr in required_attrs if not hasattr(state, attr)]
         if missing:
-            raise ValueError(f"SOVLState missing required attributes: {missing}")
+            raise ValueError(f"StateManager missing required attributes: {missing}")
         
         default_hooks = {
             "curiosity": enable_curiosity,
@@ -531,7 +531,7 @@ class GenerationPrimer:
         """
         traits = {}
         state_arg = kwargs.get("state", self.state_manager.get_state())
-        if not isinstance(state_arg, SOVLState):
+        if not isinstance(state_arg, StateManager):
             self.logger.log_error("Invalid state type for trait computation", error_type="primer_state_type_error")
             return {}
 
@@ -834,7 +834,7 @@ class GenerationPrimer:
         traits_prompt = self.get_traits_prompt(bond_score=traits.get("bond", 0.5))
         return {"traits": traits, "traits_prompt": traits_prompt}
 
-    def update_state(self, new_state: 'SOVLState'):
+    def update_state(self, new_state: 'StateManager'):
         """
         Update the state object used by the primer and all trait computations.
         Useful for hot-swapping user/system state at runtime.
@@ -877,7 +877,7 @@ class GenerationPrimer:
             original_temperament = getattr(state, 'temperament_score', None)
             try:
                 if not hasattr(state, 'confidence') or not isinstance(state.confidence, (int, float)):
-                    self.logger.log_error("Invalid or missing confidence attribute in SOVLState")
+                    self.logger.log_error("Invalid or missing confidence attribute in StateManager")
                     return state
                 if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
                     state.confidence = max(0.1, state.confidence - 0.1)
@@ -885,7 +885,7 @@ class GenerationPrimer:
                     state.confidence = max(0.2, state.confidence - 0.05)
                 if hasattr(state, 'temperament_score'):
                     if not isinstance(state.temperament_score, (int, float)):
-                        self.logger.log_error("Invalid temperament_score type in SOVLState")
+                        self.logger.log_error("Invalid temperament_score type in StateManager")
                         return state
                     state.temperament_score = max(0.0, state.temperament_score - 0.05)
                 self.logger.record_event(
@@ -999,7 +999,7 @@ class GenerationPrimer:
 
     def sync_traits_to_state(self, traits: dict) -> None:
         """
-        Automatically syncs all trait values to the corresponding attributes in SOVLState.
+        Automatically syncs all trait values to the corresponding attributes in StateManager.
         Only updates traits that are present as attributes on the state object.
         Logs a warning if a trait is not found on the state.
         Uses atomic update with rollback to prevent partial/corrupted updates.
@@ -1014,7 +1014,7 @@ class GenerationPrimer:
                         setattr(state, trait, value)
                     else:
                         self.logger.log_warning(
-                            f"Trait '{trait}' not found in SOVLState; skipping state update.",
+                            f"Trait '{trait}' not found in StateManager; skipping state update.",
                             event_type="trait_state_sync_warning"
                         )
                 return state
@@ -1030,7 +1030,7 @@ class GenerationPrimer:
     def update_state_after_operation(self, context: str = None, result: dict = None) -> None:
         """
         Enhanced state updates post-operation. Handles operation result and logs adjustments.
-        Adds fallback logic if SOVLState.update_after_operation is not available.
+        Adds fallback logic if StateManager.update_after_operation is not available.
         Now also syncs all traits in result['traits'] to state.
         """
         def update_fn(state):
@@ -1048,7 +1048,7 @@ class GenerationPrimer:
                             )
                     else:
                         self.logger.log_warning(
-                            f"Trait '{trait}' not found in SOVLState; skipping state update.",
+                            f"Trait '{trait}' not found in StateManager; skipping state update.",
                             event_type="trait_state_sync_warning"
                         )
             used_fallback = False
@@ -1064,7 +1064,7 @@ class GenerationPrimer:
                 state.update_after_operation(context=context)
             else:
                 if not used_fallback:
-                    self.logger.log_warning("SOVLState.update_after_operation not available, using default adjustments.")
+                    self.logger.log_warning("StateManager.update_after_operation not available, using default adjustments.")
             return state
         self.state_manager.update_state_atomic(update_fn)
         self.logger.record_event(
