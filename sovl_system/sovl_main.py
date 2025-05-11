@@ -72,7 +72,7 @@ from sovl_utils import (
     atomic_file_counter,
     safe_append_to_file
 )
-from sovl_confidence import calculate_confidence_score
+from sovl_confidence import calculate_confidence_score, ConfidenceCalculator
 from sovl_io import  InsufficientDataError, prune_scribe_journal
 from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingWorkflowManager
 
@@ -942,9 +942,9 @@ class SOVLSystem(SystemInterface):
         self,
         context: SystemContext,
         model_manager: ModelManager,
-        curiosity_manager: CuriosityManager,
         state_tracker: StateTracker,
-        error_manager: ErrorManager
+        error_manager: ErrorManager,
+        temperament_system: TemperamentSystem
     ):
         """
         Initialize the SOVL system with pre-initialized components.
@@ -952,32 +952,26 @@ class SOVLSystem(SystemInterface):
         Args:
             context: System context containing shared resources
             model_manager: Model manager component
-            curiosity_manager: Curiosity manager component
             state_tracker: State tracking component
             error_manager: Error management component
+            temperament_system: Temperament system component
         """
         try:
-            # Validate required components
             if not context:
                 raise ValueError("SystemContext is required")
-            
-            # Store context and components
+
             self.context = context
             self.config_handler = context.config_manager
             self.model_manager = model_manager
-            self.curiosity_manager = curiosity_manager
             self.state_tracker = state_tracker
             self.error_manager = error_manager
-            
-            # Initialize thread safety
+            self.temperament_system = temperament_system
+
             self._lock = RLock()
-            
-            # Initialize monitoring state
             self._monitoring_active = False
             self._stop_monitoring_event = Event()
             self._monitor_thread = None
-            
-            # Initialize monitoring components
+
             self.memory_monitor = MemoryMonitor(
                 config_manager=context.config_manager,
                 logger=context.logger,
@@ -985,7 +979,7 @@ class SOVLSystem(SystemInterface):
                 gpu_manager=context.gpu_manager,
                 error_manager=self.error_manager
             )
-            
+
             self.system_monitor = SystemMonitor(
                 config_manager=context.config_manager,
                 logger=context.logger,
@@ -993,27 +987,23 @@ class SOVLSystem(SystemInterface):
                 gpu_manager=context.gpu_manager,
                 error_manager=self.error_manager
             )
-            
+
             self.traits_monitor = TraitsMonitor(
                 config_manager=context.config_manager,
                 logger=context.logger,
                 state_manager=context.state_manager,
-                curiosity_manager=self.curiosity_manager,
                 training_manager=context.training_cycle_manager,
                 error_manager=self.error_manager
             )
-            
+
             # IntrospectionManager (for recursive introspection, meditation, etc)
             try:
                 self.introspection_manager = IntrospectionManager(
                     context=context,
                     state_manager=context.state_manager,
                     error_manager=self.error_manager,
-                    curiosity_manager=self.curiosity_manager,
-                    confidence_calculator=getattr(context, 'confidence_calculator', None),
                     temperament_system=getattr(context, 'temperament_system', None),
-                    model_manager=self.model_manager,
-                    bond_calculator=getattr(self, 'bond_calculator', None)
+                    model_manager=self.model_manager
                 )
             except Exception as e:
                 self.introspection_manager = None
@@ -1023,11 +1013,9 @@ class SOVLSystem(SystemInterface):
                         error_message=f"Failed to initialize IntrospectionManager: {str(e)}",
                         error=e
                     )
-            
-            # Initialize component state
+
             self._initialize_component_state()
-            
-            # Log successful initialization
+
             self.context.logger.record_event(
                 event_type="system_initialized",
                 message="SOVL system initialized successfully",
@@ -1037,7 +1025,7 @@ class SOVLSystem(SystemInterface):
                     "state_hash": self.state_tracker.get_state_hash() if hasattr(self.state_tracker, 'get_state_hash') else None
                 }
             )
-            
+
             # --- Integrate AutonomyManager elegantly ---
             self.ram_manager = getattr(context, 'ram_manager', None)
             self.gpu_manager = getattr(context, 'gpu_manager', None)
@@ -1095,7 +1083,6 @@ class SOVLSystem(SystemInterface):
     def _initialize_component_state(self):
         """Initialize the state of all components."""
         try:
-            # Initialize component states using StateManager
             component_states = {
                 "config_handler": {
                     "status": "initialized",
@@ -1104,10 +1091,6 @@ class SOVLSystem(SystemInterface):
                 "model_manager": {
                     "status": "initialized",
                     "active_model": self.model_manager.active_model_name if self.model_manager else None
-                },
-                "curiosity_manager": {
-                    "status": "initialized",
-                    "question_cache_size": len(self.curiosity_manager.question_cache) if self.curiosity_manager else 0
                 },
                 "memory_monitor": {
                     "status": "initialized",
@@ -1128,14 +1111,15 @@ class SOVLSystem(SystemInterface):
                 "error_manager": {
                     "status": "initialized",
                     "error_count": len(self.error_manager.get_error_stats()["error_counts"]) if self.error_manager else 0
+                },
+                "temperament_system": {
+                    "status": "initialized"
                 }
             }
-            
-            # Update component states in a thread-safe manner
             with self._lock:
                 for component_name, state in component_states.items():
                     self.context.update_component_state(component_name, state)
-                    
+                self.context.update_component_state("temperament_system", {"status": "initialized"})
         except Exception as e:
             self.error_manager.handle_error(
                 error_type="component_initialization",
@@ -1209,14 +1193,13 @@ class SOVLSystem(SystemInterface):
                 return {
                     "config_handler": bool(self.config_handler),
                     "model_manager": bool(self.model_manager),
-                    "curiosity_manager": bool(self.curiosity_manager),
                     "memory_monitor": bool(self.memory_monitor),
                     "state_tracker": bool(self.state_tracker),
                     "error_manager": bool(self.error_manager),
                     "system_monitor": bool(self.system_monitor),
-                    "traits_monitor": bool(self.traits_monitor)
+                    "traits_monitor": bool(self.traits_monitor),
+                    "temperament_system": bool(self.temperament_system)
                 }
-                
         except Exception as e:
             self.error_manager.handle_error(
                 error_type="component_status",

@@ -1356,6 +1356,45 @@ class CuriosityManager():
         """Outputs the curiosity utterance using the unified output function (no labels)."""
         output_response(text)
 
+    def compute(self, state: 'StateManager', **kwargs) -> float:
+        """Compute curiosity score (alias for compute_curiosity)."""
+        return self.compute_curiosity(state, **kwargs)
+
+    def compute_curiosity(self, state: 'StateManager', **kwargs) -> float:
+        try:
+            vibe_profile = kwargs.get("vibe_profile", None)
+            curiosity_score = self.calculate_curiosity_score(kwargs.get("prompt", None))
+            if vibe_profile and hasattr(vibe_profile, "dimensions"):
+                curiosity_score = (
+                    0.5 * curiosity_score +
+                    0.5 * vibe_profile.dimensions.get("curiosity", 0.5)
+                )
+            return max(0.0, min(1.0, curiosity_score))
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to compute curiosity: {str(e)}",
+                error_type="curiosity_computation_error",
+                stack_trace=traceback.format_exc()
+            )
+            if hasattr(self, 'error_manager') and self.error_manager:
+                self.error_manager.handle_data_error(e, {"state": str(state)}, "curiosity_computation")
+            return 0.5  # Default fallback
+
+    def get_novelty_score(self, prompt: str) -> float:
+        try:
+            return self.calculate_curiosity_score(prompt)
+        except Exception as e:
+            self.logger.log_error(
+                error_msg=f"Failed to compute novelty score: {str(e)}",
+                error_type="novelty_score_error",
+                stack_trace=traceback.format_exc()
+            )
+            return 0.5  # Default fallback
+
+    def is_initialized(self) -> bool:
+        """Check if CuriosityManager is properly initialized."""
+        return all(hasattr(self, attr) for attr in ["config_manager", "logger", "error_manager", "state_manager"])
+
 # Utility for validating usage percentage
 @staticmethod
 def _validate_usage_percentage(val, manager_name, logger=None):

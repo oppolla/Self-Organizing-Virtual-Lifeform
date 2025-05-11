@@ -8,6 +8,7 @@ from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_state import StateManager 
 from sovl_viber import VibeProfile
+from sovl_main import SOVLSystem
 import traceback
 import threading
 import concurrent.futures
@@ -376,10 +377,12 @@ class GenerationPrimer:
         logger: Logger,
         state_manager: 'StateManager',
         error_manager: ErrorManager,
-        curiosity_manager: Optional[Any] = None,
+        curiosity_manager: Any,  # CuriosityManager direct injection
         temperament_system: Optional[Any] = None,
         confidence_calculator: Optional[Any] = None,
+        bond_calculator: Optional[Any] = None,
         bond_modulator: Optional[Any] = None,
+        sovl_system: Optional[Any] = None,  # Temporary for transition
         device: Optional[Any] = None,
         lifecycle_manager: Optional[Any] = None,
         scaffold_manager: Optional[Any] = None,
@@ -390,6 +393,7 @@ class GenerationPrimer:
         enable_confidence: bool = True,
         enable_bond: bool = True,
     ):
+        self.sovl_system = sovl_system
         self.config_manager = config_manager
         self.logger = logger if logger else Logger()
         self.state_manager = state_manager
@@ -397,7 +401,7 @@ class GenerationPrimer:
         self.curiosity_manager = curiosity_manager
         self.temperament_system = temperament_system
         self.confidence_calculator = confidence_calculator
-        self.bond_calculator = get_bond_calculator(config_manager, logger, state_manager.get_state())
+        self.bond_calculator = bond_calculator
         self.bond_modulator = bond_modulator
         self.device = device
         self.lifecycle_manager = lifecycle_manager
@@ -414,7 +418,9 @@ class GenerationPrimer:
         missing = [attr for attr in required_attrs if not hasattr(state, attr)]
         if missing:
             raise ValueError(f"StateManager missing required attributes: {missing}")
-        
+        if not curiosity_manager or not curiosity_manager.is_initialized():
+            self.logger.log_error("CuriosityManager not properly initialized", error_type="primer_init_error")
+            raise ValueError("CuriosityManager initialization failed")
         default_hooks = {
             "curiosity": enable_curiosity,
             "temperament": enable_temperament,
@@ -434,20 +440,6 @@ class GenerationPrimer:
         self.logger.record_event(
             event_type="primer_generation_hooks_final",
             message=f"Final merged generation_hooks: {self.generation_hooks}",
-            level="info",
-            component="GenerationPrimer"
-        )
-      
-        self.curiosity_weight = getattr(self.curiosity_manager, "weight_ignorance", None)
-        if isinstance(config_manager, ConfigManager):
-            self.curiosity_weight = config_manager.get("curiosity_config.weight_ignorance", self.curiosity_weight)
-        self.temperament_decay = None
-        if isinstance(config_manager, ConfigManager):
-            self.temperament_decay = config_manager.get("temperament_config.decay", None)
-       
-        self.logger.record_event(
-            event_type="primer_initialized",
-            message="GenerationPrimer initialized with config-driven hooks and parameters.",
             level="info",
             component="GenerationPrimer"
         )
@@ -525,17 +517,11 @@ class GenerationPrimer:
             return fallback
 
     def compute_traits(self, **kwargs) -> Dict[str, Any]:
-        """
-        Aggregates trait values from all connected modules, respecting generation hooks.
-        Uses VibeProfile scores to inform trait computations where applicable.
-        """
         traits = {}
-        state_arg = kwargs.get("state", self.state_manager.get_state())
-        if not isinstance(state_arg, StateManager):
+        state = kwargs.get("state", self.state_manager)
+        if not isinstance(state, StateManager):
             self.logger.log_error("Invalid state type for trait computation", error_type="primer_state_type_error")
             return {}
-
-        # Get latest VibeProfile from dialogue_context_manager
         vibe_profile = None
         if self.dialogue_context_manager and hasattr(self.dialogue_context_manager, 'short_term'):
             short_term = getattr(self.dialogue_context_manager, 'short_term', None)
@@ -556,85 +542,61 @@ class GenerationPrimer:
                 event_type="vibe_profile_missing",
                 component="GenerationPrimer"
             )
-
-        timeout = 1.5  # seconds
-        trait_jobs = {}
-        trait_fallbacks = {
-            "curiosity": 0.5,
-            "temperament": 0.5,
-            "confidence": 0.5,
-            "bond": 0.5
-        }
+        timeout = 1.5
+        trait_fallbacks = {"curiosity": 0.5, "temperament": 0.5, "confidence": 0.5, "bond": 0.5}
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            trait_jobs = {}
             # Curiosity
-            if self.generation_hooks.get("curiosity", True):
-                if not self.curiosity_manager or not hasattr(self.curiosity_manager, 'compute_curiosity'):
-                    self.logger.log_error("Curiosity manager missing or invalid", error_type="primer_curiosity_manager_error")
-                    traits["curiosity"] = trait_fallbacks["curiosity"]
-                else:
-                    curiosity_kwargs = kwargs.copy()
-                    trait_jobs["curiosity"] = executor.submit(
-                        lambda: self.curiosity_manager.compute_curiosity(state=state_arg, **curiosity_kwargs)
-                    )
+            if self.generation_hooks.get("curiosity", True) and self.curiosity_manager:
+                trait_jobs["curiosity"] = executor.submit(
+                    lambda: self.curiosity_manager.compute(state=state, vibe_profile=vibe_profile, **kwargs)
+                )
             # Temperament
-            if self.generation_hooks.get("temperament", True):
-                if not self.temperament_system or not hasattr(self.temperament_system, 'current_score'):
-                    self.logger.log_error("Temperament system missing or invalid", error_type="primer_temperament_manager_error")
-                    traits["temperament"] = trait_fallbacks["temperament"]
-                else:
-                    temperament_kwargs = kwargs.copy()
-                    trait_jobs["temperament"] = executor.submit(
-                        lambda: self.temperament_system.current_score(state=state_arg, **temperament_kwargs)
-                    )
+            if self.generation_hooks.get("temperament", True) and self.temperament_system:
+                trait_jobs["temperament"] = executor.submit(
+                    lambda: self.temperament_system.current_score
+                )
             # Confidence
-            if self.generation_hooks.get("confidence", True):
-                if not self.confidence_calculator or not hasattr(self.confidence_calculator, 'calculate_confidence_score'):
-                    self.logger.log_error("Confidence calculator missing or invalid", error_type="primer_confidence_manager_error")
-                    traits["confidence"] = trait_fallbacks["confidence"]
-                else:
-                    confidence_kwargs = kwargs.copy()
-                    if vibe_profile:
-                        confidence_kwargs["vibe_confidence"] = vibe_profile.confidence
-                    trait_jobs["confidence"] = executor.submit(
-                        lambda: self.confidence_calculator.calculate_confidence_score(state=state_arg, **confidence_kwargs)
+            if self.generation_hooks.get("confidence", True) and self.confidence_calculator:
+                confidence_kwargs = kwargs.copy()
+                if vibe_profile:
+                    confidence_kwargs["vibe_confidence"] = vibe_profile.confidence
+                trait_jobs["confidence"] = executor.submit(
+                    lambda: self.confidence_calculator.calculate_confidence_score(
+                        logits=kwargs.get("logits"),
+                        generated_ids=kwargs.get("generated_ids"),
+                        error_manager=self.error_manager,
+                        context=kwargs.get("context"),
+                        state=state,
+                        **confidence_kwargs
                     )
+                )
             # Bond
-            if self.generation_hooks.get("bond", True):
-                if not self.bond_calculator or not hasattr(self.bond_calculator, 'calculate_bond'):
-                    self.logger.log_error("Bond calculator missing or invalid", error_type="primer_bond_manager_error")
-                    traits["bond"] = trait_fallbacks["bond"]
-                else:
-                    bond_kwargs = kwargs.copy()
-                    if vibe_profile:
-                        bond_kwargs["vibe_resonance"] = vibe_profile.dimensions.get("resonance_topic_consistency", 0.5)
-                    def bond_func():
-                        bond_score = self.bond_calculator.calculate_bond(state=state_arg, **bond_kwargs)
-                        if self.bond_modulator:
-                            try:
-                                bond_score = self.bond_modulator.get_bond_modulation(kwargs.get("user_id"), bond_score)
-                            except Exception as e:
-                                self.logger.log_warning(f"BondModulator failed: {str(e)}", error_type="bond_modulation_error")
-                        return bond_score
-                    trait_jobs["bond"] = executor.submit(bond_func)
-            # Collect results with timeout and fallback
+            if self.generation_hooks.get("bond", True) and self.bond_calculator:
+                bond_kwargs = kwargs.copy()
+                if vibe_profile:
+                    bond_kwargs["vibe_resonance"] = vibe_profile.dimensions.get("resonance_topic_consistency", 0.5)
+                trait_jobs["bond"] = executor.submit(
+                    lambda: self.bond_calculator.calculate_bonding_score(
+                        user_input=kwargs.get("user_input", ""),
+                        state=state,
+                        error_manager=self.error_manager,
+                        context=kwargs.get("context"),
+                        curiosity_manager=self.curiosity_manager,
+                        extra_data=bond_kwargs.get("extra_data"),
+                        **bond_kwargs
+                    )
+                )
             for trait, future in trait_jobs.items():
                 try:
                     traits[trait] = future.result(timeout=timeout)
-                except concurrent.futures.TimeoutError:
-                    self.logger.log_warning(
-                        f"Trait '{trait}' computation timed out after {timeout}s; using fallback.",
-                        event_type="trait_timeout",
-                        component="GenerationPrimer"
-                    )
-                    traits[trait] = trait_fallbacks[trait]
-                except Exception as e:
+                except (concurrent.futures.TimeoutError, Exception) as e:
                     self.logger.log_warning(
                         f"Trait '{trait}' computation failed: {e}; using fallback.",
                         event_type="trait_error",
                         component="GenerationPrimer"
                     )
                     traits[trait] = trait_fallbacks[trait]
-        # Fail fast if required traits are missing
         required_traits = ["curiosity", "temperament"]
         missing = [t for t in required_traits if traits.get(t) is None]
         if missing:
@@ -720,7 +682,7 @@ class GenerationPrimer:
 
     def compute_curiosity(self, **kwargs):
         if self.curiosity_manager:
-            return self.curiosity_manager.compute_curiosity(**kwargs)
+            return self.curiosity_manager.compute(state=self.state_manager, **kwargs)
         return None
 
     def get_temperament(self):
@@ -738,32 +700,45 @@ class GenerationPrimer:
             return self.bond_calculator.calculate_bond(**kwargs)
         return None
 
-    def get_trait(self, trait: str, **kwargs):
-        """
-        Unified trait getter for seamless integration.
-        Usage: primer.get_trait('curiosity', ...)
-        Returns the computed value for the requested trait, or None if not available/enabled.
-        Only known traits are allowed.
-        """
-        trait_map = {
-            "curiosity": self.compute_curiosity,
-            "temperament": self.get_temperament,
-            "confidence": self.compute_confidence,
-            "bond": self.compute_bond
-        }
-        if trait not in trait_map:
-            self.logger.log_error(
-                error_msg=f"Attempted to access unknown trait '{trait}'",
-                error_type="primer_trait_access_error",
-                component="GenerationPrimer"
-            )
-            raise ValueError(f"Unknown trait: {trait}")
-        if self.generation_hooks.get(trait, True):
-            try:
-                return trait_map[trait](**kwargs)
-            except Exception as e:
-                self.handle_error(f"get_trait:{trait}", e, {"kwargs": kwargs})
-        return None
+    def get_trait(self, trait: str, **kwargs) -> Optional[float]:
+        try:
+            if trait == "curiosity" and self.curiosity_manager:
+                return self.curiosity_manager.compute(state=self.state_manager, **kwargs)
+            elif trait == "temperament" and self.temperament_system:
+                return self.temperament_system.current_score
+            elif trait == "confidence" and self.confidence_calculator:
+                return self.confidence_calculator.calculate_confidence_score(
+                    logits=kwargs.get("logits"),
+                    generated_ids=kwargs.get("generated_ids"),
+                    error_manager=self.error_manager,
+                    context=kwargs.get("context"),
+                    state=self.state_manager,
+                    **kwargs
+                )
+            elif trait == "bond" and self.bond_calculator:
+                bond_score = self.bond_calculator.calculate_bonding_score(
+                    user_input=kwargs.get("user_input", ""),
+                    state=self.state_manager,
+                    error_manager=self.error_manager,
+                    context=kwargs.get("context"),
+                    curiosity_manager=self.curiosity_manager,
+                    extra_data=kwargs.get("extra_data"),
+                    **kwargs
+                )
+                if self.bond_modulator:
+                    _, modulated_score = self.bond_modulator.get_bond_modulation(
+                        metadata_entries=kwargs.get("metadata_entries", []),
+                        extra_data=kwargs.get("extra_data"),
+                        **kwargs
+                    )
+                    bond_score = modulated_score
+                return bond_score
+            else:
+                self.logger.log_error(f"Unknown or missing trait: {trait}", error_type="primer_trait_access_error")
+                raise ValueError(f"Unknown trait: {trait}")
+        except Exception as e:
+            self.handle_error(f"get_trait:{trait}", e, {"kwargs": kwargs})
+            return None
 
     def get_all_traits(self, **kwargs) -> Dict[str, Any]:
         """
@@ -851,10 +826,7 @@ class GenerationPrimer:
         )
 
     def update_curiosity_state(self, *args, **kwargs):
-        """
-        Update curiosity state post-generation. Delegates to curiosity_manager if available.
-        """
-        if self.curiosity_manager and hasattr(self.curiosity_manager, "update_metrics"):
+        if self.curiosity_manager:
             try:
                 return self.curiosity_manager.update_metrics(*args, **kwargs)
             except Exception as e:
@@ -864,7 +836,7 @@ class GenerationPrimer:
                     stack_trace=traceback.format_exc()
                 )
         else:
-            self.logger.log_warning("Curiosity manager not available for curiosity state update.")
+            self.logger.log_warning("CuriosityManager not available for state update.")
         return None
 
     def update_state_after_error(self, error: Exception, context: str) -> None:

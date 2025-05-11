@@ -26,6 +26,9 @@ import threading
 from sovl_resource import ResourceManager
 from sovl_api import SOVLAPI
 from sovl_queue import ScribeQueue
+from sovl_bonder import BondCalculator
+from sovl_confidence import ConfidenceCalculator
+from sovl_temperament import TemperamentSystem
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
@@ -98,7 +101,27 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("scribe_ingestion_processor", "sovl_processor", "ScribeIngestionProcessor", {"log_paths": "scribe_log_paths", "memory_templates": "memory_templates", "logger": "logger", "config_path": "config_manager"}),
     
     # Generation preparation and interface components
-    ("generation_primer", "sovl_primer", "GenerationPrimer", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager", "error_manager": "error_manager", "curiosity_manager": "curiosity_manager", "temperament_system": "temperament_system", "confidence_calculator": "confidence_calculator", "bond_modulator": "bond_modulator", "device": "device", "lifecycle_manager": "lifecycle_manager", "scaffold_manager": "scaffold_manager", "generation_hooks": "generation_hooks", "dialogue_context_manager": "state_manager", "enable_curiosity": "enable_curiosity", "enable_temperament": "enable_temperament", "enable_confidence": "enable_confidence", "enable_bond": "enable_bond"}),
+    ("generation_primer", "sovl_primer", "GenerationPrimer", {
+        "config_manager": "config_manager",
+        "logger": "logger",
+        "state_manager": "state_manager",
+        "error_manager": "error_manager",
+        "curiosity_manager": "curiosity_manager",
+        "temperament_system": "temperament_system",
+        "confidence_calculator": "confidence_calculator",
+        "bond_calculator": "bond_calculator",
+        "bond_modulator": "bond_modulator",
+        "sovl_system": "sovl_system",  # Temporary for transition
+        "dialogue_context_manager": "state_manager",
+        "device": "device",
+        "lifecycle_manager": "lifecycle_manager",
+        "scaffold_manager": "scaffold_manager",
+        "generation_hooks": "generation_hooks",
+        "enable_curiosity": "enable_curiosity",
+        "enable_temperament": "enable_temperament",
+        "enable_confidence": "enable_confidence",
+        "enable_bond": "enable_bond"
+    }),
     
     # Main system and API components (depend on almost everything)
     ("sovl_system", "sovl_main", "SOVLSystem", {"context": "system_context", "model_manager": "model_manager", "curiosity_manager": "curiosity_manager", "state_tracker": "state_manager", "error_manager": "error_manager"}),
@@ -596,6 +619,22 @@ class SOVLOrchestrator(OrchestratorInterface):
             )
             
             # Create and register system
+            bond_calculator = BondCalculator(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                user_profile_state=state_tracker,
+                state_manager=state_tracker
+            )
+            confidence_calculator = ConfidenceCalculator(
+                config_manager=self.config_manager,
+                logger=self.logger,
+                state_manager=state_tracker
+            )
+            temperament_system = TemperamentSystem(
+                state_manager=state_tracker,
+                config_manager=self.config_manager,
+                error_manager=error_manager
+            )
             system = SOVLSystem(
                 context=context,
                 config_handler=self.config_manager,
@@ -603,7 +642,10 @@ class SOVLOrchestrator(OrchestratorInterface):
                 curiosity_manager=curiosity_manager,
                 memory_monitor=memory_monitor,
                 state_tracker=state_tracker,
-                error_manager=error_manager
+                error_manager=error_manager,
+                bond_calculator=bond_calculator,
+                confidence_calculator=confidence_calculator,
+                temperament_system=temperament_system
             )
             
             self.mediator.register_system(system)
