@@ -66,13 +66,16 @@ class AspirationSystem:
     """
     Handles aspiration logic: LLM calls, doctrine storage, and prompt assembly.
     """
-    def __init__(self, config: Dict[str, Any], logger, long_term_memory, state_manager=None):
+    def __init__(self, config: Dict[str, Any], logger, long_term_memory, state_manager=None, error_manager=None):
         self.config = config
         self.logger = logger
         self.long_term_memory = long_term_memory
         self.state_manager = state_manager
+        self.error_manager = error_manager
         self.current_doctrine: Optional[str] = None
         self.last_update: Optional[float] = None
+        if self.logger:
+            self.logger.log_info("AspirationSystem initialized.")
 
     def update_aspiration(self, llm, dream_summary: Optional[str] = None, n_recent: int = 50, days_window: int = 7, max_tokens: int = 1024):
         """
@@ -82,6 +85,8 @@ class AspirationSystem:
         Handles memory volume and token limits for the prompt.
         """
         try:
+            if self.logger:
+                self.logger.log_info("Aspiration update started.")
             # 1. Get the latest short-term embedding as query
             query_embedding = None
             if hasattr(self.long_term_memory, 'get_short_term_context'):
@@ -205,12 +210,25 @@ class AspirationSystem:
             self.current_doctrine = new_doctrine
             self.last_update = time.time()
             if self.logger:
-                self.logger.log_info(f"Aspiration doctrine updated: {new_doctrine}")
+                self.logger.log_info(f"Aspiration doctrine updated.")
             if self.state_manager is not None:
                 self.state_manager.set_aspiration_doctrine(self.current_doctrine)
+            if self.logger:
+                self.logger.log_info("Aspiration update completed.")
         except Exception as e:
             if self.logger:
                 self.logger.log_error(f"Aspiration update failed: {str(e)}")
+            if self.error_manager:
+                import traceback
+                self.error_manager.record_error(
+                    error=e,
+                    error_type="aspiration_update_error",
+                    context={
+                        "location": "update_aspiration",
+                        "doctrine": self.current_doctrine
+                    },
+                    stack_trace=traceback.format_exc()
+                )
             self.current_doctrine = "Be open to new experiences."
             self.last_update = time.time()
 
@@ -220,10 +238,14 @@ class AspirationSystem:
 
     def serialize(self) -> Dict[str, Any]:
         """Serialize doctrine state for persistence."""
+        if self.logger:
+            self.logger.log_debug("Serializing doctrine state.")
         return {'doctrine': self.current_doctrine, 'last_update': self.last_update}
 
     def deserialize(self, data: Dict[str, Any]):
         """Load doctrine state from persistence."""
+        if self.logger:
+            self.logger.log_debug("Deserializing doctrine state.")
         self.current_doctrine = data.get('doctrine')
         self.last_update = data.get('last_update')
 
@@ -232,8 +254,8 @@ class AspirationManager:
     """
     Orchestrates aspiration lifecycle, state, and integration with dream phase and prompt assembly.
     """
-    def __init__(self, config, logger, long_term_memory, state_manager=None):
-        self.system = AspirationSystem(config, logger, long_term_memory, state_manager=state_manager)
+    def __init__(self, config, logger, long_term_memory, state_manager=None, error_manager=None):
+        self.system = AspirationSystem(config, logger, long_term_memory, state_manager=state_manager, error_manager=error_manager)
 
     def update_aspiration(self, llm, dream_summary: Optional[str] = None):
         """Update aspiration at the end of the dream phase."""
