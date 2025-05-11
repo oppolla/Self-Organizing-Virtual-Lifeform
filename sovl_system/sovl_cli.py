@@ -38,7 +38,7 @@ VALID_DATA = None
 COMMAND_CATEGORIES = {
     "System": [
         "/save", "/load", "/reset", "/status", "/monitor", "/history", "/run", "/stop",
-        "/config", "/log", "/exit", "/quit",
+        "/config", "/log", "/exit", "/quit", "/pause", "/resume"
     ],
     "Modes & States": [
         "/trip", "/drunk", "/dream", "/gestate",  "/announce", "/shy", "/pidgin", 
