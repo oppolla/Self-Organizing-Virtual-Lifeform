@@ -1198,7 +1198,7 @@ scaffold models for debugging and development purposes.
 
     def do_spark(self, arg):
         """Display a freshly generated curiosity question (spark)."""
-        curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+        curiosity_manager = self.curiosity_manager
         if curiosity_manager and hasattr(curiosity_manager, 'generate_curiosity_question'):
             try:
                 context = arg.strip() if arg.strip() else None
@@ -1227,7 +1227,7 @@ scaffold models for debugging and development purposes.
 
     def do_mimic(self, arg):
         """Generate a response that mimics the user, using bond modulation context."""
-        bond_modulator = getattr(self.sovl_system, 'bond_modulator', None)
+        bond_modulator = self.bond_modulator
         generation_manager = getattr(self.sovl_system, 'generation_manager', None)
         state = getattr(self.sovl_system, 'state', None)
         if not bond_modulator or not generation_manager:
@@ -1548,7 +1548,7 @@ scaffold models for debugging and development purposes.
             error_str = "?"
         # Curiosity/novelty (recent)
         try:
-            curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+            curiosity_manager = self.curiosity_manager
             curiosity_score = None
             if curiosity_manager and hasattr(curiosity_manager, 'get_curiosity_score'):
                 curiosity_score = curiosity_manager.get_curiosity_score()
@@ -1621,7 +1621,7 @@ scaffold models for debugging and development purposes.
         # Ensure required managers are available
         generation_manager = getattr(self.sovl_system, 'generation_manager', None)
         state_manager = getattr(self.sovl_system.context, 'state_manager', None)
-        curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+        curiosity_manager = self.curiosity_manager
         if not (generation_manager and state_manager and curiosity_manager):
             print("Error: Required system components (generation_manager, state_manager, curiosity_manager) are not available.")
             return
@@ -1754,7 +1754,7 @@ scaffold models for debugging and development purposes.
                     decay = max(0.0, 1.0 - (elapsed / self.trip_duration))
                     state_manager = getattr(self.sovl_system.context, 'state_manager', None)
                     generation_manager = getattr(self.sovl_system, 'generation_manager', None)
-                    curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+                    curiosity_manager = self.curiosity_manager
                     state = state_manager.get_state() if state_manager else None
                     metrics = self._get_live_metrics(state)
                     trip_params = self._calculate_trip_parameters(metrics, decay)
@@ -2502,7 +2502,7 @@ scaffold models for debugging and development purposes.
         Blurt an unfiltered temperament utterance: if the system's temperament score is over halfway, it blurts joy; otherwise, it blurts grumpy/frustration.
         Usage: /blurt
         """
-        temperament_manager = getattr(self.sovl_system, 'temperament_manager', None)
+        temperament_manager = self.temperament_manager
         if not temperament_manager:
             print("Temperament manager not available on this system.")
             return
@@ -2877,7 +2877,7 @@ scaffold models for debugging and development purposes.
                     decay = max(0.0, 1.0 - (elapsed / self.trip_duration))
                     state_manager = getattr(self.sovl_system.context, 'state_manager', None)
                     generation_manager = getattr(self.sovl_system, 'generation_manager', None)
-                    curiosity_manager = getattr(self.sovl_system, 'curiosity_manager', None)
+                    curiosity_manager = self.curiosity_manager
                     state = state_manager.get_state() if state_manager else None
                     metrics = self._get_live_metrics(state)
                     trip_params = self._calculate_trip_parameters(metrics, decay)
@@ -2969,13 +2969,13 @@ scaffold models for debugging and development purposes.
             ("memory_manager", getattr(self.sovl_system, 'memory_manager', None)),
             ("ram_manager", getattr(self.sovl_system, 'ram_manager', None)),
             ("gpu_manager", getattr(self.sovl_system, 'gpu_manager', None)),
-            ("bond_calculator", getattr(self.sovl_system, 'bond_calculator', None)),
+            ("bond_calculator", self.bond_calculator),
             ("error_manager", getattr(self.sovl_system, 'error_manager', None)),
             ("logger", getattr(self.sovl_system, 'logger', None)),
             ("config_handler", getattr(self.sovl_system, 'config_handler', None)),
             ("scaffold_provider", getattr(self.sovl_system, 'scaffold_provider', None)),
             ("introspection_manager", getattr(self.sovl_system, 'introspection_manager', None)),
-            ("curiosity_manager", getattr(self.sovl_system, 'curiosity_manager', None)),
+            ("curiosity_manager", self.curiosity_manager),
             ("traits_monitor", getattr(self, 'traits_monitor', None)),
             ("system_monitor", getattr(self, 'system_monitor', None)),
             ("memory_monitor", getattr(self, 'memory_monitor', None)),
@@ -3051,7 +3051,7 @@ scaffold models for debugging and development purposes.
         # Generation & language
         safe_check("GenerationManager", getattr(self.sovl_system, 'generation_manager', None), 'generate_text', args=["test"], kwargs={'num_return_sequences': 1}, required=True)
         safe_check("ScaffoldProvider", getattr(self.sovl_system, 'scaffold_provider', None), 'get_scaffold_metrics', required=False)
-        safe_check("BondCalculator", getattr(self.sovl_system, 'bond_calculator', None), 'get_bond_score', args=[0], required=False)
+        safe_check("BondCalculator", self.bond_calculator, 'get_bond_score', args=[0], required=False)
         # Memory & monitoring
         safe_check("MemoryManager", getattr(self.sovl_system, 'memory_manager', None), 'get_status', required=False)
         safe_check("RAMManager", getattr(self.sovl_system, 'ram_manager', None), 'get_status', required=False)
@@ -3065,9 +3065,9 @@ scaffold models for debugging and development purposes.
         safe_check("EventDispatcher", getattr(self.sovl_system, 'event_dispatcher', None), required=False)
         # Introspection, curiosity, temperament, confidence
         safe_check("IntrospectionManager", getattr(self.sovl_system, 'introspection_manager', None), required=False)
-        safe_check("CuriosityManager", getattr(self.sovl_system, 'curiosity_manager', None), 'generate_curiosity_question', args=["test"], required=False)
-        safe_check("TemperamentManager", getattr(self.sovl_system, 'temperament_manager', None), required=False)
-        safe_check("ConfidenceManager", getattr(self.sovl_system, 'confidence_manager', None), required=False)
+        safe_check("CuriosityManager", self.curiosity_manager, 'generate_curiosity_question', args=["test"], required=False)
+        safe_check("TemperamentManager", self.temperament_manager, required=False)
+        safe_check("ConfidenceManager", self.confidence_manager, required=False)
         # Learning, training, tuning
         safe_check("Trainer", getattr(self.sovl_system, 'trainer', None), required=False)
         safe_check("Tuner", getattr(self.sovl_system, 'tuner', None), required=False)
