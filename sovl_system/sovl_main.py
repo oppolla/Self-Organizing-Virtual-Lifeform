@@ -50,7 +50,7 @@ from sovl_scaffold import (
 )
 
 # Monitoring components
-from sovl_monitor import MemoryMonitor, SystemMonitor, TraitsMonitor
+from sovl_monitor import MonitorManager
 
 # Utilities
 from sovl_utils import (
@@ -356,28 +356,14 @@ class SOVLSystem(SystemInterface):
             self._stop_monitoring_event = Event()
             self._monitor_thread = None
 
-            self.memory_monitor = MemoryMonitor(
+            self.monitor_manager = MonitorManager(
                 config_manager=context.config_manager,
                 logger=context.logger,
                 ram_manager=context.ram_manager,
                 gpu_manager=context.gpu_manager,
-                error_manager=self.error_manager
-            )
-
-            self.system_monitor = SystemMonitor(
-                config_manager=context.config_manager,
-                logger=context.logger,
-                ram_manager=context.ram_manager,
-                gpu_manager=context.gpu_manager,
-                error_manager=self.error_manager
-            )
-
-            self.traits_monitor = TraitsMonitor(
-                config_manager=context.config_manager,
-                logger=context.logger,
                 state_manager=context.state_manager,
-                training_manager=context.training_cycle_manager,
-                error_manager=self.error_manager
+                error_manager=self.error_manager,
+                training_manager=getattr(context, 'training_cycle_manager', None)
             )
 
             # IntrospectionManager (for recursive introspection, meditation, etc)
@@ -464,15 +450,15 @@ class SOVLSystem(SystemInterface):
                 },
                 "memory_monitor": {
                     "status": "initialized",
-                    "memory_usage": self.memory_monitor.check_memory_health() if self.memory_monitor else None
+                    "memory_usage": self.monitor_manager.memory_monitor.check_memory_health() if self.monitor_manager else None
                 },
                 "system_monitor": {
                     "status": "initialized",
-                    "metrics": self.system_monitor._collect_metrics() if self.system_monitor else None
+                    "metrics": self.monitor_manager.system_monitor._collect_metrics() if self.monitor_manager else None
                 },
                 "traits_monitor": {
                     "status": "initialized",
-                    "traits": self.traits_monitor._get_current_traits() if self.traits_monitor else None
+                    "traits": self.monitor_manager.traits_monitor._get_current_traits() if self.monitor_manager else None
                 },
                 "state_tracker": {
                     "status": "initialized",
@@ -503,12 +489,12 @@ class SOVLSystem(SystemInterface):
         try:
             if enable:
                 # Enable memory management
-                self.memory_monitor.start_monitoring()
+                self.monitor_manager.memory_monitor.start_monitoring()
                 self.context.ram_manager.enable_cleanup()
                 self.context.gpu_manager.enable_cleanup()
             else:
                 # Disable memory management
-                self.memory_monitor.stop_monitoring()
+                self.monitor_manager.memory_monitor.stop_monitoring()
                 self.context.ram_manager.disable_cleanup()
                 self.context.gpu_manager.disable_cleanup()
                 
@@ -560,11 +546,11 @@ class SOVLSystem(SystemInterface):
                 return {
                     "config_handler": bool(self.config_handler),
                     "model_manager": bool(self.model_manager),
-                    "memory_monitor": bool(self.memory_monitor),
+                    "memory_monitor": bool(self.monitor_manager),
                     "state_tracker": bool(self.state_tracker),
                     "error_manager": bool(self.error_manager),
-                    "system_monitor": bool(self.system_monitor),
-                    "traits_monitor": bool(self.traits_monitor),
+                    "system_monitor": bool(self.monitor_manager),
+                    "traits_monitor": bool(self.monitor_manager),
                     "temperament_system": bool(self.temperament_system)
                 }
         except Exception as e:
@@ -597,10 +583,9 @@ class SOVLSystem(SystemInterface):
         try:
             with self._lock:
                 self.context.logger.set_debug_mode(enabled)
-                if self.system_monitor:
-                    self.system_monitor.set_debug_mode(enabled)
-                if self.traits_monitor:
-                    self.traits_monitor.set_debug_mode(enabled)
+                if self.monitor_manager:
+                    self.monitor_manager.system_monitor.set_debug_mode(enabled)
+                    self.monitor_manager.traits_monitor.set_debug_mode(enabled)
                     
         except Exception as e:
             self.error_manager.handle_error(

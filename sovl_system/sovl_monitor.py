@@ -717,3 +717,46 @@ class TraitsMonitor:
     def get_trait_history(self, trait_name: str):
         """Get the history for a given trait."""
         return list(self._trait_histories.get(trait_name, []))
+
+class MonitorManager:
+    def __init__(
+        self,
+        config_manager,
+        logger,
+        ram_manager,
+        gpu_manager,
+        state_manager,
+        error_manager,
+        training_manager
+    ):
+        self.memory_monitor = MemoryMonitor(
+            config_manager=config_manager,
+            logger=logger,
+            ram_manager=ram_manager,
+            gpu_manager=gpu_manager,
+            error_manager=error_manager
+        )
+        self.system_monitor = SystemMonitor(
+            config_manager=config_manager,
+            logger=logger,
+            ram_manager=ram_manager,
+            gpu_manager=gpu_manager,
+            error_manager=error_manager
+        )
+        self.traits_monitor = TraitsMonitor(
+            config_manager=config_manager,
+            logger=logger,
+            state_manager=state_manager,
+            training_manager=training_manager,
+            error_manager=error_manager
+        )
+
+    def start_all(self):
+        self.memory_monitor.start_monitoring()
+        self.system_monitor.start_monitoring()
+        self.traits_monitor.start_monitoring()
+
+    def stop_all(self):
+        self.memory_monitor.stop_monitoring()
+        self.system_monitor.stop_monitoring()
+        self.traits_monitor.stop_monitoring()
