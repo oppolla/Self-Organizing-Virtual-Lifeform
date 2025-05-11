@@ -136,35 +136,73 @@ class SOVLOrchestrator(OrchestratorInterface):
         except Exception as e:
             self._log_error("Failed to initialize device", e)
             self.device = torch.device("cpu")
-        # Canonical initialization loop
-        for key, module_name, class_name, dep_map in self.COMPONENT_INIT_LIST:
-            try:
-                # Import module and class
-                module = __import__(module_name, fromlist=[class_name])
-                cls = getattr(module, class_name)
-                # Build kwargs from dep_map
-                kwargs = {}
-                for arg, dep_key in dep_map.items():
-                    if dep_key == "device":
-                        kwargs[arg] = self.device
-                    elif dep_key in self.components:
-                        kwargs[arg] = self.components[dep_key]
-                    elif hasattr(self, dep_key):
-                        kwargs[arg] = getattr(self, dep_key)
-                    else:
-                        kwargs[arg] = None
-                # Special handling for config_manager and logger
-                if key == "config_manager":
-                    kwargs = {"config_path": config_path, "logger": self.logger}
-                if key == "logger":
-                    kwargs = {"log_file": log_file, "max_size_mb": 10, "rotation_interval": "1d"}
-                # Instantiate and store
-                self.components[key] = cls(**kwargs)
-                setattr(self, key, self.components[key])
-            except Exception as e:
-                self._log_error(f"Failed to initialize {key}", e)
-                self.components[key] = None
-                setattr(self, key, None)
+        # --- Enhanced Initialization Output ---
+        INIT_GROUPS = [
+            ("Core Infrastructure", ["config_manager", "logger", "resource_manager"]),
+            ("State & Memory Managers", ["ram_manager", "gpu_manager", "state_manager", "error_manager"]),
+            ("Event & Data Systems", ["event_dispatcher", "jsonl_loader", "scribe_queue", "hardware_manager", "data_manager"]),
+            ("Model & Processing", ["model_manager", "metadata_processor", "lora_adapter_manager"]),
+            ("Monitors", ["system_monitor", "memory_monitor", "traits_monitor"]),
+            ("System Context & Mediation", ["system_context", "system_mediator"]),
+            ("Generation & Calculation", ["generation_manager", "confidence_calculator", "bond_calculator"]),
+            ("Personality & Behavior", ["temperament_system", "curiosity_manager", "vibe_sculptor"]),
+            ("Creative & Reflective", ["dreamer", "aspiration_system", "introspection_manager"]),
+            ("Training & Ingestion", ["training_manager", "scribe_ingestion_processor"]),
+            ("Generation Prep & Interface", ["generation_primer"]),
+            ("Main System & API", ["sovl_system", "api"]),
+            ("CLI Handler", ["cli_handler"]),
+        ]
+        key_to_index = {key: i for i, (key, *_rest) in enumerate(self.COMPONENT_INIT_LIST)}
+        total = len(self.COMPONENT_INIT_LIST)
+        initialized = []
+        failed = []
+        current = 1
+        for group_name, group_keys in INIT_GROUPS:
+            print(f"[SOVL System] — {group_name} —", flush=True)
+            for key in group_keys:
+                # Find the tuple for this key
+                idx = key_to_index.get(key)
+                if idx is None:
+                    continue
+                _key, module_name, class_name, dep_map = self.COMPONENT_INIT_LIST[idx]
+                msg = f"[{current}/{total}]  Initializing {key} ({class_name}) from {module_name} ... "
+                print(f"[SOVL System] {msg}", end="", flush=True)
+                try:
+                    module = __import__(module_name, fromlist=[class_name])
+                    cls = getattr(module, class_name)
+                    kwargs = {}
+                    for arg, dep_key in dep_map.items():
+                        if dep_key == "device":
+                            kwargs[arg] = self.device
+                        elif dep_key in self.components:
+                            kwargs[arg] = self.components[dep_key]
+                        elif hasattr(self, dep_key):
+                            kwargs[arg] = getattr(self, dep_key)
+                        else:
+                            kwargs[arg] = None
+                    if key == "config_manager":
+                        kwargs = {"config_path": config_path, "logger": self.logger}
+                    if key == "logger":
+                        kwargs = {"log_file": log_file, "max_size_mb": 10, "rotation_interval": "1d"}
+                    self.components[key] = cls(**kwargs)
+                    setattr(self, key, self.components[key])
+                    print("✓", flush=True)
+                    initialized.append(key)
+                except Exception as e:
+                    print(f"✗ (Error: {e})", flush=True)
+                    self._log_error(f"Failed to initialize {key}", e)
+                    self.components[key] = None
+                    setattr(self, key, None)
+                    failed.append((key, str(e)))
+                current += 1
+            print("", flush=True)  # Blank line between groups
+        if not failed:
+            print("[SOVL System] All components initialized. Awakening system...", flush=True)
+        else:
+            print(f"[SOVL System] Initialization failed for {len(failed)} component(s):", flush=True)
+            for key, err in failed:
+                print(f"    - {key}: {err}", flush=True)
+        print(f"[SOVL System] Log file: {self.logger.log_file}", flush=True)
         # Continue with any additional initialization as before
         try:
             self._initialize_config()
@@ -697,7 +735,22 @@ class SOVLOrchestrator(OrchestratorInterface):
     def shutdown(self) -> None:
         """Shutdown the system, saving state and releasing resources."""
         self._log_event("orchestrator_shutdown_start", {})
+        print("[SOVL System] Preparing to shutdown all components...", flush=True)
         try:
+            # Gracefully shut down all components in reverse init order
+            for key, *_ in reversed(self.COMPONENT_INIT_LIST):
+                component = self.components.get(key)
+                if component is not None:
+                    shutdown_fn = getattr(component, "shutdown", None) or getattr(component, "close", None)
+                    if callable(shutdown_fn):
+                        print(f"[SOVL System] Shutting down {key} ...", flush=True)
+                        try:
+                            shutdown_fn()
+                            self._log_event("component_shutdown", {"component": key})
+                            print(f"[SOVL System]   -> {key} shut down successfully.", flush=True)
+                        except Exception as e:
+                            self._log_error(f"Failed to shut down component {key}", e)
+                            print(f"[SOVL System]   !! Failed to shut down {key}: {e}", flush=True)
             # Defensive: Attempt state save
             try:
                 if hasattr(self, 'state_manager') and self.state_manager and self.state:
@@ -721,8 +774,10 @@ class SOVLOrchestrator(OrchestratorInterface):
                     self.logger.close()
             except Exception as e:
                 print(f"Logger close failed: {str(e)}")
+            print("[SOVL System] Shutdown complete.", flush=True)
         except Exception as e:
             self._log_error("Shutdown encountered an error", e)
+            print(f"[SOVL System] Shutdown encountered an error: {e}", flush=True)
 
     def _handle_execution_failure(self) -> None:
         """Handle system execution failure with recovery actions."""
@@ -813,52 +868,6 @@ class SOVLOrchestrator(OrchestratorInterface):
         except Exception as e:
             self._log_error("Validation failed", e)
             return {"loss": float("inf")}
-
-class Conductor:
-    """Orchestrates the SOVL system components."""
-    
-    def __init__(
-        self,
-        config_manager: ConfigManager,
-        logger: Logger,
-        ram_manager: RAMManager,
-        gpu_manager: GPUMemoryManager
-    ):
-        """
-        Initialize the conductor.
-        
-        Args:
-            config_manager: Config manager for fetching configuration values
-            logger: Logger instance for logging events
-            ram_manager: RAMManager instance for RAM memory management
-            gpu_manager: GPUMemoryManager instance for GPU memory management
-        """
-        self._config_manager = config_manager
-        self._logger = logger
-        self.ram_manager = ram_manager
-        self.gpu_manager = gpu_manager
-        self._lock = Lock()
-        
-    def check_memory_health(self) -> Dict[str, Any]:
-        """Check memory health across all memory managers."""
-        try:
-            ram_health = self.ram_manager.check_memory_health()
-            gpu_health = self.gpu_manager.check_memory_health()
-            
-            return {
-                "ram_health": ram_health,
-                "gpu_health": gpu_health
-            }
-        except Exception as e:
-            self._logger.log_error(
-                error_msg=f"Failed to check memory health: {str(e)}",
-                error_type="memory_health_error",
-                stack_trace=traceback.format_exc()
-            )
-            return {
-                "ram_health": {"status": "error"},
-                "gpu_health": {"status": "error"}
-            }
 
 # Main block
 if __name__ == "__main__":
