@@ -14,6 +14,7 @@ import json
 import re
 import traceback
 import threading
+from sovl_processor import SimpleTokenizer
 
 class BondCalculator:
     """Calculates bonding score and manages user bond/nickname via UserProfileState."""
@@ -47,6 +48,17 @@ class BondCalculator:
         self._sync_thread = None
         self._sync_thread_stop = threading.Event()
         self._start_sync_thread()
+        self.tokenizer = SimpleTokenizer()
+        self.similarity_threshold = float(config_manager.get_section("bonding_config", {}).get("signature_similarity_threshold", 0.15))
+        self.identified_users = {}  # user_id (hash) -> profile
+        self.lock = Lock()
+        self.archived_users = {}
+        self.signature_history_maxlen = int(self.config_manager.get_section("bonding_config", {}).get("signature_history_maxlen", 100))
+        self.signature_history_maxdays = int(self.config_manager.get_section("bonding_config", {}).get("signature_history_maxdays", 180))
+        self.drift_threshold = float(self.config_manager.get_section("bonding_config", {}).get("drift_threshold", 0.25))
+        self.drift_consecutive = int(self.config_manager.get_section("bonding_config", {}).get("drift_consecutive", 5))
+        self.archive_timeout_days = int(self.config_manager.get_section("bonding_config", {}).get("archive_timeout_days", 365))
+        self.decay_lambda = float(self.config_manager.get_section("bonding_config", {}).get("decay_lambda", 0.01))
 
     def _start_sync_thread(self):
         if self._sync_thread is None or not self._sync_thread.is_alive():
@@ -100,72 +112,70 @@ class BondCalculator:
 
     def _generate_signature(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs) -> dict:
         """
-        Generate a user signature from behavioral metadata and optional extra modalities.
-        Args:
-            metadata_entries: list of behavioral metadata dicts
-            extra_data: dict of additional modality data (future-proof)
-            kwargs: reserved for future extensions
-        Returns:
-            signature: dict
+        Generate a user signature using a simple, robust formula.
         """
-        # Limit metadata list size
         metadata_entries = metadata_entries[-self.max_signature_metadata:]
         if not metadata_entries or not isinstance(metadata_entries, list):
             self.logger.log_warning("metadata_entries is empty or not a list in _generate_signature")
             return None
-
         valid_entries = []
         for idx, md in enumerate(metadata_entries):
             if not isinstance(md, dict):
-                self.logger.log_warning(f"Skipping non-dict metadata entry at index {idx}")
                 continue
-            # Validate required keys and types
             device = md.get('device', None)
             timestamp = md.get('timestamp', None)
             content_metrics = md.get('content_metrics', {})
             if device is not None and not isinstance(device, str):
-                self.logger.log_warning(f"Skipping entry at index {idx}: device is not a string")
                 continue
             if timestamp is None or not isinstance(timestamp, (int, float)) or timestamp <= 0:
-                self.logger.log_warning(f"Skipping entry at index {idx}: invalid timestamp {timestamp}")
                 continue
             if not isinstance(content_metrics, dict):
-                self.logger.log_warning(f"Skipping entry at index {idx}: content_metrics is not a dict")
                 continue
             word_count = content_metrics.get('word_count', 0)
-            sentiment_score = content_metrics.get('sentiment_score', 0.0)
+            avg_sentence_length = content_metrics.get('avg_sentence_length', 0)
             if (word_count is not None and not isinstance(word_count, (int, float))) or (isinstance(word_count, (int, float)) and word_count < 0):
-                self.logger.log_warning(f"Skipping entry at index {idx}: invalid word_count {word_count}")
                 continue
-            if sentiment_score is not None and not isinstance(sentiment_score, (int, float)):
-                self.logger.log_warning(f"Skipping entry at index {idx}: invalid sentiment_score {sentiment_score}")
+            if avg_sentence_length is not None and not isinstance(avg_sentence_length, (int, float)):
                 continue
-            valid_entries.append(md)
-
+            # Token stats (if present)
+            token_stats = md.get('token_stats', {})
+            valid_entries.append({
+                'device': device,
+                'word_count': word_count,
+                'avg_sentence_length': avg_sentence_length,
+                'token_stats': token_stats,
+            })
         if not valid_entries:
             self.logger.log_warning("No valid metadata entries after validation in _generate_signature")
             return None
-
-        # Extract features from valid entries
-        devices = [md.get('device') for md in valid_entries if 'device' in md]
-        device_fingerprint = devices[0] if devices else 'unknown'
-        timestamps = [md.get('timestamp') for md in valid_entries if 'timestamp' in md]
-        timestamps.sort()
-        avg_gap = (sum(t2-t1 for t1, t2 in zip(timestamps, timestamps[1:])) / (len(timestamps)-1)) if len(timestamps) > 1 else 0.0
-        activity_level = len(timestamps)
-        avg_word_count = sum(md.get('content_metrics', {}).get('word_count', 0) for md in valid_entries) / len(valid_entries)
-        avg_sentiment = sum(md.get('content_metrics', {}).get('sentiment_score', 0.0) for md in valid_entries) / len(valid_entries)
-        # Compose signature dict
+        # Most common device
+        devices = [md['device'] for md in valid_entries if md['device']]
+        device_fingerprint = max(set(devices), key=devices.count) if devices else 'unknown'
+        # Averages
+        avg_word_count = sum(md['word_count'] for md in valid_entries) / len(valid_entries)
+        avg_sentence_length = sum(md['avg_sentence_length'] for md in valid_entries) / len(valid_entries)
+        # Token and bigram stats
+        all_tokens = []
+        all_bigrams = []
+        for md in valid_entries:
+            token_stats = md['token_stats']
+            tokens = token_stats.get('tokens', [])
+            all_tokens.extend(tokens)
+            bigrams = list(zip(tokens[:-1], tokens[1:])) if len(tokens) > 1 else []
+            all_bigrams.extend(bigrams)
+        total_tokens = len(all_tokens)
+        unique_tokens = len(set(all_tokens))
+        token_diversity = unique_tokens / total_tokens if total_tokens > 0 else 0.0
+        total_bigrams = len(all_bigrams)
+        unique_bigrams = len(set(all_bigrams))
+        bigram_diversity = unique_bigrams / total_bigrams if total_bigrams > 0 else 0.0
         signature = {
-            'device_fingerprint': device_fingerprint,
-            'avg_gap': avg_gap,
-            'activity_level': activity_level,
+            'device': device_fingerprint,
             'avg_word_count': avg_word_count,
-            'avg_sentiment': avg_sentiment
+            'token_diversity': token_diversity,
+            'bigram_diversity': bigram_diversity,
+            'avg_sentence_length': avg_sentence_length
         }
-        # Optionally, add extra modalities to signature (future)
-        if extra_data:
-            signature['extra'] = extra_data
         return signature
 
     def _hash_signature(self, signature):
@@ -173,48 +183,172 @@ class BondCalculator:
         sig_str = json.dumps(signature, sort_keys=True)
         return hashlib.sha256(sig_str.encode('utf-8')).hexdigest()
 
+    def _signature_distance(self, sig1: dict, sig2: dict) -> float:
+        """Compute Euclidean distance between two signatures (excluding device)."""
+        keys = ['avg_word_count', 'token_diversity', 'bigram_diversity', 'avg_sentence_length']
+        return sum((sig1.get(k, 0.0) - sig2.get(k, 0.0)) ** 2 for k in keys) ** 0.5
+
+    def _prune_signature_history(self, profile):
+        now = time.time()
+        # Prune by maxlen
+        profile['signature_history'] = profile['signature_history'][-self.signature_history_maxlen:]
+        # Prune by maxdays
+        profile['signature_history'] = [s for s in profile['signature_history'] if (now - s.get('timestamp', now)) < self.signature_history_maxdays * 86400]
+
+    def _time_weighted_average_signature(self, signature_history):
+        now = time.time()
+        weights = []
+        values = []
+        for sig in signature_history:
+            age_days = (now - sig.get('timestamp', now)) / 86400
+            weight = pow(2.718, -self.decay_lambda * age_days)
+            weights.append(weight)
+            values.append([sig.get('avg_word_count', 0), sig.get('token_diversity', 0), sig.get('bigram_diversity', 0), sig.get('avg_sentence_length', 0)])
+        if not weights or not values:
+            return None
+        total_weight = sum(weights)
+        avg = [sum(v[i] * weights[i] for i in range(len(weights))) / total_weight for v in zip(*values)]
+        return {
+            'avg_word_count': avg[0],
+            'token_diversity': avg[1],
+            'bigram_diversity': avg[2],
+            'avg_sentence_length': avg[3]
+        }
+
+    def _signature_variance(self, signature_history):
+        if not signature_history:
+            return 0.0
+        avg = self._time_weighted_average_signature(signature_history)
+        if not avg:
+            return 0.0
+        keys = ['avg_word_count', 'token_diversity', 'bigram_diversity', 'avg_sentence_length']
+        var = 0.0
+        for sig in signature_history:
+            var += sum((sig.get(k, 0.0) - avg[k]) ** 2 for k in keys)
+        return var / (len(signature_history) * len(keys))
+
+    def _adaptive_similarity_threshold(self, profile):
+        var = self._signature_variance(profile['signature_history'])
+        base = self.similarity_threshold
+        if var < 0.01:
+            return max(0.05, base * 0.5)
+        elif var > 0.1:
+            return min(0.5, base * 2)
+        return base
+
+    def _drift_detection(self, profile, new_signature):
+        avg = self._time_weighted_average_signature(profile['signature_history'])
+        if not avg:
+            return False
+        dist = self._signature_distance(new_signature, avg)
+        profile.setdefault('drift_counter', 0)
+        if dist > self.drift_threshold:
+            profile['drift_counter'] += 1
+        else:
+            profile['drift_counter'] = 0
+        return profile['drift_counter'] >= self.drift_consecutive
+
+    def _cluster_split(self, profile):
+        # Simple: compare mean of last 10 vs previous mean
+        history = profile['signature_history']
+        if len(history) < 20:
+            return False
+        last10 = history[-10:]
+        prev10 = history[-20:-10]
+        avg_last = self._time_weighted_average_signature(last10)
+        avg_prev = self._time_weighted_average_signature(prev10)
+        if not avg_last or not avg_prev:
+            return False
+        dist = self._signature_distance(avg_last, avg_prev)
+        return dist > self.drift_threshold * 2
+
+    def _archive_dormant_profiles(self):
+        now = time.time()
+        to_archive = [uid for uid, p in self.identified_users.items() if (now - p['last_seen']) > self.archive_timeout_days * 86400]
+        for uid in to_archive:
+            self.archived_users[uid] = self.identified_users.pop(uid)
+            self.logger.record_event(
+                event_type="profile_archived",
+                message=f"Archived dormant profile: {uid}",
+                level="info",
+                additional_info={}
+            )
+
     def register_user_signature(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs):
-        """Register or update a user signature/profile from recent metadata, sync with central state if available."""
         signature = self._generate_signature(metadata_entries, extra_data=extra_data, **kwargs)
         if not signature:
             return None
+        signature['timestamp'] = time.time()
         sig_hash = self._hash_signature(signature)
         with self.lock:
-            if sig_hash not in self.identified_users:
-                profile = {
-                    'signature': signature,
-                    'first_seen': time.time(),
-                    'last_seen': time.time(),
-                    'bond_score': self.default_bond_score,
-                    'metadata_count': len(metadata_entries)
-                }
-                self.identified_users[sig_hash] = profile
-                self.logger.record_event(
-                    event_type="bond_user_signature_registered",
-                    message=f"Registered new user signature: {sig_hash}",
-                    level="info",
-                    additional_info={'signature': signature}
-                )
-                # Batch state sync
-                with self._sync_lock:
-                    self._pending_state_syncs.add(sig_hash)
-            else:
-                # Only update if changed
+            self._archive_dormant_profiles()
+            # 1. Exact match (legacy)
+            if sig_hash in self.identified_users:
                 profile = self.identified_users[sig_hash]
                 now = time.time()
-                updated = False
-                if abs(now - profile['last_seen']) > 1.0:
+                profile['last_seen'] = now
+                profile['metadata_count'] += len(metadata_entries)
+                profile.setdefault('signature_history', []).append(signature)
+                self._prune_signature_history(profile)
+                return sig_hash
+            # 2. Soft match
+            best_match = None
+            best_dist = float('inf')
+            for uid, profile in self.identified_users.items():
+                threshold = self._adaptive_similarity_threshold(profile)
+                dist = self._signature_distance(signature, profile['signature'])
+                if dist < best_dist:
+                    best_dist = dist
+                    best_match = uid
+            if best_match is not None:
+                profile = self.identified_users[best_match]
+                threshold = self._adaptive_similarity_threshold(profile)
+                if best_dist <= threshold:
+                    now = time.time()
                     profile['last_seen'] = now
-                    updated = True
-                old_count = profile['metadata_count']
-                new_count = old_count + len(metadata_entries)
-                if new_count != old_count:
-                    profile['metadata_count'] = new_count
-                    updated = True
-                if updated:
-                    with self._sync_lock:
-                        self._pending_state_syncs.add(sig_hash)
-        return sig_hash
+                    profile['metadata_count'] += len(metadata_entries)
+                    profile.setdefault('signature_history', []).append(signature)
+                    self._prune_signature_history(profile)
+                    # Drift/cluster detection
+                    if self._drift_detection(profile, signature):
+                        self.logger.record_event(
+                            event_type="profile_drift_detected",
+                            message=f"Drift detected for user {best_match}",
+                            level="info",
+                            additional_info={}
+                        )
+                    if self._cluster_split(profile):
+                        # Split: archive old, start new
+                        self.logger.record_event(
+                            event_type="profile_cluster_split",
+                            message=f"Cluster split for user {best_match}",
+                            level="info",
+                            additional_info={}
+                        )
+                        self.archived_users[best_match] = self.identified_users.pop(best_match)
+                        # Create new profile below
+                    else:
+                        profile.setdefault('related_user_ids', []).append(sig_hash)
+                        profile['bond_score'] = (profile['bond_score'] + self.default_bond_score) / 2
+                        return best_match
+            # 3. New profile
+            profile = {
+                'signature': signature,
+                'first_seen': time.time(),
+                'last_seen': time.time(),
+                'bond_score': self.default_bond_score,
+                'metadata_count': len(metadata_entries),
+                'signature_history': [signature],
+                'related_user_ids': []
+            }
+            self.identified_users[sig_hash] = profile
+            self.logger.record_event(
+                event_type="bond_user_signature_registered",
+                message=f"Registered new user signature: {sig_hash}",
+                level="info",
+                additional_info={'signature': signature}
+            )
+            return sig_hash
 
     def calculate_bond(self, user_id: str, metadata_entries, extra_data: Optional[dict] = None, **kwargs) -> float:
         """
