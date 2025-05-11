@@ -52,7 +52,7 @@ COMMAND_CATEGORIES = {
         "/rate", "/complain", "/confess", "/rant", "/debate", "/flare", "/spark",
     ],
     "Debug & Development": [
-        "/panic", "/glitch", "/scaffold", "/errors", "/trace", "/components", "/reload", "/test"
+        "/panic", "/glitch", "/scaffold", "/errors", "/trace", "/components", "/reload", "/test", "/config"
     ],
     "Learning & Guidance": [
         "/help", "/tutorial"
