@@ -964,12 +964,7 @@ class Dreamer:
             state_manager.set_dreaming_progress(1.0)
         
         # --- Aspiration update integration ---
-        if hasattr(self, 'aspiration_manager') and self.aspiration_manager is not None:
-            dream_summary = None  # Optionally, generate or fetch a dream summary here
-            llm = getattr(self, 'llm', None) or generation_manager
-            self.aspiration_manager.update_aspiration(llm, dream_summary)
-            new_doctrine = self.aspiration_manager.get_current_doctrine()
-            self.logger.info(f"[Aspiration Phase] New doctrine for next cycle: {new_doctrine}")
+        self.perform_aspiration_update(generation_manager)
         
         if state_manager and hasattr(state_manager, 'set_mode'):
             state_manager.set_mode('online')
@@ -1031,6 +1026,15 @@ class Dreamer:
                 error_type="dreamer_recovery_error",
                 context={"original_error": record.error_type}
             )
+
+    def perform_aspiration_update(self, generation_manager=None):
+        """Update the aspiration doctrine based on the current state. This is a core feature of the dream cycle."""
+        if hasattr(self, 'aspiration_manager') and self.aspiration_manager is not None:
+            dream_summary = None  # Optionally, generate or fetch a dream summary here
+            llm = getattr(self, 'llm', None) or generation_manager
+            self.aspiration_manager.update_aspiration(llm, dream_summary)
+            new_doctrine = self.aspiration_manager.get_current_doctrine()
+            self.logger.info(f"[Aspiration Phase] New doctrine for next cycle: {new_doctrine}")
 
     @classmethod
     def cli_run_dream(
