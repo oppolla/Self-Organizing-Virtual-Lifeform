@@ -124,7 +124,17 @@ class SOVLOrchestrator(OrchestratorInterface):
     }),
     
     # Main system and API components (depend on almost everything)
-    ("sovl_system", "sovl_main", "SOVLSystem", {"context": "system_context", "model_manager": "model_manager", "curiosity_manager": "curiosity_manager", "state_tracker": "state_manager", "error_manager": "error_manager"}),
+    ("sovl_system", "sovl_main", "SOVLSystem", {
+        "config_manager": "config_manager",
+        "logger": "logger",
+        "state_manager": "state_manager",
+        "error_manager": "error_manager",
+        "generation_primer": "generation_primer",
+        "dialogue_context_manager": "dialogue_context_manager",
+        "device": "device",
+        "lifecycle_manager": "lifecycle_manager",
+        "scaffold_manager": "scaffold_manager"
+    }),
     ("api", "sovl_api", "SOVLAPI", {"config_path": "config_manager"}),
     
     # CLI handler must be last as it depends on sovl_system which is created late
@@ -639,13 +649,9 @@ class SOVLOrchestrator(OrchestratorInterface):
                 context=context,
                 config_handler=self.config_manager,
                 model_manager=self.model_manager,
-                curiosity_manager=curiosity_manager,
                 memory_monitor=memory_monitor,
                 state_tracker=state_tracker,
                 error_manager=error_manager,
-                bond_calculator=bond_calculator,
-                confidence_calculator=confidence_calculator,
-                temperament_system=temperament_system
             )
             
             self.mediator.register_system(system)

@@ -392,14 +392,6 @@ class CommandHandler(cmd.Cmd):
         else:
             print("No operation to resume")
             
-    def do_metrics(self, arg):
-        """Show current metrics."""
-        metrics = self.sovl_system.get_metrics()
-        print("\nCurrent Metrics:")
-        print("---------------")
-        for key, value in metrics.items():
-            print(f"{key}: {value}")
-            
     def do_config(self, arg):
         """
         Interactive configuration editor for sovl_config.json.

@@ -67,39 +67,38 @@ class NoOpMotivator:
 class AutonomyManager:
     """
     A lightweight decision-making framework for autonomous system optimization in the SOVL System.
-    - The `tuner` dependency is required for actions like 'throttle' (dynamic parameter tuning).
-    - The `motivator` dependency is required for goal-driven behavior (e.g., 'explore' action).
-    If these are not provided, safe no-op fallbacks are used, but full functionality is not guaranteed.
+    All dependencies are injected explicitly to avoid legacy system_ref patterns.
     """
-    def __init__(self, config_manager, logger: Logger, device: torch.device, system_ref, tuner: Optional[SOVLTuner] = None, motivator=None, state_manager=None, ram_manager=None, gpu_manager=None):
-        """
-        Initialize the AutonomyManager.
-
-        Args:
-            config_manager: ConfigManager instance for accessing configuration.
-            logger: Logger instance for recording events and errors.
-            device: Torch device (cuda/cpu) for tensor operations.
-            system_ref: Reference to SOVLSystem instance for triggering actions.
-            tuner: SOVLTuner instance for dynamic parameter tuning (optional).
-            motivator: Motivator instance for goal-driven behavior (optional).
-            state_manager: StateManager instance for goal persistence (optional).
-            ram_manager: Centralized RAMManager instance (optional).
-            gpu_manager: Centralized GPUMemoryManager instance (optional).
-        """
+    def __init__(
+        self,
+        config_manager,
+        logger: Logger,
+        device: torch.device,
+        generation_manager=None,
+        state_manager=None,
+        ram_manager=None,
+        gpu_manager=None,
+        tuner: Optional[SOVLTuner] = None,
+        motivator=None,
+        get_resource_stats=None,
+        pause=None,
+        shutdown=None,
+        soft_shutdown=None,
+        get_battery_level=None,
+    ):
         self.config_manager = config_manager
         self.logger = logger
         self.device = device
-        self.system_ref = system_ref
+        self.generation_manager = generation_manager
+        self.state_manager = state_manager
+        self.ram_manager = ram_manager
+        self.gpu_manager = gpu_manager
         self.tuner = tuner if tuner is not None else NoOpTuner()
-        self.state_manager = state_manager or getattr(system_ref, 'state_manager', None)
-        self.ram_manager = ram_manager or getattr(system_ref, 'ram_manager', None)
-        self.gpu_manager = gpu_manager or getattr(system_ref, 'gpu_manager', None)
-        if self.state_manager is None:
-            self.logger.record_event(
-                event_type="state_manager_missing",
-                message="No state_manager provided. Goal persistence may fail.",
-                level="warning"
-            )
+        self.get_resource_stats = get_resource_stats
+        self.pause = pause
+        self.shutdown = shutdown
+        self.soft_shutdown = soft_shutdown
+        self.get_battery_level = get_battery_level
         self.motivator = motivator if motivator is not None else Motivator(
             curiosity=None,
             memory=None,
@@ -157,7 +156,6 @@ class AutonomyManager:
 
         # --- LLM Decision Integration: Attach GenerationManager ---
         # Attempt to get a generation_manager from system_ref, else raise error on first use
-        self.generation_manager = getattr(system_ref, 'generation_manager', None)
         if self.generation_manager is None:
             self.logger.record_event(
                 event_type="generation_manager_missing",
@@ -199,7 +197,7 @@ class AutonomyManager:
             # Memory usage with fallback
             try:
                 # Use centralized resource stats
-                resource_stats = self.system_ref.get_resource_stats() if hasattr(self.system_ref, 'get_resource_stats') else {}
+                resource_stats = self.get_resource_stats() if self.get_resource_stats else {}
                 current_mem = resource_stats.get('ram_used', 0.0)
                 total_mem = resource_stats.get('ram_total', 0.0)
                 metrics["memory_usage"] = current_mem / total_mem if total_mem and total_mem > 0 else 0.0
@@ -446,16 +444,16 @@ class AutonomyManager:
                     additional_info={"timestamp": time.time()}
                 )
         elif action == "pause":
-            if hasattr(self.system_ref, "pause"):
-                self.system_ref.pause()
+            if self.pause:
+                self.pause()
                 self.logger.record_event(event_type="system_paused", message="System paused by LLM decision.")
         elif action == "soft_shutdown":
-            if hasattr(self.system_ref, "soft_shutdown"):
-                self.system_ref.soft_shutdown()
+            if self.soft_shutdown:
+                self.soft_shutdown()
                 self.logger.record_event(event_type="soft_shutdown", message="System entered soft shutdown mode.")
         elif action == "shutdown":
-            if hasattr(self.system_ref, "shutdown"):
-                self.system_ref.shutdown()
+            if self.shutdown:
+                self.shutdown()
                 self.logger.record_event(event_type="shutdown", message="System shutdown initiated by LLM.")
         elif action == "explore":
             if isinstance(self.motivator, NoOpMotivator):
@@ -548,18 +546,12 @@ class AutonomyManager:
             context[name] = get_obs(name, node)
 
         # Add system state (battery, error, etc.)
-        if hasattr(self.system_ref, 'get_battery_level'):
+        if self.get_battery_level:
             try:
-                context["battery"] = self.system_ref.get_battery_level()
+                context["battery"] = self.get_battery_level()
             except Exception:
                 context["battery"] = None
         error_state = None
-        if hasattr(self.system_ref, 'get_last_error'):
-            try:
-                error_state = self.system_ref.get_last_error()
-            except Exception:
-                error_state = None
-        context["error"] = error_state
         if hasattr(self, 'error_counts') and self.error_counts:
             context["error_rate"] = sum(self.error_counts) / len(self.error_counts)
             context["error_count"] = len(self.error_counts)
@@ -569,7 +561,7 @@ class AutonomyManager:
         context["throttle_level"] = getattr(self, "throttle_level", 0)
         # Add system resource metrics (RAM, GPU)
         try:
-            resource_stats = self.system_ref.get_resource_stats() if hasattr(self.system_ref, 'get_resource_stats') else {}
+            resource_stats = self.get_resource_stats() if self.get_resource_stats else {}
             context["ram_usage"] = resource_stats.get('ram_used', None)
             context["ram_total"] = resource_stats.get('ram_total', None)
             context["ram_usage_pct"] = resource_stats['ram_used'] / resource_stats['ram_total'] if resource_stats.get('ram_used') is not None and resource_stats.get('ram_total') else None

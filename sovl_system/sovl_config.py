@@ -899,6 +899,14 @@ class ConfigManager:
                 context={"updates": updates}
             )
 
+    def get_config(self) -> dict:
+        """
+        Return the full structured config as a dict for CLI and other consumers.
+        """
+        with self.lock:
+            import copy
+            return copy.deepcopy(self.store.structured_config)
+
 if __name__ == "__main__":
     from sovl_logger import LoggerConfig
     logger = Logger(LoggerConfig())

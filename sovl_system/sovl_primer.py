@@ -382,7 +382,6 @@ class GenerationPrimer:
         confidence_calculator: Optional[Any] = None,
         bond_calculator: Optional[Any] = None,
         bond_modulator: Optional[Any] = None,
-        sovl_system: Optional[Any] = None,  # Temporary for transition
         device: Optional[Any] = None,
         lifecycle_manager: Optional[Any] = None,
         scaffold_manager: Optional[Any] = None,
@@ -393,7 +392,6 @@ class GenerationPrimer:
         enable_confidence: bool = True,
         enable_bond: bool = True,
     ):
-        self.sovl_system = sovl_system
         self.config_manager = config_manager
         self.logger = logger if logger else Logger()
         self.state_manager = state_manager
