@@ -18,16 +18,16 @@ from collections import defaultdict
 
 # Core system imports
 from sovl_main import SystemContext, SOVLSystem
-from sovl_state import StateManager, SOVLState, StateTracker
+from sovl_state import StateManager, StateTracker
 from sovl_error import ErrorManager, ErrorContext
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 
 # Other imports
 from sovl_curiosity import CuriosityManager
-from sovl_io import load_training_data, InsufficientDataError
+from sovl_io import InsufficientDataError
 from sovl_cli import CommandHandler, run_cli
 from sovl_utils import (
-    safe_compare, memory_usage, log_memory_usage, dynamic_batch_size,
+    safe_compare, log_memory_usage, dynamic_batch_size,
     detect_repetitions, adjust_temperature, synchronized,
     validate_components, sync_component_states, validate_component_states,
     initialize_component_state
@@ -67,23 +67,6 @@ def error_handler(func):
             raise
     return wrapper
 
-# Constants
-TRAIN_EPOCHS = 10
-BATCH_SIZE = 32
-FORMATTED_TRAINING_DATA = None
-VALID_DATA = None
-CHECKPOINT_INTERVAL = 1  # Save checkpoint every epoch by default
-COMMAND_CATEGORIES = {
-    "System": ["quit", "exit", "save", "load", "reset", "status", "help", "monitor"],
-    "Training": ["train", "dream"],
-    "Generation": ["generate", "echo", "mimic"],
-    "Memory": ["memory", "recall", "forget", "recap"],
-    "Interaction": ["muse", "flare", "debate", "spark", "reflect"],
-    "Debug": ["log", "config", "panic", "glitch"],
-    "Advanced": ["tune", "rewind"],
-    "History": ["history"]
-}
-
 class SOVLRunner:
     """Main class to manage SOVL system execution."""
     
@@ -101,9 +84,6 @@ class SOVLRunner:
         self.tokenizer = None  # Initialize tokenizer
         self.last_checkpoint_time = None
         self.checkpoint_interval = CHECKPOINT_INTERVAL
-        self.metrics_history = []
-        self.best_validation_loss = float('inf')
-        self.patience = 0
         self.max_patience = 3
         self.traits_monitor = None  # Add traits monitor
         
@@ -550,31 +530,6 @@ class SOVLRunner:
                 error_type="cleanup_error"
             )
 
-    def _run_system(self, args: argparse.Namespace):
-        """Run the SOVL system with monitoring and error handling."""
-        try:
-            self.logger.log_event(
-                event_type="system_start",
-                message="Initializing SOVL system...",
-                level="info"
-            )
-            
-            self.orchestrator = SOVLOrchestrator(
-                config_path=args.config,
-                log_file=self.logger.config.log_file,
-                optimizer=self.optimizer,  # Pass optimizer to orchestrator
-                scheduler=self.scheduler   # Pass scheduler to orchestrator
-            )
-            self.orchestrator.initialize_system()
-            self.orchestrator.run()
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Error during system execution: {str(e)}",
-                error_type="system_execution_error"
-            )
-            raise
-    
     def execute_command(self, sovl_system: SOVLSystem, command: str, args: List[str] = None) -> bool:
         """Execute a command with proper error handling and logging."""
         try:
@@ -644,437 +599,6 @@ class SOVLRunner:
             print(f"Error: {str(e)}")
             return False
     
-    @error_handler
-    async def _async_save_checkpoint(self, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
-        """Asynchronously save system checkpoint with concurrency protection and non-blocking I/O."""
-        import uuid
-        from concurrent.futures import ThreadPoolExecutor
-        current_time = time.time()
-        checkpoint_data = {
-            "version": "1.0",  # Add versioning for future format changes
-            "timestamp": current_time,
-            "model_state": self.model.state_dict(),
-            "optimizer_state": optimizer.state_dict() if optimizer else None,
-            "component_states": {
-                name: comp.to_dict() for name, comp in self.components.items()
-                if self._validate_component_serialization(comp, name)
-            }
-        }
-        temp_path = Path("checkpoints") / f"temp_{current_time}_{uuid.uuid4().hex}.pt"
-        final_path = Path("checkpoints") / f"checkpoint_{current_time}.pt"
-        loop = asyncio.get_running_loop()
-        try:
-            with self._checkpoint_lock:
-                # Save to temporary file in a thread pool
-                await loop.run_in_executor(None, torch.save, checkpoint_data, temp_path)
-                # Atomic rename in a thread pool
-                await loop.run_in_executor(None, temp_path.rename, final_path)
-                self.last_checkpoint_time = current_time
-                self.logger.log_event(
-                    event_type="checkpoint",
-                    message=f"Checkpoint saved to {final_path}",
-                    level="info"
-                )
-            return True
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to save checkpoint: {str(e)}",
-                error_type="checkpoint_save_error"
-            )
-            return False
-
-    def _validate_checkpoint(self, checkpoint_data: Dict[str, Any]) -> bool:
-        """Validate checkpoint data structure and compatibility."""
-        try:
-            # Check required fields
-            required_fields = ["timestamp", "model_state"]
-            for field in required_fields:
-                if field not in checkpoint_data:
-                    raise ValueError(f"Missing required field: {field}")
-            
-            # Validate model state compatibility (optional deeper check)
-            if self.model:
-                model_keys = set(self.model.state_dict().keys())
-                checkpoint_keys = set(checkpoint_data["model_state"].keys())
-                missing_keys = model_keys - checkpoint_keys
-                
-                if missing_keys:
-                    self.logger.log_event(
-                        event_type="checkpoint_warning",
-                        message=f"Checkpoint missing {len(missing_keys)} model keys",
-                        level="warning"
-                    )
-            
-            return True
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Checkpoint validation failed: {str(e)}",
-                error_type="checkpoint_validation_error"
-            )
-            return False
-
-    def _load_partial_state(self, model: torch.nn.Module, state_dict: Dict[str, torch.Tensor]) -> Tuple[bool, List[str]]:
-        """Load partial model state and return success status and missing keys."""
-        try:
-            model_dict = model.state_dict()
-            # Filter out incompatible keys
-            filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
-            missing_keys = [k for k in model_dict.keys() if k not in filtered_dict]
-            
-            # Load compatible keys
-            model_dict.update(filtered_dict)
-            model.load_state_dict(model_dict)
-            
-            return len(filtered_dict) > 0, missing_keys
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Partial state loading failed: {str(e)}",
-                error_type="checkpoint_error"
-            )
-            return False, []
-
-    @error_handler
-    def save_checkpoint(self, force: bool = False, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
-        """Save system state checkpoint with async support."""
-        if not force and self.last_checkpoint_time is not None:
-            if time.time() - self.last_checkpoint_time < self.checkpoint_interval:
-                return False
-            
-        try:
-            self.logger.log_event(
-                event_type="checkpoint",
-                message="Saving system checkpoint...",
-                level="info"
-            )
-            
-            # Run async save
-            return asyncio.run(self._async_save_checkpoint(optimizer))
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to save checkpoint: {str(e)}",
-                error_type="checkpoint_error"
-            )
-            return False
-
-    def load_checkpoint(self, checkpoint_path: str, optimizer: Optional[torch.optim.Optimizer] = None) -> bool:
-        """Load system state from checkpoint (.pt file). Handles partial restoration and logs missing/incompatible fields."""
-        try:
-            self.logger.log_event(
-                event_type="checkpoint",
-                message=f"Loading checkpoint from {checkpoint_path}...",
-                level="info"
-            )
-
-            # Load checkpoint using torch.load
-            checkpoint_data = torch.load(checkpoint_path, map_location=self.context.device)
-
-            # Explicitly check for required fields
-            required_fields = ["timestamp", "model_state"]
-            missing_fields = [f for f in required_fields if f not in checkpoint_data]
-            if missing_fields:
-                self.logger.log_error(
-                    error_msg=f"Checkpoint missing required fields: {missing_fields}",
-                    error_type="checkpoint_schema_error"
-                )
-                return False
-
-            # Validate checkpoint structure (calls _validate_checkpoint for deeper checks)
-            if not self._validate_checkpoint(checkpoint_data):
-                return False
-
-            # Load model state (partial if needed)
-            if self.model and "model_state" in checkpoint_data:
-                success, missing_keys = self._load_partial_state(self.model, checkpoint_data["model_state"])
-                if not success:
-                    self.logger.log_error(
-                        error_msg="Failed to load model state from checkpoint.",
-                        error_type="checkpoint_error"
-                    )
-                    return False
-                if missing_keys:
-                    self.logger.log_event(
-                        event_type="checkpoint_warning",
-                        message=f"Model loaded with {len(missing_keys)} missing keys: {missing_keys}",
-                        level="warning"
-                    )
-            else:
-                self.logger.log_error(
-                    error_msg="No model_state found in checkpoint.",
-                    error_type="checkpoint_schema_error"
-                )
-
-            # Load optimizer state if present
-            if optimizer is not None:
-                if "optimizer_state" in checkpoint_data and checkpoint_data["optimizer_state"] is not None:
-                    try:
-                        optimizer.load_state_dict(checkpoint_data["optimizer_state"])
-                        self.logger.log_event(
-                            event_type="checkpoint",
-                            message="Optimizer state loaded successfully",
-                            level="info"
-                        )
-                    except Exception as e:
-                        self.logger.log_error(
-                            error_msg=f"Failed to load optimizer state: {str(e)}",
-                            error_type="checkpoint_error"
-                        )
-                        # Continue loading without optimizer state
-                else:
-                    self.logger.log_event(
-                        event_type="checkpoint_warning",
-                        message="No optimizer_state found in checkpoint.",
-                        level="warning"
-                    )
-
-            # Load component states if available
-            if "component_states" in checkpoint_data:
-                loaded_components = 0
-                for name, component_data in checkpoint_data["component_states"].items():
-                    if name in self.components:
-                        try:
-                            self.components[name].from_dict(component_data)
-                            loaded_components += 1
-                        except Exception as e:
-                            self.logger.log_error(
-                                error_msg=f"Failed to load state for component {name}: {str(e)}",
-                                error_type="checkpoint_error"
-                            )
-                            # Continue with other components instead of failing completely
-                self.logger.log_event(
-                    event_type="checkpoint",
-                    message=f"Loaded {loaded_components} component states from checkpoint.",
-                    level="info"
-                )
-            else:
-                self.logger.log_event(
-                    event_type="checkpoint_warning",
-                    message="No component_states found in checkpoint.",
-                    level="warning"
-                )
-
-            self.last_checkpoint_time = checkpoint_data["timestamp"]
-            self.logger.log_event(
-                event_type="checkpoint",
-                message="Checkpoint loaded successfully",
-                level="info"
-            )
-            return True
-
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to load checkpoint: {str(e)}",
-                error_type="checkpoint_error"
-            )
-            return False
-
-    def cleanup_old_checkpoints(self, max_checkpoints: int = 5):
-        """Remove old checkpoints to manage disk space."""
-        try:
-            checkpoint_dir = Path("checkpoints")
-            checkpoint_dir.mkdir(exist_ok=True)
-            
-            # Update to look for .pt files instead of .json
-            checkpoints = sorted(checkpoint_dir.glob("checkpoint_*.pt"), key=lambda x: x.stat().st_mtime)
-            
-            # Remove older checkpoints beyond the max limit
-            for old_checkpoint in checkpoints[:-max_checkpoints]:
-                old_checkpoint.unlink()
-                self.logger.log_event(
-                    event_type="checkpoint_cleanup",
-                    message=f"Removed old checkpoint: {old_checkpoint}",
-                    level="info"
-                )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Failed to clean up old checkpoints: {str(e)}",
-                error_type="checkpoint_cleanup_error"
-            )
-
-    @error_handler
-    def _run_validation(self, valid_data: List[Dict[str, Any]], batch_size: int) -> Dict[str, float]:
-        """Run validation with automatic mixed precision and memory optimization."""
-        if not valid_data:
-            self.logger.log_event(
-                event_type="validation",
-                message="No validation data provided",
-                level="warning"
-            )
-            return {}
-            
-        try:
-            self.logger.log_event(
-                event_type="validation_start",
-                message="Starting validation...",
-                level="info"
-            )
-            
-            self.model.eval()
-            metrics = defaultdict(float)
-            total_batches = 0
-            
-            # Initialize gradient scaler for mixed precision
-            scaler = torch.cuda.amp.GradScaler()
-            
-            with torch.no_grad():
-                for i in range(0, len(valid_data), batch_size):
-                    batch = valid_data[i:i + batch_size]
-                    if not batch:
-                        continue
-                        
-                    # Use automatic mixed precision
-                    with torch.cuda.amp.autocast():
-                        inputs = self._prepare_batch(batch)
-                        outputs = self.model(**inputs)
-                        loss = self._calculate_loss(outputs, inputs)
-                        
-                    # Update metrics
-                    metrics["loss"] += loss.item()
-                    total_batches += 1
-                    
-                    # Clear cache periodically
-                    if i % (batch_size * 10) == 0:
-                        torch.cuda.empty_cache()
-                        
-            # Calculate average metrics
-            if total_batches > 0:
-                return {k: v/total_batches for k, v in metrics.items()}
-            return {}
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Validation error: {str(e)}",
-                error_type="validation_error"
-            )
-            return {}
-
-    @error_handler
-    def _prepare_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        """Prepare batch for model input with parallel processing. Always includes labels."""
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not initialized")
-        if not batch or "text" not in batch[0]:
-            raise ValueError("Each batch item must contain a 'text' field.")
-        # Extract texts for parallel processing
-        texts = [item["text"] for item in batch]
-        # Use thread pool for parallel tokenization
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            tokenized = list(executor.map(
-                lambda text: self.tokenizer(
-                    text,
-                    truncation=True,
-                    max_length=self.context.config_manager.get("training.max_seq_length", 512)
-                ),
-                texts
-            ))
-        # Find maximum sequence length in batch
-        max_length = max(len(t["input_ids"]) for t in tokenized)
-        batch_size = len(tokenized)
-        # Initialize tensors with padding
-        input_ids = torch.full((batch_size, max_length), self.tokenizer.pad_token_id)
-        attention_mask = torch.zeros((batch_size, max_length))
-        # Fill tensors with tokenized data
-        for i, tokens in enumerate(tokenized):
-            length = len(tokens["input_ids"])
-            input_ids[i, :length] = torch.tensor(tokens["input_ids"])
-            attention_mask[i, :length] = 1
-        # Prepare labels
-        if "labels" in batch[0]:
-            label_texts = [item["labels"] for item in batch]
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                tokenized_labels = list(executor.map(
-                    lambda text: self.tokenizer(
-                        text,
-                        truncation=True,
-                        max_length=self.context.config_manager.get("training.max_seq_length", 512)
-                    ),
-                    label_texts
-                ))
-            labels = torch.full((batch_size, max_length), -100)  # -100 for ignored positions
-            for i, tokens in enumerate(tokenized_labels):
-                length = min(len(tokens["input_ids"]), max_length)
-                labels[i, :length] = torch.tensor(tokens["input_ids"][:length])
-        else:
-            labels = input_ids.clone()
-        # Move tensors to appropriate device
-        device = self.context.device
-        return {
-            "input_ids": input_ids.to(device),
-            "attention_mask": attention_mask.to(device),
-            "labels": labels.to(device)
-        }
-
-    def _calculate_loss(self, outputs: torch.Tensor, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Calculate loss for the model outputs."""
-        try:
-            return torch.nn.functional.cross_entropy(
-                outputs.logits.view(-1, outputs.logits.size(-1)),
-                inputs["labels"].view(-1),
-                ignore_index=-100
-            )
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Loss calculation error: {str(e)}",
-                error_type="loss_calculation_error"
-            )
-            raise
-
-    def _update_metrics_history(self, metrics: Dict[str, float], epoch: int) -> None:
-        """Update metrics history and handle early stopping."""
-        try:
-            # Add metrics to history
-            self.metrics_history.append({
-                "epoch": epoch,
-                "metrics": metrics,
-                "timestamp": time.time()
-            })
-            
-            # Check for early stopping
-            if metrics["loss"] < self.best_validation_loss:
-                self.best_validation_loss = metrics["loss"]
-                self.patience = 0
-            else:
-                self.patience += 1
-                
-            # Log metrics update
-            self.logger.log_event(
-                event_type="metrics_update",
-                message=f"Metrics updated for epoch {epoch}",
-                level="info",
-                additional_info={
-                    "metrics": metrics,
-                    "best_validation_loss": self.best_validation_loss,
-                    "patience": self.patience
-                }
-            )
-            
-        except Exception as e:
-            self.logger.log_error(
-                error_msg=f"Metrics update error: {str(e)}",
-                error_type="metrics_update_error"
-            )
-            raise
-
-    def _validate_component_serialization(self, component: Any, name: str) -> bool:
-        """Validate that a component has required serialization methods."""
-        try:
-            if not hasattr(component, 'to_dict') or not hasattr(component, 'from_dict'):
-                raise ValueError(f"Component {name} missing required serialization methods")
-            
-            # Validate scaffold components
-            if name in ["scaffold_provider", "scaffold_token_mapper", "cross_attention_injector"]:
-                if component is not None and (not hasattr(component, 'to_dict') or not hasattr(component, 'from_dict')):
-                    raise ValueError(f"Scaffold component {name} missing required serialization methods")
-            
-            
-            self.logger.log_event(f"Validated component {name} serialization", level="info")
-            
-            return True
-            
-        except Exception as e:
-            self.logger.log_error(f"Component {name} serialization validation failed: {str(e)}")
-            return False
-
     def run(self):
         """Main execution method with enhanced argument parsing."""
         parser = argparse.ArgumentParser(
@@ -1192,88 +716,46 @@ class SOVLRunner:
                 self.logger.log_error(error_msg="Orchestrator not initialized", error_type="orchestrator_error")
                 return
             
-            # Run system
-            try:
-                if args.mode == 'train':
-                    self.logger.log_event(
-                        event_type="training",
-                        message="Starting gestation...",
-                        level="info"
-                    )
-                    
-                    # Load training and validation data
-                    formatted_training_data = load_training_data(args.train_data) if args.train_data else []
-                    valid_data = load_training_data(args.valid_data) if args.valid_data else []
-                    
-                    if not formatted_training_data:
-                        self.logger.warning("No training data available")
-                        return
-                    
-                    # Training loop with validation
-                    for epoch in range(args.epochs):
-                        self.logger.log_event(
-                            event_type="epoch_start",
-                            message=f"Starting epoch {epoch + 1}/{args.epochs}",
-                            level="info"
-                        )
-                        # Training phase
-                        train_loss = self.orchestrator.train(
-                            epochs=1,
-                            batch_size=args.batch_size,
-                            formatted_training_data=formatted_training_data,
-                            valid_data=valid_data,
-                            optimizer=self.optimizer,
-                            checkpoint_callback=lambda: self.save_checkpoint(optimizer=self.optimizer),
-                            validate_every=args.validate_every
-                        )
-                        
-                        # Validation phase
-                        if valid_data and (epoch + 1) % args.validate_every == 0:
-                            metrics = self.orchestrator.validate(valid_data)
-                            valid_loss = metrics.get("loss", float("inf"))
-                            self._update_metrics_history(metrics, epoch + 1)
-                            self.logger.log_event(
-                                event_type="validation",
-                                message=f"Epoch {epoch + 1} validation results",
-                                level="info",
-                                additional_info={
-                                    "train_loss": train_loss,
-                                    "valid_loss": valid_loss,
-                                    "metrics": metrics
-                                }
-                            )
-                            if self.patience >= self.max_patience:
-                                self.logger.log_event(
-                                    event_type="early_stopping",
-                                    message=f"Early stopping triggered after {self.patience} epochs without improvement",
-                                    level="info"
-                                )
-                                break
-                        # Save checkpoint and clean up old ones
-                        self.save_checkpoint(optimizer=self.optimizer)
-                        self.cleanup_old_checkpoints(args.max_checkpoints)
-                elif args.mode == 'generate':
-                    self.logger.log_event(
-                        event_type="generation",
-                        message="Starting generation...",
-                        level="info"
-                    )
-                    self.orchestrator.generate()
-                elif args.mode == 'dream':
-                    self.logger.log_event(
-                        event_type="dreaming",
-                        message="Starting dreaming...",
-                        level="info"
-                    )
-                    self.orchestrator.dream()
-                else:
-                    raise ValueError(f"Invalid mode: {args.mode}")
-            except Exception as e:
-                self.logger.log_error(
-                    error_msg=f"System error during operation: {str(e)}",
-                    error_type="system_error"
+            # Mode dispatch: delegate to canonical trainer/workflow
+            if args.mode == 'train':
+                self.logger.log_event(
+                    event_type="training",
+                    message="Starting canonical training workflow...",
+                    level="info"
                 )
-                raise
+                # Canonical: use SOVLTrainer for all training
+                from sovl_trainer import SOVLTrainer
+                from sovl_memory import RAMManager, GPUMemoryManager
+                trainer = SOVLTrainer(
+                    config_manager=self.context.config_manager,
+                    logger=self.logger,
+                    ram_manager=self.components.get("ram_manager"),
+                    gpu_manager=self.components.get("gpu_manager"),
+                    model=self.model,
+                    device=self.context.device,
+                    tokenizer=self.tokenizer
+                )
+                # Example: train on scribe journal (adjust as needed)
+                scribe_path = self.context.config_manager.get("scribed_config.log_path", "logs/sovl_scribed.jsonl")
+                batch_size = args.batch_size
+                epochs = args.epochs
+                trainer.train_on_scribe_journal(scribe_path, batch_size=batch_size, epochs=epochs)
+            elif args.mode == 'generate':
+                self.logger.log_event(
+                    event_type="generation",
+                    message="Starting generation...",
+                    level="info"
+                )
+                self.orchestrator.generate()
+            elif args.mode == 'dream':
+                self.logger.log_event(
+                    event_type="dreaming",
+                    message="Starting dreaming...",
+                    level="info"
+                )
+                self.orchestrator.dream()
+            else:
+                raise ValueError(f"Invalid mode: {args.mode}")
         except Exception as e:
             self.logger.log_error(
                 error_msg=f"System error: {str(e)}",
@@ -1281,15 +763,6 @@ class SOVLRunner:
             )
             raise
         finally:
-            # Save final checkpoint and cleanup, but guard against errors in these methods
-            try:
-                self.save_checkpoint(force=True, optimizer=self.optimizer)
-            except Exception as e:
-                self.logger.log_error(error_msg=f"Error saving final checkpoint: {str(e)}", error_type="checkpoint_error")
-            try:
-                self.cleanup_old_checkpoints(args.max_checkpoints)
-            except Exception as e:
-                self.logger.log_error(error_msg=f"Error cleaning up old checkpoints: {str(e)}", error_type="checkpoint_error")
             try:
                 self.cleanup()
             except Exception as e:
