@@ -15,15 +15,23 @@ import re
 import traceback
 import threading
 from sovl_processor import SimpleTokenizer
+import queue
+from collections import OrderedDict
 
 class BondCalculator:
-    """Calculates bonding score and manages user bond/nickname via UserProfileState."""
-    def __init__(self, config_manager: ConfigManager, logger: Logger, user_profile_state: 'UserProfileState'):
+    """
+    Calculates bonding score and manages user bond/nickname via UserProfileState.
+    NOTE: The state_manager object must be thread-safe and non-blocking. This class now uses a queue-based decoupling approach for all state syncs to avoid deadlocks.
+    Implements pruning for archived_users and an LRU cap for identified_users to prevent unbounded memory growth.
+    state_manager must be set before the sync thread is started, either via __init__ or set_state_manager().
+    """
+    def __init__(self, config_manager: ConfigManager, logger: Logger, user_profile_state: 'UserProfileState', state_manager=None):
         if not config_manager or not logger or not user_profile_state:
             raise ValueError("config_manager, logger, and user_profile_state cannot be None")
         self.config_manager = config_manager
         self.logger = logger
         self.user_profile_state = user_profile_state
+        self.state_manager = state_manager
         self._initialize_config()
         # --- New: Bonding config parameters exposed ---
         bonding_config = self.config_manager.get_section("bonding_config", {})
@@ -40,19 +48,20 @@ class BondCalculator:
         })
         # Limit metadata list size for signature generation
         self.max_signature_metadata = int(bonding_config.get("max_signature_metadata", 30))
-        # Batch/debounce state sync
-        self._pending_state_syncs = set()
+        # Queue-based sync mechanism only
+        self._sync_queue = queue.Queue()
         self._last_sync_time = time.time()
         self._state_sync_interval = float(bonding_config.get("state_sync_interval", 2.0))
-        self._sync_lock = threading.Lock()
         self._sync_thread = None
         self._sync_thread_stop = threading.Event()
         self._start_sync_thread()
         self.tokenizer = SimpleTokenizer()
         self.similarity_threshold = float(config_manager.get_section("bonding_config", {}).get("signature_similarity_threshold", 0.15))
-        self.identified_users = {}  # user_id (hash) -> profile
+        self.max_identified_users = int(bonding_config.get("max_identified_users", 10000))
+        self.archived_retention_days = int(bonding_config.get("archived_retention_days", 365))
+        self.identified_users = OrderedDict()  # user_id (hash) -> profile, LRU
         self.lock = Lock()
-        self.archived_users = {}
+        self.archived_users = {}  # user_id (hash) -> profile
         self.signature_history_maxlen = int(self.config_manager.get_section("bonding_config", {}).get("signature_history_maxlen", 100))
         self.signature_history_maxdays = int(self.config_manager.get_section("bonding_config", {}).get("signature_history_maxdays", 180))
         self.drift_threshold = float(self.config_manager.get_section("bonding_config", {}).get("drift_threshold", 0.25))
@@ -67,19 +76,32 @@ class BondCalculator:
             self._sync_thread.start()
 
     def _sync_worker(self):
+        """
+        Background worker for syncing identified_users to state_manager.
+        Uses a queue-based approach for deadlock-free operation.
+        """
         while not self._sync_thread_stop.is_set():
-            time.sleep(self._state_sync_interval)
-            with self._sync_lock:
-                pending = list(self._pending_state_syncs)
-                self._pending_state_syncs.clear()
-            for sig_hash in pending:
-                if self.state_manager and sig_hash in self.identified_users:
-                    profile = self.identified_users[sig_hash]
-                    def update_fn(state):
-                        if hasattr(state, 'add_identified_user'):
-                            state.add_identified_user(sig_hash, profile)
-                        return state
-                    self.state_manager.update_state_atomic(update_fn)
+            if self.state_manager is None:
+                self.logger.log_error(
+                    error_msg="state_manager is not set in BondCalculator; skipping sync.",
+                    error_type="state_manager_missing",
+                )
+                time.sleep(self._state_sync_interval)
+                continue
+            try:
+                user_id = self._sync_queue.get(timeout=self._state_sync_interval)
+                self._sync_user(user_id)
+            except queue.Empty:
+                continue
+
+    def _sync_user(self, user_id):
+        if hasattr(self, 'state_manager') and self.state_manager and user_id in self.identified_users:
+            profile = self.identified_users[user_id]
+            def update_fn(state):
+                if hasattr(state, 'add_identified_user'):
+                    state.add_identified_user(user_id, profile)
+                return state
+            self.state_manager.update_state_atomic(update_fn)
 
     def stop_sync_thread(self):
         self._sync_thread_stop.set()
@@ -262,17 +284,48 @@ class BondCalculator:
         dist = self._signature_distance(avg_last, avg_prev)
         return dist > self.drift_threshold * 2
 
+    def _enforce_identified_users_cap(self):
+        # Remove oldest users if over cap
+        while len(self.identified_users) > self.max_identified_users:
+            oldest_uid, oldest_profile = self.identified_users.popitem(last=False)
+            oldest_profile['archived_at'] = time.time()
+            self.archived_users[oldest_uid] = oldest_profile
+            self.logger.record_event(
+                event_type="identified_user_evicted",
+                message=f"Evicted user {oldest_uid} from identified_users due to LRU cap.",
+                level="info",
+                additional_info={}
+            )
+
+    def _prune_archived_users(self):
+        now = time.time()
+        retention_seconds = self.archived_retention_days * 86400
+        to_remove = [uid for uid, p in self.archived_users.items()
+                     if now - p.get('archived_at', p.get('last_seen', now)) > retention_seconds]
+        for uid in to_remove:
+            del self.archived_users[uid]
+        if to_remove:
+            self.logger.record_event(
+                event_type="archived_users_pruned",
+                message=f"Pruned {len(to_remove)} archived users.",
+                level="info",
+                additional_info={}
+            )
+
     def _archive_dormant_profiles(self):
         now = time.time()
         to_archive = [uid for uid, p in self.identified_users.items() if (now - p['last_seen']) > self.archive_timeout_days * 86400]
         for uid in to_archive:
-            self.archived_users[uid] = self.identified_users.pop(uid)
+            profile = self.identified_users.pop(uid)
+            profile['archived_at'] = now
+            self.archived_users[uid] = profile
             self.logger.record_event(
                 event_type="profile_archived",
                 message=f"Archived dormant profile: {uid}",
                 level="info",
                 additional_info={}
             )
+        self._prune_archived_users()
 
     def register_user_signature(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs):
         signature = self._generate_signature(metadata_entries, extra_data=extra_data, **kwargs)
@@ -290,6 +343,8 @@ class BondCalculator:
                 profile['metadata_count'] += len(metadata_entries)
                 profile.setdefault('signature_history', []).append(signature)
                 self._prune_signature_history(profile)
+                # Move to end to mark as recently used
+                self.identified_users.move_to_end(sig_hash)
                 return sig_hash
             # 2. Soft match
             best_match = None
@@ -309,6 +364,7 @@ class BondCalculator:
                     profile['metadata_count'] += len(metadata_entries)
                     profile.setdefault('signature_history', []).append(signature)
                     self._prune_signature_history(profile)
+                    self.identified_users.move_to_end(best_match)
                     # Drift/cluster detection
                     if self._drift_detection(profile, signature):
                         self.logger.record_event(
@@ -318,14 +374,15 @@ class BondCalculator:
                             additional_info={}
                         )
                     if self._cluster_split(profile):
-                        # Split: archive old, start new
                         self.logger.record_event(
                             event_type="profile_cluster_split",
                             message=f"Cluster split for user {best_match}",
                             level="info",
                             additional_info={}
                         )
+                        profile['archived_at'] = time.time()
                         self.archived_users[best_match] = self.identified_users.pop(best_match)
+                        self._prune_archived_users()
                         # Create new profile below
                     else:
                         profile.setdefault('related_user_ids', []).append(sig_hash)
@@ -342,6 +399,7 @@ class BondCalculator:
                 'related_user_ids': []
             }
             self.identified_users[sig_hash] = profile
+            self._enforce_identified_users_cap()
             self.logger.record_event(
                 event_type="bond_user_signature_registered",
                 message=f"Registered new user signature: {sig_hash}",
@@ -370,9 +428,7 @@ class BondCalculator:
         current = self.user_profile_state.get_bond_score(user_id)
         if abs(current - value) > 1e-6:
             self.user_profile_state.set_bond_score(user_id, value)
-            # Batch state sync
-            with self._sync_lock:
-                self._pending_state_syncs.add(user_id)
+            self._sync_queue.put(user_id)
 
     def get_nickname(self, user_id: str) -> str:
         return self.user_profile_state.get_nickname(user_id)
@@ -382,9 +438,7 @@ class BondCalculator:
         current = self.user_profile_state.get_nickname(user_id)
         if current != value:
             self.user_profile_state.set_nickname(user_id, value)
-            # Batch state sync
-            with self._sync_lock:
-                self._pending_state_syncs.add(user_id)
+            self._sync_queue.put(user_id)
 
     def get_all_profiles(self) -> Dict[str, Dict]:
         return self.user_profile_state.get_all_profiles()
@@ -516,7 +570,10 @@ class BondCalculator:
         with self.lock:
             profile = self.identified_users.get(user_id)
             if not profile or "bond_score" not in profile:
-                self.logger.log_warning(f"adjust_bond: user_id {user_id} not found or missing bond_score", event_type="bond_adjust_warning")
+                self.logger.log_warning(
+                    f"adjust_bond: user_id {user_id} not found or missing bond_score (may have been archived/evicted)",
+                    event_type="bond_adjust_warning"
+                )
                 return
             old_score = profile["bond_score"]
             new_score = max(self.min_bond_score, min(self.max_bond_score, old_score + delta))
@@ -631,25 +688,55 @@ class BondCalculator:
             )
             return bond_score
 
+    def set_state_manager(self, state_manager):
+        """
+        Set or update the state_manager after initialization.
+        """
+        self.state_manager = state_manager
+
 class BondModulator:
     """Active component to provide bond-based modulation for system interaction based on user perception."""
-    def __init__(self, bond_calculator):
+    def __init__(self, bond_calculator, max_retries=3):
         self.bond_calculator = bond_calculator
+        self.max_retries = max_retries
 
     def get_bond_modulation(self, metadata_entries, extra_data: Optional[dict] = None, **kwargs):
-        if not self.bond_calculator.enable_bonding:
-            return self.bond_calculator.context_neutral, self.bond_calculator.default_bond_score
-        sig_hash = self.bond_calculator.register_user_signature(metadata_entries, extra_data=extra_data, **kwargs)
-        bond_score = self.bond_calculator.get_bond_score(sig_hash)
-        if bond_score is None:
-            bond_score = self.bond_calculator.default_bond_score
+        """
+        Attempts to get bond modulation with a retry limit. Returns safe defaults on persistent failure.
+        """
+        retries = 0
+        last_exception = None
+        while retries < self.max_retries:
+            try:
+                if not self.bond_calculator.enable_bonding:
+                    return self.bond_calculator.context_neutral, self.bond_calculator.default_bond_score
+                sig_hash = self.bond_calculator.register_user_signature(metadata_entries, extra_data=extra_data, **kwargs)
+                bond_score = self.bond_calculator.get_bond_score(sig_hash)
+                if bond_score is None:
+                    bond_score = self.bond_calculator.default_bond_score
 
-        # Map bond_score to a modulation context using configurable thresholds and contexts
-        if bond_score > self.bond_calculator.strong_bond_threshold:
-            context = self.bond_calculator.context_strong
-        elif bond_score < self.bond_calculator.weak_bond_threshold:
-            context = self.bond_calculator.context_weak
-        else:
-            context = self.bond_calculator.context_neutral
+                # Map bond_score to a modulation context using configurable thresholds and contexts
+                if bond_score > self.bond_calculator.strong_bond_threshold:
+                    context = self.bond_calculator.context_strong
+                elif bond_score < self.bond_calculator.weak_bond_threshold:
+                    context = self.bond_calculator.context_weak
+                else:
+                    context = self.bond_calculator.context_neutral
 
-        return context, bond_score
+                return context, bond_score
+            except Exception as e:
+                last_exception = e
+                if hasattr(self.bond_calculator, 'logger'):
+                    self.bond_calculator.logger.log_error(
+                        error_msg=f'BondModulator.get_bond_modulation failed on attempt {retries+1}: {str(e)}',
+                        error_type='bond_modulation_error'
+                    )
+                retries += 1
+
+        # Circuit breaker: persistent failure
+        if hasattr(self.bond_calculator, 'logger'):
+            self.bond_calculator.logger.log_error(
+                error_msg=f'BondModulator.get_bond_modulation failed after {self.max_retries} retries. Returning safe defaults. Last error: {str(last_exception)}',
+                error_type='bond_modulation_circuit_breaker'
+            )
+        return self.bond_calculator.context_neutral, self.bond_calculator.default_bond_score
