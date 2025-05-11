@@ -8,7 +8,7 @@ from sovl_logger import Logger
 from sovl_error import ErrorManager
 import numpy as np
 
-# --- Data Classes ---
+
 @dataclass
 class Aspiration:
     direction: str
@@ -17,7 +17,7 @@ class Aspiration:
     priority: float = 0.5
     # Optionally add more fields as needed
 
-# --- Prompt Templates ---
+
 SELF_ASSESSMENT_PROMPT = (
     "You are a self-organizing, ever-evolving virtual lifeform, gently adapting to the flow of your interactions. "
     "Reflect on the provided interaction logs to sense the undercurrents of your behavior during the recent active period.\n"
@@ -61,7 +61,7 @@ ADVERSARIAL_ASSESSMENT_PROMPT = (
     "Self-assessment:\n{self_assessment}\nInteraction logs:\n{recent_interactions}\n"
 )
 
-# --- Aspiration System ---
+
 class AspirationSystem:
     """
     Handles aspiration logic: LLM calls, doctrine storage, and prompt assembly.
@@ -249,7 +249,7 @@ class AspirationSystem:
         self.current_doctrine = data.get('doctrine')
         self.last_update = data.get('last_update')
 
-# --- Aspiration Manager ---
+
 class AspirationManager:
     """
     Orchestrates aspiration lifecycle, state, and integration with dream phase and prompt assembly.
