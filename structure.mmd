@@ -23,7 +23,7 @@ graph TD
         sovl_io[IO]
     end
 
-    %% Reticular Formation
+    %% Ganglia
     subgraph Ganglia[Ganglia: Configuration]
         sovl_config[Config]
         sovl_schema[Schema]
@@ -90,6 +90,7 @@ graph TD
         sovl_interfaces[Interfaces]
         sovl_hardware[Hardware]
         sovl_data[Data]
+        sovl_state[State]
     end
 
     %% Janus
@@ -98,7 +99,9 @@ graph TD
     end
 
     %% Data Store
-    chronicle[chronicle.json]
+    subgraph Data_Store[Data Store]
+        chronicle[chronicle.json]
+    end
 
     %% Flows: Grouped by Function
     %% 1. Entry and Orchestration
@@ -134,8 +137,14 @@ graph TD
     sovl_temperament --> sovl_primer
     sovl_confidence --> sovl_primer
     sovl_bonder --> sovl_primer
+    sovl_meditator --> sovl_primer
     sovl_primer --> sovl_generation
     sovl_cli -->|Talk| sovl_main --> sovl_generation
+    sovl_curiosity --> sovl_viber
+    sovl_temperament --> sovl_viber
+    sovl_viber --> sovl_primer
+    sovl_viber <--> sovl_recaller
+    sovl_striver --> sovl_primer
 
     %% 5. Memory and Learning
     sovl_engram <--> sovl_scaffold
@@ -169,16 +178,7 @@ graph TD
     sovl_state --> sovl_interfaces
     sovl_conductor --> sovl_interfaces
 
-     %% 8. State
+    %% 8. State
     sovl_state --> sovl_data
     sovl_main --> sovl_state
     sovl_bonder --> sovl_state
-
-     %% 9. Generation
-    sovl_primer --> sovl_generation
-    sovl_curiosity --> sovl_viber
-    sovl_temperament --> sovl_viber
-    sovl_bonder --> sovl_primer
-    sovl_viber --> sovl_ primer
-    sovl_viber <--> sovl_recaller
-    sovl_striver --> sovl_primer
