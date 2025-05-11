@@ -24,6 +24,8 @@ from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
 from sovl_trainer import TrainingWorkflowManager
 import threading
 from sovl_resource import ResourceManager
+from sovl_api import SOVLAPI
+from sovl_queue import ScribeQueue
 
 if TYPE_CHECKING:
     from sovl_main import SOVLSystem
@@ -44,19 +46,68 @@ class SOVLOrchestrator(OrchestratorInterface):
 
     # Canonical, ordered list of core components to initialize
     COMPONENT_INIT_LIST = [
-        # (component_key, module, class_name, kwargs or dependency keys)
-        ("resource_manager", "sovl_resource", "ResourceManager", {}),
-        ("config_manager", "sovl_config", "ConfigManager", {}),
-        ("logger", "sovl_logger", "Logger", {}),
-        ("state_manager", "sovl_state", "StateManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
-        ("model_manager", "sovl_manager", "ModelManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
-        ("ram_manager", "sovl_memory", "RAMManager", {"config_manager": "config_manager", "logger": "logger"}),
-        ("gpu_manager", "sovl_memory", "GPUMemoryManager", {"config_manager": "config_manager", "logger": "logger"}),
-        ("error_manager", "sovl_error", "ErrorManager", {"state_manager": "state_manager", "logger": "logger"}),
-        ("system_monitor", "sovl_monitor", "SystemMonitor", {"config_manager": "config_manager", "logger": "logger", "ram_manager": "ram_manager", "gpu_manager": "gpu_manager", "error_manager": "error_manager"}),
-        ("memory_monitor", "sovl_monitor", "MemoryMonitor", {"config_manager": "config_manager", "logger": "logger", "ram_manager": "ram_manager", "gpu_manager": "gpu_manager", "error_manager": "error_manager"}),
-        ("traits_monitor", "sovl_monitor", "TraitsMonitor", {"config_manager": "config_manager", "logger": "logger", "state_tracker": "state_manager", "error_manager": "error_manager"}),
-        # Add more components as needed
+    # Base infrastructure components with no dependencies
+    ("config_manager", "sovl_config", "ConfigManager", {}),
+    ("logger", "sovl_logger", "Logger", {}),
+    ("resource_manager", "sovl_resource", "ResourceManager", {}),
+    
+    # Core system components with minimal dependencies
+    ("ram_manager", "sovl_memory", "RAMManager", {"config_manager": "config_manager", "logger": "logger"}),
+    ("gpu_manager", "sovl_memory", "GPUMemoryManager", {"config_manager": "config_manager", "logger": "logger"}),
+    ("state_manager", "sovl_state", "StateManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
+    ("error_manager", "sovl_error", "ErrorManager", {"state_manager": "state_manager", "logger": "logger"}),
+    ("event_dispatcher", "sovl_events", "EventDispatcher", {"config_manager": "config_manager", "logger": "logger"}),
+    
+    # Basic data and resource management
+    ("jsonl_loader", "sovl_io", "JSONLLoader", {"config_manager": "config_manager", "logger": "logger", "error_manager": "error_manager"}),
+    ("scribe_queue", "sovl_queue", "ScribeQueue", {"logger": "logger"}),
+    ("hardware_manager", "sovl_hardware", "HardwareManager", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager"}),
+    ("data_manager", "sovl_data", "DataManager", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager"}),
+    
+    # Model and core processing
+    ("model_manager", "sovl_manager", "ModelManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
+    ("metadata_processor", "sovl_processor", "MetadataProcessor", {"config_manager": "config_manager", "logger": "logger", "state_accessor": "state_manager"}),
+    ("lora_adapter_manager", "sovl_engram", "LoraAdapterManager", {"config_manager": "config_manager", "logger": "logger", "error_handler": "error_manager"}),
+    
+    # Monitoring systems
+    ("system_monitor", "sovl_monitor", "SystemMonitor", {"config_manager": "config_manager", "logger": "logger", "ram_manager": "ram_manager", "gpu_manager": "gpu_manager", "error_manager": "error_manager"}),
+    ("memory_monitor", "sovl_monitor", "MemoryMonitor", {"config_manager": "config_manager", "logger": "logger", "ram_manager": "ram_manager", "gpu_manager": "gpu_manager", "error_manager": "error_manager"}),
+    
+    # System foundation components
+    ("system_context", "sovl_main", "SystemContext", {"config_path": "config_manager"}),
+    ("system_mediator", "sovl_interfaces", "SystemMediator", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
+    
+    # Core interaction components
+    ("generation_manager", "sovl_generation", "GenerationManager", {"config_manager": "config_manager", "base_model": "model_manager", "base_tokenizer": "model_manager", "state": "state_manager", "logger": "logger", "error_manager": "error_manager", "device": "device", "dialogue_context_manager": "state_manager", "state_manager": "state_manager", "resource_manager": "resource_manager", "model_manager": "model_manager"}),
+    ("confidence_calculator", "sovl_confidence", "ConfidenceCalculator", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager"}),
+    ("bond_calculator", "sovl_bonder", "BondCalculator", {"config_manager": "config_manager", "logger": "logger", "user_profile_state": "state_manager", "state_manager": "state_manager"}),
+    
+    # Advanced personality and behavior systems
+    ("temperament_system", "sovl_temperament", "TemperamentSystem", {"state_manager": "state_manager", "config_manager": "config_manager", "error_manager": "error_manager"}),
+    ("curiosity_manager", "sovl_curiosity", "CuriosityManager", {"config_manager": "config_manager", "logger": "logger", "error_manager": "error_manager", "device": "device", "generation_manager": "generation_manager", "state_manager": "state_manager"}),
+    ("traits_monitor", "sovl_monitor", "TraitsMonitor", {"config_manager": "config_manager", "logger": "logger", "state_tracker": "state_manager", "error_manager": "error_manager"}),
+    ("vibe_sculptor", "sovl_viber", "VibeSculptor", {"config_manager": "config_manager", "logger": "logger", "temperament_system": "temperament_system"}),
+    
+    # Creative and reflective systems
+    ("dreamer", "sovl_dreamer", "Dreamer", {"config_manager": "config_manager", "scribe_path": "config_manager", "error_manager": "error_manager", "state_manager": "state_manager"}),
+    ("aspiration_system", "sovl_striver", "AspirationSystem", {"config": "config_manager", "logger": "logger", "long_term_memory": "dialogue_context_manager", "state_manager": "state_manager", "error_manager": "error_manager"}),
+    ("introspection_manager", "sovl_meditater", "IntrospectionManager", {"context": "system_context", "state_manager": "state_manager", "error_manager": "error_manager", "curiosity_manager": "curiosity_manager", "confidence_calculator": "confidence_calculator", "temperament_system": "temperament_system", "model_manager": "model_manager", "dialogue_context_manager": "state_manager", "bond_calculator": "bond_calculator"}),
+    
+    # Training and process systems
+    ("training_manager", "sovl_trainer", "TrainingWorkflowManager", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager", "model_manager": "model_manager", "error_manager": "error_manager"}),
+    ("scribe_ingestion_processor", "sovl_processor", "ScribeIngestionProcessor", {"log_paths": "scribe_log_paths", "memory_templates": "memory_templates", "logger": "logger", "config_path": "config_manager"}),
+    
+    # Generation preparation and interface components
+    ("generation_primer", "sovl_primer", "GenerationPrimer", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager", "error_manager": "error_manager", "curiosity_manager": "curiosity_manager", "temperament_system": "temperament_system", "confidence_calculator": "confidence_calculator", "bond_modulator": "bond_modulator", "device": "device", "lifecycle_manager": "lifecycle_manager", "scaffold_manager": "scaffold_manager", "generation_hooks": "generation_hooks", "dialogue_context_manager": "state_manager", "enable_curiosity": "enable_curiosity", "enable_temperament": "enable_temperament", "enable_confidence": "enable_confidence", "enable_bond": "enable_bond"}),
+    
+    # Main system and API components (depend on almost everything)
+    ("sovl_system", "sovl_main", "SOVLSystem", {"context": "system_context", "model_manager": "model_manager", "curiosity_manager": "curiosity_manager", "state_tracker": "state_manager", "error_manager": "error_manager"}),
+    ("api", "sovl_api", "SOVLAPI", {"config_path": "config_manager"}),
+    
+    # CLI handler must be last as it depends on sovl_system which is created late
+    ("cli_handler", "sovl_cli", "CommandHandler", {"sovl_system": "system"}),
+    
+    # Add more components as needed
     ]
 
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH, log_file: str = DEFAULT_LOG_FILE) -> None:
