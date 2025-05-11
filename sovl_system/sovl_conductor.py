@@ -42,6 +42,23 @@ class SOVLOrchestrator(OrchestratorInterface):
     LOG_MAX_SIZE_MB: int = 10
     SAVE_PATH_SUFFIX: str = "_final.json"
 
+    # Canonical, ordered list of core components to initialize
+    COMPONENT_INIT_LIST = [
+        # (component_key, module, class_name, kwargs or dependency keys)
+        ("resource_manager", "sovl_resource", "ResourceManager", {}),
+        ("config_manager", "sovl_config", "ConfigManager", {}),
+        ("logger", "sovl_logger", "Logger", {}),
+        ("state_manager", "sovl_state", "StateManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
+        ("model_manager", "sovl_manager", "ModelManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
+        ("ram_manager", "sovl_memory", "RAMManager", {"config_manager": "config_manager", "logger": "logger"}),
+        ("gpu_manager", "sovl_memory", "GPUMemoryManager", {"config_manager": "config_manager", "logger": "logger"}),
+        ("error_manager", "sovl_error", "ErrorManager", {"state_manager": "state_manager", "logger": "logger"}),
+        ("system_monitor", "sovl_monitor", "SystemMonitor", {"config_manager": "config_manager", "logger": "logger", "ram_manager": "ram_manager", "gpu_manager": "gpu_manager", "error_manager": "error_manager"}),
+        ("memory_monitor", "sovl_monitor", "MemoryMonitor", {"config_manager": "config_manager", "logger": "logger", "ram_manager": "ram_manager", "gpu_manager": "gpu_manager", "error_manager": "error_manager"}),
+        ("traits_monitor", "sovl_monitor", "TraitsMonitor", {"config_manager": "config_manager", "logger": "logger", "state_tracker": "state_manager", "error_manager": "error_manager"}),
+        # Add more components as needed
+    ]
+
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH, log_file: str = DEFAULT_LOG_FILE) -> None:
         """
         Initialize the orchestrator with configuration and logging.
@@ -53,122 +70,55 @@ class SOVLOrchestrator(OrchestratorInterface):
         Raises:
             RuntimeError: If initialization of ConfigManager or SOVLSystem fails.
         """
-        # Initialize thread lock for state synchronization
         self._lock = threading.RLock()
-        
+        self.components = {}
         self._initialize_logger(log_file)
         self._log_event("orchestrator_init_start", {"config_path": config_path})
-
-        # Defensive: Check config file existence
         if not os.path.isfile(config_path):
             msg = f"Config file not found: {config_path}"
             self._log_error(msg, FileNotFoundError(msg))
             raise RuntimeError(msg)
-
-        # --- ResourceManager integration start ---
-        self.components = {}  # Store system components for compatibility
-        self.components["resource_manager"] = ResourceManager(logger=self.logger)
-        # Reserve 2048 MB GPU memory for ModelManager (adjust as needed)
-        gpu_mem_mb = 2048
-        acquired = self.components["resource_manager"].acquire("gpu_memory", amount=gpu_mem_mb)
-        if not acquired:
-            raise RuntimeError(f"Insufficient GPU memory for ModelManager (requested {gpu_mem_mb} MB)")
-        # --- ResourceManager integration end ---
-
+        # Device selection
         try:
-            # Initialize ConfigManager with validation
-            try:
-                self.config_manager = self._create_config_manager(config_path)
-            except Exception as e:
-                self._log_error("Failed to initialize ConfigManager", e)
-                raise
-            # Initialize configuration
-            try:
-                self._initialize_config()
-            except Exception as e:
-                self._log_error("Failed to initialize configuration", e)
-                raise
-            # Initialize device
-            try:
-                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                self._log_event("device_initialized", {"device": str(self.device)})
-            except Exception as e:
-                self._log_error("Failed to initialize device", e)
-                self.device = torch.device("cpu")
-            # Initialize state manager
-            try:
-                self.state_manager = StateManager(
-                    config_manager=self.config_manager,
-                    logger=self.logger,
-                    device=self.device
-                )
-            except Exception as e:
-                self._log_error("Failed to initialize StateManager", e)
-                self.state_manager = None
-            # Initialize model manager early
-            try:
-                self.model_manager = ModelManager(
-                    config_manager=self.config_manager,
-                    logger=self.logger,
-                    device=self.device
-                )
-            except Exception as e:
-                # Release GPU memory on failure
-                self.components["resource_manager"].release("gpu_memory", amount=gpu_mem_mb)
-                self._log_error("Failed to initialize ModelManager", e)
-                self.model_manager = None
-            # Initialize memory managers
-            try:
-                self.ram_manager = RAMManager(self.config_manager, self.logger)
-            except Exception as e:
-                self._log_error("Failed to initialize RAMManager", e)
-                self.ram_manager = None
-            try:
-                self.gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
-            except Exception as e:
-                self._log_error("Failed to initialize GPUMemoryManager", e)
-                self.gpu_manager = None
-            # Initialize error manager
-            try:
-                self.error_manager = ErrorManager(self.state_manager, self.logger)
-            except Exception as e:
-                self._log_error("Failed to initialize ErrorManager", e)
-                self.error_manager = None
-            # Initialize monitors
-            try:
-                self.system_monitor = SystemMonitor(
-                    config_manager=self.config_manager,
-                    logger=self.logger,
-                    ram_manager=self.ram_manager,
-                    gpu_manager=self.gpu_manager,
-                    error_manager=self.error_manager
-                )
-            except Exception as e:
-                self._log_error("Failed to initialize SystemMonitor", e)
-                self.system_monitor = None
-            try:
-                self.memory_monitor = MemoryMonitor(
-                    config_manager=self.config_manager,
-                    logger=self.logger,
-                    ram_manager=self.ram_manager,
-                    gpu_manager=self.gpu_manager,
-                    error_manager=self.error_manager
-                )
-            except Exception as e:
-                self._log_error("Failed to initialize MemoryMonitor", e)
-                self.memory_monitor = None
-            try:
-                self.traits_monitor = TraitsMonitor(
-                    config_manager=self.config_manager,
-                    logger=self.logger,
-                    state_tracker=getattr(self.state_manager, 'state_tracker', None),
-                    error_manager=self.error_manager
-                )
-            except Exception as e:
-                self._log_error("Failed to initialize TraitsMonitor", e)
-                self.traits_monitor = None
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self._log_event("device_initialized", {"device": str(self.device)})
         except Exception as e:
-            self._log_error("Orchestrator initialization failed", e)
+            self._log_error("Failed to initialize device", e)
+            self.device = torch.device("cpu")
+        # Canonical initialization loop
+        for key, module_name, class_name, dep_map in self.COMPONENT_INIT_LIST:
+            try:
+                # Import module and class
+                module = __import__(module_name, fromlist=[class_name])
+                cls = getattr(module, class_name)
+                # Build kwargs from dep_map
+                kwargs = {}
+                for arg, dep_key in dep_map.items():
+                    if dep_key == "device":
+                        kwargs[arg] = self.device
+                    elif dep_key in self.components:
+                        kwargs[arg] = self.components[dep_key]
+                    elif hasattr(self, dep_key):
+                        kwargs[arg] = getattr(self, dep_key)
+                    else:
+                        kwargs[arg] = None
+                # Special handling for config_manager and logger
+                if key == "config_manager":
+                    kwargs = {"config_path": config_path, "logger": self.logger}
+                if key == "logger":
+                    kwargs = {"log_file": log_file, "max_size_mb": 10, "rotation_interval": "1d"}
+                # Instantiate and store
+                self.components[key] = cls(**kwargs)
+                setattr(self, key, self.components[key])
+            except Exception as e:
+                self._log_error(f"Failed to initialize {key}", e)
+                self.components[key] = None
+                setattr(self, key, None)
+        # Continue with any additional initialization as before
+        try:
+            self._initialize_config()
+        except Exception as e:
+            self._log_error("Failed to initialize configuration", e)
             raise
 
     def _initialize_config(self) -> None:
