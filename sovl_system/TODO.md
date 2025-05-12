@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. 
+1. on do_reflect
 2. 
 3. 
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 

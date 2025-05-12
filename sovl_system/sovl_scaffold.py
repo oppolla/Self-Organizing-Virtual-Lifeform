@@ -592,6 +592,21 @@ class ScaffoldTokenMapper:
             )
             raise
 
+    def rebuild_token_map(self):
+        """Public method to force a rebuild of the token map from scratch."""
+        self.logger.record_event(
+            event_type="token_map_rebuild_start",
+            message="Rebuilding token map from scratch via public method.",
+            level="info"
+        )
+        self.token_map.clear()
+        self._build_token_map()
+        self.logger.record_event(
+            event_type="token_map_rebuild_complete",
+            message="Token map rebuild complete.",
+            level="info"
+        )
+
 # Factory to create a configured ScaffoldTokenMapper.
 def build_scaffold_token_mapping(
     base_tokenizer: Any, 

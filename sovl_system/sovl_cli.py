@@ -37,7 +37,7 @@ VALID_DATA = None
 
 COMMAND_CATEGORIES = {
     "System": [
-        "/save", "/load", "/reset", "/status", "/monitor", "/history", "/run", "/stop",
+        "/save", "/load", "/reset", "/monitor", "/history", "/run", "/stop",
         "/config", "/log", "/exit", "/quit", "/pause", "/resume"
     ],
     "Modes & States": [
@@ -129,7 +129,6 @@ class CommandHandler(cmd.Cmd):
     def __init__(self, sovl_system: SOVLSystem):
         super().__init__()
         self.sovl_system = sovl_system
-        self.debug_mode = False
         self.logger = Logger.instance()
         self.error_manager = ErrorManager.instance()
 
@@ -417,6 +416,13 @@ class CommandHandler(cmd.Cmd):
                 for k in config:
                     print(f"  {k}")
                 print("\nUse '/config show <section>' to view keys in a section.")
+                # Simple hints for user
+                print("\nHints:")
+                print("  - Use '/config search <term>' to find keys by name.")
+                print("  - Use '/config set <section.key> <value>' to change a value.")
+                print("  - Use '/config help <section.key>' to see a key's value and type.")
+                print("  - Use '/config reset' to restore defaults (with backup and confirmation).")
+                print("  - Use '/help config' for more details and examples.")
                 return
             # Support dot notation for deeper keys
             parts = section.split('.')
@@ -578,11 +584,36 @@ class CommandHandler(cmd.Cmd):
             return
         else:
             print_error("Usage: /config show [section[.key]], /config set <key> <value>, /config search <term>, /config help <key>, /config reset [section]")
+            print("\nHints:")
+            print("  - Use '/config show' to list all config sections.")
+            print("  - Use '/config search <term>' to find keys by name.")
+            print("  - Use '/config set <section.key> <value>' to change a value.")
+            print("  - Use '/config help <section.key>' to see a key's value and type.")
+            print("  - Use '/config reset' to restore defaults (with backup and confirmation).")
+            print("  - Use '/help config' for more details and examples.")
+
+    def do_reset(self, arg):
+        """Reset the system to its initial state using atomic update."""
+        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
+        if not state_manager:
+            print_error("StateManager not available for atomic update.")
+            return
+        try:
+            def reset_update(state):
+                # Reinitialize or clear state as appropriate
+                if hasattr(state, '_initialize_state'):
+                    state._initialize_state()
+                    print_success("System state has been reset (atomic).")
+                else:
+                    print_error("State object does not support initialization/reset.")
+            state_manager.update_state_atomic(reset_update)
+        except Exception as e:
+            print_error(f"Atomic reset update failed: {e}")
 
     def do_exit(self, arg):
         """Exit the CLI."""
         try:
-            print("Exiting CLI...")
+            print("CLI session terminated.")
             self.logger.record_event(
                 event_type="cli_exit",
                 message="CLI exited by user",
@@ -603,6 +634,10 @@ class CommandHandler(cmd.Cmd):
                 context="CommandHandler.do_exit"
             )
             
+    def do_quit(self, arg):
+        """Alias for /quit"""
+        return self.do_exit(arg)
+
     def do_history(self, arg):
         """Show command history with execution status, timestamps, and numbering."""
         try:
@@ -657,95 +692,6 @@ class CommandHandler(cmd.Cmd):
         else:
             print("No matching commands found")
             
-    def do_debug(self, arg):
-        """
-        Debug command with various subcommands:
-        debug on/off - Enable/disable debug mode
-        debug state - Show internal state
-        debug components - List active components
-        debug errors - Show recent errors
-        debug memory - Show memory usage
-        debug trace - Show execution trace
-        """
-        try:
-            cmd = arg.split()
-            if not cmd:
-                print("Debug commands: on/off, state, components, errors, memory, trace")
-                return
-            elif cmd[0] == "on":
-                self.debug_mode = True
-                print("Debug mode enabled")
-            elif cmd[0] == "off":
-                self.debug_mode = False
-                print("Debug mode disabled")
-                if hasattr(self.logger, 'update_config'):
-                    self.logger.update_config(log_level="info")
-            elif cmd[0] == "state":
-                if hasattr(self, '_show_debug_state'):
-                    self._show_debug_state()
-                else:
-                    print("Debug state function not available.")
-            elif cmd[0] == "components":
-                if hasattr(self, '_show_debug_components'):
-                    self._show_debug_components()
-                else:
-                    print("Debug components function not available.")
-            elif cmd[0] == "errors":
-                # Show recent errors from ErrorManager
-                errors = self.error_manager.get_recent_errors() if hasattr(self.error_manager, 'get_recent_errors') else []
-                if errors:
-                    print("\nRecent CLI Errors:")
-                    print("-----------------")
-                    for error in errors:
-                        print(f"Type: {error.get('error_type','N/A')}")
-                        print(f"Message: {error.get('message','N/A')}")
-                        print(f"Time: {error.get('timestamp','N/A')}")
-                        if 'stack_trace' in error:
-                            print(f"Stack Trace:\n{error['stack_trace']}")
-                        if 'context' in error:
-                            print(f"Context: {error['context']}")
-                        print("-" * 50)
-                else:
-                    print("No recent CLI errors found.")
-            elif cmd[0] == "memory":
-                if hasattr(self, '_show_debug_memory'):
-                    self._show_debug_memory()
-                else:
-                    print("Debug memory function not available.")
-            elif cmd[0] == "trace":
-                if hasattr(self, '_show_debug_trace'):
-                    self._show_debug_trace()
-                else:
-                    print("Debug trace function not available.")
-            else:
-                print(f"Unknown debug command: {cmd[0]}")
-            print("Type 'debug' for available debug commands")
-        except Exception as e:
-            print(f"Error in debug command: {e}")
-            self.logger.log_error(
-                error_msg=f"Debug command failed: {str(e)}",
-                error_type="cli_debug_error",
-                stack_trace=traceback.format_exc()
-            )
-            self.error_manager.record_error(
-                error_type="cli_debug_error",
-                message=f"Debug command failed: {str(e)}",
-                stack_trace=traceback.format_exc(),
-                context="CommandHandler.do_debug"
-            )
-            
-    def help_debug(self):
-        """Show help for debug command."""
-        print("\nDebug Commands:")
-        print("-------------")
-        print("debug on/off        - Enable/disable debug mode")
-        print("debug state         - Show internal state")
-        print("debug components    - List active components")
-        print("debug errors        - Show recent errors")
-        print("debug memory        - Show memory usage")
-        print("debug trace         - Show execution trace")
-        print("\nUse these commands to inspect and troubleshoot the system.")
-
     def do_joke(self, arg):
         """Tell a joke using the LLM."""
         try:
@@ -813,8 +759,10 @@ class CommandHandler(cmd.Cmd):
         Scaffold utilities:
           scaffold state         - Show current scaffold state/config
           scaffold map <prompt>  - Show token mapping for a prompt
+          scaffold rebuild [i]   - Rebuild the token map for scaffold model at index i (default: 0)
         """
         scaffold_provider = getattr(self.sovl_system, 'scaffold_provider', None)
+        token_mappers = getattr(self.sovl_system, 'scaffold_token_mappers', None)
         token_mapper = getattr(self.sovl_system, 'scaffold_token_mapper', None)
         cmd = arg.strip().split()
         if not cmd:
@@ -841,32 +789,29 @@ class CommandHandler(cmd.Cmd):
                     print(f"Mapping error: {e}")
             else:
                 print("Scaffold token mapper not available.")
+        elif cmd[0] == 'rebuild':
+            # Support optional index argument
+            index = 0
+            if len(cmd) > 1:
+                try:
+                    index = int(cmd[1])
+                except ValueError:
+                    print("Invalid index. Usage: scaffold rebuild [i]")
+                    return
+            if token_mappers and 0 <= index < len(token_mappers):
+                mapper = token_mappers[index]
+                if hasattr(mapper, 'rebuild_token_map'):
+                    try:
+                        mapper.rebuild_token_map()
+                        print(f"Scaffold token map for model {index} has been rebuilt successfully.")
+                    except Exception as e:
+                        print(f"Error rebuilding token map for model {index}: {e}")
+                else:
+                    print(f"Scaffold token mapper at index {index} does not support rebuilding.")
+            else:
+                print(f"No scaffold token mapper found at index {index}.")
         else:
             print(self.do_scaffold.__doc__)
-
-    def help_scaffold(self):
-        """Detailed help for scaffold command."""
-        print("""
-Scaffold Command - Direct interaction with scaffold models
--------------------------------------------------------
-Usage: scaffold [options] <prompt>
-
-Options:
-    -i, --index <n>    Use specific scaffold model (default: 0)
-    -t, --tokens <n>   Max new tokens to generate (default: 100)
-    -l, --logits      Return logits information
-    -h, --hidden      Return hidden states
-
-Examples:
-    scaffold "What is the meaning of life?"
-    scaffold -i 1 -t 200 "Tell me a story"
-    scaffold -i 2 -l -h "Analyze this text"
-
-Note: This command requires that the SOVL system is initialized with a working 'generation_manager' that implements 'backchannel_scaffold_prompt'. If these are missing or misconfigured, scaffold model interaction will not be available.
-
-The scaffold command allows direct interaction with any of the available
-scaffold models for debugging and development purposes.
-""")
 
     def do_rate(self, arg):
         """
@@ -895,80 +840,11 @@ scaffold models for debugging and development purposes.
             interactions = profile.get("interactions", 0)
             nickname = profile.get("nickname", "")
 
-            print(f"Bond Score: {bond_score:.2f} / 10")
+            print(f"Bond Score: {bond_score * 10:.1f} / 10")
             print(f"Interaction Count: {interactions}")
             print(f"Nickname: {nickname if nickname else '(None)'}")
         except Exception as e:
             print(f"Error in rate command: {e}")
-            if self.debug_mode:
-                traceback.print_exc()
-
-    def do_status(self, arg):
-        """Show current metrics."""
-        print("\nCurrent Metrics:")
-        print("---------------")
-        # System Monitor
-        if self.system_monitor:
-            try:
-                metrics = self.sovl_system.get_metrics()
-                for key, value in metrics.items():
-                    print(f"{key}: {value}")
-            except Exception as e:
-                print(f"System monitor error: {e}")
-        else:
-            print("System monitor not available. Showing basic system info:")
-            print(f"Platform: {platform.system()} {platform.release()}")
-            print(f"Python: {platform.python_version()}")
-            print(f"CPU count: {os.cpu_count()}")
-
-        # Memory Monitor
-        if self.memory_monitor:
-            try:
-                mem_metrics = self.sovl_system.get_config().get('memory', {})
-                for key, value in mem_metrics.items():
-                    print(f"Memory {key}: {value}")
-            except Exception as e:
-                print(f"Memory monitor error: {e}")
-        elif getattr(self, 'memory_monitor_fallback', False):
-            print("Memory monitor not available. Using sovl_system.memory_manager fallback:")
-            memory_manager = getattr(self.sovl_system, 'memory_manager', None)
-            if memory_manager:
-                try:
-                    # Example: assume memory_manager has a get_status() or similar method
-                    mem_status = memory_manager.get_status() if hasattr(memory_manager, 'get_status') else str(memory_manager)
-                    print(f"Memory Manager Status: {mem_status}")
-                except Exception as e:
-                    print(f"Error retrieving memory manager status: {e}")
-            else:
-                print("No memory manager available for memory metrics.")
-        else:
-            print("Memory monitor not available and no fallback present.")
-
-        # GPU Info
-        try:
-            if hasattr(torch, 'cuda') and torch.cuda.is_available():
-                print(f"CUDA available: True")
-                print(f"CUDA device count: {torch.cuda.device_count()}")
-                print(f"Current CUDA device: {torch.cuda.current_device()}")
-                print(f"CUDA device name: {torch.cuda.get_device_name(torch.cuda.current_device())}")
-            else:
-                print("CUDA available: False")
-        except Exception as e:
-            print(f"GPU info error: {e}")
-
-        # Traits Monitor
-        if self.traits_monitor:
-            try:
-                print("Traits monitor available.")
-                # Add more trait metrics as needed
-            except Exception as e:
-                print(f"Traits monitor error: {e}")
-        else:
-            print("Traits monitor not available.")
-
-    def do_quit(self, arg):
-        """Exit the CLI (alias for exit)."""
-        return self.do_exit(arg)
 
     def do_save(self, arg):
         """Save the current system state to a file using StateManager if available."""
@@ -1043,24 +919,6 @@ scaffold models for debugging and development purposes.
                 print_error(f"Failed to load state from '{filename}': {e}")
         else:
             print_error("Load not implemented or unavailable.")
-
-    def do_reset(self, arg):
-        """Reset the system to its initial state using atomic update."""
-        state_manager = getattr(self.sovl_system.context, 'state_manager', None)
-        if not state_manager:
-            print_error("StateManager not available for atomic update.")
-            return
-        try:
-            def reset_update(state):
-                # Reinitialize or clear state as appropriate
-                if hasattr(state, '_initialize_state'):
-                    state._initialize_state()
-                    print_success("System state has been reset (atomic).")
-                else:
-                    print_error("State object does not support initialization/reset.")
-            state_manager.update_state_atomic(reset_update)
-        except Exception as e:
-            print_error(f"Atomic reset update failed: {e}")
 
     def do_monitor(self, arg):
         """

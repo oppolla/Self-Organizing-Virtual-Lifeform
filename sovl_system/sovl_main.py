@@ -420,6 +420,25 @@ class SOVLSystem(SystemInterface):
             
             self.is_paused = False
             self._pause_lock = RLock()
+
+            # Attach ScaffoldTokenMapper for CLI and system use
+            try:
+                self.scaffold_token_mapper = ScaffoldTokenMapper(
+                    config_handler=self.config_handler,
+                    logger=getattr(self, 'logger', None),
+                    error_manager=self.error_manager
+                )
+                # Support for multiple scaffold token mappers (future-proof)
+                self.scaffold_token_mappers = [self.scaffold_token_mapper]
+            except Exception as e:
+                self.scaffold_token_mapper = None
+                self.scaffold_token_mappers = []
+                if hasattr(self, 'error_manager') and self.error_manager:
+                    self.error_manager.handle_error(
+                        error_type="scaffold_token_mapper_init",
+                        error_message=f"Failed to initialize ScaffoldTokenMapper: {str(e)}",
+                        error=e
+                    )
             
         except Exception as e:
             if hasattr(self, 'error_manager') and self.error_manager:
@@ -901,5 +920,15 @@ class SOVLSystem(SystemInterface):
     def config_handler(self):
         """Return the config handler (ConfigManager)."""
         return self._config_handler if hasattr(self, '_config_handler') else self.__dict__.get('config_handler')
+
+    @property
+    def scaffold_token_mapper(self):
+        """Return the ScaffoldTokenMapper instance, or None if unavailable."""
+        return self._scaffold_token_mapper if hasattr(self, '_scaffold_token_mapper') else self.__dict__.get('scaffold_token_mapper')
+
+    @property
+    def scaffold_token_mappers(self):
+        """Return the list of ScaffoldTokenMapper instances (for multi-model support)."""
+        return self._scaffold_token_mappers if hasattr(self, '_scaffold_token_mappers') else self.__dict__.get('scaffold_token_mappers', [])
 
     # Optionally, add more properties for other major attributes as needed
