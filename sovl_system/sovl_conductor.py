@@ -53,13 +53,12 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("config_manager", "sovl_config", "ConfigManager", {}),
     ("logger", "sovl_logger", "Logger", {}),
     ("resource_manager", "sovl_resource", "ResourceManager", {}),
-    
+    ("error_manager", "sovl_error", "ErrorManager", {"state_manager": "state_manager", "logger": "logger"}),
+    ("state_manager", "sovl_state", "StateManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
     
     # Core system components with minimal dependencies
     ("ram_manager", "sovl_memory", "RAMManager", {"config_manager": "config_manager", "logger": "logger"}),
     ("gpu_manager", "sovl_memory", "GPUMemoryManager", {"config_manager": "config_manager", "logger": "logger"}),
-    ("state_manager", "sovl_state", "StateManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
-    ("error_manager", "sovl_error", "ErrorManager", {"state_manager": "state_manager", "logger": "logger"}),
     ("event_dispatcher", "sovl_events", "EventDispatcher", {"config_manager": "config_manager", "logger": "logger"}),
     
     # Basic data and resource management
@@ -166,7 +165,7 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("cli_handler", "sovl_cli", "CommandHandler", {"sovl_system": "system"}),
     
     # Add more components as needed
-    ("recaller", "sovl_recaller", "Recaller", {"dialogue_context_manager": "dialogue_context_manager", "long_term_memory": "dialogue_context_manager.long_term", "logger": "logger"}),
+    ("dialogue_shutdown", "sovl_recaller", "DialogueShutdown", {"dialogue_context_manager": "dialogue_context_manager", "long_term_memory": "dialogue_context_manager.long_term", "logger": "logger"}),
     ]
 
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH, log_file: str = DEFAULT_LOG_FILE) -> None:
@@ -197,8 +196,8 @@ class SOVLOrchestrator(OrchestratorInterface):
             self.device = torch.device("cpu")
         # --- Enhanced Initialization Output ---
         INIT_GROUPS = [
-            ("Core Infrastructure", ["config_manager", "logger", "resource_manager"]),
-            ("State & Memory Managers", ["ram_manager", "gpu_manager", "state_manager", "error_manager"]),
+            ("Core Infrastructure", ["config_manager", "logger", "resource_manager", "state_manager", "error_manager"]),
+            ("State & Memory Managers", ["ram_manager", "gpu_manager"]),
             ("Event & Data Systems", ["event_dispatcher", "jsonl_loader", "scribe_queue", "hardware_manager", "data_manager"]),
             ("Model & Processing", ["model_manager", "metadata_processor", "lora_adapter_manager", "scaffold_provider", "cross_attention_injector", "scaffold_token_mapper"]),
             ("Monitors", ["system_monitor", "memory_monitor", "traits_monitor"]),
@@ -219,7 +218,6 @@ class SOVLOrchestrator(OrchestratorInterface):
         for group_name, group_keys in INIT_GROUPS:
             print(f"[SOVL System] — {group_name} —", flush=True)
             for key in group_keys:
-                # Find the tuple for this key
                 idx = key_to_index.get(key)
                 if idx is None:
                     continue
@@ -234,11 +232,17 @@ class SOVLOrchestrator(OrchestratorInterface):
                         if dep_key == "device":
                             kwargs[arg] = self.device
                         elif dep_key in self.components:
-                            kwargs[arg] = self.components[dep_key]
+                            dep = self.components[dep_key]
+                            if dep is None:
+                                raise RuntimeError(f"Dependency {dep_key} for {key} is None")
+                            kwargs[arg] = dep
                         elif hasattr(self, dep_key):
-                            kwargs[arg] = getattr(self, dep_key)
+                            dep = getattr(self, dep_key)
+                            if dep is None:
+                                raise RuntimeError(f"Dependency {dep_key} for {key} is None")
+                            kwargs[arg] = dep
                         else:
-                            kwargs[arg] = None
+                            raise RuntimeError(f"Dependency {dep_key} for {key} not found")
                     if key == "config_manager":
                         kwargs = {"config_path": config_path, "logger": self.logger}
                     if key == "logger":
@@ -253,8 +257,22 @@ class SOVLOrchestrator(OrchestratorInterface):
                     self.components[key] = None
                     setattr(self, key, None)
                     failed.append((key, str(e)))
+                    # Halt initialization immediately if any component fails
+                    print("[SOVL System] Initialization halted due to critical failure.", flush=True)
+                    self._log_event("initialization_halted", {"failed_component": key, "error": str(e)})
+                    # Print/log summary before raising
+                    print("[SOVL System] Initialization Summary:", flush=True)
+                    print(f"  Succeeded: {initialized}", flush=True)
+                    print(f"  Failed: {failed}", flush=True)
+                    self._log_event("initialization_summary", {"succeeded": initialized, "failed": failed})
+                    raise RuntimeError(f"Critical component {key} failed to initialize: {e}")
                 current += 1
             print("", flush=True)  # Blank line between groups
+        # Print/log summary at the end if all succeeded
+        print("[SOVL System] Initialization Summary:", flush=True)
+        print(f"  Succeeded: {initialized}", flush=True)
+        print(f"  Failed: {failed}", flush=True)
+        self._log_event("initialization_summary", {"succeeded": initialized, "failed": failed})
         if not failed:
             print("[SOVL System] All components initialized. Awakening system...", flush=True)
         else:
@@ -679,6 +697,7 @@ class SOVLOrchestrator(OrchestratorInterface):
                 state_tracker=state_tracker,
                 error_manager=error_manager,
             )
+            system.orchestrator = self
             
             self.mediator.register_system(system)
             
