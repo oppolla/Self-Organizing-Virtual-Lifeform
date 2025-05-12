@@ -3,7 +3,7 @@
 ## General Taks:
 
 1. explore chain of thought reasoning approaches
-2. 
+2. add generation to conductor sovl_main init
 3. 
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
