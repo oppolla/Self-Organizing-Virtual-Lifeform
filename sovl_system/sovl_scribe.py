@@ -96,6 +96,13 @@ class Scriber:
             self.scribe_path = getattr(self, 'scribe_path', None) or config_manager.get("scribed_config.output_path", "scribe/sovl_scribe.jsonl")
             os.makedirs(os.path.dirname(self.scribe_path), exist_ok=True)
             
+            # --- Ensure scribe journal file is created on init ---
+            try:
+                with open(self.scribe_path, 'a', encoding='utf-8'):
+                    pass  # This will create the file if it doesn't exist
+            except Exception as e:
+                self.fallback_logger.error(f"Failed to create scribe journal file on init: {str(e)}")
+            
             # Set the state accessor if provided during initialization
             if state_accessor is not None:
                 self.set_state_accessor(state_accessor)

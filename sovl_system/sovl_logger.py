@@ -344,6 +344,13 @@ class Logger(IErrorHandler):
             self._validator = _LogValidator(self._fallback_logger)
             self._file_handler = _FileHandler(self.config, self._fallback_logger)
             
+            # --- Ensure log file is created on init ---
+            try:
+                with open(self.config.log_file, 'a', encoding='utf-8'):
+                    pass  # This will create the file if it doesn't exist
+            except Exception as e:
+                self._fallback_logger.error(f"Failed to create log file on init: {str(e)}")
+            
             # Register with ErrorRecordBridge
             ErrorRecordBridge().register_handler(self)
             

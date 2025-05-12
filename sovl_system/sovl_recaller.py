@@ -520,6 +520,18 @@ class LongTermMemory:
             self.logger.log_error(f"LongTermMemory.clear failed: {e}", error_type="LongTermMemoryError")
             raise
 
+    def close(self):
+        try:
+            if hasattr(self, '_db_conn') and self._db_conn:
+                self._db_conn.close()
+                self.logger.record_event(
+                    event_type="long_term_memory_closed",
+                    message="LongTermMemory database connection closed.",
+                    level="info"
+                )
+        except Exception as e:
+            self.logger.log_error(f"Failed to close database connection: {e}", error_type="LongTermMemoryError")
+
 class MemoryPressureError(Exception):
     """Raised when a message cannot be added due to high RAM usage, even after cleanup attempts."""
     pass
@@ -805,6 +817,50 @@ class DialogueContextManager:
             if self.error_manager:
                 self.error_manager.record_error(e, error_type="DialogueContextManagerError")
             return np.empty((0, self.embedding_dim), dtype=np.float32)
+
+    def close(self):
+        try:
+            if hasattr(self, '_db_conn') and self._db_conn:
+                self._db_conn.close()
+                self.logger.record_event(
+                    event_type="dialogue_context_manager_closed",
+                    message="DialogueContextManager database connection closed.",
+                    level="info"
+                )
+        except Exception as e:
+            self.logger.log_error(f"Failed to close database connection: {e}", error_type="DialogueContextManagerError")
+
+class Recaller:
+    def __init__(self, dialogue_context_manager=None, long_term_memory=None, logger=None):
+        self.dialogue_context_manager = dialogue_context_manager
+        self.long_term_memory = long_term_memory
+        self.logger = logger
+
+    def shutdown(self):
+        if hasattr(self, 'dialogue_context_manager') and self.dialogue_context_manager:
+            try:
+                self.dialogue_context_manager.close()
+                if self.logger:
+                    self.logger.record_event(
+                        event_type="recaller_shutdown",
+                        message="DialogueContextManager closed by Recaller.",
+                        level="info"
+                    )
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(f"Failed to close DialogueContextManager: {e}", error_type="RecallerError")
+        if hasattr(self, 'long_term_memory') and self.long_term_memory:
+            try:
+                self.long_term_memory.close()
+                if self.logger:
+                    self.logger.record_event(
+                        event_type="recaller_shutdown",
+                        message="LongTermMemory closed by Recaller.",
+                        level="info"
+                    )
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_error(f"Failed to close LongTermMemory: {e}", error_type="RecallerError")
 
 # Example usage (for testing)
 if __name__ == "__main__":

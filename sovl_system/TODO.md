@@ -4,7 +4,7 @@
 
 1. 
 2. 
-3. 
+3. CLI - do_test old pattern depreciated
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. Disable that startup data sovl_seed part. Save it for Soulprint

@@ -54,6 +54,7 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("logger", "sovl_logger", "Logger", {}),
     ("resource_manager", "sovl_resource", "ResourceManager", {}),
     
+    
     # Core system components with minimal dependencies
     ("ram_manager", "sovl_memory", "RAMManager", {"config_manager": "config_manager", "logger": "logger"}),
     ("gpu_manager", "sovl_memory", "GPUMemoryManager", {"config_manager": "config_manager", "logger": "logger"}),
@@ -71,6 +72,30 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("model_manager", "sovl_manager", "ModelManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
     ("metadata_processor", "sovl_processor", "MetadataProcessor", {"config_manager": "config_manager", "logger": "logger", "state_accessor": "state_manager"}),
     ("lora_adapter_manager", "sovl_engram", "LoraAdapterManager", {"config_manager": "config_manager", "logger": "logger", "error_handler": "error_manager"}),
+    ("scaffold_provider", "sovl_scaffold", "ScaffoldProvider", {
+    "config_manager": "config_manager",
+    "logger": "logger",
+    "error_handler": "error_manager",
+    "ram_manager": "ram_manager",
+    "gpu_manager": "gpu_manager"
+    }),
+    ("cross_attention_injector", "sovl_scaffold", "CrossAttentionInjector", {
+        "config_manager": "config_manager",
+        "logger": "logger",
+        "ram_manager": "ram_manager",
+        "gpu_manager": "gpu_manager"
+    }),
+    ("scaffold_token_mapper", "sovl_scaffold", "ScaffoldTokenMapper", {
+        "base_tokenizer": "model_manager", 
+        "scaffold_tokenizer": "model_manager", 
+        "logger": "logger",
+        "config": "config_manager",
+        "base_model": "model_manager",  
+        "scaffold_model": "model_manager", 
+        "ram_manager": "ram_manager",
+        "gpu_manager": "gpu_manager",
+        "provider": "scaffold_provider"
+    }),
     
     # Monitoring systems
     ("system_monitor", "sovl_monitor", "SystemMonitor", {"config_manager": "config_manager", "logger": "logger", "ram_manager": "ram_manager", "gpu_manager": "gpu_manager", "error_manager": "error_manager"}),
@@ -141,6 +166,7 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("cli_handler", "sovl_cli", "CommandHandler", {"sovl_system": "system"}),
     
     # Add more components as needed
+    ("recaller", "sovl_recaller", "Recaller", {"dialogue_context_manager": "dialogue_context_manager", "long_term_memory": "dialogue_context_manager.long_term", "logger": "logger"}),
     ]
 
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH, log_file: str = DEFAULT_LOG_FILE) -> None:
@@ -174,7 +200,7 @@ class SOVLOrchestrator(OrchestratorInterface):
             ("Core Infrastructure", ["config_manager", "logger", "resource_manager"]),
             ("State & Memory Managers", ["ram_manager", "gpu_manager", "state_manager", "error_manager"]),
             ("Event & Data Systems", ["event_dispatcher", "jsonl_loader", "scribe_queue", "hardware_manager", "data_manager"]),
-            ("Model & Processing", ["model_manager", "metadata_processor", "lora_adapter_manager"]),
+            ("Model & Processing", ["model_manager", "metadata_processor", "lora_adapter_manager", "scaffold_provider", "cross_attention_injector", "scaffold_token_mapper"]),
             ("Monitors", ["system_monitor", "memory_monitor", "traits_monitor"]),
             ("System Context & Mediation", ["system_context", "system_mediator"]),
             ("Generation & Calculation", ["generation_manager", "confidence_calculator", "bond_calculator"]),

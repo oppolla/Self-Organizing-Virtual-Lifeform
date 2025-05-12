@@ -4,7 +4,6 @@ from threading import Lock
 from sovl_logger import Logger
 from sovl_state import StateManager, UserProfileState
 from sovl_error import ErrorManager
-from sovl_main import SystemContext
 from sovl_curiosity import CuriosityManager
 from sovl_utils import synchronized
 from sovl_config import ConfigManager
@@ -477,7 +476,6 @@ class BondCalculator:
         user_input: str,
         state: StateManager,
         error_manager: ErrorManager,
-        context: SystemContext,
         curiosity_manager: Optional[CuriosityManager] = None,
         extra_data: Optional[dict] = None,
         **kwargs

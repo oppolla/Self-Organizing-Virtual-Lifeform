@@ -13,7 +13,6 @@ from sovl_state import StateManager, ConversationHistory
 from sovl_utils import detect_repetitions, adjust_temperature, synchronized, dynamic_batch_size
 from sovl_error import ErrorManager
 from sovl_config import ConfigManager
-from sovl_trainer import TrainingConfig
 from sovl_queue import capture_scribe_event
 from sovl_memory import GenerationMemoryManager
 from sovl_manager import ModelManager
