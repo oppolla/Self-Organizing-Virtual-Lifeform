@@ -830,7 +830,7 @@ class DialogueContextManager:
         except Exception as e:
             self.logger.log_error(f"Failed to close database connection: {e}", error_type="DialogueContextManagerError")
 
-class Recaller:
+class DialogueShutdown:
     def __init__(self, dialogue_context_manager=None, long_term_memory=None, logger=None):
         self.dialogue_context_manager = dialogue_context_manager
         self.long_term_memory = long_term_memory
@@ -842,25 +842,25 @@ class Recaller:
                 self.dialogue_context_manager.close()
                 if self.logger:
                     self.logger.record_event(
-                        event_type="recaller_shutdown",
-                        message="DialogueContextManager closed by Recaller.",
+                        event_type="dialogue_shutdown",
+                        message="DialogueContextManager closed by DialogueShutdown.",
                         level="info"
                     )
             except Exception as e:
                 if self.logger:
-                    self.logger.log_error(f"Failed to close DialogueContextManager: {e}", error_type="RecallerError")
+                    self.logger.log_error(f"Failed to close DialogueContextManager: {e}", error_type="DialogueShutdownError")
         if hasattr(self, 'long_term_memory') and self.long_term_memory:
             try:
                 self.long_term_memory.close()
                 if self.logger:
                     self.logger.record_event(
-                        event_type="recaller_shutdown",
-                        message="LongTermMemory closed by Recaller.",
+                        event_type="dialogue_shutdown",
+                        message="LongTermMemory closed by DialogueShutdown.",
                         level="info"
                     )
             except Exception as e:
                 if self.logger:
-                    self.logger.log_error(f"Failed to close LongTermMemory: {e}", error_type="RecallerError")
+                    self.logger.log_error(f"Failed to close LongTermMemory: {e}", error_type="DialogueShutdownError")
 
 # Example usage (for testing)
 if __name__ == "__main__":
