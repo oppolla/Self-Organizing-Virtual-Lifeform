@@ -53,8 +53,9 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("config_manager", "sovl_config", "ConfigManager", {}),
     ("logger", "sovl_logger", "Logger", {}),
     ("resource_manager", "sovl_resource", "ResourceManager", {}),
-    ("error_manager", "sovl_error", "ErrorManager", {"state_manager": "state_manager", "logger": "logger"}),
     ("state_manager", "sovl_state", "StateManager", {"config_manager": "config_manager", "logger": "logger", "device": "device"}),
+    ("error_manager", "sovl_error", "ErrorManager", {"state_manager": "state_manager", "logger": "logger"}),
+  
     
     # Core system components with minimal dependencies
     ("ram_manager", "sovl_memory", "RAMManager", {"config_manager": "config_manager", "logger": "logger"}),

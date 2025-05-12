@@ -9,7 +9,7 @@
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. Disable that startup data sovl_seed part. Save it for Soulprint
 7. Consider an "offline" mode for maintainence
-8. 
+8. Helios structure - sun like
 
 
 
