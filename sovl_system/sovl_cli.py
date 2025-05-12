@@ -2952,33 +2952,25 @@ scaffold models for debugging and development purposes.
 
     def do_components(self, arg):
         """
-        List all active system components and their status.
+        List all initialized system components, their class, status, and usage count.
         Usage: /components
         """
-        components = [
-            ("generation_manager", getattr(self.sovl_system, 'generation_manager', None)),
-            ("state_tracker", getattr(self.sovl_system, 'state_tracker', None)),
-            ("memory_manager", getattr(self.sovl_system, 'memory_manager', None)),
-            ("ram_manager", getattr(self.sovl_system, 'ram_manager', None)),
-            ("gpu_manager", getattr(self.sovl_system, 'gpu_manager', None)),
-            ("bond_calculator", self.bond_calculator),
-            ("error_manager", getattr(self.sovl_system, 'error_manager', None)),
-            ("logger", getattr(self.sovl_system, 'logger', None)),
-            ("config_handler", getattr(self.sovl_system, 'config_handler', None)),
-            ("scaffold_provider", getattr(self.sovl_system, 'scaffold_provider', None)),
-            ("introspection_manager", getattr(self.sovl_system, 'introspection_manager', None)),
-            ("curiosity_manager", self.curiosity_manager),
-            ("traits_monitor", getattr(self, 'traits_monitor', None)),
-            ("system_monitor", getattr(self, 'system_monitor', None)),
-            ("memory_monitor", getattr(self, 'memory_monitor', None)),
-        ]
+        orchestrator = getattr(self.sovl_system, 'orchestrator', None)
+        if not orchestrator or not hasattr(orchestrator, 'COMPONENT_INIT_LIST'):
+            print("[Error] Orchestrator or component list not available.")
+            return
+        component_list = orchestrator.COMPONENT_INIT_LIST
+        # Try to get the actual initialized components dict
+        components = getattr(orchestrator, 'components', {})
         print("\nSystem Components:")
         print("------------------")
-        for name, comp in components:
-            status = "OK" if comp else "Unavailable"
-            version = getattr(comp, 'version', None) or getattr(comp, '__version__', None) or ""
-            extra = f" (v{version})" if version else ""
-            print(f"{name:22}: {status}{extra}")
+        print(f"{'Key':22} {'Class':22} {'Status':10} {'Usage':10}")
+        print("-"*70)
+        for key, module, class_name, dep_map in component_list:
+            instance = components.get(key)
+            status = "OK" if instance else "FAILED"
+            usage = getattr(instance, 'usage_count', 0) if instance else 0
+            print(f"{key:22} {class_name:22} {status:10} {str(usage):10}")
 
     def do_reload(self, arg):
         """
