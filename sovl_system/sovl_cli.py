@@ -64,8 +64,7 @@ COMMAND_CATEGORIES = {
 ALIASES = {
     "q": "quit",
     "h": "help",
-    "ls": "history",
-    "s": "status",  
+    "ls": "history",  
     "r": "reset",  
 }
 
