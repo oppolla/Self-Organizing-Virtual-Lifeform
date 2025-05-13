@@ -1314,9 +1314,11 @@ class CommandHandler(cmd.Cmd):
             print("[Debate mode error: Generation manager not available]")
             return
         style = random.choice([
-            "challenge strongly and press hard on the user's assumptions, but avoid rudeness.",
-            "offer a softer, more nuanced counterpoint, and occasionally acknowledge a valid point.",
-            "mix strong rebuttals with gentle questioning, and sometimes concede a minor issue."
+            "Question the user's position with gentle, curious probing, subtly pressing their assumptions to spark reflection while keeping the challenge light.",
+            "Challenge the user's stance with respectful, thoughtful questions, applying mild pressure to their assumptions while maintaining an inviting tone.",
+            "Press the user's ideas with clear, respectful counterpoints, steadily probing their logic while balancing challenge with subtle openness.",
+            "Confront the user's position with sharp, respectful rebuttals, firmly testing their logic while tempering the intensity with measured clarity.",
+            "Push the user's stance with firm, clear counterarguments, strongly probing their assumptions while preserving a respectful, engaging tone."
         ])
         debate_prompt = (
             "SYSTEM: You are in debate mode. For every user message, take a devil's advocate stance—challenge the user's statements, question their assumptions, and argue the opposite side with intelligence and wit. "
