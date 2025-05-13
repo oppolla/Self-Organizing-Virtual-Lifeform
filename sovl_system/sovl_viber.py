@@ -699,3 +699,30 @@ class VibeSculptor:
                 "history_length": 0,
                 "trend_overall_score": 0.0
             }
+
+    @synchronized()
+    def lower_vibe(self, amount: float = 0.3):
+        """
+        Lower the latest vibe profile's overall_score and intensity by the given amount, clamped to min_vibe.
+        """
+        if not self.vibes:
+            return
+        latest = self.vibes[-1]
+        new_score = max(self.min_vibe, latest.overall_score - amount)
+        new_intensity = max(self.min_vibe, latest.intensity - amount)
+        # Create a new VibeProfile with lowered values, keep other fields the same
+        lowered = VibeProfile(
+            overall_score=new_score,
+            dimensions=latest.dimensions.copy(),
+            intensity=new_intensity,
+            confidence=latest.confidence,
+            salient_phrases=latest.salient_phrases,
+            timestamp_unix=time.time()
+        )
+        self.vibes.append(lowered)
+        self.logger.record_event(
+            event_type="vibe_lowered_due_to_shame",
+            message="Vibe lowered due to shame event",
+            level="warning",
+            additional_info={"old_score": latest.overall_score, "new_score": new_score, "amount": amount}
+        )
