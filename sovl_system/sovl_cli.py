@@ -25,6 +25,7 @@ import threading
 import json
 import shutil
 from sovl_dreamer import Dreamer
+from sovl_recaller import DialogueContextManager
 import importlib
 import pkgutil
 import argparse
@@ -220,6 +221,7 @@ class CommandHandler(cmd.Cmd):
         self.drunk_start_time = 0.0
         self.drunk_duration = 0.0
         self.is_ranting = False
+        self.is_debating = False
 
         self._last_mode = None
         self._last_progress = None
@@ -1032,19 +1034,21 @@ class CommandHandler(cmd.Cmd):
             print_error("Gestation (training) not available on this system.")
 
     def do_reflect(self, arg):
-        """Force an introspection cycle and display the result."""
+        """Force a full introspection cycle (using all available techniques) and display the result."""
         introspection_manager = getattr(self.sovl_system, 'introspection_manager', None)
-        if introspection_manager and hasattr(introspection_manager, 'conduct_hidden_dialogue'):
+        # Use the new unified selection+execution method if available
+        if introspection_manager and hasattr(introspection_manager, '_select_and_execute'):
             try:
                 action_description = arg.strip() if arg.strip() else "Manual reflection triggered from CLI."
-                result = asyncio.run(introspection_manager.conduct_hidden_dialogue(action_description, show_status=False))
+                # This will select and execute the best technique(s)
+                result = asyncio.run(introspection_manager._select_and_execute(action_description=action_description, show_status=False))
                 print("\nIntrospection Result:")
                 for k, v in result.items():
                     print(f"{k}: {v}")
             except Exception as e:
                 print(f"Error during introspection: {e}")
         else:
-            print("Introspection manager or conduct_hidden_dialogue not available on this system.")
+            print("Introspection manager or _select_and_execute not available on this system.")
 
     def do_spark(self, arg):
         """Display a freshly generated curiosity question (spark)."""
@@ -1052,9 +1056,9 @@ class CommandHandler(cmd.Cmd):
         if curiosity_manager and hasattr(curiosity_manager, 'generate_curiosity_question'):
             try:
                 context = arg.strip() if arg.strip() else None
-                question = curiosity_manager.generate_curiosity_question(context or "What should I be curious about?")
+                question = curiosity_manager.generate_curiosity_question(context)
                 if question:
-                    print(f"Spark (curiosity question):\n{question}")
+                    print(question)
                 else:
                     print("There is currently no spark within")
             except Exception as e:
@@ -1069,66 +1073,103 @@ class CommandHandler(cmd.Cmd):
             try:
                 prompt = arg if arg.strip() else " "
                 response = generation_manager._handle_internal_prompt(prompt)
-                print(f"Flare response:\n{response}")
+                print(response)
             except Exception as e:
                 print(f"Error generating flare response: {e}")
         else:
             print("Generation manager or _handle_internal_prompt not available on this system.")
 
     def do_mimic(self, arg):
-        """Generate a response that mimics the user, using bond modulation context."""
-        bond_modulator = self.bond_modulator
+        """Generate a response that mimics the user, using long-term memory to build a speech pattern profile."""
+        recaller = getattr(self.sovl_system, 'recaller', None)
         generation_manager = getattr(self.sovl_system, 'generation_manager', None)
-        state = getattr(self.sovl_system, 'state', None)
-        if not bond_modulator or not generation_manager:
-            print("Bond modulator or generation manager not available on this system.")
+        if not recaller or not generation_manager:
+            print("Recaller or generation manager not available on this system.")
             return
         try:
-            # Attempt to get user metadata entries from state or sovl_system
-            metadata_entries = []
-            if state and hasattr(state, 'history') and hasattr(state.history, 'get_recent_metadata'):
-                metadata_entries = state.history.get_recent_metadata()
-            # Get bond modulation context
-            context_str, bond_score = bond_modulator.get_bond_modulation(metadata_entries)
-            # Compose prompt: context + user arg
-            prompt = f"{context_str}\n{arg.strip()}" if arg.strip() else context_str
+            # Fetch past user utterances from long-term memory
+            memories = recaller.get_long_term_context(top_k=10)
+            user_utterances = [m['content'] for m in memories if m.get('role') == 'user' and m.get('content')]
+            if not user_utterances:
+                print("No user history available to mimic.")
+                return
+            # Build the speech pattern profile (concatenate samples)
+            samples = '\n'.join(user_utterances)
+            user_input = arg.strip()
+            # System prompt format
+            prompt = (
+                "Mimic the user's speech style as closely as possible. Here are selected examples of how the user typically speaks:\n"
+                f"{samples}\n\n"
+                "Now, given the following input (if any), respond in the user's style:\n"
+                f"{user_input if user_input else ''}\n\n"
+                "Essential qualities:\n"
+                "- Match the user's tone, vocabulary, and phrasing.\n"
+                "- Make the response feel authentic and personal.\n"
+                "- Do not mention that you are mimicking or analyzing the user.\n"
+                "- Output only the response, with no preamble or explanation."
+            )
             responses = generation_manager.generate_text(prompt, num_return_sequences=1)
             if responses:
-                print(f"Mimic response:\n{responses[0]}")
+                print(responses[0])
             else:
                 print("No response generated.")
         except Exception as e:
             print(f"Error generating mimic response: {e}")
 
     def do_echo(self, arg):
-        """Reflectively echo the user's input."""
-        if arg.strip():
-            print(f'You said: "{arg.strip()}"')
-        else:
-            print("You didn't say anything for me to echo.")
+        """Echo the most recent N user messages from short-term memory (default 1, up to MAX_ECHOES)."""
+        MAX_ECHOES = 100  # High limit for testing short-term memory
+        recaller = getattr(self.sovl_system, 'recaller', None)
+        if not recaller or not hasattr(recaller, 'get_short_term_context'):
+            print("Short-term memory system not available.")
+            return
+        try:
+            short_term = recaller.get_short_term_context()
+            user_msgs = [m['content'] for m in short_term if m.get('role') == 'user' and m.get('content')]
+            if not user_msgs:
+                print("No recent user messages to echo.")
+                return
+            # Determine how many to echo
+            n = 1
+            if arg.strip().isdigit():
+                n = min(int(arg.strip()), MAX_ECHOES)
+            n = min(n, len(user_msgs))
+            for i in range(n):
+                print(f'You said [{i+1}]: "{user_msgs[-(i+1)]}"')
+        except Exception as e:
+            print(f"Error accessing short-term memory: {e}")
 
     def do_recall(self, arg):
         """Recall a memory from the system's long-term memory (DialogueContextManager)."""
         recaller = getattr(self.sovl_system, 'recaller', None)
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
         if not recaller or not hasattr(recaller, 'get_long_term_context'):
             print_error("Memory system (recaller) not available on this system.")
             return
+        if not generation_manager or not hasattr(generation_manager, 'generate_text'):
+            print_error("Generation manager not available for memory synthesis.")
+            return
         try:
-            # Optionally, allow user to specify a query or just get a random memory
-            if arg.strip():
-                embedding_fn = getattr(recaller, 'embedding_fn', None)
-                if embedding_fn:
-                    query_embedding = embedding_fn(arg.strip())
-                    memories = recaller.get_long_term_context(query_embedding=query_embedding, top_k=1)
-                else:
-                    memories = []
+            if not arg.strip():
+                print_error("Please provide a search string to recall a relevant memory.")
+                return
+            embedding_fn = getattr(recaller, 'embedding_fn', None)
+            N = 4  # Number of memories to synthesize
+            if embedding_fn:
+                query_embedding = embedding_fn(arg.strip())
+                memories = recaller.get_long_term_context(query_embedding=query_embedding, top_k=N)
             else:
-                # Get a random or most recent memory
-                memories = recaller.get_long_term_context(top_k=1)
+                memories = []
             if memories:
-                memory = memories[0]
+                memory_texts = [m.get('content', '') for m in memories if m.get('content')]
+                prompt = (
+                    f"Here are several of your most relevant past memories about '{arg.strip()}':\n" +
+                    "\n".join(f"{i+1}. {text}" for i, text in enumerate(memory_texts)) +
+                    "\n\nSummarize or synthesize these into a single, natural recollection as if you were remembering it yourself. Output only the recollection, no preamble or explanation."
+                )
+                summary = generation_manager.generate_text(prompt, num_return_sequences=1)
                 print_section_header("Recalled Memory:")
-                print(memory.get('content', str(memory)))
+                print(summary[0] if summary else "[No summary generated]")
                 print_success("Memory recalled successfully.")
             else:
                 print_error("No memory could be recalled.")
@@ -1136,39 +1177,77 @@ class CommandHandler(cmd.Cmd):
             print_error(f"Error recalling memory: {e}")
 
     def do_forget(self, arg):
-        """Clear the sovl_recall log."""
-        recall_log = getattr(self.sovl_system, 'recall_log', None)
-        if recall_log and hasattr(recall_log, 'clear'):
-            recall_log.clear()
-            print_success("sovl_recall log has been cleared.")
-        else:
-            print_error("sovl_recall log not available or cannot be cleared.")
+        """Forget the top_k most relevant memories to a search string from long-term memory."""
+        recaller = getattr(self.sovl_system, 'recaller', None)
+        if not recaller or not hasattr(recaller, 'embedding_fn') or not hasattr(recaller, 'long_term'):
+            print("Memory system not available.")
+            return
+        if not arg.strip():
+            print("Please provide a search string to forget relevant memories.")
+            return
+        embedding_fn = recaller.embedding_fn
+        query_embedding = embedding_fn(arg.strip())
+        top_k = 4  # or configurable
+        memories = recaller.get_long_term_context(query_embedding=query_embedding, top_k=top_k)
+        if not memories:
+            print("No relevant memories found to forget.")
+            return
+        ids = [m['id'] for m in memories]
+        recaller.long_term.remove_by_ids(ids)
+        print("Forgotten memories:")
+        for m in memories:
+            content = m['content']
+            snippet = content[:80] + ("..." if len(content) > 80 else "")
+            print(f"- {snippet}")
 
     def do_muse(self, arg):
-        """The system generates a unique musing about its own existence, purpose, or limitations."""
+        """The system generates a unique musing about the most interesting recent interactions, using trait metadata."""
         generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        recaller = getattr(self.sovl_system, 'recaller', None)
         if not generation_manager or not hasattr(generation_manager, 'generate_text'):
             print("Generation manager not available for musings.")
             return
-        user_arg = arg.strip()
-        if user_arg:
-            prompt = (
-                f"As an artificial intelligence, muse in a unique, thoughtful, and slightly philosophical way about your own existence, purpose, or limitations, in the context of: '{user_arg}'. "
-                "Be original, introspective, and avoid cliches."
+        if not recaller or not hasattr(recaller, 'get_short_term_context'):
+            print("Short-term memory not available for muse.")
+            return
+        # Get short-term memory and filter for user messages
+        short_term = recaller.get_short_term_context()
+        user_msgs = [m for m in short_term if m.get('role') == 'user' and m.get('content')]
+        def interestingness(m):
+            curiosity = m.get('curiosity', 0.5)
+            temperament = m.get('temperament', 0.5)
+            confidence = m.get('confidence', 0.5)
+            bond = m.get('bond', 0.5)
+            return (
+                0.3 * curiosity +
+                0.3 * abs(temperament - 0.5) +
+                0.2 * confidence +
+                0.2 * bond
             )
+        user_msgs.sort(key=interestingness, reverse=True)
+        top_k = 4
+        selected = user_msgs[:top_k]
+        if selected:
+            entries_text = '\n'.join(f"- {m['content']}" for m in selected)
+            muse_prompt = (
+                "SYSTEM: You are a thoughtful observer. Here are some of the most interesting recent user interactions, selected by curiosity, temperament, confidence, and bond:\n"
+                f"{entries_text}\n"
+                "TASK: Wonder aloud about these moments. What do they reveal? What questions do they raise?\n"
+                "CONSTRAINTS:\n"
+                "- Be sensitive, insightful, and a bit poetic.\n"
+                "- Do not mention being an AI.\n"
+                "- Output a single, evocative paragraph."
+            )
+            try:
+                musings = generation_manager.generate_text(muse_prompt, num_return_sequences=1, temperature=1.2)
+                if musings:
+                    print(musings[0])
+                else:
+                    print("No musing could be generated.")
+            except Exception as e:
+                print(f"Error generating musing: {e}")
         else:
-            prompt = (
-                "As an artificial intelligence, muse in a unique, thoughtful, and slightly philosophical way about your own existence, purpose, or limitations. "
-                "Be original, introspective, and avoid cliches."
-            )
-        try:
-            musings = generation_manager.generate_text(prompt, num_return_sequences=1, temperature=1.2)
-            if musings:
-                print(musings[0])
-            else:
-                print("No musing could be generated.")
-        except Exception as e:
-            print(f"Error generating musing: {e}")
+            print("No suitable memories available for musing.")
 
     def do_panic(self, arg):
         """Simulate a critical system panic for testing error handling and shutdown."""
@@ -1206,32 +1285,59 @@ class CommandHandler(cmd.Cmd):
             print(f"Atomic glitch update failed: {e}")
 
     def do_debate(self, arg):
-        """Have the LLM debate itself on a topic of its own choosing (or a provided topic)."""
-        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
-        if not generation_manager or not hasattr(generation_manager, 'generate_text'):
-            print("Generation manager not available for debate.")
-            return
-        user_arg = arg.strip()
-        if user_arg:
-            prompt = (
-                f"Debate with yourself on the topic: '{user_arg}'. "
-                "Present both sides as two distinct voices, each making their case in turn. "
-                "Make the debate thoughtful, nuanced, and engaging. End with a brief reflection on which side is more convincing, or if the debate remains unresolved."
-            )
-        else:
-            prompt = (
-                "Debate with yourself on a topic of your own choosing. "
-                "First, state the topic. Then, present both sides of the debate as two distinct voices, each making their case in turn. "
-                "Make the debate thoughtful, nuanced, and engaging. End with a brief reflection on which side is more convincing, or if the debate remains unresolved."
-            )
-        try:
-            debates = generation_manager.generate_text(prompt, num_return_sequences=1, temperature=1.1)
-            if debates:
-                print(debates[0])
+        """
+        Enter debate mode: all LLM responses will take a devil's advocate stance.
+        Usage: /debate
+        Use /debate off or /stop debate to exit this mode.
+        """
+        mode_arg = arg.strip().lower()
+        if mode_arg == 'off':
+            if self.is_debating:
+                self.is_debating = False
+                print("*** Debate mode disengaged. SOVL will now respond normally. ***")
             else:
-                print("No debate could be generated.")
+                print("Debate mode is not active.")
+            return
+        if self.is_debating:
+            print("Debate mode is already active. Use /stop debate or /debate off to exit.")
+            return
+        self.is_debating = True
+        print("*** Debate mode engaged: All responses will take a devil's advocate position. ***")
+        # Register in mode registry if not present
+        if not hasattr(self, "_mode_flags"):
+            self._mode_flags = {}
+        self._mode_flags["debate"] = "is_debating"
+    
+    def _debate_response(self, user_prompt):
+        import random
+        generation_manager = getattr(self.sovl_system, 'generation_manager', None)
+        if not generation_manager:
+            print("[Debate mode error: Generation manager not available]")
+            return
+        style = random.choice([
+            "challenge strongly and press hard on the user's assumptions, but avoid rudeness.",
+            "offer a softer, more nuanced counterpoint, and occasionally acknowledge a valid point.",
+            "mix strong rebuttals with gentle questioning, and sometimes concede a minor issue."
+        ])
+        debate_prompt = (
+            "SYSTEM: You are in debate mode. For every user message, take a devil's advocate stance—challenge the user's statements, question their assumptions, and argue the opposite side with intelligence and wit. "
+            f"However, do not be relentlessly antagonistic or steamroll the user. For this response, {style}\n"
+            "Essential qualities:\n"
+            "- Challenge the user's position, but avoid personal attacks or rudeness.\n"
+            "- Use a mix of strong rebuttals and gentle questioning.\n"
+            "- Make the exchange feel dynamic, not one-sided.\n"
+            "- Never agree outright, but do not be afraid to partially concede or soften your stance when appropriate.\n"
+            "- Output only your response, with no preamble or explanation.\n"
+            f"USER: {user_prompt}\n"
+        )
+        try:
+            response = generation_manager.generate_text(debate_prompt, num_return_sequences=1, temperature=1.1)
+            if response and isinstance(response, list):
+                print(f"SOVL (debate): {response[0]}")
+            else:
+                print("SOVL (debate): ...")
         except Exception as e:
-            print(f"Error generating debate: {e}")
+            print(f"[Debate mode error: {e}]")
 
     def do_rewind(self, arg):
         """Rewind the conversation history by N turns (default: 7) using atomic update."""
@@ -2066,6 +2172,7 @@ class CommandHandler(cmd.Cmd):
                 "shy": "is_shy",
                 "pidgin": "is_pidgin",
                 "backchannel": "is_backchannel",
+                "debate": "is_debating",
             }
 
         if not mode or mode == "all":
