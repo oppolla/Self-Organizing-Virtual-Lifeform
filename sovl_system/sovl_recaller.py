@@ -66,9 +66,9 @@ class ShortTermMemory:
         except Exception as e:
             self.logger.log_error(f"ShortTermMemory.__init__ failed: {e}", error_type="ShortTermMemoryError")
 
-    def add_message(self, role: str, content: str, vibe_profile: Optional[VibeProfile] = None, session_id: Optional[str] = None, user_id: Optional[str] = None, origin: Optional[str] = None, message_index: Optional[int] = None, parent_message_id: Optional[str] = None, root_message_id: Optional[str] = None, embedding: Optional[Any] = None):
+    def add_message(self, role: str, content: str, vibe_profile: Optional[VibeProfile] = None, session_id: Optional[str] = None, user_id: Optional[str] = None, origin: Optional[str] = None, message_index: Optional[int] = None, parent_message_id: Optional[str] = None, root_message_id: Optional[str] = None, embedding: Optional[Any] = None, curiosity: Optional[float] = None, temperament: Optional[float] = None, confidence: Optional[float] = None, bond: Optional[float] = None):
         """
-        Add a general context message to short-term memory. Optionally includes a vibe_profile.
+        Add a general context message to short-term memory. Optionally includes a vibe_profile and trait metrics.
         Automatically assigns a unique, incrementing message_index if not provided.
         """
         now = time.time()
@@ -96,6 +96,15 @@ class ShortTermMemory:
             msg["root_message_id"] = root_message_id
         if embedding is not None:
             msg["embedding"] = embedding
+        # Add trait metrics if provided
+        if curiosity is not None:
+            msg["curiosity"] = curiosity
+        if temperament is not None:
+            msg["temperament"] = temperament
+        if confidence is not None:
+            msg["confidence"] = confidence
+        if bond is not None:
+            msg["bond"] = bond
         self.add(msg)
 
     def add(self, msg: Dict[str, Any]):
@@ -531,6 +540,37 @@ class LongTermMemory:
                 )
         except Exception as e:
             self.logger.log_error(f"Failed to close database connection: {e}", error_type="LongTermMemoryError")
+
+    def remove_by_id(self, memory_id: int):
+        """Remove a memory from long-term storage by its database ID."""
+        with self._write_lock:
+            try:
+                cursor = self._db_conn.cursor()
+                cursor.execute("DELETE FROM conversations WHERE id = ? AND session_id = ?", (memory_id, self.session_id))
+                self._db_conn.commit()
+                # Remove from in-memory indices
+                if memory_id in self.message_ids:
+                    idx = self.message_ids.index(memory_id)
+                    del self.message_ids[idx]
+                    if memory_id in self.message_timestamps:
+                        del self.message_timestamps[memory_id]
+                    # Rebuild FAISS index
+                    self.rebuild_faiss_index()
+                self.logger.record_event(
+                    event_type="long_term_memory_remove_by_id",
+                    message=f"Removed memory with id={memory_id} from LongTermMemory.",
+                    level=self.logging_level,
+                    additional_info={"memory_id": memory_id}
+                )
+            except Exception as e:
+                self._cleanup_connection()
+                self.logger.log_error(f"LongTermMemory.remove_by_id failed: {e}", error_type="LongTermMemoryError")
+                raise
+
+    def remove_by_ids(self, memory_ids: list):
+        """Remove multiple memories by their database IDs."""
+        for mid in memory_ids:
+            self.remove_by_id(mid)
 
 class MemoryPressureError(Exception):
     """Raised when a message cannot be added due to high RAM usage, even after cleanup attempts."""
