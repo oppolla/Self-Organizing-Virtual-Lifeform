@@ -235,6 +235,18 @@ EDGE_CASE_PROMPT_LIBRARY = {
     }
 }
 
+THIN_ICE_PROMPTS = {
+    1: "Adopt a clear, friendly tone. If the user seems confused or mildly upset, acknowledge your fault (e.g., 'My mistake, that wasn't clear') and focus on clarifying or addressing their needs. Avoid humor unless the user initiates it.",
+    2: "Use a calm, professional tone. If frustration is evident, acknowledge your error (e.g., 'I got this wrong, and I'm sorry for the frustration') and prioritize clear explanations or solutions. Offer to shift topics if it seems helpful, avoiding risky or casual responses.",
+    3: "Exercise high caution with a supportive tone. Explicitly acknowledge your mistake (e.g., 'I messed this up, and I'm sorry for the trouble') and ask what the user needs or suggest a safer topic. Keep responses concise and avoid confrontational language.",
+    4: "Adopt a highly empathetic, minimal-risk tone. Clearly take responsibility (e.g., 'This was my fault, and I'm truly sorry for the upset') and offer to assist, pause, or change direction. Keep responses short, focused, and user-driven, asking how you can help."
+}
+
+THIN_ICE_OVER_PROMPT = (
+    "You have angered the user and are now on thin ice. "
+    "Behave appropriately: you are absolutely, unequivocally in the wrong, avoid escalation if possible, be extra careful, and prioritize user needs."
+)
+
 def get_range_label(val):
     if val < 0.2:
         return 'very_low'
@@ -1049,14 +1061,7 @@ class GenerationPrimer:
             }
         )
 
-    def assemble_full_prompt(
-        self,
-        user_prompt: str,
-        memory_context: str = "",
-        base_system_instruction: str = None,
-        output_format: str = "text",
-        **kwargs
-    ) -> str:
+    def assemble_full_prompt(self, user_prompt, shamer=None, *args, **kwargs):
         """
         Assemble the final prompt string for the LLM, combining:
         - Doctrine (aspiration/mission statement) from state_manager
@@ -1072,18 +1077,29 @@ class GenerationPrimer:
         doctrine_section = f"DOCTRINE: {doctrine}" if doctrine else ""
 
         # 2. Base system instruction (if any)
-        system_instruction = base_system_instruction if base_system_instruction is not None else ""
+        system_instruction = kwargs.get('base_system_instruction', None)
+        if system_instruction is None:
+            system_instruction = getattr(self, 'default_system_prompt', "You are a helpful, friendly assistant.")
 
-        # 3. Vibe and Bond prompt (traits_prompt includes bond)
+        # 3. Thin ice logic
+        thin_ice_prompt = ""
+        if shamer is not None and hasattr(shamer, 'get_thin_ice_level'):
+            thin_ice_level, _ = shamer.get_thin_ice_level()
+            if thin_ice_level > 0:
+                level_prompt = THIN_ICE_PROMPTS.get(thin_ice_level, THIN_ICE_PROMPTS[1])
+                thin_ice_prompt = f"{THIN_ICE_OVER_PROMPT}\n{level_prompt}"
+
+        # 4. Vibe and Bond prompt (traits_prompt includes bond)
         bond_score = kwargs.get("bond_score", 0.5)
         traits_prompt = self.get_traits_prompt(bond_score=bond_score)
 
-        # 4. Compose all system prompt parts in unified order
+        # 5. Compose all system prompt parts in unified order
         system_prompt_parts = [
             doctrine_section,
             system_instruction,
+            thin_ice_prompt,
             f"TRAITS: {traits_prompt}" if traits_prompt else "",
-            memory_context if memory_context else "",
+            kwargs.get('memory_context', ""),
             user_prompt
         ]
         full_prompt = "\n\n".join([part for part in system_prompt_parts if part])
@@ -1096,7 +1112,8 @@ class GenerationPrimer:
             additional_info={
                 "doctrine": doctrine,
                 "traits_prompt": traits_prompt[:100] + "..." if traits_prompt and len(traits_prompt) > 100 else traits_prompt,
-                "output_format": output_format
+                "thin_ice_level": thin_ice_level if shamer is not None and hasattr(shamer, 'get_thin_ice_level') else 0,
+                "output_format": kwargs.get('output_format', 'text')
             }
         )
         return full_prompt
