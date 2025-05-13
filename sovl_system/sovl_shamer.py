@@ -144,6 +144,12 @@ class Shamer:
             self.weights["syntactic"] * syntactic_score +
             self.weights["contextual"] * (metadata.get("confidence_score", 0.5) if metadata else 0.5)
         )
+        self.logger.record_event(
+            event_type="frustration_computed",
+            message="Frustration score computed",
+            level="debug",
+            additional_info={"frustration_score": frustration_score, "lexical_score": lexical_score, "syntactic_score": syntactic_score}
+        )
         return {
             "frustration_score": max(0.0, min(1.0, frustration_score)),
             "lexical_score": lexical_score,
@@ -171,6 +177,12 @@ class Shamer:
             conversation_tracking = relationship_context.get("conversation_tracking", {})
             thread_depth = min(conversation_tracking.get("thread_depth", 1) / 10.0, 1.0) * 0.2
         trauma_score = min(1.0, trauma_density + intensity + escalation + thread_depth)
+        self.logger.record_event(
+            event_type="trauma_potential_computed",
+            message="Trauma potential score computed",
+            level="debug",
+            additional_info={"trauma_score": trauma_score, "trigger_score": trauma_density, "intensity": intensity, "escalation": escalation, "thread_depth": thread_depth}
+        )
         return {
             "trauma_score": trauma_score,
             "trigger_score": trauma_density,
@@ -237,6 +249,12 @@ class Shamer:
         if any(word in text for word in politeness_words):
             score = max(0.0, score - 0.2)
             features.append("politeness_counter")
+        self.logger.record_event(
+            event_type="anger_detected",
+            message="Anger score computed",
+            level="debug",
+            additional_info={"anger_score": score, "features": features}
+        )
         return min(score, 1.0), features
 
     def _has_strong_anger_feature(self, features: list) -> bool:
@@ -485,6 +503,12 @@ class Shamer:
         if self.thin_ice_level > 0:
             self.thin_ice_level -= 1
             self.last_thin_ice_reason = "step_down"
+            self.logger.record_event(
+                event_type="thin_ice_level_decreased",
+                message="Thin ice level decreased",
+                level="info",
+                additional_info={"new_thin_ice_level": self.thin_ice_level, "reason": self.last_thin_ice_reason}
+            )
 
     def get_thin_ice_level(self):
         return self.thin_ice_level, self.last_thin_ice_reason

@@ -346,5 +346,14 @@
   "state_config": {
     "max_history": 100,
     "state_file": "sovl_state_save.json"
+  },
+"event_type_weights": {
+    "error_message": 0.2,
+    "user_interaction": 1.0,
+    "curiosity_question": 0.8,
+    "curiosity_question_user": 2.0,
+    "dream": 1.5,
+    "meditation": 0.9,
+    "traumatic_memory": 5.0
   }
 }

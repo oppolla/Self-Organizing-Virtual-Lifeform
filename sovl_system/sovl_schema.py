@@ -195,6 +195,7 @@ class EventTypeWeightsConfig(BaseModel):
             "curiosity_question_user": 2.0,
             "dream": 1.5,
             "meditation": 0.9,
+            "traumatic_memory": 10.0, 
             # Add all other event types as needed
         }
     )

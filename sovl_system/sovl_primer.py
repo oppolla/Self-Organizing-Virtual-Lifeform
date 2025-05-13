@@ -8,6 +8,7 @@ from sovl_error import ErrorManager
 from sovl_config import ConfigManager
 from sovl_state import StateManager 
 from sovl_viber import VibeProfile
+from sovl_shamer import Shamer, ShameProfile
 from sovl_main import SOVLSystem
 import traceback
 import threading
