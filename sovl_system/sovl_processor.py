@@ -1033,15 +1033,94 @@ class ScribeIngestionProcessor:
         }
 
     def calculate_weight(self, metadata):
-        weight = 1.0
-        for field, factor in self.trainer_weighting.items():
-            value = metadata.get(field)
-            if value is not None:
-                try:
-                    weight += float(value) * factor
-                except Exception:
-                    pass
-        return weight
+        import math, time
+        def safe_float(val, default=0.0):
+            try:
+                return float(val)
+            except Exception:
+                return default
+
+        def clamp(val, min_val, max_val):
+            return max(min_val, min(max_val, val))
+
+        event_type = metadata.get("event_type", "unknown")
+
+        # Extract features
+        confidence = safe_float(metadata.get("confidence_score"), 0.5)
+        trait_confidence = safe_float(metadata.get("traits.confidence"), confidence)
+        novelty = safe_float(metadata.get("novelty_score"), 0.0)
+        word_count = safe_float(metadata.get("content_metrics.word_count"), 10)
+        error_rate = safe_float(metadata.get("quality_metrics.error_rate"), 0.0)
+        temperament = safe_float(metadata.get("traits.temperament"), 0.5)
+        tokens_per_second = safe_float(metadata.get("performance_metrics.timing.tokens_per_second"), 10)
+        token_diversity = safe_float(metadata.get("content_metrics.token_diversity"), 0.0)
+        timestamp = safe_float(metadata.get("timestamp_unix"), 0.0)
+        current_time = safe_float(metadata.get("current_time"), 0.0) or time.time()
+        recency = math.exp(-(current_time - timestamp) / (60 * 60 * 24)) if timestamp > 0 else 1.0
+        curiosity = safe_float(metadata.get("traits.curiosity"), 0.5)
+
+        # Normalize features
+        norm_confidence = clamp(trait_confidence, 0.0, 1.0)
+        norm_novelty = clamp(novelty, 0.0, 1.0)
+        norm_word_count = clamp(math.log1p(word_count) / 5.0, 0.0, 1.0)
+        norm_error = 1.0 - clamp(error_rate, 0.0, 1.0)
+        norm_temperament = clamp(temperament, 0.0, 1.0)
+        norm_tokens_per_second = clamp(math.log1p(tokens_per_second) / 3.0, 0.0, 1.0)
+        norm_token_diversity = clamp(token_diversity, 0.0, 1.0)
+        norm_recency = clamp(recency, 0.0, 1.0)
+        norm_curiosity = clamp(curiosity, 0.0, 1.0)
+
+        # Default weights
+        w_conf, w_nov, w_wc, w_err, w_temp, w_tps, w_rec, w_div, w_cur = 0.25, 0.20, 0.15, 0.10, 0.15, 0.15, 0.0, 0.0, 0.0
+
+        if event_type == "dream":
+            w_nov += 0.10   # Boost novelty
+            w_rec = 0.10    # Add recency
+            w_div = 0.10    # Add token diversity
+            w_conf -= 0.05  # Slightly reduce confidence
+        elif event_type == "introspection":
+            w_conf += 0.10  # Boost confidence
+            w_temp += 0.05  # Boost temperament
+            w_err = max(0.0, w_err - 0.05)  # De-emphasize error_rate
+        elif event_type in ("curiosity_question", "curiosity_question_asked"):
+            # Strong emphasis on novelty and curiosity
+            w_nov = 0.35
+            w_cur = 0.30
+            w_conf = 0.15
+            w_err = 0.05
+            w_wc = 0.05
+            w_temp = 0.05
+            w_tps = 0.05
+            w_rec = 0.0
+            w_div = 0.0
+        # Renormalize
+        total = w_conf + w_nov + w_wc + w_err + w_temp + w_tps + w_rec + w_div + w_cur
+        w_conf /= total
+        w_nov /= total
+        w_wc /= total
+        w_err /= total
+        w_temp /= total
+        w_tps /= total
+        w_rec /= total
+        w_div /= total
+        w_cur /= total
+
+        # Composite importance score
+        importance = (
+            w_conf * norm_confidence +
+            w_nov * norm_novelty +
+            w_wc * norm_word_count +
+            w_err * norm_error +
+            w_temp * norm_temperament +
+            w_tps * norm_tokens_per_second +
+            w_rec * norm_recency +
+            w_div * norm_token_diversity +
+            w_cur * norm_curiosity
+        )
+
+        event_type_weight = self.trainer_weighting.get(event_type, 1.0) if hasattr(self, 'trainer_weighting') else 1.0
+        weight = event_type_weight * (0.5 + importance)
+        return clamp(weight, 0.1, 2.0)
         
         
         

@@ -2,7 +2,7 @@
 
 ## General Taks:
 
-1. on do_reflect
+1. Build a moral code system where it makes entries for its personal ethos
 2. 
 3. 
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 

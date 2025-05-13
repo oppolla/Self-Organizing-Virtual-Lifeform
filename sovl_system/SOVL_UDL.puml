@@ -1,193 +1,500 @@
-@startuml SOVL System Architecture
+@startuml SOVL System Architecture (Obsessive Detail)
 
 ' =============================
-' Core System Orchestration
+' Orchestration & System Core
 ' =============================
 package "Orchestration" {
-    class SOVLOrchestrator {
+    class SOVLSystem {
+        +context: SystemContext
+        +model_manager: ModelManager
+        +state_tracker: StateTracker
+        +error_manager: ErrorManager
+        +trainer: SOVLTrainer
+        +generation_manager: GenerationManager
+        +scriber: Scriber
+        +monitor_manager: MonitorManager
+        +tiredness_manager: TirednessManager
+        +introspection_manager: IntrospectionManager
+        +scaffold_token_mapper: ScaffoldTokenMapper
+        +pause()
+        +resume()
+        +main_loop()
+    }
+    class SystemContext {
         +config_manager: ConfigManager
+        +logger: Logger
+        +error_handler: ErrorManager
         +state_manager: StateManager
         +model_manager: ModelManager
         +ram_manager: RAMManager
         +gpu_manager: GPUMemoryManager
-        +error_manager: ErrorManager
-        +system_monitor: SystemMonitor
-        +memory_monitor: MemoryMonitor
-        +traits_monitor: TraitsMonitor
-        +logger: Logger
-        +device: torch.device
-        +run(): None
-        +shutdown(): None
+        +event_dispatcher: EventDispatcher
+        +session_id: str
+        +update_component_state(...)
     }
-    class Conductor {
+    class TirednessManager {
+        +state_manager: StateManager
+        +logger: Logger
+        +config_handler: ConfigManager
+        +start()
+        +stop()
+    }
+    class SystemMediator {
         +config_manager: ConfigManager
         +logger: Logger
-        +ram_manager: RAMManager
-        +gpu_manager: GPUMemoryManager
-        +check_memory_health(): Dict[str, Any]
+        +device: torch.device
+        +state_manager: StateManager
+        +register_system(...)
+        +register_orchestrator(...)
+        +sync_state(...)
     }
 }
 
 ' =============================
-' System Context & State
+' State & Context
 ' =============================
-package "System Context" {
-    class SystemContext {
-        +config_path: str
-        +device: str
-        +logger: Logger
-        +resource_locks: Dict[str, Lock]
-        +component_states: Dict[str, Any]
-        +error_history: deque
-        +get_session_id(): str
-        +update_component_state(component_name: str, state: Dict[str, Any]): None
-        +record_error(error: Exception, context: Dict[str, Any]): None
-        +update_memory_usage(): None
-        +get_system_state(): Dict[str, Any]
+package "State & Context" {
+    class StateManager {
+        +get_state()
+        +set_state(...)
+        +update_state_atomic(...)
+        +save_state(...)
+        +load_state(...)
+        +set_mode(...)
     }
-    class SystemConstants {
-        +DEFAULT_DEVICE: str
-        +DEFAULT_CONFIG_PATH: str
-        +MIN_MEMORY_THRESHOLD: float
-        +MAX_MEMORY_THRESHOLD: float
-        +MAX_ERROR_HISTORY: int
-        +LOG_BUFFER_SIZE: int
+    class StateTracker {
+        +update_component_state(...)
+        +get_state()
+    }
+    class SOVLState {
+        +mode: str
+        +gestation_progress: float
+        +dreaming_progress: float
+        +meditating_progress: float
+        +history: ConversationHistory
+        +short_term_memory: deque
+        +curiosity_metrics: dict
+        +temperament_score: float
+        +seen_prompts: set
+        +to_dict()
+        +from_dict(...)
+    }
+    class UserProfileState {
+        +profiles: dict
+        +get_profile_field(...)
+        +set_profile_field(...)
+    }
+    class TrainingState <<dataclass>> {
+        +last_trained: float
+        +last_weight: float
+        +sleep_confidence_sum: float
+        +sleep_confidence_count: int
+        +data_exposure: float
+        +lora_capacity: float
+        +gestation_metrics: dict
+        +dream_metrics: dict
+        +sleep_metrics: dict
+        +data_quality_metrics: dict
+        +update_gestation_metrics(...)
+        +update_dream_metrics(...)
+        +update_sleep_metrics(...)
+        +update_data_exposure(...)
+        +update_data_quality(...)
+        +get_state_hash()
     }
 }
 
 ' =============================
-' Model, Scaffold, and Training
+' Model, Generation, Scaffold
 ' =============================
-package "Model & Training" {
+package "Model & Generation" {
     class ModelManager {
         +base_model: nn.Module
-        +scaffold_models: List[nn.Module]
+        +scaffold_models: list
         +base_tokenizer: Any
-        +scaffold_tokenizers: List[Any]
-        +quantization_mode: str
-        +active_lora_checkpoint: str
-        +load_models(lora_checkpoint_path: str): None
-        +reload_models(): None
-        +cleanup(): None
+        +scaffold_tokenizers: list
+        +load_models(...)
+        +reload_models()
+        +cleanup()
+    }
+    class GenerationManager {
+        +generate_text(...)
+        +backchannel_scaffold_prompt(...)
+        +set_system_context(...)
     }
     class ScaffoldTokenMapper {
         +base_tokenizer: Any
         +scaffold_tokenizer: Any
-        +get_token_map(): Dict
-        +tokenize_and_map(prompt: str): Any
-        +update_token_map_memory(prompt: str, confidence: float): None
+        +get_token_map()
+        +tokenize_and_map(...)
+        +update_token_map_memory(...)
     }
-    class ScaffoldErrorManager {
+    class GenerationPrimer {
+        +compute_curiosity(...)
+        +get_temperament(...)
+        +compute_confidence(...)
+        +compute_bond(...)
+        +get_trait(...)
+        +handle_error(...)
+        +handle_state_driven_error(...)
+    }
+}
+
+' =============================
+' Memory & Dialogue
+' =============================
+package "Memory & Dialogue" {
+    class RAMManager {
+        +check_memory_health()
+    }
+    class GPUMemoryManager {
+        +check_memory_health()
+    }
+    class DialogueContextManager {
+        +short_term: ShortTermMemory
+        +long_term: LongTermMemory
+        +get_short_term_context(...)
+        +get_long_term_context(...)
+    }
+}
+
+' =============================
+' AI/Behavior & Introspection
+' =============================
+package "AI & Behavior" {
+    class BondCalculator {
+        +calculate_bond(...)
+        +get_bond_score(...)
+        +set_bond_score(...)
+    }
+    class CuriosityManager {
+        +calculate_curiosity_score(...)
+        +update_metrics(...)
+    }
+    class TemperamentSystem {
+        +update_mood(...)
+        +mood_score: float
+        +mood_label: str
+    }
+    class IntrospectionManager {
+        +_select_and_execute(...)
+        +should_introspect(...)
+    }
+    class AutonomyManager
+    class TemperamentPressure <<dataclass>> {
+        +config_manager: ConfigManager
+        +error_manager: ErrorManager
+        +state_manager: StateManager
         +logger: Logger
-        +handle_error(error: Exception, operation: str, context: Dict[str, Any], severity: str): None
+        +sensitivity: float
+        +decay: float
+        +high_threshold: float
+        +low_threshold: float
+        +cooldown: float
+        +frustration_rebound: float
+        +joy_rebound: float
+        +reset_value: float
+        +check_eruption(...)
     }
-    class TrainingManager {
-        +config: TrainingConfig
-        +model: nn.Module
-        +device: torch.device
-        +train_step(batch: Dict[str, torch.Tensor]): None
-        +validate(val_loader: Any): None
-        +save_checkpoint(path: str): None
-        +load_checkpoint(path: str): None
+    class CuriosityConfig <<dataclass>> {
+        +max_questions: int
+        +max_novelty_scores: int
+        +decay_rate: float
+        +hidden_size: int
+        +question_timeout: float
+        +validate(...)
     }
-    class TrainingConfig {
+    class TemperamentConfig <<dataclass>> {
+        +get(...)
+        +update(...)
+    }
+}
+
+' =============================
+' Training & Scribe
+' =============================
+package "Training & Scribe" {
+    class SOVLTrainer {
+        +train_on_scribe_journal(...)
+    }
+    class TrainingWorkflowManager {
+        +run_gestation_cycle(...)
+    }
+    class Scriber {
+        +write(...)
+        +read(...)
+    }
+    class TrainingConfig <<dataclass>> {
         +optimizer: OptimizerConfig
         +scheduler: SchedulerConfig
         +memory: MemoryConfig
         +params: TrainingParams
         +logging: LoggingConfig
+        +_load_config(...)
+        +_validate(...)
+        +validate_section(...)
     }
 }
 
 ' =============================
-' Memory & Monitoring
+' Monitoring & Utilities
 ' =============================
-package "Memory & Monitoring" {
-    class RAMManager {
-        +check_memory_health(): Dict[str, Any]
+package "Monitoring & Utilities" {
+    class MonitorManager {
+        +memory_monitor: MemoryMonitor
+        +system_monitor: SystemMonitor
+        +traits_monitor: TraitsMonitor
     }
-    class GPUMemoryManager {
-        +check_memory_health(): Dict[str, Any]
-    }
-    class SystemMonitor {
-        +logger: Logger
-        +ram_manager: RAMManager
-        +gpu_manager: GPUMemoryManager
-        +error_manager: ErrorManager
-    }
-    class MemoryMonitor {
-        +logger: Logger
-        +ram_manager: RAMManager
-        +gpu_manager: GPUMemoryManager
-        +error_manager: ErrorManager
-    }
-    class TraitsMonitor {
-        +logger: Logger
-    }
-}
-
-' =============================
-' Utilities & Supporting Modules
-' =============================
-package "Utilities" {
+    class MemoryMonitor
+    class SystemMonitor
+    class TraitsMonitor
     class Logger {
-        +log_event(event_type: str, message: str, level: str, additional_info: Dict): None
-        +log_error(error_msg: str, error_type: str, stack_trace: str, additional_info: Dict): None
-        +get_recent_events(limit: int): List[Dict]
-        +get_recent_errors(limit: int): List[Dict]
+        +log_event(...)
+        +log_error(...)
+        +get_recent_events(...)
+        +get_recent_errors(...)
+    }
+    class LoggerConfig <<dataclass>> {
+        +log_file: str
+        +compress_old: bool
+        +max_size_mb: int
+        +log_level: str
+        +error_handling_config: dict
     }
     class ErrorManager {
-        +error_history: deque
-        +handle_error(error: Exception, context: Dict[str, Any]): None
-        +get_recent_errors(): List[Dict]
+        +handle_error(...)
+        +get_error_stats(...)
     }
     class ConfigManager {
-        +get(key: str, default: Any): Any
+        +get(...)
+        +subscribe(...)
     }
-    class StateManager {
-        +load_state(): Any
-        +save_state(state: Any): None
+    class ConfigNamespace <<dataclass>> {
+        +_data: dict
+    }
+    class EventDispatcher {
+        +subscribe(...)
+        +dispatch(...)
+    }
+    class DataStats <<dataclass>> {
+        +total_entries: int
+        +valid_entries: int
+        +invalid_entries: int
+        +last_load_time: float
+        +average_entry_length: float
+        +validation_errors: dict
+        +data_quality_score: float
+        +data_diversity_score: float
+        +last_update_time: float
+        +update(...)
+        +to_dict(...)
+        +from_dict(...)
     }
 }
 
 ' =============================
-' Relationships
+' Plugins & Extensions
 ' =============================
-SOVLOrchestrator --> ModelManager
-SOVLOrchestrator --> RAMManager
-SOVLOrchestrator --> GPUMemoryManager
-SOVLOrchestrator --> ErrorManager
-SOVLOrchestrator --> SystemMonitor
-SOVLOrchestrator --> MemoryMonitor
-SOVLOrchestrator --> TraitsMonitor
-SOVLOrchestrator --> Logger
-SOVLOrchestrator --> StateManager
-SOVLOrchestrator --> ConfigManager
-SOVLOrchestrator --> SystemContext
+package "Plugins & Extensions" {
+    class PluginMetadata <<dataclass>> {
+        +name: str
+        +version: str
+        +description: str
+        +author: str
+        +dependencies: list
+        +priority: int
+        +enabled: bool
+        +config_requirements: list
+    }
+    class PluginInterface <<interface>> {
+        +initialize(...)
+        +get_metadata(...)
+        +execute(...)
+        +cleanup(...)
+        +validate(...)
+        +to_dict(...)
+        +from_dict(...)
+    }
+}
+
+' =============================
+' Interfaces & Protocols
+' =============================
+package "Interfaces & Protocols" {
+    interface SystemInterface {
+        +get_state()
+        +update_state(...)
+        +shutdown()
+        +toggle_memory(...)
+        +get_memory_stats()
+        +get_component_status()
+        +get_system_state()
+    }
+    interface OrchestratorInterface {
+        +set_system(...)
+        +sync_state(...)
+    }
+    interface StateAccessor {
+        +get_state()
+        +update_state_atomic(...)
+        +get_state_version()
+        +validate_state(...)
+    }
+    interface ICuriosityManager {
+        +get_pressure()
+        +reduce_pressure(...)
+        +tune(...)
+        +get_pressure_stats()
+    }
+    interface ITrainer {
+        +train_step(...)
+        +get_current_parameters()
+        +update_parameters(...)
+    }
+    interface ICrossAttentionInjector {
+        +inject_cross_attention(...)
+        +set_influence(...)
+        +get_cross_attention_layers(...)
+    }
+    interface ILoggerClient {
+        +log_event(...)
+        +log_error(...)
+    }
+    interface IErrorHandler {
+        +handle_error(...)
+    }
+    class SOVLSystemAdapter {
+        +sovl_system: SOVLSystem
+        +state_manager: StateManager
+        +get_state()
+        +update_state(...)
+        +shutdown()
+    }
+    class SOVLOrchestratorAdapter {
+        +_orchestrator: OrchestratorInterface
+        +set_system(...)
+        +sync_state(...)
+    }
+}
+
+' =============================
+' Exceptions
+' =============================
+package "Exceptions" {
+    class SystemInitializationError extends Exception {
+        +message: str
+        +config_path: str
+        +stack_trace: str
+    }
+    class ConfigurationError extends Exception
+    class CuriosityError extends Exception
+    class GenerationError extends Exception
+    class StateError extends Exception
+    class InsufficientDataError extends Exception
+    class PluginError extends Exception
+    class DataValidationError extends Exception
+    class MemoryPressureError extends Exception
+}
+
+' =============================
+' Relationships (Expanded)
+' =============================
+SOVLSystem --> SystemContext
+SOVLSystem --> ModelManager
+SOVLSystem --> StateTracker
+SOVLSystem --> ErrorManager
+SOVLSystem --> SOVLTrainer
+SOVLSystem --> GenerationManager
+SOVLSystem --> Scriber
+SOVLSystem --> MonitorManager
+SOVLSystem --> TirednessManager
+SOVLSystem --> IntrospectionManager
+SOVLSystem --> ScaffoldTokenMapper
+SystemContext --> ConfigManager
+SystemContext --> Logger
+SystemContext --> ErrorManager
+SystemContext --> StateManager
+SystemContext --> ModelManager
+SystemContext --> RAMManager
+SystemContext --> GPUMemoryManager
+SystemContext --> EventDispatcher
+SystemContext --> DialogueContextManager
 ModelManager --> ScaffoldTokenMapper
-ModelManager --> ScaffoldErrorManager
 ModelManager --> Logger
 ModelManager --> ConfigManager
-TrainingManager --> TrainingConfig
-TrainingManager --> ModelManager
-TrainingManager --> Logger
-TrainingManager --> ErrorManager
-SystemMonitor --> RAMManager
-SystemMonitor --> GPUMemoryManager
-SystemMonitor --> ErrorManager
+GenerationManager --> ModelManager
+GenerationManager --> Logger
+GenerationManager --> ErrorManager
+GenerationManager --> DialogueContextManager
+StateManager --> SOVLState
+StateManager --> RAMManager
+StateManager --> GPUMemoryManager
+StateManager --> Logger
+StateManager --> ConfigManager
+StateTracker --> SOVLState
+StateTracker --> Logger
+StateTracker --> ConfigManager
+SOVLState --> UserProfileState
+SOVLState --> ConversationHistory
+SOVLState --> deque
+SOVLState --> dict
+SOVLTrainer --> TrainingWorkflowManager
+SOVLTrainer --> Logger
+SOVLTrainer --> ErrorManager
+SOVLTrainer --> ConfigManager
+MonitorManager --> MemoryMonitor
+MonitorManager --> SystemMonitor
+MonitorManager --> TraitsMonitor
+MonitorManager --> Logger
+MonitorManager --> RAMManager
+MonitorManager --> GPUMemoryManager
+MonitorManager --> StateManager
+MonitorManager --> ErrorManager
+MonitorManager --> TrainingWorkflowManager
+BondCalculator --> UserProfileState
+BondCalculator --> StateManager
+BondCalculator --> Logger
+CuriosityManager --> StateManager
+CuriosityManager --> Logger
+CuriosityManager --> ErrorManager
+CuriosityManager --> DialogueContextManager
+TemperamentSystem --> StateManager
+TemperamentSystem --> ConfigManager
+TemperamentSystem --> ErrorManager
+IntrospectionManager --> StateManager
+IntrospectionManager --> CuriosityManager
+IntrospectionManager --> ConfidenceCalculator
+IntrospectionManager --> TemperamentSystem
+IntrospectionManager --> ModelManager
+IntrospectionManager --> DialogueContextManager
+IntrospectionManager --> BondCalculator
+TirednessManager --> StateManager
+TirednessManager --> Logger
+TirednessManager --> ConfigManager
+Scriber --> Logger
+Scriber --> ErrorManager
 MemoryMonitor --> RAMManager
 MemoryMonitor --> GPUMemoryManager
 MemoryMonitor --> ErrorManager
+SystemMonitor --> RAMManager
+SystemMonitor --> GPUMemoryManager
+SystemMonitor --> ErrorManager
+TraitsMonitor --> Logger
+ErrorManager --> Logger
+ErrorManager --> StateTracker
+ErrorManager --> ConfigManager
 Logger <-- ErrorManager
 Logger <-- SystemMonitor
 Logger <-- MemoryMonitor
-StateManager --> Logger
-StateManager --> ConfigManager
-SystemContext --> Logger
-SystemContext --> ConfigManager
-Conductor --> RAMManager
-Conductor --> GPUMemoryManager
-Conductor --> MemoriaManager
-Conductor --> Logger
+EventDispatcher --> Logger
+
+' Inheritance/Implementation
+SOVLSystem ..|> SystemInterface
+SystemMediator ..> SOVLSystem
+SystemMediator ..> OrchestratorInterface
+SOVLSystemAdapter ..|> SystemInterface
+SOVLOrchestratorAdapter ..|> OrchestratorInterface
+StateManager ..|> StateAccessor
+PluginInterface <|.. PluginMetadata
 
 @enduml

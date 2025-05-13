@@ -636,10 +636,29 @@ class SOVLTrainer:
                 # Prepare batch for model (assume batch_preparer handles 'memory' field)
                 batch = self.batch_preparer.prepare(batch_texts)
                 batch = move_batch_to_device(batch, self.device)
+                batch_weights_tensor = torch.tensor(batch_weights, dtype=torch.float32, device=self.device)
                 optimizer.zero_grad()
                 outputs = self.model(**batch)
-                loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-                # Apply per-sample weighting if needed (not shown here)
+                # Assume outputs.loss is per-sample if reduction='none', else fallback to scalar
+                losses = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                # Logging: report loss shape and dtype
+                if hasattr(losses, 'shape'):
+                    self._logger.log_info(
+                        f"Loss shape: {losses.shape}, dtype: {losses.dtype}",
+                        event_type="training_loss_shape"
+                    )
+                    print(f"[DEBUG] Loss shape: {losses.shape}, dtype: {losses.dtype}")
+                else:
+                    self._logger.log_warning(
+                        "Loss object has no 'shape' attribute.",
+                        event_type="training_loss_shape_warning"
+                    )
+                if hasattr(losses, 'dim') and losses.dim() > 0 and losses.shape[0] == batch_weights_tensor.shape[0]:
+                    weighted_losses = losses * batch_weights_tensor
+                    loss = weighted_losses.mean()
+                else:
+                    # Fallback: use scalar loss if per-sample not available
+                    loss = losses
                 loss.backward()
                 optimizer.step()
         return trained_memories

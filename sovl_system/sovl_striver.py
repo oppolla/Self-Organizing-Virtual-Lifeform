@@ -77,16 +77,27 @@ class AspirationSystem:
         if self.logger:
             self.logger.log_info("AspirationSystem initialized.")
 
-    def update_aspiration(self, llm, dream_summary: Optional[str] = None, n_recent: int = 50, days_window: int = 7, max_tokens: int = 1024):
+    def update_aspiration(self, llm, dream_summary: Optional[str] = None):
         """
         Run the two-step LLM process to generate and update the doctrine.
         Optionally include dream summary in the doctrine.
         Uses vector search for relevant long-term memory, then applies advanced selection: time window, vibe, recency fallback.
         Handles memory volume and token limits for the prompt.
+        All parameters are now pulled from self.config.
         """
         try:
             if self.logger:
                 self.logger.log_info("Aspiration update started.")
+            # Get config parameters or use defaults
+            n_recent = self.config.get("n_recent", 50)
+            days_window = self.config.get("days_window", 7)
+            max_tokens = self.config.get("max_tokens", 1024)
+            strong_vibe_threshold = self.config.get("strong_vibe_threshold", 0.1)
+            moderate_vibe_threshold = self.config.get("moderate_vibe_threshold", 0.05)
+            min_intensity_strong = self.config.get("min_intensity_strong", 0.4)
+            min_intensity_moderate = self.config.get("min_intensity_moderate", 0.2)
+            doctrine_fallback = self.config.get("doctrine_fallback", "Be open to new experiences.")
+
             # 1. Get the latest short-term embedding as query
             query_embedding = None
             if hasattr(self.long_term_memory, 'get_short_term_context'):
@@ -108,17 +119,17 @@ class AspirationSystem:
                 else:
                     ltm = []
             now = time.time()
-            # 3. Time window filter (e.g., last 7 days)
+            # 3. Time window filter (e.g., last N days)
             recent_cutoff = now - days_window * 86400
             ltm = [m for m in ltm if m.get('timestamp_unix', 0) >= recent_cutoff]
-            # 4. Vibe-based selection (softer, more inclusive)
+            # 4. Vibe-based selection (tunable thresholds)
             def vibe(m):
                 v = m.get('vibe_profile', {})
                 if not isinstance(v, dict): v = {}
                 return v.get('overall_score', 0.5), v.get('intensity', 0.5)
-            strong_vibes = [m for m in ltm if abs(vibe(m)[0] - 0.5) > 0.1 and vibe(m)[1] > 0.4]
-            moderate_vibes = [m for m in ltm if 0.05 < abs(vibe(m)[0] - 0.5) <= 0.1 or 0.2 < vibe(m)[1] <= 0.4]
-            neutral_vibes = [m for m in ltm if abs(vibe(m)[0] - 0.5) <= 0.05 and vibe(m)[1] <= 0.2]
+            strong_vibes = [m for m in ltm if abs(vibe(m)[0] - 0.5) > strong_vibe_threshold and vibe(m)[1] > min_intensity_strong]
+            moderate_vibes = [m for m in ltm if (moderate_vibe_threshold < abs(vibe(m)[0] - 0.5) <= strong_vibe_threshold or min_intensity_moderate < vibe(m)[1] <= min_intensity_strong)]
+            neutral_vibes = [m for m in ltm if abs(vibe(m)[0] - 0.5) <= moderate_vibe_threshold and vibe(m)[1] <= min_intensity_moderate]
             # 5. Merge and deduplicate, sample a mix (adaptive proportions)
             vibe_buckets = [strong_vibes, moderate_vibes, neutral_vibes]
             bucket_counts = [len(b) for b in vibe_buckets]
@@ -130,20 +141,17 @@ class AspirationSystem:
                 allocations = [int(round(p * n_recent)) for p in proportions]
                 # Adjust allocations to sum to n_recent
                 while sum(allocations) < n_recent:
-                    # Add to the largest bucket with available memories left
                     max_idx = max(range(3), key=lambda i: bucket_counts[i] - allocations[i])
                     if bucket_counts[max_idx] > allocations[max_idx]:
                         allocations[max_idx] += 1
                     else:
                         break
                 while sum(allocations) > n_recent:
-                    # Remove from the largest allocation
                     max_idx = max(range(3), key=lambda i: allocations[i])
                     if allocations[max_idx] > 0:
                         allocations[max_idx] -= 1
                     else:
                         break
-                # Sample from each bucket
                 for bucket, n in zip(vibe_buckets, allocations):
                     selected.extend(bucket[:n])
             # Deduplicate
@@ -164,14 +172,12 @@ class AspirationSystem:
             token_count = 0
             for i in recent_interactions:
                 line = f"[{i.get('timestamp_unix', '')}] {i.get('role', '')}: {i.get('content', '')} | vibe: {i.get('vibe_profile', {})}"
-                # Simple token estimate: whitespace split
                 line_tokens = len(line.split())
                 if token_count + line_tokens > max_tokens:
                     break
                 summary_lines.append(line)
                 token_count += line_tokens
             if not summary_lines and recent_interactions:
-                # If nothing fits, include the first memory truncated to max_tokens words
                 first = recent_interactions[0]
                 line = f"[{first.get('timestamp_unix', '')}] {first.get('role', '')}: {first.get('content', '')} | vibe: {first.get('vibe_profile', {})}"
                 words = line.split()
@@ -229,7 +235,7 @@ class AspirationSystem:
                     },
                     stack_trace=traceback.format_exc()
                 )
-            self.current_doctrine = "Be open to new experiences."
+            self.current_doctrine = doctrine_fallback
             self.last_update = time.time()
 
     def get_current_doctrine(self) -> str:
