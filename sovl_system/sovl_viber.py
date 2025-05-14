@@ -66,6 +66,8 @@ class VibeSculptor:
         self.temperament_system = temperament_system
         self.vibes: deque[VibeProfile] = deque(maxlen=self._get_config("history_maxlen", 20))
         self._load_config()
+        self._last_vibe_drop_turn = None  # Track last drop turn
+        self._turn_counter = 0  # Track total turns/interactions
 
     def _load_config(self) -> None:
         """Load vibe configuration elegantly."""
@@ -700,13 +702,31 @@ class VibeSculptor:
                 "trend_overall_score": 0.0
             }
 
+    def increment_turn(self):
+        """Call this at the end of each user interaction to increment the turn counter."""
+        self._turn_counter += 1
+
     @synchronized()
     def lower_vibe(self, amount: float = 0.3):
         """
-        Lower the latest vibe profile's overall_score, intensity, and all four main vibe categories by the given amount, clamped to min_vibe.
+        Lower the latest vibe profile's overall_score, intensity, and all four main vibe categories by the given amount, clamped to min_vibe. Only allow if cooldown has expired.
         """
         if not self.vibes:
             return
+        # Get config values
+        if amount is None:
+            amount = self._get_config("vibe_lower_amount", 0.25)
+        cooldown_turns = self._get_config("vibe_lower_cooldown_turns", 5)
+        # Check cooldown
+        if self._last_vibe_drop_turn is not None:
+            turns_since_last_drop = self._turn_counter - self._last_vibe_drop_turn
+            if turns_since_last_drop < cooldown_turns:
+                self.logger.record_event(
+                    event_type="vibe_lower_cooldown_blocked",
+                    message=f"Vibe drop blocked by cooldown ({turns_since_last_drop}/{cooldown_turns} turns since last drop)",
+                    level="info"
+                )
+                return
         latest = self.vibes[-1]
         new_score = max(self.min_vibe, latest.overall_score - amount)
         new_intensity = max(self.min_vibe, latest.intensity - amount)
@@ -728,6 +748,7 @@ class VibeSculptor:
             timestamp_unix=time.time()
         )
         self.vibes.append(lowered)
+        self._last_vibe_drop_turn = self._turn_counter  # Update last drop turn
         self.logger.record_event(
             event_type="vibe_lowered_due_to_shame",
             message="Vibe and all four main categories lowered due to shame event",

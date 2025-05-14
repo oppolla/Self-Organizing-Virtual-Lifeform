@@ -460,6 +460,7 @@ class VibeConfig(BaseModel):
     balance_force: float = 0.1  # Force applied for homeostatic balancing
     coupling_factor: float = 0.05  # Coupling between vibe components
     vibe_lower_amount: float = 0.3  # Amount to lower vibe on shame/anger event (default 0.3)
+    vibe_lower_cooldown_turns: int = 5  # Number of turns to wait before allowing another vibe drop
 
 # Used by: AspirationSystem, AspirationManager (sovl_striver.py)
 class AspirationConfig(BaseModel):

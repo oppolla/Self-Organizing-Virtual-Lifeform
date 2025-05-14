@@ -221,7 +221,8 @@
     "extremity_weight": 0.5,
     "balance_force": 0.1,
     "coupling_factor": 0.05,
-    "vibe_lower_amount": 0.3
+    "vibe_lower_amount": 0.25,
+    "vibe_lower_cooldown_turns": 10
   },
   "aspiration_config": {
     "n_recent": 50,
