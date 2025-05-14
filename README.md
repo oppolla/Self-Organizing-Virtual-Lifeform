@@ -89,7 +89,7 @@ SOVL features a rich CLI with commands grouped by category. Use `/help` in the C
 - `/trip` — Simulate an altered state with decaying intensity.
 - `/drunk` — Enter “drunk” mode with recursive introspection.
 - `/dream` — Trigger a dream cycle that blends and remixes recent memories into a novel dream.
-- `/gestate` — Enter gestation (training) mode.
+- `/gestate` — Enter gestation (training) mode to crystalize and consolidate memories
 - `/announce` — Announce system metrics at intervals.
 - `/shy` — Enter shy mode (reduced engagement).
 - `/pidgin <language>` — Respond in a specified language.
