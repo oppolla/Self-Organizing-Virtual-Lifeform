@@ -1,46 +1,145 @@
 {
-  "core_config": {
-    "base_model_name": "SmolLM2-360M",
-    "base_model_path": null,
-    "scaffold_model_name": "SmolLM2-135M",
-    "scaffold_model_path": null,
-    "cross_attn_layers": [4, 6],
-    "use_dynamic_layers": false,
-    "layer_selection_mode": "balanced",
-    "custom_layers": null,
-    "valid_split_ratio": 0.2,
-    "random_seed": 42,
-    "quantization": "fp16",
-    "hidden_size": 768,
-    "num_heads": 12,
-    "gradient_checkpointing": true,
-    "initializer_range": 0.02,
-    "migration_mode": true,
-    "device": "cuda"
+  "gestation_config": {
+  "tiredness_threshold": 0.7,
+  "tiredness_check_interval": 10,
+  "tiredness_decay_k": 0.01,
+  "sleep_log_min": 10,
+  "gestation_countdown_seconds": 30,
+    "tiredness_weights": {"log": 0.4, "confidence": 0.3, "time": 0.3},
+    "min_awake_seconds": 60,
+    "max_awake_seconds": 7200,
+    "post_abort_cooldown_seconds": 120,
+    "dream_after_gestation": true
   },
-  "model": {
-    "model_path": "/path/to/SmolLM2-360M/model",
-    "model_type": "causal_lm",
-    "quantization_mode": "fp16"
+  "orchestrator_config": {
+    "log_max_size_mb": 10,
+    "save_path_suffix": "_final.json",
+    "enable_logging": true,
+    "enable_state_saving": true,
+    "state_save_interval": 300,
+    "max_backup_files": 5
   },
+  "logging_config": {
+    "log_file": "sovl_logs.jsonl",
+    "max_size_mb": 10,
+    "compress_old": false,
+    "max_in_memory_logs": 1000,
+    "rotation_count": 5,
+    "max_log_age_days": 30,
+    "prune_interval_hours": 24,
+    "memory_threshold_mb": 100,
+    "gpu_memory_threshold": 0.85,
+    "log_level": "INFO",
+    "logging_enabled": true,
+    "error_cooldown": 1.0,
+    "max_recent_errors": 100,
+    "error_handling_config": {
+      "max_history_per_error": 10,
+      "critical_threshold": 5,
+      "warning_threshold": 10,
+      "retry_attempts": 3,
+      "retry_delay": 1.0,
+      "memory_recovery_attempts": 3,
+      "memory_recovery_delay": 1.0
+  }
+},
   "controls_config": {
-    "enable_scaffold": true,
-    "scaffold_weight_cap": 0.5,
+    "monitor_deadlocks": true,
     "scaffold_unk_id": 0,
-    "enable_cross_attention": true,
-    "enable_dynamic_cross_attention": false,
-    "injection_strategy": "sequential",
-    "blend_strength": 0.5,
-    "attention_weight": 0.5,
-    "max_tokens_per_mapping": 3,
-    "mapping_similarity_threshold": 0.7,
-    "allow_bidirectional_mapping": false,
-    "fallback_strategy": "split",
-    "normalization_level": "basic",
-    "min_semantic_similarity": 0.5,
-    "max_meaning_drift": 0.3,
-    "enable_periodic_validation": true,
-    "conflict_resolution_strategy": "keep_highest_conf"
+    "use_token_map_memory": true,
+    "dynamic_cross_attn_mode": null,
+    "max_generation_retries": 3,
+    "base_batch_size": 1,
+    "memory_threshold": 0.85,
+    "max_cache_size": 1000,
+    "base_temperature": 0.7,
+    "top_k": 50,
+    "top_p": 0.95,
+    "max_new_tokens": 100,
+    "enable_repetition_check": null,
+    "conversation_history_maxlen": null,
+    "memory_decay_rate": null,
+    "enable_error_listening": null,
+    "dream_memory_weight": null
+  },
+  "monitoring_config": {
+    "bond_history_maxlen": 30,
+    "ram_critical_threshold_percent": 90.0,
+    "gpu_critical_threshold_percent": 95.0,
+    "scaffold_confidence_threshold": 0.6,
+    "scaffold_fallback_rate_threshold": 0.2,
+    "poll_interval": 10.0,
+    "trait_history_size": 100
+  },
+  "ram_config": {
+    "memory_threshold": 0.85,
+    "memory_decay_rate": 0.95,
+    "max_batch_size": 32,
+    "initial_batch_size": 8,
+    "batch_size": 8
+  },
+  "gpu_config": {
+    "gpu_threshold": 0.85,
+    "gpu_decay_rate": 0.95,
+    "max_batch_size": 32,
+    "initial_batch_size": 8,
+    "batch_size": 8
+  },
+  "io_config": {
+    "field_mapping": {"prompt": "prompt", "completion": "completion"},
+    "required_fields": ["prompt", "completion"],
+    "min_string_length": 1,
+    "max_string_length": 10000,
+    "strict_validation": false,
+    "shuffle_data": true
+  },
+  "scribed_config": {
+    "scribe_batch_size": 20,
+    "scribe_flush_interval": 2.0,
+    "scribe_queue_maxsize": 2000,
+    "output_path": "scribe/scribe_journal.jsonl"
+  },
+  "core_config": {
+    "random_seed": 42
+  },
+  "generation_config": {
+    "min_batch_size": 1,
+    "max_batch_size": 8,
+    "default_batch_size": 1,
+    "mem_per_sample_mb": 100
+  },
+  "training_config": {
+    "max_seq_length": 1024,
+    "batch_size": 8,
+    "dry_run_params": {}
+  },
+  "curiosity_config": {
+    "enable_curiosity": true,
+    "attention_weight": 0.3,
+    "queue_maxlen": 50,
+    "novelty_history_maxlen": 20,
+    "decay_rate": 0.95,
+    "question_timeout": 1800.0,
+    "novelty_threshold_spontaneous": 0.8,
+    "novelty_threshold_response": 0.8,
+    "pressure_threshold": 0.5,
+    "pressure_drop": 0.3,
+    "silence_threshold": 20.0,
+    "question_cooldown": 30.0,
+    "weight_ignorance": 0.7,
+    "weight_novelty": 0.3,
+    "max_new_tokens": 8,
+    "base_temperature": 0.9,
+    "temperament_influence": 0.3,
+    "top_k": 30,
+    "max_memory_mb": 512.0,
+    "pressure_change_cooldown": 1.0,
+    "min_pressure": 0.1,
+    "max_pressure": 0.9,
+    "pressure_decay_rate": 0.1,
+    "metrics_maxlen": 1000,
+    "min_temperature": 0.7,
+    "max_temperature": 1.7
   },
   "temperament_config": {
     "mood_influence": 0.3,
@@ -62,422 +161,14 @@
     "temperament_confidence_adjustment": 0.5,
     "temperament_pressure_drop": 0.2,
     "lifecycle_params": {
-      "gestation": {
-        "bias": 0.1,
-        "decay": 1.0
-      },
-      "active": {
-        "bias": 0.0,
-        "decay": 0.9
-      },
-      "sleep": {
-        "bias": -0.1,
-        "decay": 0.8
-      }
+      "gestation": {"bias": 0.1, "decay": 1.0},
+      "active": {"bias": 0.0, "decay": 0.9},
+      "sleep": {"bias": -0.1, "decay": 0.8}
     }
-  },
-  "training_config": {
-    "model_name": "SmolLM2-360M",
-    "learning_rate": 1.5e-5,
-    "train_epochs": 1,
-    "batch_size": 2,
-    "max_seq_length": 512,
-    "sigmoid_scale": 0.5,
-    "sigmoid_shift": 3.0,
-    "lifecycle_capacity_factor": 0.01,
-    "lifecycle_curve": "sigmoid_linear",
-    "grad_accum_steps": 4,
-    "exposure_gain_eager": 2,
-    "exposure_gain_default": 2,
-    "max_patience": 2,
-    "dry_run": false,
-    "dry_run_params": {
-      "max_samples": 4,
-      "max_length": 128,
-      "validate_architecture": true,
-      "skip_training": true
-    },
-    "weight_decay": 0.01,
-    "max_grad_norm": 1.0,
-    "use_amp": true,
-    "checkpoint_interval": 1000,
-    "scheduler_type": "linear",
-    "cosine_min_lr": 1e-6,
-    "warmup_ratio": 0.1,
-    "warmup_steps": 300,
-    "total_steps": 5000,
-    "validate_every_n_steps": 100,
-    "checkpoint_path": "checkpoints/sovl_trainer",
-    "dropout_rate": 0.1,
-    "max_epochs": 1,
-    "metrics_to_track": ["loss", "accuracy", "confidence"],
-    "enable_gestation": true,
-    "enable_sleep_training": true,
-    "enable_lifecycle_weighting": true,
-    "sleep_conf_threshold": 0.7,
-    "sleep_log_min": 33,
-    "fatigue_factor_cap": 0.1,
-    "fatigue_scaling_factor": 2.0,
-    "dream_memory_weight": 0.03,
-    "enable_dreaming": true,
-    "repetition_n": 3,
-    "dream_noise_scale": 0.01,
-    "dream_prompt_weight": 0.5,
-    "dream_novelty_boost": 0.03,
-    "dream_memory_decay": 0.95,
-    "dream_prune_threshold": 0.1,
-    "enable_prompt_driven_dreams": true,
-    "dream_swing_var": 0.1,
-    "dream_lifecycle_delta": 0.1,
-    "dream_temperament_on": false,
-    "memory_threshold": 0.85,
-    "memory_decay_rate": 0.95,
-    "use_scaffold_memory": true,
-    "use_token_map_memory": true,
-    "scaffold_weight": 0.3,
-    "max_dream_memory_mb": 128,
-    "dream_memory_maxlen": 3,
-    "confidence_history_maxlen": 5,
-    "temperament_history_maxlen": 5
-  },
-  "scaffold_config": {
-    "model_path": "/path/to/SmolLM2-135M/model",
-    "model_type": "gpt2",
-    "tokenizer_path": "/path/to/SmolLM2-135M/tokenizer",
-    "quantization_mode": "int8"
-  },
-  "dynamic_weighting": {
-    "min_weight": 0.0,
-    "max_weight": 1.0,
-    "weight_decay": 0.01,
-    "momentum": 0.9,
-    "history_size": 5,
-    "enable_dynamic_scaling": true,
-    "weight_curves": ["linear", "sigmoid_linear"]
-  },
-  "curiosity_config": {
-    "enable_curiosity": true,
-    "attention_weight": 0.3,
-    "queue_maxlen": 50,
-    "novelty_history_maxlen": 20,
-    "decay_rate": 0.95,
-    "question_timeout": 1800.0,
-    "novelty_threshold_spontaneous": 0.8,
-    "novelty_threshold_response": 0.8,
-    "pressure_threshold": 0.55,
-    "pressure_drop": 0.3,
-    "silence_threshold": 20.0,
-    "question_cooldown": 60.0,
-    "weight_ignorance": 0.7,
-    "weight_novelty": 0.3,
-    "max_new_tokens": 8,
-    "base_temperature": 0.9,
-    "temperament_influence": 0.3,
-    "top_k": 30,
-    "max_memory_mb": 512.0,
-    "pressure_change_cooldown": 1.0,
-    "min_pressure": 0.1,
-    "max_pressure": 0.9,
-    "pressure_decay_rate": 0.95,
-    "metrics_maxlen": 1000,
-    "min_temperature": 0.7,
-    "max_temperature": 1.7,
-    "lifecycle_params": {
-      "gestation": {
-        "pressure_reduction": 0.5,
-        "novelty_boost": 0.1
-      },
-      "active": {
-        "pressure_reduction": 0.3,
-        "novelty_boost": 0.35
-      },
-      "sleep": {
-        "pressure_reduction": 0.1,
-        "novelty_boost": 0.2
-      }
-    }
-  },
-  "cross_attn_config": {
-    "memory_weight": 0.2
-  },
-  "logging_config": {
-    "log_dir": "logs",
-    "log_file": "sovl_logs.jsonl",
-    "log_level": "INFO",
-    "max_log_size_mb": 10,
-    "backup_count": 5
-  },
-  "error_config": {
-    "error_cooldown": 1.0,
-    "warning_threshold": 5.0,
-    "error_threshold": 7.0,
-    "critical_threshold": 10.0
-  },
-  "generation_config": {
-    "temperature": 0.7,
-    "top_p": 0.9
-  },
-  "data_config": {
-    "batch_size": 2,
-    "max_retries": 3
-  },
-  "data_provider": {
-    "provider_type": "default",
-    "data_path": "/path/to/training/data"
-  },
-  "memory_config": {
-    "memoria": {
-      "storage_path": "storage/",
-      "max_storage_mb": 5120,
-      "state_save_interval": 300,
-      "compression_enabled": true,
-      "encryption_enabled": false,
-      "max_memory_mb": 512,
-      "garbage_collection_threshold": 0.7,
-      "memory_decay_rate": 0.95,
-      "enable_memory_compression": true,
-      "compression_ratio": 0.5,
-      "max_compressed_memory_mb": 1024
-    },
-    "ram": {
-      "max_memory_mb": 1024,
-      "memory_threshold": 0.8,
-      "memory_decay_rate": 0.95,
-      "dream_memory_maxlen": 10,
-      "conversation_history_maxlen": 20,
-      "max_ram_mb": 2048,
-      "ram_threshold": 0.8,
-      "enable_ram_compression": true,
-      "ram_compression_ratio": 0.6,
-      "max_compressed_ram_mb": 4096
-    },
-    "gpu": {
-      "max_memory_mb": 2048,
-      "memory_threshold": 0.9,
-      "check_interval": 1000,
-      "batch_size_adjustment": 0.5,
-      "clear_cache_threshold": 0.95,
-      "max_gpu_memory_mb": 1024,
-      "gpu_memory_threshold": 0.85,
-      "enable_gpu_memory_compression": true,
-      "gpu_compression_ratio": 0.7,
-      "max_compressed_gpu_memory_mb": 2048
-    },
-    "manager": {
-      "enable_memoria_manager": true,
-      "enable_ram_manager": true,
-      "enable_gpu_memory_manager": true,
-      "memory_sync_interval": 60,
-      "enable_memory_monitoring": true,
-      "memory_monitoring_interval": 5
-    }
-  },
-  "io_config": {
-    "field_mapping": {
-      "response": "completion",
-      "prompt": "prompt"
-    },
-    "required_fields": [
-      "prompt",
-      "response"
-    ],
-    "min_string_length": 1,
-    "max_string_length": 10000,
-    "enable_validation": true,
-    "strict_validation": false,
-    "random_seed": 42,
-    "shuffle_data": true,
-    "seed_file": "sovl_seed.jsonl",
-    "min_training_entries": 10,
-    "valid_split_ratio": 0.2,
-    "valid_quantization_modes": [
-      "fp16",
-      "int8",
-      "int4"
-    ],
-    "default_quantization_mode": "fp16"
-  },
-  "state_config": {
-    "max_history": 500,
-    "state_file": "sovl_state.json"
   },
   "confidence_config": {
     "history_maxlen": 5,
     "weight": 0.5
-  },
-  "dream_memory_config": {
-    "max_memories": 100,
-    "base_weight": 0.1,
-    "max_weight": 1.5
-  },
-  "gestation_weighting": {
-    "metadata_fields": {
-      "quality_metrics": {
-        "code": {
-          "enabled": true,
-          "weight": 1.5
-        },
-        "url": {
-          "enabled": true,
-          "weight": 1.3
-        },
-        "question": {
-          "enabled": true,
-          "weight": 1.2
-        },
-        "exclamation": {
-          "enabled": true,
-          "weight": 1.1
-        },
-        "emoji": {
-          "enabled": true,
-          "weight": 0.9
-        }
-      },
-      "content_metrics": {
-        "word_count": 0,
-        "context_word_count": 0,
-        "avg_word_length": 0.0,
-        "sentence_count": 0,
-        "avg_sentence_length": 0.0
-      },
-      "confidence_metrics": {
-        "confidence": 0.5,
-        "temperament": 0.5
-      },
-      "context_metrics": {
-        "is_first_message": false,
-        "is_last_message": false,
-        "context_window_size": 0,
-        "response_time": 0.0
-      }
-    },
-    "content_weights": {
-      "word_count_ratio_scale": 0.5,
-      "optimal_word_length_range": {
-        "min": 4,
-        "max": 8,
-        "weight": 1.2
-      },
-      "suboptimal_word_length_weight": 0.8,
-      "optimal_sentence_count_range": {
-        "min": 2,
-        "max": 5,
-        "weight": 1.2
-      },
-      "excessive_sentence_weight": 0.9,
-      "optimal_sentence_length_range": {
-        "min": 10,
-        "max": 20,
-        "weight": 1.2
-      },
-      "excessive_sentence_length_weight": 0.9
-    },
-    "confidence_weights": {
-      "high_confidence_threshold": 0.8,
-      "high_confidence_weight": 1.3,
-      "moderate_confidence_threshold": 0.6,
-      "moderate_confidence_weight": 1.1,
-      "low_confidence_threshold": 0.4,
-      "low_confidence_weight": 0.8
-    },
-    "temperament_weights": {
-      "balanced_range": {
-        "min": 0.4,
-        "max": 0.6,
-        "weight": 1.2
-      },
-      "extreme_temperament_weight": 0.9
-    },
-    "context_weights": {
-      "first_last_message_weight": 1.2,
-      "optimal_context_range": {
-        "min": 2,
-        "max": 4,
-        "weight": 1.1
-      },
-      "excessive_context_weight": 0.9
-    },
-    "timing_weights": {
-      "max_response_time": 60,
-      "optimal_timing_weight": 1.0
-    },
-    "weight_bounds": {
-      "min": 0.1,
-      "max": 3.0
-    }
-  },
-  "metrics_config": {
-    "token_statistics": {
-      "enabled": true,
-      "ngram_sizes": [2, 3, 4],
-      "special_token_tracking": true,
-      "min_token_frequency": 2,
-      "max_tokens_to_track": 1000,
-      "token_pattern_threshold": 0.1
-    },
-    "performance_metrics": {
-      "enabled": true,
-      "track_generation_time": true,
-      "track_memory_usage": true,
-      "track_efficiency": true,
-      "memory_sample_rate": 1000,
-      "time_window_ms": 5000
-    },
-    "structure_analysis": {
-      "enabled": true,
-      "track_length_metrics": true,
-      "track_whitespace": true,
-      "min_section_length": 10,
-      "max_section_length": 1000,
-      "whitespace_ratio_threshold": 0.3
-    },
-    "relationship_context": {
-      "enabled": true,
-      "max_context_history": 100,
-      "reference_decay_rate": 0.95,
-      "temporal_window_size": 10,
-      "min_relationship_strength": 0.1
-    },
-    "helper_methods": {
-      "indentation_analysis": {
-        "enabled": true,
-        "max_indent_level": 8,
-        "tab_size": 4,
-        "mixed_indent_warning": true
-      },
-      "optimization_analysis": {
-        "enabled": true,
-        "performance_threshold": 0.8,
-        "memory_threshold": 0.9,
-        "optimization_levels": ["basic", "moderate", "aggressive"]
-      }
-    }
-  },
-  "experience_memory": {
-    "max_short_term": 50,
-    "short_term_expiry_seconds": 3600,
-    "embedding_dim": 128,
-    "long_term_top_k": 5,
-    "long_term_retention_days": 30,
-    "memory_logging_level": "info"
-  },
-  "scribed_config": {
-    "output_path": "scribe/sovl_scribe.jsonl",
-    "max_file_size_mb": 50,
-    "buffer_size": 10
-  },
-  "metadata_weighting": {
-    "internal_error_reflection": 0.2,
-    "user_message": 1.0,
-    "system_message": 0.5,
-    "dream_memory": 0.3
-  },
-  "generation_hooks": {
-    "curiosity": true,
-    "temperament": true,
-    "confidence": true,
-    "bonding": true
   },
   "bonding_config": {
       "strong_bond_threshold": 0.8,
@@ -497,48 +188,174 @@
       "bond_sensitivity": 1.0,
       "enable_bonding": true
   },
-  "motivator_config": {
-    "decay_rate": 0.01,
-    "min_priority": 0.1,
-    "completion_threshold": 0.95,
-    "reevaluation_interval": 60,
-    "memory_check_enabled": true,
-    "irrelevance_threshold": 0.2,
-    "completion_drive": 0.7,
-    "novelty_drive": 0.2
+  "introspection_config": {
+    "enable": true,
+    "min_curiosity_trigger": 0.7,
+    "max_confidence_trigger": 0.4,
+    "triggering_moods": ["cautious", "melancholy"],
+    "cooldown_seconds": 30,
+    "base_approval_threshold": 0.6,
+    "status_phrases": [
+      "Processing...", "Considering carefully...", "Reviewing perspectives...", "Evaluating options..."
+    ],
+    "debug_mode": false,
+    "batch_size": 4,
+    "topic_window_messages": 15,
+    "time_window_seconds": 600,
+    "dialogue_maxlen": 100
   },
-"lifecycle_config": {
-    "gestation": {
-      "bias": 0.1,
-      "decay": 1.0
-    },
-    "active": {
-      "bias": 0.0,
-      "decay": 0.9
-    },
-    "sleep": {
-      "bias": -0.1,
-      "decay": 0.8
+  "vibe_config": {
+    "history_maxlen": 20,
+    "default_vibe_score": 0.5,
+    "min_vibe_score": 0.0,
+    "max_vibe_score": 1.0,
+    "switch_threshold": 0.3,
+    "decay_factor": 0.9,
+    "energy_weight": 0.25,
+    "flow_weight": 0.25,
+    "resonance_weight": 0.25,
+    "engagement_weight": 0.25,
+    "repetition_threshold": 0.8,
+    "repetition_factor_min": 0.2,
+    "repetition_factor_max": 0.8,
+    "extremity_weight": 0.5,
+    "balance_force": 0.1,
+    "coupling_factor": 0.05,
+    "vibe_lower_amount": 0.25,
+    "vibe_lower_cooldown_turns": 10
+  },
+  "aspiration_config": {
+    "n_recent": 50,
+    "days_window": 7,
+    "max_tokens": 1024,
+    "strong_vibe_threshold": 0.1,
+    "moderate_vibe_threshold": 0.05,
+    "min_intensity_strong": 0.4,
+    "min_intensity_moderate": 0.2,
+    "doctrine_fallback": "Be open to new experiences."
+  },
+  "scaffold_config": {
+    "max_tokens_per_mapping": 3,
+    "mapping_similarity_threshold": 0.7,
+    "conflict_resolution_strategy": "keep_highest_conf",
+    "min_token_map_confidence": 0.5,
+    "max_low_conf_ratio": 0.2,
+    "max_fallback_ratio": 0.3,
+    "max_drift": 0.9,
+    "cosine_weight": 0.5,
+    "euclidean_weight": 0.3,
+    "norm_weight": 0.2,
+    "levenshtein_weight": 0.4,
+    "char_weight": 0.3,
+    "subword_weight": 0.2,
+    "freq_weight": 0.1,
+    "drift_cache_size": 10000,
+    "token_mapping_fallback_order": [
+      "levenshtein", "subword", "char", "split", "merge", "nearest", "unk"
+    ],
+    "attention_chunk_size": 128,
+    "gpu_memory_threshold": 0.85,
+    "token_mapping": {},
+    "attention_config": {},
+    "memory_config": {}
+  },
+"engram_lora": {
+    "lora_rank": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.1
+  },
+  "lora": {
+    "target_modules": ["q_proj", "v_proj"],
+    "task_type": "CAUSAL_LM"
+  },
+  "model_config": {
+    "base_model_name": "your-base-model-name-or-path",
+    "scaffold_model_name": "your-scaffold-model-name-or-path",
+    "scaffold_model_names": ["your-scaffold-model-1", "your-scaffold-model-2"],
+    "quantization_mode": "fp16"
+  },
+  "memory": {
+    "max_short_term": 50,
+    "short_term_expiry_seconds": null,
+    "embedding_dim": 128,
+    "db_path": "conversations.db",
+    "long_term_retention_days": null,
+    "long_term_top_k": 5,
+    "memory_logging_level": "info",
+    "long_term_max_records": 10000,
+    "faiss_rebuild_threshold": 100,
+    "default_origin": "dialogue_manager",
+    "default_session_id": "default",
+    "default_user_id": "default"
+  },
+  "training": {
+    "optimizer_type": "adamw",
+    "learning_rate": 2e-5,
+    "weight_decay": 0.01,
+    "grad_accum_steps": 4,
+    "max_grad_norm": 1.0,
+    "scheduler_type": "linear",
+    "warmup_steps": 0,
+    "total_steps": 100000,
+    "cosine_min_lr": 1e-6,
+    "warmup_ratio": 0.1,
+    "batch_size": 1,
+    "max_seq_length": 512,
+    "use_amp": false,
+    "max_patience": 2,
+    "max_epochs": 3,
+    "validate_every_n_steps": 500,
+    "checkpoint_interval": 5000,
+    "checkpoint_path": "checkpoints/sovl_trainer",
+    "dropout_rate": 0.1,
+    "metrics_to_track": ["loss", "accuracy", "confidence"],
+    "log_file": "training_logs.jsonl",
+    "max_size_mb": 10,
+    "compress_old": true,
+    "max_in_memory_logs": 100,
+    "rotation_count": 5,
+    "max_log_age_days": 30,
+    "prune_interval_hours": 48,
+    "memory_threshold_mb": 100,
+    "gpu_memory_threshold": 0.85,
+    "error_cooldown": 1.0,
+    "max_recent_errors": 100,
+    "logging_verbosity": "info",
+    "error_handling_config": {
+      "max_history_per_error": 10,
+      "critical_threshold": 5,
+      "warning_threshold": 10,
+      "retry_attempts": 3,
+      "retry_delay": 1.0,
+      "memory_recovery_attempts": 3,
+      "memory_recovery_delay": 1.0
     }
   },
-  "monitoring": {
-    "enable_monitoring": true,
-    "monitor_interval": 60,
-    "metrics_to_track": ["memory_usage", "cpu_usage", "gpu_usage", "error_rate"],
-    "alert_thresholds": {
-      "memory_usage": 0.9,
-      "cpu_usage": 0.9,
-      "gpu_usage": 0.9,
-      "error_rate": 0.1
-    }
+  "queue_config": {
+    "max_queue_size": 2000,
+    "warning_threshold": 0.8,
+    "fallback_path": "scribe_fallback.jsonl",
+    "critical_event_types": ["checkpoint", "training_complete"],
+    "fallback_max_size_mb": 10,
+    "fallback_rotation_count": 3
   },
-  "dreamer_config": {
-    "enable_dreaming": true,
-    "dream_interval": 3600,
-    "dream_memory_weight": 0.03,
-    "dream_novelty_boost": 0.03,
-    "dream_memory_decay": 0.95,
-    "dream_prune_threshold": 0.1
+  "error_config": {
+    "error_cooldown": 1.0,
+    "warning_threshold": 5.0,
+    "error_threshold": 7.0,
+    "critical_threshold": 10.0
+  },
+  "state_config": {
+    "max_history": 100,
+    "state_file": "sovl_state_save.json"
+  },
+"event_type_weights": {
+    "error_message": 0.2,
+    "user_interaction": 1.0,
+    "curiosity_question": 0.8,
+    "curiosity_question_user": 2.0,
+    "dream": 1.5,
+    "meditation": 0.9,
+    "traumatic_memory": 5.0
   }
-
 }
