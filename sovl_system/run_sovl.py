@@ -7,7 +7,7 @@ print(r"""
 |_____/   \____/      \/     |______|    |_____/     |_|    |_____/     |_|    |______| |_|    |_|
 """)
 print("https://github.com/oppolla/Self-Organizing-Virtual-Lifeform")
-print("Version 0.1.1\n")
+print("Version 0.1.1")
 print("License: MIT\n")
 
 import sys
