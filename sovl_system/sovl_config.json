@@ -275,7 +275,7 @@
     "quantization_mode": "fp16"
   },
   "memory": {
-    "max_short_term": 50,
+    "max_short_term": 500,
     "short_term_expiry_seconds": null,
     "embedding_dim": 128,
     "db_path": "conversations.db",
@@ -312,7 +312,7 @@
     "log_file": "training_logs.jsonl",
     "max_size_mb": 10,
     "compress_old": true,
-    "max_in_memory_logs": 100,
+    "max_in_memory_logs": 2500,
     "rotation_count": 5,
     "max_log_age_days": 30,
     "prune_interval_hours": 48,
