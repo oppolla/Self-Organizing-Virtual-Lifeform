@@ -1,11 +1,27 @@
+print(r"""
+  _____    ____   __      __  _            _____   __     __   _____   _______   ______   __  __ 
+ / ____|  / __ \  \ \    / / | |          / ____|  \ \   / /  / ____| |__   __| |  ____| |  \/  |
+| (___   | |  | |  \ \  / /  | |         | (___     \ \_/ /  | (___      | |    | |__    | \  / |
+ \___ \  | |  | |   \ \/ /   | |          \___ \     \   /    \___ \     | |    |  __|   | |\/| |
+ ____) | | |__| |    \  /    | |____      ____) |     | |     ____) |    | |    | |____  | |  | |
+|_____/   \____/      \/     |______|    |_____/      |_|    |_____/     |_|    |______| |_|  |_|
+""")
+print("https://github.com/oppolla/Self-Organizing-Virtual-Lifeform")
+print("Version 0.1.1\n")
+print("License: MIT\n")
+
 import sys
 import platform
 import os
 
 MIN_PYTHON = (3, 8)
 if sys.version_info < MIN_PYTHON:
-    print(f"\033[91m[ERROR] Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required. You have {platform.python_version()}.\033[0m")
-    sys.exit(1)
+    print(f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+ required. You have {platform.python_version()}.")
+    response = input("Type 'c' to continue at your own risk, or 'n' to exit. [c/n]: ").strip().lower()
+    if response == 'c':
+        print("Continuing at your own risk...")
+    else:
+        sys.exit(1)
 
 import subprocess
 
@@ -14,7 +30,8 @@ REQUIRED_PACKAGES = [
     "transformers",
     "peft",
     "bitsandbytes",
-    "pydantic"
+    "pydantic",
+    "numpy"
 ]
 
 def check_dependencies():
@@ -25,14 +42,14 @@ def check_dependencies():
         except ImportError:
             missing.append(pkg)
     if missing:
-        print("\033[91m" + f"[ERROR] Missing required packages: {', '.join(missing)}" + "\033[0m")
+        print(f"Missing required packages: {', '.join(missing)}")
         print("You can install them with:")
         print(f"    pip install {' '.join(missing)}\n")
         response = input("Type 'i' to install automatically, 'm' to manually install and exit, 'c' to continue at your own risk, or 'n' to exit. [i/m/c/n]: ").strip().lower()
         if response == "i":
             try:
                 subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
-                print("\033[92mAll required packages installed.\033[0m")
+                print("All required packages installed.")
                 rerun = input("Would you like to re-run the entry point now? (y/n): ").strip().lower()
                 if rerun == "y":
                     print("Re-running the entry point...\n")
@@ -40,29 +57,17 @@ def check_dependencies():
                 else:
                     print("Please re-run the script manually to continue.")
             except Exception as e:
-                print(f"\033[91m[ERROR] Automatic installation failed: {e}\033[0m")
+                print(f"[ERROR] Automatic installation failed: {e}")
             sys.exit(1)
         elif response == "m":
             print("Please type the above pip install command in your terminal, then re-run this script.")
             sys.exit(1)
         elif response == "c":
-            print("\033[93mContinuing at your own risk...\033[0m")
+            print("Continuing at your own risk...")
             return
         else:
             print("Exiting. Please install the missing packages and try again.")
             sys.exit(1)
-
-print(r"""
-  _____    ____   __      __  _            _____   __     __   _____   _______   ______   __  __ 
- / ____|  / __ \  \ \    / / | |          / ____|  \ \   / /  / ____| |__   __| |  ____| |  \/  |
-| (___   | |  | |  \ \  / /  | |         | (___     \ \_/ /  | (___      | |    | |__    | \  / |
- \___ \  | |  | |   \ \/ /   | |          \___ \     \   /    \___ \     | |    |  __|   | |\/| |
- ____) | | |__| |    \  /    | |____      ____) |     | |     ____) |    | |    | |____  | |  | |
-|_____/   \____/      \/     |______|    |_____/      |_|    |_____/     |_|    |______| |_|  |_|
-""")
-print("https://github.com/oppolla/Self-Organizing-Virtual-Lifeform")
-print("License: MIT\n")
-print("Version 0.1.1\n")
 
 check_dependencies()
 
