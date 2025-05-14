@@ -1,7 +1,5 @@
 # SOVL System (Self-Organizing Virtual Lifeform)
 
-NOTE: This project is still under development 
-
 ## Overview
 SOVL is a complex, modular AI agent framework designed for autonomous learning, adaptation, and self-improvement. It leverages a unique dual-LLM (Large Language Model) architecture—combining a stable base model with a dynamic, scaffolded secondary model—to enable continuous, lifelong learning through biologically inspired mechanisms such as "sleep" and "dreaming."
 
