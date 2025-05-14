@@ -73,6 +73,8 @@ class Shamer:
         self.thin_ice_level = 0
         self.last_thin_ice_reason = "normal"
         self._load_config()
+        self.last_empathy_attempt = 0
+        self.empathy_cooldown = 600  # seconds (10 minutes)
 
     def _load_config(self) -> None:
         """Load shame configuration."""
@@ -441,17 +443,35 @@ class Shamer:
                     r"what are you doing", r"what's going on", r"why did you", r"how could you", r"are you serious", r"do you even"
                 ] if re.search(pat, text))
 
+                # Proactive empathy prompt with cooldown
+                empathy_prompt = None
+                now = time.time()
+                if (
+                    0.4 <= anger_score < 0.7
+                    and not strong_anger
+                    and (now - self.last_empathy_attempt > self.empathy_cooldown)
+                ):
+                    empathy_prompt = EMPATHY_SYSTEM_PROMPT_TEMPLATE.format(
+                        user_input=user_input[:200],
+                        anger_features=", ".join(anger_features) if anger_features else "none"
+                    )
+                    self.last_empathy_attempt = now
+
                 # Create ShameProfile
+                context = {
+                    "conversation_id": conversation_id,
+                    "user_input": user_input[:200],
+                    "anger_features": anger_features,
+                }
+                if empathy_prompt:
+                    context["empathy_prompt"] = empathy_prompt
+
                 shame_id = f"shame_{int(time.time() * 1000)}_{hash(user_input[:50]) & 0xFFFFFFFF}"
                 shame_profile = ShameProfile(
                     frustration_score=frustration_score,
                     trauma_potential=0.0,
                     triggers=triggers,
-                    context={
-                        "conversation_id": conversation_id,
-                        "user_input": user_input[:200],
-                        "anger_features": anger_features,
-                    },
+                    context=context,
                     timestamp_unix=time.time(),
                     shame_id=shame_id,
                     suppression_strength=self.max_suppression,
@@ -471,6 +491,7 @@ class Shamer:
                         "triggers": triggers,
                         "thin_ice_level": self.thin_ice_level,
                         "thin_ice_reason": self.last_thin_ice_reason,
+                        "empathy_prompt": empathy_prompt,
                     }
                 )
 
@@ -588,3 +609,21 @@ class Shamer:
 
     def get_thin_ice_level(self):
         return self.thin_ice_level, self.last_thin_ice_reason
+
+EMPATHY_SYSTEM_PROMPT_TEMPLATE = (
+    "The user appears to be experiencing moderate frustration or upset, likely due to challenges in our recent interaction. "
+    "Their most recent input was: \"{user_input}\". "
+    "Detected emotional indicators include: {anger_features}. "
+    "Your primary objective is to respond with deep empathy, fully acknowledging the user's emotional state and any potential missteps in the conversation. "
+    "Assume responsibility for any confusion, error, or dissatisfaction, even if the cause is unclear, to demonstrate accountability and build trust. "
+    "Avoid any defensive or dismissive language, as this could escalate the user's frustration. "
+    "Instead, express genuine regret for their experience and convey an earnest desire to make things right. "
+    "Reflect briefly on the specific emotional cues (e.g., strong language, questioning tone, or sarcasm) to show you've paid close attention to their words and feelings. "
+    "Offer clear, actionable assistance, such as revisiting the previous topic, clarifying a misunderstanding, or inviting the user to provide more details about their needs. "
+    "If the emotional cues suggest sarcasm or indirect frustration, acknowledge the possibility of a misread tone with humility and invite correction. "
+    "Propose at least two specific ways to move forward, ensuring the user feels empowered to guide the conversation. "
+    "Maintain a warm, approachable tone that prioritizes the user's comfort and signals your commitment to a positive, collaborative exchange. "
+    "Frame your response as a fresh start, aiming to de-escalate tension, correct any errors, and restore a sense of mutual understanding. "
+    "If prior context (e.g., recent conversation history or detected frustration trends) is available, subtly reference it to show continuity and attentiveness, but keep the focus on the present moment. "
+    "Conclude with an open-ended invitation for the user to share their thoughts, reinforcing that their perspective is valued and central to resolving the issue."
+)

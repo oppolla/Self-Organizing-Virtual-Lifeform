@@ -1101,12 +1101,18 @@ class GenerationPrimer:
 
         # 4.5. Sarcasm prompt
         sarcasm_flag = False
+        empathy_prompt = ""
         if shamer is not None and hasattr(shamer, 'get_shame_context'):
             state = getattr(self, 'state_manager', None)
             if state is not None:
                 shame_context = shamer.get_shame_context(state)
                 sarcasm_flag = shame_context.get("sarcasm_flag", False)
-
+                # Surface empathy prompt from most recent active shame, if present
+                if shame_context.get("active_shames"):
+                    for sp in reversed(shame_context["active_shames"]):
+                        if "empathy_prompt" in sp.get("context", {}):
+                            empathy_prompt = sp["context"]["empathy_prompt"]
+                            break
         # 5. Compose all system prompt parts in unified order
         system_prompt_parts = [
             doctrine_section,
@@ -1116,6 +1122,8 @@ class GenerationPrimer:
         ]
         if sarcasm_flag:
             system_prompt_parts.append(SARCASM_SYSTEM_PROMPT)
+        if empathy_prompt:
+            system_prompt_parts.append(empathy_prompt)
         system_prompt_parts.extend([
             kwargs.get('memory_context', ""),
             user_prompt
@@ -1132,6 +1140,7 @@ class GenerationPrimer:
                 "traits_prompt": traits_prompt[:100] + "..." if traits_prompt and len(traits_prompt) > 100 else traits_prompt,
                 "thin_ice_level": thin_ice_level if shamer is not None and hasattr(shamer, 'get_thin_ice_level') else 0,
                 "sarcasm_flag": sarcasm_flag,
+                "empathy_prompt": empathy_prompt,
                 "output_format": kwargs.get('output_format', 'text')
             }
         )
