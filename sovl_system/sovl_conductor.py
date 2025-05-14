@@ -224,7 +224,7 @@ class SOVLOrchestrator(OrchestratorInterface):
                 if idx is None:
                     continue
                 _key, module_name, class_name, dep_map = self.COMPONENT_INIT_LIST[idx]
-                msg = f"[{current}/{total}]  Initializing {key} ({class_name}) from {module_name} ... "
+                msg = f"[{current}/{total}]  Incarnating {key} ({class_name}) from {module_name} ... "
                 print(f"[SOVL System] {msg}", end="", flush=True)
                 try:
                     module = __import__(module_name, fromlist=[class_name])
@@ -260,10 +260,10 @@ class SOVLOrchestrator(OrchestratorInterface):
                     setattr(self, key, None)
                     failed.append((key, str(e)))
                     # Halt initialization immediately if any component fails
-                    print("[SOVL System] Initialization halted due to critical failure.", flush=True)
+                    print("[SOVL System] Incarnation halted due to critical failure.", flush=True)
                     self._log_event("initialization_halted", {"failed_component": key, "error": str(e)})
                     # Print/log summary before raising
-                    print("[SOVL System] Initialization Summary:", flush=True)
+                    print("[SOVL System] Incarnation Summary:", flush=True)
                     print(f"  Succeeded: {initialized}", flush=True)
                     print(f"  Failed: {failed}", flush=True)
                     self._log_event("initialization_summary", {"succeeded": initialized, "failed": failed})
@@ -271,14 +271,14 @@ class SOVLOrchestrator(OrchestratorInterface):
                 current += 1
             print("", flush=True)  # Blank line between groups
         # Print/log summary at the end if all succeeded
-        print("[SOVL System] Initialization Summary:", flush=True)
+        print("[SOVL System] Incarnation Summary:", flush=True)
         print(f"  Succeeded: {initialized}", flush=True)
         print(f"  Failed: {failed}", flush=True)
         self._log_event("initialization_summary", {"succeeded": initialized, "failed": failed})
         if not failed:
             print("[SOVL System] All components initialized. Awakening system...", flush=True)
         else:
-            print(f"[SOVL System] Initialization failed for {len(failed)} component(s):", flush=True)
+            print(f"[SOVL System] Incarnation failed for {len(failed)} component(s):", flush=True)
             for key, err in failed:
                 print(f"    - {key}: {err}", flush=True)
         print(f"[SOVL System] Log file: {self.logger.log_file}", flush=True)
