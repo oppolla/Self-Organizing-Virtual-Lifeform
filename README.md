@@ -317,4 +317,5 @@ See the [LICENSE](./LICENSE) file for full details.
 
 ---
 
-SOVL is an open exploration of what it means for AI agents to learn, adapt, and develop something like an inner life by blending lifelong learning with dynamic, reactive, and proactive behaviors. It exists for the sake of existing and is purpose agnostic.
+SOVL is an open exploration of what it means for AI agents to learn, adapt, and develop something of
+ an inner life by blending lifelong learning with dynamic, reactive, and proactive behaviors into something resembling a virtual lifeform. It exists for the sake of existing and is purpose agnostic.
