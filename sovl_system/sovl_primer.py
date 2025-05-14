@@ -248,6 +248,11 @@ THIN_ICE_OVER_PROMPT = (
     "Behave appropriately: you are absolutely, unequivocally in the wrong, avoid escalation if possible, be extra careful, and prioritize user needs."
 )
 
+SARCASM_SYSTEM_PROMPT = (
+    "Note: The user appears to be using sarcasm. "
+    "Respond with extra care, clarify their intent if needed, and avoid taking statements at face value."
+)
+
 def get_range_label(val):
     if val < 0.2:
         return 'very_low'
@@ -1094,15 +1099,27 @@ class GenerationPrimer:
         bond_score = kwargs.get("bond_score", 0.5)
         traits_prompt = self.get_traits_prompt(bond_score=bond_score)
 
+        # 4.5. Sarcasm prompt
+        sarcasm_flag = False
+        if shamer is not None and hasattr(shamer, 'get_shame_context'):
+            state = getattr(self, 'state_manager', None)
+            if state is not None:
+                shame_context = shamer.get_shame_context(state)
+                sarcasm_flag = shame_context.get("sarcasm_flag", False)
+
         # 5. Compose all system prompt parts in unified order
         system_prompt_parts = [
             doctrine_section,
             system_instruction,
             thin_ice_prompt,
             f"TRAITS: {traits_prompt}" if traits_prompt else "",
+        ]
+        if sarcasm_flag:
+            system_prompt_parts.append(SARCASM_SYSTEM_PROMPT)
+        system_prompt_parts.extend([
             kwargs.get('memory_context', ""),
             user_prompt
-        ]
+        ])
         full_prompt = "\n\n".join([part for part in system_prompt_parts if part])
 
         # Log the full system prompt for traceability
@@ -1114,6 +1131,7 @@ class GenerationPrimer:
                 "doctrine": doctrine,
                 "traits_prompt": traits_prompt[:100] + "..." if traits_prompt and len(traits_prompt) > 100 else traits_prompt,
                 "thin_ice_level": thin_ice_level if shamer is not None and hasattr(shamer, 'get_thin_ice_level') else 0,
+                "sarcasm_flag": sarcasm_flag,
                 "output_format": kwargs.get('output_format', 'text')
             }
         )
