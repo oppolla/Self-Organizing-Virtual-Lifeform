@@ -425,10 +425,20 @@ class Shamer:
                 self.thin_ice_level = level
                 self.last_thin_ice_reason = reason
 
-            # Check if thresholds are met (now also using anger_score)
+            # Check for sustained anger in recent history (3+ angry turns)
+            last_inputs = context_data.get("last_5_inputs", [])
+            recent_anger_count = 0
+            for past_input in last_inputs:
+                past_words = set(re.findall(r'\w+', past_input.lower()))
+                if any(self.is_fuzzy_anger_word(word, self.anger_keywords) for word in past_words):
+                    recent_anger_count += 1
+
+            sustained_anger = recent_anger_count >= 3
+
+            # Only escalate if sustained anger (3+)
             if (
-                frustration_score >= self.frustration_threshold or
-                (anger_score > 0.5 and strong_anger)
+                (frustration_score >= self.frustration_threshold or (anger_score > 0.5 and strong_anger))
+                and sustained_anger
             ):
                 # Extract triggers (now includes blame phrases and interrogative patterns)
                 text = user_input.lower()
@@ -498,7 +508,7 @@ class Shamer:
                 # Lower the vibe due to shame event
                 self.viber.lower_vibe()
 
-                # Delayed capture: store pending event
+                # Delayed capture: store pending event (only after escalation)
                 short_term = self.dialogue_context_manager.get_short_term_context()
                 inciting_text = shame_profile.context.get("user_input", "")
                 inciting_idx = None
@@ -516,6 +526,7 @@ class Shamer:
                 })
 
                 return shame_profile
+            # If not sustained, just set thin ice and return None (no shame, no vibe drop, no pending event)
             return None
         except Exception as e:
             error_manager.record_error(
