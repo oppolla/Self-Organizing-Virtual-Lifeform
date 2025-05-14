@@ -88,8 +88,8 @@ SOVL features a rich CLI with commands grouped by category. Use `/help` in the C
 ### Modes & States
 - `/trip` — Simulate an altered state with decaying intensity.
 - `/drunk` — Enter “drunk” mode with recursive introspection.
-- `/dream` — Trigger a dream cycle for memory consolidation.
-- `/gestate` — Enter gestation (training) mode.
+- `/dream` — Trigger a dream cycle that blends and remixes recent memories into a novel dream.
+- `/gestate` — Enter gestation (training) mode to crystalize and consolidate memories
 - `/announce` — Announce system metrics at intervals.
 - `/shy` — Enter shy mode (reduced engagement).
 - `/pidgin <language>` — Respond in a specified language.
@@ -317,4 +317,6 @@ See the [LICENSE](./LICENSE) file for full details.
 
 ---
 
-SOVL is an open exploration of what it means for AI agents to learn, adapt, and develop something like an inner life by blending lifelong learning with dynamic, reactive, and proactive behaviors. For feedback, questions, or collaboration, use the GitHub repository page.
+SOVL is an open exploration of the possibilities 
+AI agents represent; to learn, adapt, and develop something of
+ an inner life by blending lifelong learning with dynamic, reactive, and proactive behaviors into something resembling a virtual lifeform. It exists for the sake of existing and is purpose agnostic.
