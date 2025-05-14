@@ -120,6 +120,7 @@ class SOVLOrchestrator(OrchestratorInterface):
     ("dreamer", "sovl_dreamer", "Dreamer", {"config_manager": "config_manager", "scribe_path": "config_manager", "error_manager": "error_manager", "state_manager": "state_manager"}),
     ("aspiration_system", "sovl_striver", "AspirationSystem", {"config": "config_manager", "logger": "logger", "long_term_memory": "dialogue_context_manager", "state_manager": "state_manager", "error_manager": "error_manager"}),
     ("introspection_manager", "sovl_meditater", "IntrospectionManager", {"context": "system_context", "state_manager": "state_manager", "error_manager": "error_manager", "curiosity_manager": "curiosity_manager", "confidence_calculator": "confidence_calculator", "temperament_system": "temperament_system", "model_manager": "model_manager", "dialogue_context_manager": "state_manager", "bond_calculator": "bond_calculator"}),
+    ("shamer", "sovl_shamer", "Shamer", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager", "viber": "viber", "dialogue_context_manager": "dialogue_context_manager"}),
     
     # Training and process systems
     ("training_manager", "sovl_trainer", "TrainingWorkflowManager", {"config_manager": "config_manager", "logger": "logger", "state_manager": "state_manager", "model_manager": "model_manager", "error_manager": "error_manager"}),
