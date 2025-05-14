@@ -4,6 +4,5 @@ peft
 bitsandbytes
 pydantic
 numpy
-# The following are only needed for Windows compatibility:
 pyreadline3; sys_platform == "win32"
 windows-curses; sys_platform == "win32"
