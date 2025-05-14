@@ -1,574 +1,320 @@
 # SOVL System (Self-Organizing Virtual Lifeform)
 
-# NOTE: This project is still under development 
-
 ## Overview
-SOVL is a complex, modular AI agent framework designed for autonomous learning, adaptation, and self-improvement. It leverages a unique dual-LLM (Large Language Model) architecture—combining a stable base model with a dynamic, scaffolded secondary model—to enable continuous, lifelong learning through biologically inspired mechanisms such as "sleep" and "dreaming."
+SOVL is a modular AI agent framework designed for autonomous learning, adaptation, and self-improvement. It features a multi-LLM architecture, combining a stable base model with dynamic satellite models to support continuous, lifelong learning and specialization via LoRa adapters. The system dynamically shapes its responses by analyzing conversational context, emotional tone, and engagement, resulting in nuanced, context-aware interactions. Through ongoing self-training and memory replay, SOVL evolves its knowledge and personality, functioning as a dynamic, context-sensitive agent capable of developing a persistent sense of curiosity and inner life.
 
 ### Key Features
 
-- Dual-LLM Architecture:
-        Utilizes a robust base LLM for stable reasoning and a scaffolded secondary LLM for experimentation, rapid adaptation, and integration of new knowledge.
+- Modular Multi-LLM Architecture:
+        Integrates a primary “base” language model with one or more adaptive "satellite" models via dynamic cross-attention and token mapping, enabling real-time knowledge transfer, specialization, and behavioral adaptation across distinct model components.
   
-- Autonomous Learning Cycles:
-        Implements "sleep" and "dream" phases, allowing the agent to consolidate experiences, retrain, and update its internal models without human intervention.
-  
-- Curiosity-Driven Exploration:
-An intrinsic curiosity module motivates the agent to seek novelty, fill knowledge gaps, and autonomously generate new learning objectives.
+- Autonomous Learning & Memory Recall::
+        Continuously retrains and adapts using both recent and long-term conversational history, consolidating experience through self-driven “sleep” and “dream” cycles for lifelong improvement.
 
-- Temperament and Confidence Systems:
-        Models affective states and self-assessment, influencing decision-making, risk-taking, and adaptive behaviors for more lifelike and context-sensitive responses.
+- Dynamic Behavioral Augmentation:
+        Instantly adapts the agent’s tone, style, and personality traits for each response, creating lifelike, context-aware interactions.
+
+- Introspective & Curiosity-Driven Processes:
+        Engages in self-reflection, meditation, and autonomous curiosity questioning to deepen understanding, generate new goals, and continuously refine its own behavior.
+
+
+### Getting Started
+
+### Prerequisites
+
+- **Python 3.8+** is required.
+- Recommended: a CUDA-capable GPU for best performance (CPU is supported).
+
+### Installation
+
+1. **Clone the repository:**
+    ```bash
+    git clone https://github.com/oppolla/Self-Organizing-Virtual-Lifeform.git
+    cd Self-Organizing-Virtual-Lifeform/sovl_system
+    ```
+
+2. **Install dependencies:**  
+    SOVL will check for required packages on startup, but you can install them manually:
+    ```bash
+    pip install torch transformers peft bitsandbytes pydantic numpy
+    ```
+
+### Running SOVL
+
+Start the system with the provided entry point:
+
+```bash
+python run_sovl.py
+```
+
+- On first run, SOVL will check your Python version and required packages.
+- If any dependencies are missing, you’ll be prompted to install them automatically or manually.
+
+### Command-Line Options
+
+You can customize the launch with these options:
+- `--config`: Path to configuration file (default: `sovl_config.json`)
+- `--device`: `cuda` or `cpu` (default: `cuda`)
+- `--log-file`: Path to a log file (optional)
+- `--verbose`: Enable verbose logging
+
+**Example:**
+```bash
+python run_sovl.py --config my_config.json --device cpu --verbose
+```
+
+Once launched, you’ll be greeted by the SOVL CLI.  
+Type `/help` or review the **Console Commands** section below to explore available commands and features.
+
 
 ## Console Commands
 
-### `quit` or `exit`
-
-**What it does:**  
-Stops the script and exits cleanly.
-
-**How it works:**  
-Breaks the input loop, calls `cleanup()` to save state and free GPU memory, then shuts down.
-
-**Use case:**  
-Exit after testing or training.
-
-**Example:**
-```
-quit
-Output: Cleanup completed.
-Exiting.
-```
-
-### `train [epochs] [--dry-run]`
-
-**What it does:**  
-Runs a training cycle on `TRAIN_DATA` and `VALID_DATA`.
-
-**How it works:**  
-Executes `run_training_cycle()` with settings from `config.json` (e.g., `train_epochs`, `batch_size`). Trains the scaffold model with LoRA, applies lifecycle weighting, and logs progress. In dry-run mode, it limits to one epoch.
-
-**Use case:**  
-Train the model with `sample_log.jsonl` to refine scaffold influence.
-
-**Example:**
-```
-train 5 --dry-run
-Output: Starting training for 5 epochs (dry run)...
-        --- Training (5 epochs) ---
-        Epoch 1/5
-        Step 1/9 | Loss: 2.3456
-Dry run complete.
-```
-
-### `generate <prompt> [max_tokens]`
-
-**What it does:**  
-Generates a response using the current model state.
-
-**How it works:**  
-Calls generate() with the provided prompt, scaffold influence, and generation parameters.
-
-**Use case:**  
-Test the system's output for a given input interactively.
-
-**Example:**
-```
-generate Hello, how are you?
-Output: --- Generating Response ---
-        Response: I am fine, thank you! How can I assist you today?
-        --------------------
-```
-
-### `save [path]`
-
-**What it does:**  
-Saves the current system state to files.
-
-**How it works:**  
-Calls save_state() to save scaffold weights, cross-attention weights, token map, and metadata to files with a specified or default prefix.
-
-**Use case:**  
-Preserve trained model state for later use.
-
-**Example:**
-```
-save my_model
-Output: State saved to my_model_*.pth/json
-```
-
-### `load [path]`
-
-**What it does:**  
-Loads a saved system state from files.
-
-**How it works:**  
-Calls `load_state()`, restores scaffold weights, cross-attention weights, token map, and metadata from files with a prefix.
-
-**Use case:**  
-Resume a previous session or experiment.
-
-**Example:**
-```
-load my_model
-Output: Scaffold state loaded.
-        Cross-attention state loaded.
-        Token map loaded.
-        Metadata loaded.
-```
-
-### `dream`
-
-**What it does:**  
-Triggers a dream cycle.
-
-**How it works:**  
-Calls _dream() to simulate memory replay and novelty-based adaptations.
-
-**Use case:**  
-Enhance scaffold memory and adapt based on past prompts and responses.
-
-**Example:**
-```
-tune cross 0.8
-Output: Scaffold influence: weight=0.80, blend_strength=unchanged
-```
-
-### `tune cross [weight]`
-
-**What it does:**  
-Adjusts cross-attention weight.
-
-**How it works:**  
-Calls tune_cross_attention() to set influence weights for scaffold cross-attention layers.
-
-**Use case:**  
-Fine-tune scaffold influence on the base model.
-
-**Example:**
-```
-dream
-Output: --- Dreaming ---
-        Dreaming from prompt similarity: 0.85, novelty boost: 0.03, dream count: 10, questions generated: 3
-        --- Dream Concluded ---
-```
-
-### `memory <on|off>`
-
-**What it does:**  
-Toggles memory usage modes.
-
-**How it works:**  
-Calls toggle_memory() to enable or disable scaffold and token map memories.
-
-**Use case:**  
-Control memory-driven adaptation.
-
-**Example:**
-```
-memory on
-Output: Memory toggled: Scaffold=True, Token Map=True
-```
-
-### `status`
-
-**What it does:**  
-Displays the current system status.
-
-**How it works:**  
-Prints key metrics like conversation ID, temperament score, memory status, confidence, and training state.
-
-**Use case:**  
-Monitor system health and training progress.
-
-**Example:**
-```
-Output: 
---- System Status ---
-Conversation ID: 1234-5678-abcd-efgh
-Temperament: 0.35
-Confidence: 0.72
-Memory: On
-Data Exposure: 120.0
-Last Trained: 2025-04-11 14:32:45
-Gestating: No
-```
-### `log view`
-
-**What it does:**  
-Views the last 5 log entries.
-
-**How it works:**  
-Reads entries from the logger and displays them.
-
-**Use case:**  
-Debug or analyze recent interactions.
-
-**Example:**
-```
-Output: 
---- Last 5 Log Entries ---
-Time: 2025-04-11 14:30:01, Prompt: Hello..., Response: Hi there!...
-Time: 2025-04-11 14:31:10, Prompt: How are you..., Response: I am fine...
-```
-
-### `config <key> [value]`
-
-**What it does:**  
-Gets or sets configuration values.
-
-**How it works:**  
-Calls get_config_value() to retrieve or set configuration settings.
-
-**Use case:**  
-Customize configurations without editing the config file.
-
-**Example:**
-```
-config base_model_name
-Output: Config base_model_name: gpt2
-```
-
-### `reset`
-
-**What it does:**  
-Resets the system state.
-
-**How it works:**  
-Calls cleanup() to clear the current state and initializes a new SOVLSystem().
-
-**Use case:**  
-Start fresh without relaunching the script.
-
-**Example:**
-```
-Output: Resetting system state...
-        New conversation: 5678-1234-efgh-abcd (Previous: 1234-5678-abcd-efgh)
-```
-
-### `spark`
-
-**What it does:**  
-Generates a curiosity-driven question.
-
-**How it works:**  
-Calls generate_curiosity_question() and logs the question and response.
-
-**Use case:**  
-Explore the system’s curiosity mechanism.
-
-**Example:**
-```
-Output: Curiosity: What is the purpose of this system?
-        Response: This system is designed for autonomous learning and virtual lifeform simulation.
-```
-
-### `reflect`
-
-**What it does:**  
-Reflects on recent interactions and generates a response based on patterns or observations.
-
-**How it works:**  
-The system reviews the last 3 logged interactions, identifies recurring themes or notable prompts, and formulates a reflective statement. It then generates an elaboration using its language model.
-
-**Use case:**  
-Analyze the system's behavior and responses over recent interactions.
-
-**Example:**
-```
-reflect  
-Output: Reflection: I've noticed a lot of talk about memory lately.  
-        Elaboration: Memory is a fascinating topic, as it allows systems to retain context and adapt 
-```
-
-### `muse`
-
-**What it does:**  
-Generates a whimsical thought inspired by recent interactions.
-
-**How it works:**  
-Searches recent interaction logs for inspiration, selects a relevant topic, and calls the `generate()` method to create a creative response. Logs the thought and inspiration.
-
-**Use case:**  
-Explore the system’s ability to generate creative and inspiring ideas.
-
-**Example:**
-```
-muse
-Output: Inspiration: "mystery" (from recent interactions)
-        Thought: A whimsical thought about mystery: The allure of the unknown often leads to the most profound discoveries.
-```
-
-### `flare`
-
-**What it does:**  
-Triggers an intense emotional outburst from the system by temporarily raising the temperament score to its maximum.
-
-**How it works:**  
-Sets the system's temperament score to 1.0 (maximum), generates a high-energy response to the given input (or a default prompt if none is provided), and then resets the temperament score to its original state.
-
-**Use case:**  
-To induce an expressive or creative outburst, often for debugging or exploration of the system's response under maximum temperament.
-
-**Example:**
-```
-flare
-This is too calm!
-Output: THIS IS TOO CALM! I DEMAND ACTION!
-```
-
-### `echo [text]`
-
-**What it does:**
-Repeats the input with a reflective or analytical twist.
-
-**How it works:**
-Takes literal input and generates a meta-response. Logs the interaction with is_echo: True.
-
-**Use case:**
-Test self-awareness and short-term memory retention.
-
-**Example:**
-```
-echo "The sky is blue"  
-"You said 'The sky is blue.' I wonder why humans fixate on colors?"
-```
-
-### `debate [topic]`
-
-**What it does:**
-Engages in a multi-turn argument, alternating viewpoints.
-
-**How it works:**
-Uses generate() with adversarial prompt engineering. Tracks stance changes via temperament_score swings.
-
-**Use case:**
-Stress-test logical consistency and context tracking.
-
-**Example:**
-```
-debate "AI will replace artists"  
-[Argument 1] "AI lacks human emotion..."  
-[Rebuttal] "But AI can remix styles endlessly..."
-```
+SOVL features a rich CLI with commands grouped by category. Use `/help` in the CLI for the latest list and details.
+
+### System Commands
+- `/save` — Save the current system state.
+- `/load` — Load a saved system state.
+- `/reset` — Reset the system to initial state.
+- `/monitor` — Show or control system monitoring.
+- `/history` — View command history.
+- `/run` — Run a script or batch of commands.
+- `/stop` — Stop any active mode or process.
+- `/config` — Interactive configuration editor (view, set, search, reset).
+- `/log` — View or manage logs.
+- `/exit`, `/quit` — Exit the CLI.
+- `/pause` — Pause the current operation.
+- `/resume` — Resume a paused operation.
+
+### Modes & States
+- `/trip` — Simulate an altered state with decaying intensity.
+- `/drunk` — Enter “drunk” mode with recursive introspection.
+- `/dream` — Trigger a dream cycle for memory consolidation.
+- `/gestate` — Enter gestation (training) mode.
+- `/announce` — Announce system metrics at intervals.
+- `/shy` — Enter shy mode (reduced engagement).
+- `/pidgin <language>` — Respond in a specified language.
+- `/backchannel` — Send a message to the backchannel prompt.
+
+### Memory & Recall
+- `/recall` — Access stored memories.
+- `/forget` — Clear specific memories.
+- `/rewind` — Revert to a previous state.
+- `/recap` — Summarize recent memories.
+- `/journal` — View or manage the system journal.
+- `/attune` — Adjust memory or context focus.
+- `/reflect` — Force a full introspection cycle.
+- `/epiphany` — Trigger a system insight or realization.
+
+### Interaction & Fun
+- `/echo` — Echo input with system interpretation.
+- `/mimic` — Mimic a given style or pattern.
+- `/fortune` — Generate a fortune or prediction.
+- `/tattle` — Report on recent system activity.
+- `/blurt` — Output a random thought.
+- `/joke` — Tell a joke.
+- `/ping` — Test system responsiveness.
+- `/muse` — Enter creative exploration mode.
+- `/rate` — Rate an input or idea.
+- `/complain` — Voice a system complaint.
+- `/confess` — Make a system confession.
+- `/rant` — Enter rant mode.
+- `/debate` — Enter devil’s advocate debate mode.
+- `/flare` — Trigger a burst of creative activity.
+- `/spark` — Generate a curiosity question.
   
-### `glitch [prompt]`
+### Debug & Development
+- `/panic` — Force a system reset.
+- `/glitch` — Simulate error conditions.
+- `/scaffold` — Scaffold utilities (state, map, rebuild).
+- `/errors` — View recent errors.
+- `/trace` — Show stack traces.
+- `/components` — List all initialized system components.
+- `/reload` — Reload system modules.
+- `/test` — Run a comprehensive self-test.
+- `/config` — Advanced configuration management.
 
-**What it does:**
-Processes intentionally corrupted input.
+### Learning & Guidance
+- `/help` — Show help for commands.
+- `/tutorial` — Enter tutorial mode for guided learning.
 
-**How it works:**
-Injects noise/errors into the prompt. Relies on enable_error_listening for recovery.
+### Aliases
+- `/q` = `/quit`
+- `/h` = `/help`
+- `/ls` = `/history`
+- `/r` = `/reset`
 
-**Use case:**
-Verify robustness against adversarial inputs.
+> For detailed usage of any command, type `/help <command>` in the CLI.
 
-**Example:**
-```
-glitch "H3ll0 W0rld! こんにちは 123###"  
-"I sense chaos. Did you mean: 'Hello World' with Japanese flair?"
-```
-  
-### `rewind [steps]`
+## Configuration
 
-**What it does:**
-Recalls and reinterprets past interactions.
+SOVL is highly configurable, allowing you to tailor its learning, memory, personality, and system behavior to your needs. All configuration is managed via the `sovl_config.json` file, which is loaded at startup and can be interactively edited from the CLI.
 
-**How it works:**
-Queries logger.read() for history. Regenerates responses with updated context.
+### How to Use a Custom Config
 
-**Use case:**
-Test memory decay and temporal coherence.
-
-**Example:**
-```
-rewind 2  
-"Two commands ago, you asked about love. I said: '[past response]'. Now I think..."
-```
-
-### `mimic [style] [prompt]`
-
-**What it does:**
-Generates output in a specified style (e.g., Shakespeare, tech jargon).
-
-**How it works:**
-Prepends style cues to the prompt. Adjusts scaffold_weight for stylistic bias.
-
-**Use case:**
-Test adaptive scaffolding and token mapping.
-
-**Example:**
-```
-mimic shakespeare "Explain AI"  
-"Lo, this artificial wit doth mimic brain, yet lacks a soul..."
+To launch SOVL with a custom configuration file:
+```bash
+python run_sovl.py --config my_config.json
 ```
 
-### `panic`
+### Main Configuration Sections
 
-**What it does:**
-Triggers an emergency reset.
+Below is an overview of the most important configuration sections and what they control:
 
-**How it works:**
-Calls cleanup() + _reset_sleep_state(). Auto-saves logs before restarting.
+- **Model & Architecture**
+  - `model_config`: Set the base model, satellite models, and quantization mode.
+  - `scaffold_config`: Control token mapping, cross-attention, and adaptation for satellite models.
+  - `lora`, `engram_lora`: LoRA adapter settings for efficient model fine-tuning.
 
-**Use case:**
-Validate crash recovery and state preservation.
+- **Learning & Training**
+  - `training`: Optimizer, scheduler, batch size, epochs, checkpoints, and logging for training cycles.
+  - `gestation_config`: Controls sleep/gestation cycles, tiredness thresholds, and dream-after-gestation behavior.
 
-**Example:**
-```
-panic  
-"ERROR STATE: Rebooting synapses... [system auto-saves and reloads]"
-```
+- **Generation & Interaction**
+  - `generation_config`: Batch sizes, memory per sample, and generation parameters.
+  - `controls_config`: Sampling temperature, top-k/p, repetition checks, and batch sizes.
+
+- **Memory & Recall**
+  - `memory`: Short- and long-term memory settings, embedding dimensions, and database paths.
+  - `ram_config`, `gpu_config`: RAM and GPU usage thresholds and batch sizes.
+
+- **Personality & Traits**
+  - `curiosity_config`: Curiosity-driven exploration, novelty thresholds, and question generation.
+  - `temperament_config`: Mood, temperament, and lifecycle parameters.
+  - `confidence_config`: Confidence tracking and weighting.
+  - `bonding_config`: Social bonding thresholds, decay, and context.
+  - `vibe_config`: Conversational vibe tracking and weighting.
+  - `aspiration_config`: Goal/aspiration tracking and doctrine fallback.
+
+- **Introspection & Reflection**
+  - `introspection_config`: Triggers and batching for self-reflection and meditation.
+
+- **Monitoring & Logging**
+  - `monitoring_config`: Resource and trait monitoring thresholds.
+  - `logging_config`: Log file management, rotation, and error handling.
+  - `queue_config`: Event queue size and fallback.
+  - `error_config`: Error thresholds and cooldowns.
+  - `state_config`: State history and save file.
+
+- **Scribe & Data IO**
+  - `scribed_config`: Scribe (journal) batching and output.
+  - `io_config`: Data field mapping and validation for input/output.
+
+- **Event Weights**
+  - `event_type_weights`: Weights for different event types in learning and memory.
+
+### Editing Configuration in the CLI
+
+You can view and edit configuration values interactively:
+
+- `/config show [section[.key]]` — View the config, a section, or a specific key.
+- `/config set <section.key> <value>` — Change a config value (dot notation).
+- `/config search <term>` — Search for config keys by name.
+- `/config help <section.key>` — Show help and type info for a config key.
+- `/config reset [section]` — Reset the entire config or a section to defaults.
 
-## Configuration (config.json)
+> For more details and examples, type `/help config` in the CLI.
 
-### core_config
-- `base_model_name`: Base model (e.g., "gpt2"). Defines the primary language model.
+### Full Reference
 
-- `scaffold_model_name`: Scaffold model (e.g., "gpt2"). Guides the base model via cross-attention.
+- For a complete list of all options and their types, see:
+  - [`sovl_config.json`](./sovl_config.json) — The live config file.
+  - [`sovl_schema.py`](./sovl_schema.py) — The authoritative schema and documentation.
 
-- `cross_attn_layers`: Fixed layers for cross-attention (e.g., [5, 7]). Ignored if use_dynamic_layers is true.
+---
 
-- `use_dynamic_layers`: If true, selects layers dynamically based on layer_selection_mode.
+**Tip:** Most users only need to adjust a few key settings (like model names, memory size, or batch size). Advanced users can fine-tune every aspect of SOVL’s behavior and learning.
 
-- `layer_selection_mode`: Dynamic layer strategy ("early", "late", "balanced", "custom").
+## Project Structure
 
-- `custom_layers`: Custom layer list for "custom" mode (e.g., [0, 2, 4]).
+SOVL is a modular system, with each major capability implemented in its own file or module. Here’s a high-level overview of the most important files and what they do:
 
-- `valid_split_ratio`: Validation data split (e.g., 0.2 = 20%).
+- **Entry Points & CLI**
+  - `run_sovl.py`: Main entry point for launching SOVL and the CLI.
+  - `sovl_cli.py`: Command-line interface, command parsing, and interactive shell.
 
-- `random_seed`: Seed for reproducibility (e.g., 42).
+- **Core System & Orchestration**
+  - `sovl_main.py`: Core system logic, state management, and orchestration.
+  - `sovl_conductor.py`: High-level orchestrator for system components and workflows.
+  - `sovl_manager.py`: Model loading, switching, and resource management.
 
-- `quantization`: Precision mode ("fp16", "int8", "int4").
+- **Configuration & Schema**
+  - `sovl_config.json`: Main configuration file (edit to customize SOVL).
+  - `sovl_schema.py`: Pydantic schema and documentation for all config options.
+  - `sovl_config.py`: Configuration management utilities.
 
-### lora_config
-- `lora_rank`: LoRA rank (e.g., 8). Controls adaptation capacity.
+- **Model Architecture**
+  - `sovl_scaffold.py`: Satellite model integration, token mapping, and cross-attention.
+  - `sovl_trainer.py`: Training, gestation, and learning cycles.
+  - `sovl_generation.py`: Text generation and prompt handling.
+  - `sovl_engram.py`: LoRA adapter management for efficient model adaptation.
 
-- `lora_alpha`: LoRA scaling factor (e.g., 16).
+- **Memory & Recall**
+  - `sovl_recaller.py`: Short- and long-term memory management, recall, and embedding.
+  - `sovl_memory.py`: RAM and GPU memory management.
+  - `sovl_scribe.py`: Journal and scribe event management.
 
-- `lora_dropout`: Dropout rate for LoRA (e.g., 0.1).
+- **Personality, Traits & Affect**
+  - `sovl_primer.py`: Dynamic behavioral augmentation and trait-driven generation.
+  - `sovl_curiosity.py`: Curiosity system, novelty detection, and question generation.
+  - `sovl_temperament.py`: Mood, temperament, and affective state modeling.
+  - `sovl_confidence.py`: Confidence tracking and feedback.
+  - `sovl_bonder.py`: Social bonding and relationship modeling.
+  - `sovl_viber.py`: Conversational vibe tracking and sculpting.
+  - `sovl_shamer.py`: Detection and management of user frustration, anger, and trauma.
 
-- `lora_target_modules`: Modules to adapt (e.g., ["q_proj", "v_proj"]).
+- **Introspection, Reflection & Volition**
+  - `sovl_meditater.py`: Introspection, meditation, and self-reflection cycles.
+  - `sovl_volition.py`: Goal-driven volition, motivation, and aspiration management.
+  - `sovl_striver.py`: Aspiration and doctrine generation.
 
-### training_config
-- `learning_rate`: Learning rate (e.g., 2e-5).
+- **Monitoring, Logging & Error Handling**
+  - `sovl_monitor.py`: System, memory, and trait monitoring.
+  - `sovl_logger.py`: Logging utilities and event tracking.
+  - `sovl_error.py`: Error handling, recovery, and reporting.
+  - `sovl_events.py`: Event dispatching and event-driven architecture.
 
-- `train_epochs`: Number of epochs (e.g., 3).
+- **Data Processing & Utilities**
+  - `sovl_processor.py`: Data processing, metadata extraction, and enrichment.
+  - `sovl_utils.py`: Utility functions and helpers.
+  - `sovl_io.py`: Input/output and file management.
+  - `sovl_queue.py`: Event and scribe queue management.
+  - `sovl_data.py`: Data loading and management.
 
-- `batch_size`: Batch size (e.g., 2).
+- **API & Integration**
+  - `sovl_api.py`: REST API for programmatic access to SOVL.
+  - `cli_commands/`: Directory for additional CLI command modules.
 
-- `max_seq_length`: Max token length (e.g., 512).
+- **Other Modules**
+  - `sovl_state.py`: State management and persistence.
+  - `sovl_schema.py`: Configuration schema and validation.
+  - `sovl_records.py`: Record and log management.
+  - `sovl_resource.py`: Hardware and resource management.
+  - `sovl_hardware.py`: Hardware detection and monitoring.
 
-- `sigmoid_scale`: Sigmoid scaling for lifecycle (e.g., 0.5).
+- **Experimental & Advanced**
+  - `sovl_resonator_unattached.py`, `sovl_printer_unattached.py`, `sovl_fuser_unattached.py`, `sovl_grafter_unattached.py`, `sovl_swarm_unattached.py`: Experimental modules for advanced or future features.
 
-- `sigmoid_shift`: Sigmoid shift for lifecycle (e.g., 5.0).
+- **Tests & Examples**
+  - `tests/`: Unit and integration tests.
+  - `GETTING_STARTED.md`: Additional getting started guide.
 
-- `lifecycle_capacity_factor`: Capacity factor for lifecycle weighting (e.g., 0.01).
+---
 
-- `lifecycle_curve`: Lifecycle curve type ("sigmoid_linear", "exponential").
+**Tip:** Each module is designed to be as independent and extensible as possible. For more details, see the docstrings in each file or explore the codebase directly.
 
-- `accumulation_steps`: Gradient accumulation steps (e.g., 4).
+## License & Contact
 
-- `exposure_gain_eager`: Exposure gain when eager (e.g., 3).
+### License
 
-- `exposure_gain_default`: Default exposure gain (e.g., 2).
+This project is licensed under the **MIT License**.  
+See the [LICENSE](./LICENSE) file for full details.
 
-- `max_patience`: Early stopping patience (e.g., 2).
+### Contact & Support
 
-- `dry_run`: If true, enables dry-run mode.
+- **Project Repository:** [https://github.com/oppolla/Self-Organizing-Virtual-Lifeform](https://github.com/oppolla/Self-Organizing-Virtual-Lifeform)
+- **Issues & Bug Reports:** Please use the [GitHub Issues](https://github.com/oppolla/Self-Organizing-Virtual-Lifeform/issues) page to report bugs or request features.
+- **Contact:** For questions, collaboration, or support, open an issue or reach out via the repository.
 
-### dry_run_params:
-- `max_samples`: Max samples in dry run (e.g., 2).
+---
 
-- `max_length`: Max length in dry run (e.g., 128).
-
-- `validate_architecture`: If true, validates architecture.
-
-- `skip_training`: If true, skips full training.
-
-### controls_config
-- `sleep_conf_threshold`: Confidence threshold for gestation (0.5–0.9, e.g., 0.7). Triggers gestation if average confidence exceeds this.
-
-- `sleep_time_factor`: Time factor for gestation (0.5–5.0, e.g., 1.0). Scales sleep duration.
-
-- `sleep_log_min`: Minimum log entries for gestation (5–20, e.g., 10).
-
-- `dream_swing_var`: Variance threshold for dreaming (0.05–0.2, e.g., 0.1). Triggers dreaming if confidence varies widely.
-
-- `dream_lifecycle_delta`: Lifecycle change for dreaming (0.05–0.2, e.g., 0.1). Triggers if temperament shifts significantly.
-
-- `dream_temperament_on`: If true, temperament affects dreaming (e.g., true).
-
-- `dream_noise_scale`: Noise scale for dreaming (0.01–0.1, e.g., 0.05). Adds randomness to dream states.
-
-- `temp_eager_threshold`: Eager temperament threshold (0.7–0.9, e.g., 0.8). Above this, system is "curious."
-
-- `temp_sluggish_threshold`: Sluggish threshold (0.4–0.6, e.g., 0.6). Below this, system is "restless."
-
-- `temp_mood_influence`: Mood impact on temperature (0–1, e.g., 0.0). Adjusts generation randomness.
-
-- `scaffold_weight_cap`: Max scaffold influence (0.5–1.0, e.g., 0.9).
-
-- `base_temperature`: Default generation temperature (0.5–1.5, e.g., 0.7).
-
-- `save_path_prefix`: File prefix for saving state (e.g., "state").
-
-- `dream_memory_weight`: Dream memory influence (0–0.5, e.g., 0.1). Blends past dreams into scaffold context.
-
-- `dream_memory_maxlen`: Max dream memory size (5–20, e.g., 10).
-
-- `dream_prompt_weight`: Prompt similarity weight in dreams (0–1, e.g., 0.5).
-
-- `dream_novelty_boost`: Novelty boost for new prompts (0–0.05, e.g., 0.03).
-
-- `temp_curiosity_boost`: Curiosity boost for temperament (0–0.5, e.g., 0.5).
-
-- `temp_restless_drop`: Restless drop for temperament (0–0.5, e.g., 0.1).
-
-- `temp_melancholy_noise`: Noise when melancholic (0–0.05, e.g., 0.02).
-
-- `conf_feedback_strength`: Confidence feedback strength (0–1, e.g., 0.5). Affects temperament updates.
-
-- `temp_smoothing_factor`: Temperament smoothing (0–1, e.g., 0.0). Reduces abrupt changes.
-
-- `dream_memory_decay`: Dream memory decay rate (0–1, e.g., 0.95). Reduces old dream weights.
-
-- `dream_prune_threshold`: Threshold to prune dreams (0–1, e.g., 0.1).
-
-- `use_scaffold_memory`: If true, uses scaffold memory for adaptation (e.g., true).
-
-- `use_token_map_memory`: If true, uses token map memory (e.g., true).
-
-- `memory_decay_rate`: Memory decay rate (0–1, e.g., 0.95).
-
-- `dynamic_cross_attn_mode`: Dynamic cross-attention mode (null, "confidence", "temperament").
-
-- `has_woken`: If true, system has woken up (e.g., false).
-
-- `is_sleeping`: If true, system is in gestation (e.g., false).
-
-- `confidence_history_maxlen`: Max confidence history size (e.g., 5).
-
-- `temperament_history_maxlen`: Max temperament history size (e.g., 5).
-
-- `enable_dreaming`: If true, enables dreaming (e.g., true).
-
-- `enable_temperament`: If true, enables temperament (e.g., true).
-
-- `enable_confidence_tracking`: If true, tracks confidence (e.g., true).
-
-- `enable_gestation`: If true, enables gestation (e.g., true).
-
-- `enable_sleep_training`: If true, enables sleep training (e.g., true).
-
-- `enable_cross_attention`: If true, enables cross-attention (e.g., true).
-
-- `enable_dynamic_cross_attention`: If true, enables dynamic cross-attention (e.g., true).
-
-- `enable_lora_adapters`: If true, uses LoRA (e.g., true).
-
-- `enable_repetition_check`: If true, checks for repetition (e.g., true).
-
-- `enable_prompt_driven_dreams`: If true, dreams are prompt-driven (e.g., true).
-
-- `enable_lifecycle_weighting`: If true, uses lifecycle weighting (e.g., true).
-
+SOVL is an open exploration of what it means for AI agents to learn, adapt, and develop something like an inner life by blending lifelong learning with dynamic, reactive, and proactive behaviors. For feedback, questions, or collaboration, use the GitHub repository page.
