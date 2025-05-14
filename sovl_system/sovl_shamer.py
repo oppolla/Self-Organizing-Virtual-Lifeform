@@ -3,12 +3,11 @@ import re
 from collections import deque
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
-from sovl_processor import MetadataProcessor
 from sovl_config import ConfigManager
 from sovl_queue import capture_scribe_event
 from sovl_logger import Logger
 from sovl_state import StateManager
-from sovl_error import ErrorManager
+from sovl_error import ErrorManager, ConfigurationError
 from sovl_utils import synchronized
 from sovl_viber import VibeSculptor
 from sovl_recaller import DialogueContextManager
