@@ -206,7 +206,7 @@ class SOVLOrchestrator(OrchestratorInterface):
             ("System Context & Mediation", ["system_context", "system_mediator"]),
             ("Generation & Calculation", ["generation_manager", "confidence_calculator", "bond_calculator"]),
             ("Personality & Behavior", ["temperament_system", "curiosity_manager", "vibe_sculptor"]),
-            ("Creative & Reflective", ["dreamer", "aspiration_system", "introspection_manager"]),
+            ("Creative & Reflective", ["dreamer", "aspiration_system", "introspection_manager", "shamer"]),
             ("Training & Ingestion", ["training_manager", "scribe_ingestion_processor"]),
             ("Generation Prep & Interface", ["generation_primer"]),
             ("Main System & API", ["sovl_system", "api"]),
