@@ -703,17 +703,25 @@ class VibeSculptor:
     @synchronized()
     def lower_vibe(self, amount: float = 0.3):
         """
-        Lower the latest vibe profile's overall_score and intensity by the given amount, clamped to min_vibe.
+        Lower the latest vibe profile's overall_score, intensity, and all four main vibe categories by the given amount, clamped to min_vibe.
         """
         if not self.vibes:
             return
         latest = self.vibes[-1]
         new_score = max(self.min_vibe, latest.overall_score - amount)
         new_intensity = max(self.min_vibe, latest.intensity - amount)
-        # Create a new VibeProfile with lowered values, keep other fields the same
+        new_dimensions = latest.dimensions.copy()
+        for key in [
+            "energy_base_energy",
+            "flow_rhythm_score",
+            "resonance_topic_consistency",
+            "engagement_engagement_score"
+        ]:
+            if key in new_dimensions:
+                new_dimensions[key] = max(self.min_vibe, new_dimensions[key] - amount)
         lowered = VibeProfile(
             overall_score=new_score,
-            dimensions=latest.dimensions.copy(),
+            dimensions=new_dimensions,
             intensity=new_intensity,
             confidence=latest.confidence,
             salient_phrases=latest.salient_phrases,
@@ -722,7 +730,7 @@ class VibeSculptor:
         self.vibes.append(lowered)
         self.logger.record_event(
             event_type="vibe_lowered_due_to_shame",
-            message="Vibe lowered due to shame event",
+            message="Vibe and all four main categories lowered due to shame event",
             level="warning",
-            additional_info={"old_score": latest.overall_score, "new_score": new_score, "amount": amount}
+            additional_info={"old_score": latest.overall_score, "new_score": new_score, "amount": amount, "lowered_dimensions": {k: new_dimensions.get(k) for k in ["energy_base_energy", "flow_rhythm_score", "resonance_topic_consistency", "engagement_engagement_score"]}}
         )

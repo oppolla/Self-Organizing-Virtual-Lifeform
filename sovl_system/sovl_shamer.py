@@ -85,9 +85,7 @@ class Shamer:
                     "angry", "frustrated", "hate", "annoyed", "wtf", "damn", "shit", "fuck", "idiot", "stupid", "sucks", "useless", "broken", "garbage", "crap", "bullshit", "terrible", "awful", "worst", "dumb", "moron"
                 ]
             )
-            self.trauma_indicators = shame_config.get("trauma_indicators", ["trauma", "hurt", "painful", "trigger"])
             self.frustration_threshold = shame_config.get("frustration_threshold", 0.7)
-            self.trauma_threshold = shame_config.get("trauma_threshold", 0.8)
             self.suppression_decay = shame_config.get("suppression_decay", 0.95)  # Gradual fading of suppression
             self.max_suppression = shame_config.get("max_suppression", 0.9)  # Max avoidance strength
             self.weights = {
@@ -154,41 +152,6 @@ class Shamer:
             "frustration_score": max(0.0, min(1.0, frustration_score)),
             "lexical_score": lexical_score,
             "syntactic_score": syntactic_score,
-        }
-
-    def _compute_trauma_potential(self, text: str, metadata: Optional[Dict[str, Any]], context: Optional[Dict[str, Any]]) -> Dict[str, float]:
-        """Estimate likelihood of trauma trigger using only in-house, explainable features."""
-        trauma_keywords = set([
-            "trauma", "hurt", "painful", "trigger", "abuse", "unsafe", "scared", "panic", "anxious", "threat", "danger", "cry", "distress"
-        ])
-        words = re.findall(r'\w+', text.lower())
-        trauma_hits = sum(1 for word in words if word in trauma_keywords)
-        trauma_density = trauma_hits / (len(words) or 1)
-        # Intensity: more trauma words, longer message, more intense
-        intensity = min(1.0, trauma_hits * 0.2 + (len(text) / 200.0))
-        # Escalation: recent negative messages
-        escalation = 0.0
-        if context and context.get("recent_frustration_flags", 0) > 1:
-            escalation = 0.2
-        # Thread depth: more back-and-forth, more likely to be traumatic
-        thread_depth = 0.0
-        if metadata:
-            relationship_context = metadata.get("relationship_context", {})
-            conversation_tracking = relationship_context.get("conversation_tracking", {})
-            thread_depth = min(conversation_tracking.get("thread_depth", 1) / 10.0, 1.0) * 0.2
-        trauma_score = min(1.0, trauma_density + intensity + escalation + thread_depth)
-        self.logger.record_event(
-            event_type="trauma_potential_computed",
-            message="Trauma potential score computed",
-            level="debug",
-            additional_info={"trauma_score": trauma_score, "trigger_score": trauma_density, "intensity": intensity, "escalation": escalation, "thread_depth": thread_depth}
-        )
-        return {
-            "trauma_score": trauma_score,
-            "trigger_score": trauma_density,
-            "intensity": intensity,
-            "escalation": escalation,
-            "thread_depth": thread_depth,
         }
 
     def detect_anger(self, user_input: str, metadata: Optional[Dict[str, Any]], context: Optional[Dict[str, Any]]) -> (float, list):
@@ -309,9 +272,9 @@ class Shamer:
             additional_info={"shame_id": shame_profile.shame_id}
         )
 
-    def _calculate_thin_ice_level(self, frustration_score, trauma_score, anger_score):
-        max_score = max(frustration_score, trauma_score, anger_score)
-        if trauma_score > 0.95 or anger_score > 0.95:
+    def _calculate_thin_ice_level(self, frustration_score, anger_score):
+        max_score = max(frustration_score, anger_score)
+        if anger_score > 0.95:
             return 4, "extreme"
         if max_score > 0.85:
             return 3, "very_high"
@@ -329,28 +292,23 @@ class Shamer:
         error_manager: ErrorManager,
         turn_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[ShameProfile]:
-        """Detect frustration or trauma and create a ShameProfile if thresholds are met."""
+        """Detect frustration and create a ShameProfile if thresholds are met."""
         try:
             if not isinstance(user_input, str):
                 raise ValueError("user_input must be a string")
 
-            # Compute frustration and trauma scores
+            # Compute frustration score
             frustration_metrics = self._compute_frustration(user_input, turn_metadata)
-            # Get context for escalation
             conversation_id = getattr(state.history, 'conversation_id', "unknown_conv_id")
             context_data = state.get_conversation_context(conversation_id)
-            trauma_metrics = self._compute_trauma_potential(user_input, turn_metadata, context_data)
             frustration_score = frustration_metrics["frustration_score"]
-            trauma_score = trauma_metrics["trauma_score"]
 
-            # New: Use enhanced anger detection
+            # Use enhanced anger detection
             anger_score, anger_features = self.detect_anger(user_input, turn_metadata, context_data)
-
-            # Hardened threshold: require at least one strong feature for anger
             strong_anger = self._has_strong_anger_feature(anger_features)
 
             # Update thin ice level based on scores
-            level, reason = self._calculate_thin_ice_level(frustration_score, trauma_score, anger_score)
+            level, reason = self._calculate_thin_ice_level(frustration_score, anger_score)
             if level > self.thin_ice_level:
                 self.thin_ice_level = level
                 self.last_thin_ice_reason = reason
@@ -358,21 +316,20 @@ class Shamer:
             # Check if thresholds are met (now also using anger_score)
             if (
                 frustration_score >= self.frustration_threshold or
-                trauma_score >= self.trauma_threshold or
                 (anger_score > 0.5 and strong_anger)
             ):
                 # Extract triggers
                 triggers = []
                 words = re.findall(r'\w+', user_input.lower())
                 for word in words:
-                    if word in self.anger_keywords or word in self.trauma_indicators:
+                    if word in self.anger_keywords:
                         triggers.append((word, 0.9))
 
                 # Create ShameProfile
                 shame_id = f"shame_{int(time.time() * 1000)}_{hash(user_input[:50]) & 0xFFFFFFFF}"
                 shame_profile = ShameProfile(
                     frustration_score=frustration_score,
-                    trauma_potential=trauma_score,
+                    trauma_potential=0.0,
                     triggers=triggers,
                     context={
                         "conversation_id": conversation_id,
@@ -393,7 +350,6 @@ class Shamer:
                     additional_info={
                         "shame_id": shame_id,
                         "frustration_score": frustration_score,
-                        "trauma_score": trauma_score,
                         "anger_score": anger_score,
                         "anger_features": anger_features,
                         "triggers": triggers,
@@ -407,7 +363,6 @@ class Shamer:
 
                 # Delayed capture: store pending event
                 short_term = self.dialogue_context_manager.get_short_term_context()
-                # Find index of inciting message (best effort: match content)
                 inciting_text = shame_profile.context.get("user_input", "")
                 inciting_idx = None
                 for i, msg in enumerate(short_term):

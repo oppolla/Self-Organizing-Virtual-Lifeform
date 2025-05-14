@@ -244,7 +244,7 @@ THIN_ICE_PROMPTS = {
 }
 
 THIN_ICE_OVER_PROMPT = (
-    "You have angered the user and are now on thin ice. "
+    "You have angered the user and are now on thin ice! "
     "Behave appropriately: you are absolutely, unequivocally in the wrong, avoid escalation if possible, be extra careful, and prioritize user needs."
 )
 

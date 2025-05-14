@@ -1,3 +1,44 @@
+
+import json
+from functools import lru_cache
+from typing import Optional, Any
+from pathlib import Path
+from pydantic import BaseModel
+from sovl_schema import (
+       GestationConfig,
+       OrchestratorConfig,
+       LoggingConfig,
+       ControlsConfig,
+       MonitoringConfig,
+       RAMConfig,
+       GPUConfig,
+       MetadataProcessorConfig,
+       ScribedConfig,
+       TrainerWeightingConfig,
+       EventTypeWeightsConfig,
+       IOConfig,
+       CoreConfig,
+       GenerationConfig,
+       TrainingConfig,
+       CuriosityConfig,
+       TemperamentConfig,
+       ConfidenceConfig,
+       BondingConfig,
+       BondConfig,
+       IntrospectionConfig,
+       VibeConfig,
+       AspirationConfig,
+       ScaffoldConfig,
+       EngramLoraConfig,
+       LoraConfig,
+       ModelConfig,
+       MemoryConfig,
+       TrainingConfigSchema,
+       QueueConfig,
+       ErrorConfig,
+       StateConfig
+   )
+
 """
 SOVL Config Manager (Pydantic-based, Backwards Compatible)
 
@@ -16,16 +57,8 @@ Usage:
     # Legacy: ConfigManager().get('controls_config.base_temperature')
 """
 
-import json
-from functools import lru_cache
-from typing import Optional, Any
-from pathlib import Path
-from sovl_config_schema import *  # Import all config section models
-
 CONFIG_PATH = Path(__file__).parent / "sovl_config.json"
 
-# Define the aggregate config model (if not present in schema)
-from pydantic import BaseModel
 
 class SOVLConfig(BaseModel):
     # Add all top-level config sections as fields

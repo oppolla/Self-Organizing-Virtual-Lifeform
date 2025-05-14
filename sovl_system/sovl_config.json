@@ -220,7 +220,8 @@
     "repetition_factor_max": 0.8,
     "extremity_weight": 0.5,
     "balance_force": 0.1,
-    "coupling_factor": 0.05
+    "coupling_factor": 0.05,
+    "vibe_lower_amount": 0.3
   },
   "aspiration_config": {
     "n_recent": 50,

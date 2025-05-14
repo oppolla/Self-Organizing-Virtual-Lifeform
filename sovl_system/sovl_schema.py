@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 
@@ -460,6 +459,7 @@ class VibeConfig(BaseModel):
     extremity_weight: float = 0.5  # Weight for extreme streaks in decay calculation
     balance_force: float = 0.1  # Force applied for homeostatic balancing
     coupling_factor: float = 0.05  # Coupling between vibe components
+    vibe_lower_amount: float = 0.3  # Amount to lower vibe on shame/anger event (default 0.3)
 
 # Used by: AspirationSystem, AspirationManager (sovl_striver.py)
 class AspirationConfig(BaseModel):
