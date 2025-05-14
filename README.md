@@ -22,8 +22,6 @@ SOVL is a complex, modular AI agent framework designed for autonomous learning, 
 
 ### Getting Started
 
-## Getting Started
-
 ### Prerequisites
 
 - **Python 3.8+** is required.
