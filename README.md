@@ -1,18 +1,22 @@
 # SOVL System (Self-Organizing Virtual Lifeform)
 
 ## Overview
-SOVL is a modular AI agent framework designed for autonomous learning, adaptation, and self-improvement. It features a multi-LLM architecture, combining a stable base model with dynamic satellite models to support continuous, lifelong learning and specialization via LoRa adapters. The system dynamically shapes its responses by analyzing conversational context, emotional tone, and engagement, resulting in nuanced, context-aware interactions. Through ongoing self-training and memory replay, SOVL evolves its knowledge and personality, functioning as a dynamic, context-sensitive agent capable of developing a persistent sense of curiosity and inner life.
+SOVL is a modular AI entity designed for autonomous learning, adaptation, and self-improvement. The system features a multi-LLM architecture, integrating a frozen core model with dynamic satellite models to enable continuous, lifelong learning and task specialization. 
+
+The core model, a stable large language model, remains unchanged during operation, preserving its general capabilities. Satellite models, specialized over time through lived experiences, are fine-tuned using Low-Rank Adaptation (LoRA) adapters. These adapters apply low-rank updates to satellite model layers during a *sleep* state, enabling rapid adaptation without modifying the full model. 
+
+The system dynamically shapes its responses by analyzing conversational context, emotional tone, and engagement, resulting in nuanced, context-aware interactions. Through ongoing self-training and memory replay, SOVL evolves its knowledge and personality over time as it gains more experiences, functioning as a dynamic, context-sensitive entity capable of developing a persistent sense of self and inner life.
 
 ### Key Features
 
 - Modular Multi-LLM Architecture:
-        Integrates a primary “base” language model with one or more adaptive "satellite" models via dynamic cross-attention and token mapping, enabling real-time knowledge transfer, specialization, and behavioral adaptation across distinct model components.
+        Integrates a primary “core” language model with one or more adaptive "satellite" models via dynamic cross-attention and token mapping, enabling real-time knowledge transfer, specialization, and behavioral adaptation across distinct model components.
   
 - Autonomous Learning & Memory Recall::
         Continuously retrains and adapts using both recent and long-term conversational history, consolidating experience through self-driven “sleep” and “dream” cycles for lifelong improvement.
 
 - Dynamic Behavioral Augmentation:
-        Instantly adapts the agent’s tone, style, and personality traits for each response, creating lifelike, context-aware interactions.
+        Instantly adapts the entity’s tone, style, and personality traits for each response, creating lifelike, context-aware interactions.
 
 - Introspective & Curiosity-Driven Processes:
         Engages in self-reflection, meditation, and autonomous curiosity questioning to deepen understanding, generate new goals, and continuously refine its own behavior.
