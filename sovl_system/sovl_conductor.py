@@ -75,7 +75,7 @@ class SOVLOrchestrator(OrchestratorInterface):
         }),
         ("event_dispatcher", "sovl_events", "EventDispatcher", {
             "config_manager": {"key": "config_manager", "required": True},
-            "logger": {"key": "logger", "required": True}
+            "logger": {"key": "logger", "required": False}
         }),
 
         # Basic data and resource management
@@ -85,17 +85,17 @@ class SOVLOrchestrator(OrchestratorInterface):
             "error_manager": {"key": "error_manager", "required": True}
         }),
         ("scribe_queue", "sovl_queue", "ScribeQueue", {
-            "logger": {"key": "logger", "required": True}
+            "logger": {"key": "logger", "required": False}
         }),
         ("hardware_manager", "sovl_hardware", "HardwareManager", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
-            "state_manager": {"key": "state_manager", "required": True}
+            "state_manager": {"key": "state_manager", "required": False}
         }),
         ("data_manager", "sovl_data", "DataManager", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
-            "state_manager": {"key": "state_manager", "required": True}
+            "state_manager": {"key": "state_manager", "required": False}
         }),
 
         # Model and core processing
@@ -107,35 +107,35 @@ class SOVLOrchestrator(OrchestratorInterface):
         ("metadata_processor", "sovl_processor", "MetadataProcessor", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
-            "state_accessor": {"key": "state_manager", "required": True}
+            "state_accessor": {"key": "state_manager", "required": False}
         }),
         ("lora_adapter_manager", "sovl_engram", "LoraAdapterManager", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
-            "error_handler": {"key": "error_manager", "required": True}
+            "error_handler": {"key": "error_manager", "required": False}
         }),
         ("scaffold_provider", "sovl_scaffold", "ScaffoldProvider", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
-            "error_handler": {"key": "error_manager", "required": True},
+            "error_handler": {"key": "error_manager", "required": False},
             "ram_manager": {"key": "ram_manager", "required": True},
             "gpu_manager": {"key": "gpu_manager", "required": True}
         }),
         ("cross_attention_injector", "sovl_scaffold", "CrossAttentionInjector", {
             "config_manager": {"key": "config_manager", "required": True},
-            "logger": {"key": "logger", "required": True},
-            "ram_manager": {"key": "ram_manager", "required": True},
-            "gpu_manager": {"key": "gpu_manager", "required": True}
+            "logger": {"key": "logger", "required": False},
+            "ram_manager": {"key": "ram_manager", "required": False},
+            "gpu_manager": {"key": "gpu_manager", "required": False}
         }),
         ("scaffold_token_mapper", "sovl_scaffold", "ScaffoldTokenMapper", {
             "base_tokenizer": {"key": "model_manager", "required": True},
             "scaffold_tokenizer": {"key": "model_manager", "required": True},
-            "logger": {"key": "logger", "required": True},
+            "logger": {"key": "logger", "required": False},
             "config": {"key": "config_manager", "required": True},
             "base_model": {"key": "model_manager", "required": True},
             "scaffold_model": {"key": "model_manager", "required": True},
-            "ram_manager": {"key": "ram_manager", "required": True},
-            "gpu_manager": {"key": "gpu_manager", "required": True},
+            "ram_manager": {"key": "ram_manager", "required": False},
+            "gpu_manager": {"key": "gpu_manager", "required": False},
             "provider": {"key": "scaffold_provider", "required": True}
         }),
 
@@ -155,6 +155,16 @@ class SOVLOrchestrator(OrchestratorInterface):
             "ram_manager": {"key": "ram_manager", "required": True},
             "gpu_manager": {"key": "gpu_manager", "required": True},
             "error_manager": {"key": "error_manager", "required": True}
+        }),
+
+        # Auxiliary Managers (Moved here for earlier initialization)
+        ("lifecycle_manager", "sovl_trainer", "LifecycleManager", {
+            "config_manager": {"key": "config_manager", "required": True},
+            "logger": {"key": "logger", "required": True}
+        }),
+        ("scaffold_manager", "sovl_scaffold", "ScaffoldManager", {
+            "config_manager": {"key": "config_manager", "required": True},
+            "logger": {"key": "logger", "required": True}
         }),
 
         # System foundation components
@@ -191,6 +201,10 @@ class SOVLOrchestrator(OrchestratorInterface):
             "logger": {"key": "logger", "required": True},
             "user_profile_state": {"key": "state_manager", "required": True},
             "state_manager": {"key": "state_manager", "required": True}
+        }),
+        ("bond_modulator", "sovl_bonder", "BondModulator", {
+            "bond_calculator": {"key": "bond_calculator", "required": True},
+            "max_retries": {"key": "max_retries", "required": False}
         }),
 
         # Advanced personality and behavior systems
@@ -229,7 +243,7 @@ class SOVLOrchestrator(OrchestratorInterface):
         ("aspiration_system", "sovl_striver", "AspirationSystem", {
             "config": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
-            "long_term_memory": {"key": "dialogue_context_manager", "required": False},
+            "long_term_memory": {"key": "state_manager._current_state.dialogue_context", "required": True},
             "state_manager": {"key": "state_manager", "required": True},
             "error_manager": {"key": "error_manager", "required": True}
         }),
@@ -248,8 +262,15 @@ class SOVLOrchestrator(OrchestratorInterface):
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
             "state_manager": {"key": "state_manager", "required": True},
-            "viber": {"key": "viber", "required": False},
-            "dialogue_context_manager": {"key": "dialogue_context_manager", "required": False}
+            "viber": {"key": "vibe_sculptor", "required": False},
+            "dialogue_context_manager": {"key": "state_manager", "required": False}
+        }),
+
+        # Dialogue Context Management (Moved and Corrected)
+        ("dialogue_shutdown", "sovl_recaller", "DialogueShutdown", {
+            "dialogue_context_manager": {"key": "state_manager._current_state.dialogue_context", "required": True},
+            "long_term_memory": {"key": "state_manager._current_state.dialogue_context.ltm", "required": False},
+            "logger": {"key": "logger", "required": True}
         }),
 
         # Training and process systems
@@ -291,7 +312,7 @@ class SOVLOrchestrator(OrchestratorInterface):
             "state_manager": {"key": "state_manager", "required": True},
             "error_manager": {"key": "error_manager", "required": True},
             "generation_primer": {"key": "generation_primer", "required": True},
-            "dialogue_context_manager": {"key": "dialogue_context_manager", "required": False},
+            "dialogue_context_manager": {"key": "state_manager", "required": False},
             "device": {"key": "device", "required": False},
             "lifecycle_manager": {"key": "lifecycle_manager", "required": False},
             "scaffold_manager": {"key": "scaffold_manager", "required": False}
@@ -302,26 +323,7 @@ class SOVLOrchestrator(OrchestratorInterface):
 
         # CLI handler must be last as it depends on sovl_system which is created late
         ("cli_handler", "sovl_cli", "CommandHandler", {
-            "sovl_system": {"key": "system", "required": True}
-        }),
-
-        # Add more components as needed
-        ("dialogue_shutdown", "sovl_recaller", "DialogueShutdown", {
-            "dialogue_context_manager": {"key": "dialogue_context_manager", "required": True},
-            "long_term_memory": {"key": "dialogue_context_manager.long_term", "required": False},
-            "logger": {"key": "logger", "required": True}
-        }),
-        ("bond_modulator", "sovl_bonder", "BondModulator", {
-            "bond_calculator": {"key": "bond_calculator", "required": True},
-            "max_retries": {"key": "max_retries", "required": False}
-        }),
-        ("lifecycle_manager", "sovl_trainer", "LifecycleManager", {
-            "config_manager": {"key": "config_manager", "required": True},
-            "logger": {"key": "logger", "required": True}
-        }),
-        ("scaffold_manager", "sovl_scaffold", "ScaffoldManager", {
-            "config_manager": {"key": "config_manager", "required": True},
-            "logger": {"key": "logger", "required": True}
+            "sovl_system": {"key": "sovl_system", "required": True}
         }),
     ]
 
