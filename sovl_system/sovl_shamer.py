@@ -103,6 +103,19 @@ class Shamer:
                 level="info",
                 additional_info={"weights": self.weights, "anger_keywords": self.anger_keywords}
             )
+            apology_config = self.config_manager.get_section("apology_config", {})
+            self.apology_weights = {
+                "direct": apology_config.get("direct_apology_weight", 0.4),
+                "casual": apology_config.get("casual_apology_weight", 0.3),
+                "defensive": apology_config.get("defensive_apology_weight", 0.2),
+                "reconciliation": apology_config.get("reconciliation_weight", 0.25),
+                "tentative": apology_config.get("tentative_apology_weight", 0.15),
+                "politeness": apology_config.get("politeness_marker_weight", 0.05)
+            }
+            self.apology_thresholds = {
+                "direct": apology_config.get("direct_apology_threshold", 0.4),
+                "tentative": apology_config.get("tentative_apology_threshold", 0.6)
+            }
         except Exception as e:
             self.logger.record_event(
                 event_type="shame_config_failed",
@@ -413,7 +426,7 @@ class Shamer:
             if self.thin_ice_level > 0:
                 apology_score, apology_features, _ = self.detect_apology(user_input)
                 if apology_score > 0.5:
-                    self.apply_configurable_reset()
+                    self.apply_configurable_reset(apology_score)
                     self.logger.record_event(
                         event_type="apology_detected",
                         message="Apology detected, applying configurable reset",
@@ -728,8 +741,10 @@ class Shamer:
             score += 0.25
             features.append("reconciliation_attempt")
         if any(word in politeness_markers for word in words) or has_apology_phrase(text, politeness_markers):
-            score += 0.1
-            features.append("politeness_marker")
+            # Only add score if other apology features are present
+            if any(feature in features for feature in ["direct_apology", "casual_apology", "defensive_apology", "tentative_apology"]):
+                score += 0.05  # Reduced weight
+                features.append("politeness_marker")
         if has_apology_phrase(text, tentative_apologies) or any(is_fuzzy_apology_word(word, tentative_apologies) for word in words):
             score += 0.15  # Lower weight due to ambiguity
             features.append("tentative_apology")
@@ -790,17 +805,41 @@ class Shamer:
 
         return min(score, 1.0), features, apology_threshold
 
-    def apply_configurable_reset(self):
-        # Retrieve the configured vibe drop value and use it to raise the vibe
+    def apply_configurable_reset(self, apology_score: float):
+        """
+        Apply a configurable reset based on the apology score.
+        Ensure that apologies are meaningful and effective.
+        """
+        # Retrieve the configured vibe drop value
         vibe_drop_value = self._get_config("vibe_drop_value", 0.25)  # Example default value
-        self.viber.raise_vibe(amount=vibe_drop_value)
 
-        # Reset thin ice level to zero
-        self.thin_ice_level = 0
+        # Calculate the vibe increase based on the apology score
+        # Ensure a minimum vibe increase to make apologies feel meaningful
+        min_vibe_increase = 0.05 * vibe_drop_value  # 5% of the vibe drop value
+        vibe_increase = max(min_vibe_increase, vibe_drop_value * (1 - apology_score))
 
-        # Reduce suppression strength to a baseline level
-        for shame_profile in self.shame_history:
-            shame_profile.suppression_strength = min(shame_profile.suppression_strength, 0.5)  # Example baseline
+        # Apply the calculated vibe increase
+        self.viber.raise_vibe(amount=vibe_increase)
+
+        # Determine reset strength based on apology score
+        if apology_score > 0.7:
+            # Stronger reset for higher scores
+            self.thin_ice_level = 0
+            for shame_profile in self.shame_history:
+                shame_profile.suppression_strength = min(shame_profile.suppression_strength, 0.5)  # Example baseline
+        else:
+            # Partial reset for minor apologies
+            self.thin_ice_level = max(0, self.thin_ice_level - 1)
+            for shame_profile in self.shame_history:
+                shame_profile.suppression_strength *= 0.9  # Gradual reduction
+
+        # Log the reset action
+        self.logger.record_event(
+            event_type="configurable_reset_applied",
+            message="Configurable reset applied based on apology score",
+            level="info",
+            additional_info={"apology_score": apology_score, "thin_ice_level": self.thin_ice_level, "vibe_increase": vibe_increase}
+        )
 
 EMPATHY_SYSTEM_PROMPT_TEMPLATE = (
     "The user appears to be experiencing moderate frustration or upset, likely due to challenges in our recent interaction. "

@@ -224,6 +224,16 @@
     "vibe_lower_amount": 0.25,
     "vibe_lower_cooldown_turns": 10
   },
+  "apology_config": {
+    "direct_apology_weight": 0.4,
+    "casual_apology_weight": 0.3,
+    "defensive_apology_weight": 0.2,
+    "reconciliation_weight": 0.25,
+    "tentative_apology_weight": 0.15,
+    "politeness_marker_weight": 0.05,
+    "direct_apology_threshold": 0.4,
+    "tentative_apology_threshold": 0.6
+  },
   "aspiration_config": {
     "n_recent": 50,
     "days_window": 7,

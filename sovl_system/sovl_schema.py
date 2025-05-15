@@ -532,6 +532,17 @@ class MemoryConfig(BaseModel):
     default_session_id: str = "default"  # Default session ID
     default_user_id: str = "default"  # Default user ID
 
+# Used by: ShameManager (sovl_shamer.py)
+class ApologyConfig(BaseModel):
+    direct_apology_weight: float = Field(0.4, ge=0.0, le=1.0)
+    casual_apology_weight: float = Field(0.3, ge=0.0, le=1.0)
+    defensive_apology_weight: float = Field(0.2, ge=0.0, le=1.0)
+    reconciliation_weight: float = Field(0.25, ge=0.0, le=1.0)
+    tentative_apology_weight: float = Field(0.15, ge=0.0, le=1.0)
+    politeness_marker_weight: float = Field(0.05, ge=0.0, le=1.0)
+    direct_apology_threshold: float = Field(0.4, ge=0.0, le=1.0)
+    tentative_apology_threshold: float = Field(0.6, ge=0.0, le=1.0)
+
 # Used by: TrainingConfig, TrainingWorkflowManager (sovl_trainer.py)
 class TrainingConfigSchema(BaseModel):
     # Optimizer
