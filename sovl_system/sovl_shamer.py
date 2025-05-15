@@ -409,6 +409,20 @@ class Shamer:
             if not isinstance(user_input, str):
                 raise ValueError("user_input must be a string")
 
+            # --- Apology detection and reset if in shame state ---
+            if self.thin_ice_level > 0:
+                apology_score, apology_features, _ = self.detect_apology(user_input)
+                if apology_score > 0.5:
+                    self.apply_configurable_reset()
+                    self.logger.record_event(
+                        event_type="apology_detected",
+                        message="Apology detected, applying configurable reset",
+                        level="info",
+                        additional_info={"apology_score": apology_score, "apology_features": apology_features}
+                    )
+                    # After reset, do not proceed with shame detection for this turn
+                    return None
+
             # Compute frustration score
             frustration_metrics = self._compute_frustration(user_input, turn_metadata)
             conversation_id = getattr(state.history, 'conversation_id', "unknown_conv_id")
@@ -620,6 +634,173 @@ class Shamer:
 
     def get_thin_ice_level(self):
         return self.thin_ice_level, self.last_thin_ice_reason
+
+    def detect_apology(self, user_input: str) -> Tuple[float, List[str], float]:
+        """Detect apology in user input with expanded keywords and contextual analysis. Returns (score, features, dynamic_threshold)."""
+        # Keyword sets
+        direct_apologies = {
+            "sorry", "apologies", "apologize", "regret", "sorrow",
+            "i'm sorry", "i apologize", "my apologies", "so sorry", "really sorry", "deeply sorry",
+            "i was mistaken", "i was wrong",
+            "forgive me", "pardon me", "i regret that", "i'm remorseful",
+            "my sincerest apologies", "truly sorry",
+            "i owe you an apology", "i'm in the wrong"
+        }
+        casual_apologies = {
+            "my bad", "oops", "my fault", "my mistake", "screwed up", "messed up", "whoops",
+            "my goof", "my screw-up", "my oops", "blew it",
+            "cocked up", "mucked up",
+            "my error", "dropped the ball",
+            "doh", "ugh"
+        }
+        defensive_apologies = {
+            "didn't mean to", "wasn't my intention", "if i upset you", "if i came across", "no offense meant",
+            "you're right", "you're correct",
+            "if i offended you", "if that came out wrong", "not my intent",
+            "i didn't intend that", "hope i didn't upset you",
+            "my misunderstanding", "i misread that"
+        }
+        reconciliation_phrases = {
+            "let's start over", "can we try again", "let's move on", "fresh start", "make it right",
+            "nevermind i get it now",
+            "let's reset", "can we backtrack", "let's clear the air",
+            "i see now", "got it now", "i understand now",
+            "let's make this work", "we're good now"
+        }
+        politeness_markers = {
+            "please", "thank you", "appreciate it", "i understand", "i hear you",
+            "kindly", "grateful for", "thanks for that",
+            "i appreciate your patience", "thanks for clarifying"
+        }
+        tentative_apologies = {
+            "my confusion", "i got mixed up", "i missed that",
+            "that was on me", "i take it back", "i stand corrected",
+            "guess i misjudged", "i see where i went wrong",
+            "my apologies if so", "sorry if that seemed off"
+        }
+
+        # Build and cache the regex for multi-word phrases
+        if not hasattr(self, '_apology_phrases_regex'):
+            multi_word_phrases = {p for p in (direct_apologies | casual_apologies | defensive_apologies | reconciliation_phrases | tentative_apologies) if ' ' in p}
+            if multi_word_phrases:
+                self._apology_phrases_regex = re.compile(
+                    r'\b(' + '|'.join([re.escape(phrase) for phrase in multi_word_phrases]) + r')\b'
+                )
+            else:
+                self._apology_phrases_regex = None
+
+        # Initialize
+        score = 0.0
+        features = []
+        text = user_input.lower()
+        words = set(re.findall(r'\w+', text))
+        word_list = re.findall(r'\w+', text)
+
+        # Fuzzy matching for single words
+        def is_fuzzy_apology_word(word, apology_set, max_distance=1):
+            if len(word) < 4:
+                return word in apology_set
+            for apology in apology_set:
+                if abs(len(word) - len(apology)) <= 2 and levenshtein_distance(word, apology) <= max_distance:
+                    return True
+            return False
+
+        # Exact matching for phrases
+        def has_apology_phrase(text, apology_set):
+            return any(phrase in text for phrase in apology_set)
+
+        # Use the cached regex for phrase matching
+        if self._apology_phrases_regex and self._apology_phrases_regex.search(text):
+            score += 0.1
+            features.append("phrase_match")
+
+        # Score by category
+        if has_apology_phrase(text, direct_apologies) or any(is_fuzzy_apology_word(word, direct_apologies) for word in words):
+            score += 0.4
+            features.append("direct_apology")
+        if has_apology_phrase(text, casual_apologies) or any(is_fuzzy_apology_word(word, casual_apologies) for word in words):
+            score += 0.3
+            features.append("casual_apology")
+        if has_apology_phrase(text, defensive_apologies) or any(is_fuzzy_apology_word(word, defensive_apologies) for word in words):
+            score += 0.2
+            features.append("defensive_apology")
+        if has_apology_phrase(text, reconciliation_phrases):
+            score += 0.25
+            features.append("reconciliation_attempt")
+        if any(word in politeness_markers for word in words) or has_apology_phrase(text, politeness_markers):
+            score += 0.1
+            features.append("politeness_marker")
+        if has_apology_phrase(text, tentative_apologies) or any(is_fuzzy_apology_word(word, tentative_apologies) for word in words):
+            score += 0.15  # Lower weight due to ambiguity
+            features.append("tentative_apology")
+
+        # Enhanced Negation handling
+        negation_patterns = {r"\b(not|never|no)\b", r"\bnot at all\b", r"\bno way\b"}
+        window_size = 3
+        for idx, word in enumerate(word_list):
+            if is_fuzzy_apology_word(word, direct_apologies | casual_apologies | defensive_apologies | tentative_apologies):
+                window_start = max(0, idx - window_size)
+                window_end = min(len(word_list), idx + window_size)
+                window_text = ' '.join(word_list[window_start:window_end])
+                if any(re.search(pat, window_text) for pat in negation_patterns):
+                    score = max(0.0, score - 0.2)
+                    features.append("negation_detected")
+                    break
+
+        # Contextual boost: recent anger
+        if any(sp.frustration_score > 0.5 for sp in self.shame_history if time.time() - sp.timestamp_unix < 3600):
+            score += 0.1
+            features.append("recent_anger_context")
+
+        # Syntactic features
+        if re.search(r"\b(i|me|my)\b", text):
+            score += 0.1
+            features.append("personal_pronoun")
+        if re.search(r"\.\.\.|\?", text):
+            score += 0.05
+            features.append("soft_punctuation")
+        if len(words) < 5 and score > 0:
+            score += 0.05
+            features.append("short_input")
+
+        # Emoticon and symbol support
+        if re.search(r"[:;][-()/\\]|😔|🙏|😞|😣|🥺", text) and score > 0:
+            score += 0.05
+            features.append("regret_emoticon")
+
+        # Sarcasm check to avoid false positives
+        if any("sarcasm_detected" in sp.context.get("anger_features", []) for sp in self.shame_history if time.time() - sp.timestamp_unix < 3600):
+            score = max(0.0, score - 0.15)
+            features.append("sarcasm_context")
+
+        # Dynamic threshold logic
+        apology_threshold = 0.5
+        if "direct_apology" in features:
+            apology_threshold = 0.4  # Lower for strong apologies
+        elif "tentative_apology" in features and not ("direct_apology" in features or "casual_apology" in features):
+            apology_threshold = 0.6  # Higher for ambiguous cases
+
+        # Log detection
+        self.logger.record_event(
+            event_type="apology_detection",
+            message="Apology detection completed",
+            level="debug",
+            additional_info={"apology_score": score, "features": features, "apology_threshold": apology_threshold}
+        )
+
+        return min(score, 1.0), features, apology_threshold
+
+    def apply_configurable_reset(self):
+        # Retrieve the configured vibe drop value and use it to raise the vibe
+        vibe_drop_value = self._get_config("vibe_drop_value", 0.25)  # Example default value
+        self.viber.raise_vibe(amount=vibe_drop_value)
+
+        # Reset thin ice level to zero
+        self.thin_ice_level = 0
+
+        # Reduce suppression strength to a baseline level
+        for shame_profile in self.shame_history:
+            shame_profile.suppression_strength = min(shame_profile.suppression_strength, 0.5)  # Example baseline
 
 EMPATHY_SYSTEM_PROMPT_TEMPLATE = (
     "The user appears to be experiencing moderate frustration or upset, likely due to challenges in our recent interaction. "
