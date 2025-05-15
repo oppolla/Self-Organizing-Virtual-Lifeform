@@ -9,10 +9,10 @@ from sovl_error import ErrorManager
 from sovl_main import SystemContext
 from sovl_utils import synchronized, NumericalGuard
 from sovl_config import ConfigManager
+from sovl_recaller import DialogueContextManager
 import time
 import threading
 import math
-from torch import nn
 from sovl_error import ErrorManager
 
 # Constants
@@ -161,6 +161,7 @@ class ConfidenceCalculator:
         generated_ids: torch.Tensor,
         error_manager: ErrorManager,
         context: SystemContext,
+        recaller: Optional[DialogueContextManager] = None,
         user_id: str = "default",
         strategy: str = "blended",  # "classic", "experience", "entropy", "margin", "blended"
         top_k: int = 5,
@@ -169,6 +170,18 @@ class ConfidenceCalculator:
         """Calculate confidence score with robust error recovery and thread safety.
         Supports multiple strategies: classic, experience, entropy, margin, blended.
         All state access is via StateManager.
+        Args:
+            logits: Model output logits
+            generated_ids: Generated token IDs
+            error_manager: ErrorManager for error handling
+            context: SystemContext containing context information
+            recaller: DialogueContextManager for experience-based adjustment (optional)
+            user_id: User identifier
+            strategy: Confidence calculation strategy
+            top_k: Number of similar items to retrieve from memory
+            weights: Optional weights for blended strategy
+        Returns:
+            float: Calculated confidence score
         """
         with self.lock:
             try:
