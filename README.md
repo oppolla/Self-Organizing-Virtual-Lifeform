@@ -10,7 +10,7 @@ The system dynamically shapes its responses by analyzing conversational context,
 ### Key Features
 
 - Modular Multi-LLM Architecture:
-        Integrates a primary “base” language model with one or more adaptive "satellite" models via dynamic cross-attention and token mapping, enabling real-time knowledge transfer, specialization, and behavioral adaptation across distinct model components.
+        Integrates a primary “core” language model with one or more adaptive "satellite" models via dynamic cross-attention and token mapping, enabling real-time knowledge transfer, specialization, and behavioral adaptation across distinct model components.
   
 - Autonomous Learning & Memory Recall::
         Continuously retrains and adapts using both recent and long-term conversational history, consolidating experience through self-driven “sleep” and “dream” cycles for lifelong improvement.
