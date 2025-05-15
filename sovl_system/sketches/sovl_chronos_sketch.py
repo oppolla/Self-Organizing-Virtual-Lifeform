@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import random
 import math
+from sovl_logger import Logger
+from sovl_error import ErrorManager
 
 class ChronosSketch:
     """
@@ -33,6 +35,8 @@ class ChronosSketch:
             "max_memories": 3,
             "memory_decay_lambda": 0.1,
         }
+        self.logger = Logger.get_instance()
+        self.error_manager = ErrorManager(context=self, state_tracker=None, config_manager=None)  # Adjust context, state_tracker, and config_manager as needed
 
     def humanize_time_delta(self, seconds: float) -> str:
         """
