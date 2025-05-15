@@ -1,7 +1,7 @@
 # SOVL System (Self-Organizing Virtual Lifeform)
 
 ## Overview
-SOVL is a modular *AI Entity* framework designed for autonomous learning, adaptation, and self-improvement. It features a multi-LLM architecture, combining a stable base model with dynamic satellite models to support continuous, lifelong learning and specialization via LoRa adapters. The system dynamically shapes its responses by analyzing conversational context, emotional tone, and engagement, resulting in nuanced, context-aware interactions. Through ongoing self-training and memory replay, SOVL evolves its knowledge and personality, functioning as a dynamic, context-sensitive agent capable of developing a persistent sense of curiosity and inner life.
+SOVL is a modular *AI Entity* framework designed for autonomous learning, adaptation, and self-improvement. It features a multi-LLM architecture, combining a stable base model with dynamic satellite models to support continuous, lifelong learning and specialization via LoRa adapters. The system dynamically shapes its responses by analyzing conversational context, emotional tone, and engagement, resulting in nuanced, context-aware interactions. Through ongoing self-training and memory replay, SOVL evolves its knowledge and personality, functioning as a dynamic, context-sensitive entity capable of developing a persistent sense of curiosity and inner life.
 
 ### Key Features
 
@@ -12,7 +12,7 @@ SOVL is a modular *AI Entity* framework designed for autonomous learning, adapta
         Continuously retrains and adapts using both recent and long-term conversational history, consolidating experience through self-driven “sleep” and “dream” cycles for lifelong improvement.
 
 - Dynamic Behavioral Augmentation:
-        Instantly adapts the agent’s tone, style, and personality traits for each response, creating lifelike, context-aware interactions.
+        Instantly adapts the entity’s tone, style, and personality traits for each response, creating lifelike, context-aware interactions.
 
 - Introspective & Curiosity-Driven Processes:
         Engages in self-reflection, meditation, and autonomous curiosity questioning to deepen understanding, generate new goals, and continuously refine its own behavior.
