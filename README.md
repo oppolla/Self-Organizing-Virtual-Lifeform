@@ -3,7 +3,7 @@
 ## Overview
 SOVL is a modular AI entity designed for autonomous learning, adaptation, and self-improvement. The system features a multi-LLM architecture, integrating a frozen core model with dynamic satellite models to enable continuous, lifelong learning and task specialization. 
 
-The core model, a stable large language model, remains unchanged during operation, preserving its general capabilities. Satellite models, specialized for specific tasks or domains, are fine-tuned efficiently using Low-Rank Adaptation (LoRA) adapters. These adapters apply low-rank updates to satellite model layers, enabling rapid adaptation without modifying the full model. 
+The core model, a stable large language model, remains unchanged during operation, preserving its general capabilities. Satellite models, specialized over time through lived experiences, are fine-tuned efficiently using Low-Rank Adaptation (LoRA) adapters. These adapters apply low-rank updates to satellite model layers, enabling rapid adaptation without modifying the full model. 
 
 The system dynamically shapes its responses by analyzing conversational context, emotional tone, and engagement, resulting in nuanced, context-aware interactions. Through ongoing self-training and memory replay, SOVL evolves its knowledge and personality, functioning as a dynamic, context-sensitive entity capable of developing a persistent sense of curiosity and inner life.
 
