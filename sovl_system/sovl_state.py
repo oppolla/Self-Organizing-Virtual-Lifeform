@@ -532,6 +532,7 @@ class SOVLState(StateBase, DictSerializable):
         # --- Conversation context for per-conversation interaction data ---
         self.conversation_context: Dict[str, Dict[str, Any]] = {}
         self._context_lock = Lock()
+        self.active_temporal_prompt: Optional[str] = None
 
     def _initialize_state(self) -> None:
         """Initialize state components with safe defaults."""
@@ -743,6 +744,7 @@ class SOVLState(StateBase, DictSerializable):
                         # Optionally add 'repetition_history' if present
                         **({"repetition_history": ctx["repetition_history"]} if "repetition_history" in ctx else {})
                     }
+                result["active_temporal_prompt"] = self.active_temporal_prompt
                 return result
             except Exception as e:
                 self.log_error(f"Failed to convert state to dict: {str(e)}")
@@ -800,6 +802,7 @@ class SOVLState(StateBase, DictSerializable):
                     # Optionally add 'repetition_history' if present
                     **({"repetition_history": ctx["repetition_history"]} if "repetition_history" in ctx else {})
                 }
+            self.active_temporal_prompt = data.get("active_temporal_prompt")
             self._validate_state()
         except Exception as e:
             self.log_error(f"Failed to populate state from dict: {str(e)}")

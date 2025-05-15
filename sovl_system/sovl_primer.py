@@ -1073,75 +1073,107 @@ class GenerationPrimer:
         - Doctrine (aspiration/mission statement) from state_manager
         - A base system instruction (default: helpful, emotionally aware assistant)
         - The high-granularity vibe context (from get_traits_prompt, includes bond)
+        - The Chronos temporal block (temporal awareness, long-term memory, guidelines)
         - The memory context (short-term/long-term, passed in)
         - The user's prompt
         Skips any empty sections. Accepts **kwargs for future extensibility.
         Logs the applied system prompt for traceability.
         """
-        # 1. Doctrine
-        doctrine = self.state_manager.get_aspiration_doctrine() or ""
-        doctrine_section = f"DOCTRINE: {doctrine}" if doctrine else ""
+        current_state = self.state_manager.get_state()
 
-        # 2. Base system instruction (if any)
-        system_instruction = kwargs.get('base_system_instruction', None)
-        if system_instruction is None:
-            system_instruction = getattr(self, 'default_system_prompt', "You are a helpful, friendly assistant.")
+        # --- System Prompt Sections --- (Order matters here)
+        system_sections = []
+
+        # 1. Doctrine
+        doctrine = current_state.get_aspiration_doctrine() if hasattr(current_state, 'get_aspiration_doctrine') else ""
+        if doctrine:
+            system_sections.append(f"DOCTRINE: {doctrine}")
+
+        # 2. Base system instruction
+        base_instruction = kwargs.get('base_system_instruction', getattr(self, 'default_system_prompt', "You are a helpful, friendly assistant."))
+        if base_instruction:
+            system_sections.append(base_instruction)
 
         # 3. Thin ice logic
-        thin_ice_prompt = ""
+        thin_ice_level = 0
         if shamer is not None and hasattr(shamer, 'get_thin_ice_level'):
             thin_ice_level, _ = shamer.get_thin_ice_level()
             if thin_ice_level > 0:
                 level_prompt = THIN_ICE_PROMPTS.get(thin_ice_level, THIN_ICE_PROMPTS[1])
-                thin_ice_prompt = f"{THIN_ICE_OVER_PROMPT}\n{level_prompt}"
+                system_sections.append(f"{THIN_ICE_OVER_PROMPT}\\n{level_prompt}")
 
-        # 4. Vibe and Bond prompt (traits_prompt includes bond)
+        # 4. Vibe and Bond prompt (TRAITS)
         bond_score = kwargs.get("bond_score", 0.5)
-        traits_prompt = self.get_traits_prompt(bond_score=bond_score)
+        traits_prompt_str = self.get_traits_prompt(bond_score=bond_score) # This itself starts with "SYSTEM PROMPT: - **Tone:**..."
+        # We need to strip the "SYSTEM PROMPT:" if present, and the TRAITS: label will be added if content exists
+        if traits_prompt_str:
+            if traits_prompt_str.upper().startswith("SYSTEM PROMPT:"):
+                traits_content = traits_prompt_str[len("SYSTEM PROMPT:"):].strip()
+            else:
+                traits_content = traits_prompt_str
+            if traits_content: # Only add TRAITS section if there's actual content after stripping
+                 system_sections.append(f"TRAITS:\n{traits_content}")
 
-        # 4.5. Sarcasm prompt
+        # 5. Temporal Context Block (from Chronos via SOVLState)
+        temporal_block_from_state = ""
+        if hasattr(current_state, 'active_temporal_prompt') and current_state.active_temporal_prompt:
+            temporal_block_from_state = current_state.active_temporal_prompt
+        if temporal_block_from_state: # Directly append the structured block
+            system_sections.append(temporal_block_from_state)
+
+        # 6. Sarcasm prompt
         sarcasm_flag = False
-        empathy_prompt = ""
-        if shamer is not None and hasattr(shamer, 'get_shame_context'):
-            state = getattr(self, 'state_manager', None)
-            if state is not None:
-                shame_context = shamer.get_shame_context(state)
-                sarcasm_flag = shame_context.get("sarcasm_flag", False)
-                # Surface empathy prompt from most recent active shame, if present
-                if shame_context.get("active_shames"):
-                    for sp in reversed(shame_context["active_shames"]):
-                        if "empathy_prompt" in sp.get("context", {}):
-                            empathy_prompt = sp["context"]["empathy_prompt"]
-                            break
-        # 5. Compose all system prompt parts in unified order
-        system_prompt_parts = [
-            doctrine_section,
-            system_instruction,
-            thin_ice_prompt,
-            f"TRAITS: {traits_prompt}" if traits_prompt else "",
-        ]
-        if sarcasm_flag:
-            system_prompt_parts.append(SARCASM_SYSTEM_PROMPT)
-        if empathy_prompt:
-            system_prompt_parts.append(empathy_prompt)
-        system_prompt_parts.extend([
-            kwargs.get('memory_context', ""),
-            user_prompt
-        ])
-        full_prompt = "\n\n".join([part for part in system_prompt_parts if part])
+        if shamer is not None and hasattr(shamer, 'get_shame_context') and current_state is not None:
+            shame_context = shamer.get_shame_context(current_state)
+            sarcasm_flag = shame_context.get("sarcasm_flag", False)
+            if sarcasm_flag:
+                system_sections.append(SARCASM_SYSTEM_PROMPT)
 
-        # Log the full system prompt for traceability
+        # 7. Empathy prompt from active shames
+        if shamer is not None and hasattr(shamer, 'get_shame_context') and current_state is not None:
+            shame_context = shamer.get_shame_context(current_state)
+            if shame_context.get("active_shames"):
+                for sp in reversed(shame_context["active_shames"]):
+                    if "empathy_prompt" in sp.get("context", {}):
+                        empathy_prompt_text = sp["context"]["empathy_prompt"]
+                        if empathy_prompt_text:
+                            system_sections.append(empathy_prompt_text)
+                            break # Add only the most recent active one
+        
+        # --- Assemble the Full Prompt --- 
+        full_prompt_parts = []
+
+        # Prepend "SYSTEM PROMPT:" if there are any system sections
+        if system_sections:
+            full_prompt_parts.append("SYSTEM PROMPT:")
+            full_prompt_parts.append("\n\n".join(system_sections)) # Join sections with double newline
+
+        # Add Memory Context (if any)
+        memory_context = kwargs.get('memory_context', "")
+        if memory_context:
+            full_prompt_parts.append(memory_context)
+
+        # Add User Prompt
+        full_prompt_parts.append(user_prompt)
+        
+        # Join all major parts with double newlines
+        full_prompt = "\n\n".join(filter(None, full_prompt_parts)) # filter(None, ...) removes empty strings that might result from empty sections
+
+        # Log the assembled prompt details for traceability
         self.logger.record_event(
             event_type="system_prompt_assembled",
             message="Unified system prompt assembled for LLM",
             level="debug",
             additional_info={
-                "doctrine": doctrine,
-                "traits_prompt": traits_prompt[:100] + "..." if traits_prompt and len(traits_prompt) > 100 else traits_prompt,
-                "thin_ice_level": thin_ice_level if shamer is not None and hasattr(shamer, 'get_thin_ice_level') else 0,
-                "sarcasm_flag": sarcasm_flag,
-                "empathy_prompt": empathy_prompt,
-                "output_format": kwargs.get('output_format', 'text')
+                "doctrine_present": bool(doctrine),
+                "base_instruction_present": bool(base_instruction),
+                "thin_ice_level": thin_ice_level,
+                "traits_prompt_content_present": bool(traits_prompt_str and traits_content),
+                "temporal_block_present": bool(temporal_block_from_state),
+                "sarcasm_flag_active": sarcasm_flag,
+                "empathy_prompt_added": 'empathy_prompt_text' in locals() and bool(empathy_prompt_text),
+                "memory_context_present": bool(memory_context),
+                "final_prompt_preview": full_prompt[:200] + ("..." if len(full_prompt) > 200 else "")
             }
         )
         return full_prompt

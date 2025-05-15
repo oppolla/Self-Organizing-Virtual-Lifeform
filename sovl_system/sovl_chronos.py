@@ -5,8 +5,10 @@ import random
 import math
 from sovl_logger import Logger
 from sovl_error import ErrorManager
+from sovl_config import ConfigManager
+from sovl_state import StateManager, SOVLState
 
-class ChronosSketch:
+class Chronos:
     """
     Provides temporal context for LLM prompts, enabling the system to express awareness of the passage of time in a human-like way.
     Designed to be injected into system prompts alongside modules like viber and shamer.
@@ -16,9 +18,12 @@ class ChronosSketch:
     "We talked about this about two weeks ago" by searching for relevant past events and expressing their temporal distance in human terms.
     Now includes pattern recognition, relative/absolute time references, fuzzy/uncertain time expressions, and meta-communicative memory fading for a more human feel.
     """
-    def __init__(self, config: Optional[dict] = None):
+    def __init__(self, config_manager: ConfigManager, state_manager: StateManager, logger: Logger, config: Optional[dict] = None):
         """
         Args:
+            config_manager: ConfigManager instance
+            state_manager: StateManager instance
+            logger: Logger instance
             config: Optional dict with configuration, e.g.:
                 {
                     "min_gap_seconds": 60,  # Only mention time if > 1 minute gap
@@ -35,8 +40,10 @@ class ChronosSketch:
             "max_memories": 3,
             "memory_decay_lambda": 0.1,
         }
-        self.logger = Logger.get_instance()
-        self.error_manager = ErrorManager(context=self, state_tracker=None, config_manager=None)  # Adjust context, state_tracker, and config_manager as needed
+        self.config_manager = config_manager
+        self.state_manager = state_manager
+        self.logger = logger
+        self.error_manager = ErrorManager(context=self, state_tracker=None, config_manager=self.config_manager)
 
     def humanize_time_delta(self, seconds: float) -> str:
         """
@@ -105,58 +112,41 @@ class ChronosSketch:
 
     def get_temporal_context_prompt(self, history: List[Dict], now: Optional[float] = None) -> str:
         """
-        Generate a temporal context string for the LLM prompt based on conversation history.
+        Generate a dynamic temporal context string based on conversation history
+        for the 'Temporal Awareness' section.
         Args:
             history: List of message dicts, each with at least 'timestamp' (UNIX time float) and 'role'.
             now: Optional UNIX timestamp for 'current' time (defaults to time.time()).
         Returns:
-            A string describing the temporal context, or an empty string if not relevant.
+            A string describing the dynamic temporal context.
         """
         now = now or time.time()
-        unix_time_str = f"Current UNIX time: {now}"
-        context_lines = [unix_time_str]
+        awareness_parts = []
         if not history:
-            context_lines.append("This is the start of the conversation.")
-            return "\n".join(context_lines)
-        # Optionally mention conversation start
-        if self.config.get("mention_start", True):
-            start_time = history[0].get("timestamp", now)
-            conv_age = now - start_time
-            if conv_age > 86400:  # More than a day old
-                start_str = self.humanize_time_delta(conv_age)
-                context_lines.append(f"This conversation began {start_str}.")
-        # Look at the last message
-        last_event = history[-1]
-        last_time = last_event.get("timestamp", now)
-        delta = now - last_time
-        if delta >= self.config["min_gap_seconds"]:
-            time_str = self.humanize_time_delta(delta)
-            if last_event["role"] == "user":
-                context_lines.append(f"The last user message was {time_str}.")
-            else:
-                context_lines.append(f"The last system message was {time_str}.")
-        # Add pattern recognition summary
-        pattern_summary = self.pattern_recognition_summary(history)
-        if pattern_summary:
-            context_lines.append(pattern_summary)
-        context_lines.append(
-            """
-Weave temporal context naturally to mirror human time awareness:
-- Clarify event timing for coherence.
-- Note gaps or recurring topics conversationally (e.g., "just now," "ages ago").
-- Frame reminders or follow-ups with relevant time cues.
-- Soften older memory references (e.g., "some time back").
-
-**Guardrails**:
-- Mention time only for clarity or connection.
-- Avoid technical timestamps unless asked.
-- Stay conversational, not time-obsessed.
-- Use fuzzy terms for vague data.
-
-Do not mention time unless it adds clarity, context, or value to your response. Avoid overemphasizing time or making it the focus of the conversation unless the user specifically asks about it or it is directly relevant.
-"""
-        )
-        return "\n".join(context_lines)
+            awareness_parts.append("This is the start of the conversation.")
+        else:
+            if self.config.get("mention_start", True):
+                start_time = history[0].get("timestamp", now)
+                conv_age = now - start_time
+                if conv_age > 86400:  # More than a day old
+                    start_str = self.humanize_time_delta(conv_age)
+                    awareness_parts.append(f"This conversation began {start_str}.")
+            
+            last_event = history[-1]
+            last_time = last_event.get("timestamp", now)
+            delta = now - last_time
+            if delta >= self.config["min_gap_seconds"]:
+                time_str = self.humanize_time_delta(delta)
+                if last_event["role"] == "user":
+                    awareness_parts.append(f"The last user message was {time_str}.")
+                else:
+                    awareness_parts.append(f"The last system message was {time_str}.")
+            
+            pattern_summary = self.pattern_recognition_summary(history)
+            if pattern_summary:
+                awareness_parts.append(pattern_summary)
+        
+        return " ".join(awareness_parts) if awareness_parts else "No specific short-term temporal observations."
 
     def is_high_quality_memory(self, mem: Dict, min_words: int = 5) -> bool:
         """
@@ -166,12 +156,17 @@ Do not mention time unless it adds clarity, context, or value to your response. 
         content = mem.get('content', '')
         return len(content.split()) > min_words
 
-    def get_long_term_temporal_references(self, memories: List[Dict], topic: str, now: Optional[float] = None, fuzzy: bool = True, prefer_absolute: bool = False) -> str:
+    def get_long_term_temporal_references(self, memories: Optional[List[Dict]], topic: Optional[str], now: Optional[float] = None, fuzzy: bool = True, prefer_absolute: bool = False) -> str:
         """
+        Generates a string summarizing relevant long-term memories for the 'Long-term Memory' section.
         Only references high-quality memories (content length > 5 words by default).
+        Returns 'None available.' if no relevant memories are found or inputs are insufficient.
         """
+        if not memories or not topic:
+            return "None available for the current topic."
+
         now = now or time.time()
-        relevant = []
+        relevant_phrases = []
         min_words = self.config.get('min_memory_words', 5)
         for mem in memories:
             if topic.lower() in mem.get('content', '').lower() and self.is_high_quality_memory(mem, min_words):
@@ -188,10 +183,11 @@ Do not mention time unless it adds clarity, context, or value to your response. 
                 if len(snippet) > 60:
                     snippet = snippet[:57] + '...'
                 phrase = self.faded_reference_phrase(salience, f'"{snippet}" {time_str}')
-                relevant.append(phrase)
-                if len(relevant) >= self.config.get('max_memories', 3):
+                relevant_phrases.append(phrase)
+                if len(relevant_phrases) >= self.config.get('max_memories', 3):
                     break
-        return ' '.join(relevant)
+        
+        return " ".join(relevant_phrases) if relevant_phrases else "No specific long-term memories found for this topic."
 
     def pattern_recognition_summary(self, history: List[Dict]) -> str:
         """
@@ -218,6 +214,46 @@ Do not mention time unless it adds clarity, context, or value to your response. 
         elif all(0 <= h < 6 for h in hours):
             return "We've had a few late night conversations lately."
         return ""
+
+    def update_active_temporal_prompt_in_state(self, history: List[Dict], now: Optional[float] = None, long_term_memories: Optional[List[Dict]] = None, topic: Optional[str] = None, fuzzy: bool = True, prefer_absolute: bool = False):
+        """
+        Constructs the full structured temporal block and updates it in SOVLState.
+        """
+        now_val = now or time.time()
+
+        awareness_content = self.get_temporal_context_prompt(history, now_val)
+        long_term_content = self.get_long_term_temporal_references(long_term_memories, topic, now_val, fuzzy, prefer_absolute)
+
+        guidelines = (
+            "Weave temporal context naturally to mirror human time awareness. "
+            "Clarify event timing for coherence. Note gaps or recurring topics conversationally (e.g., 'just now,' 'ages ago'). "
+            "Frame reminders or follow-ups with relevant time cues. Soften older memory references (e.g., 'some time back')."
+        )
+        guardrails = (
+            "Mention time only for clarity or connection. Avoid technical timestamps unless asked. "
+            "Stay conversational, not time-obsessed. Use fuzzy terms for vague data."
+        )
+        rule = (
+            "Do not mention time unless it adds clarity, context, or value to your response. "
+            "Avoid overemphasizing time or making it the focus of the conversation unless the user specifically asks about it or it is directly relevant."
+        )
+
+        final_temporal_block = (
+            f"- **Temporal Awareness:** {awareness_content}\\n"
+            f"- **Long-term Memory:** {long_term_content}\\n"
+            f"- **Guidelines:** {guidelines}\\n"
+            f"- **Guardrails:** {guardrails}\\n"
+            f"- **Rule:** {rule}"
+        )
+
+        def update_fn(state_clone: SOVLState) -> SOVLState:
+            state_clone.active_temporal_prompt = final_temporal_block
+            self.logger.record_event("chronos_state_update", "Updated active_temporal_prompt in SOVLState with structured block.")
+            return state_clone
+
+        success = self.state_manager.update_state_atomic(update_fn)
+        if not success:
+            self.logger.log_error("Failed to update active_temporal_prompt in SOVLState.")
 
     def inject_temporal_context(self, base_prompt: str, history: List[Dict], now: Optional[float] = None, long_term_memories: Optional[List[Dict]] = None, topic: Optional[str] = None, fuzzy: bool = True, prefer_absolute: bool = False) -> str:
         """

@@ -28,6 +28,7 @@ from sovl_interfaces import SystemInterface
 from sovl_queue import get_scribe_queue
 from sovl_scribe import Scriber
 from sovl_volition import AutonomyManager
+from sovl_chronos import Chronos
 
 # Model and processing
 from sovl_manager import ModelManager
@@ -867,6 +868,73 @@ class SOVLSystem(SystemInterface):
                 self.is_paused = False
                 return True
             return False
+
+    def generate_interactive_response(self, prompt_data: Dict[str, Any], user_id: Optional[str] = None, conversation_history: Optional[List[Dict[str, str]]] = None) -> Optional[str]:
+        """
+        Generates an interactive response using the GenerationManager,
+        after updating the temporal prompt via Chronos.
+        'prompt_data' is passed to the generation_manager.
+        'user_id' and 'conversation_history' are used by Chronos if provided.
+        """
+        if not self.context:
+            # This should ideally not happen if system is initialized correctly
+            print("[ERROR] SOVLSystem context is not available.") # Or use a logger if available early
+            return None
+
+        if self.is_paused:
+            if self.context.logger:
+                self.context.logger.warn("SOVLSystem is paused. Cannot generate response.")
+            else:
+                print("[WARN] SOVLSystem is paused. Cannot generate response.")
+            return None
+
+        # 1. Trigger Chronos to update temporal prompt in SOVLState
+        if self.context.chronos_system:
+            try:
+                self.context.chronos_system.update_temporal_prompt(
+                    user_id=user_id,
+                    conversation_history=conversation_history
+                )
+                if self.context.logger:
+                    self.context.logger.info("Chronos temporal prompt updated successfully.")
+            except Exception as e:
+                if self.context.error_manager:
+                    self.context.error_manager.handle_error(
+                        error_type="chronos_trigger_error",
+                        error_message=f"Error triggering Chronos 'update_temporal_prompt': {str(e)}",
+                        error=e
+                    )
+                else:
+                    print(f"[ERROR] Error triggering Chronos: {str(e)}")
+                # Depending on policy, we might proceed or abort. For now, log and proceed.
+        elif self.context.logger:
+            self.context.logger.info("Chronos system not available in context. Skipping temporal prompt update.")
+
+
+        # 2. Call the GenerationManager
+        if self.generation_manager:
+            try:
+                # Assuming generation_manager.generate uses prompt_data
+                # and internally accesses SOVLState (via its Primer) for the Chronos prompt.
+                response = self.generation_manager.generate(prompt_data=prompt_data)
+                return response
+            except Exception as e:
+                if self.context.error_manager:
+                    self.context.error_manager.handle_error(
+                        error_type="generation_manager_error",
+                        error_message=f"Error during GenerationManager 'generate': {str(e)}",
+                        error_context={"prompt_data": "hidden for brevity" if prompt_data else None}, # Avoid logging large prompt_data
+                        error=e
+                    )
+                else:
+                    print(f"[ERROR] Error during generation: {str(e)}")
+                return None
+        else:
+            if self.context.logger:
+                self.context.logger.error("GenerationManager not available in SOVLSystem.")
+            else:
+                print("[ERROR] GenerationManager not available.")
+            return None
 
     # Example: If you have a main loop or long-running operation, add a check for is_paused
     def main_loop(self):
