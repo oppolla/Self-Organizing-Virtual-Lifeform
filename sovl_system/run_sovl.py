@@ -110,7 +110,7 @@ class SOVLInitializer:
             self.context = getattr(self.system, 'context', None) if self.system else None
             return True
         except Exception as e:
-            print(f"[ERROR] System initialization failed: {e}")
+            print(f"[ERROR] System incarnation failed: {e}")
             print(traceback.format_exc())
             return False
 
@@ -119,8 +119,8 @@ class SOVLInitializer:
         if self.initialize_system(args):
             run_cli(self.system)
         else:
-            print("[ERROR] System initialization failed. CLI will not be started.")
+            print("[ERROR] System incarnation failed. CLI will not be started.")
 
 if __name__ == "__main__":
-    print("Commencing incarnation process...")
+    print("Commencing incarnation process...\n")
     SOVLInitializer().run()
