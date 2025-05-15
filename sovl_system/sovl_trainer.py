@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any, Tuple, Type
 import torch
 import time
 import math
+from enum import Enum
 from collections import deque, defaultdict
 import traceback
 from sovl_scaffold import ScaffoldProvider
@@ -14,6 +15,7 @@ from sovl_logger import Logger, LoggerConfig
 from transformers import get_linear_schedule_with_warmup
 from sovl_engram import LoraAdapterManager
 from sovl_io import JSONLLoader, StreamingJSONLoader, ScribeJSONLBatchLoader
+from sovl_events import EventHandler
 import threading
 import gc
 from sovl_utils import validate_metadata_fields, repair_metadata, get_metadata_value, collate_tensor_batch, move_batch_to_device
@@ -288,7 +290,7 @@ class TrainingConfig:
 class TrainingWorkflowManager:
     """Manages training cycles, sleep training, and gestation/dream cycles."""
     
-    def __init__(self, trainer: 'SOVLTrainer', event_handler: TrainingEventHandler):
+    def __init__(self, trainer: 'SOVLTrainer', event_handler: EventHandler):
         self.trainer = trainer
         self.event_handler = event_handler
         # Safely get attributes from trainer
@@ -317,7 +319,6 @@ class TrainingWorkflowManager:
             import gc
             from datetime import datetime
             import traceback
-            import torch
 
             # Set mode to 'gestating' at the start
             state_manager = getattr(self.trainer, 'state_manager', None)
