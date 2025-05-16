@@ -6,7 +6,7 @@ import bitsandbytes as bnb
 from typing import Optional, List, Dict, Any, Tuple
 import traceback
 import os
-from threading import Lock
+from threading import Lock, RLock
 import time
 from functools import wraps
 from sovl_utils import validate_quantization_mode
@@ -84,7 +84,7 @@ class ModelManager:
         self._config_manager = config_manager
         self._logger = logger
         self._device = device
-        self._memory_lock = Lock()
+        self._memory_lock = RLock()
         self._gpu_lock = Lock()  # Add dedicated GPU lock
         self._last_failed_recovery_key = None  # Track last failed recovery attempt
         self.components = {}  # For compatibility with other modules
@@ -108,7 +108,23 @@ class ModelManager:
         self.lora_managers = []
         self.active_lora_checkpoint = None
         # Initialize models and tokenizers
-        self.load_models()
+        try:
+            self.load_models()
+        except Exception:
+            self._log_error(
+                "Initial model loading failed during ModelManager construction. Attempting cleanup.", 
+                "constructor_load_fail",
+                stack_trace=traceback.format_exc()
+            )
+            try:
+                self.cleanup() # Attempt cleanup
+            except Exception as cleanup_exc:
+                self._log_error(
+                    f"Cleanup after constructor load failure also failed: {str(cleanup_exc)}", 
+                    "constructor_cleanup_fail",
+                    stack_trace=traceback.format_exc()
+                )
+            raise # Re-throw original load_models exception
 
     def _initialize_error_manager(self):
         """Initialize error manager with model-specific configuration."""
