@@ -210,6 +210,11 @@ class SOVLOrchestrator(OrchestratorInterface):
             "config_manager": {"key": "config_manager", "required": True},
             "error_manager": {"key": "error_manager", "required": True}
         }, {"is_critical": False}),
+        ("chronos_system", "sovl_chronos", "Chronos", {
+            "config_manager": {"key": "config_manager", "required": True},
+            "logger": {"key": "logger", "required": True},
+            "state_manager": {"key": "state_manager", "required": True}
+        }, {"is_critical": False}),
         ("curiosity_manager", "sovl_curiosity", "CuriosityManager", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
@@ -309,6 +314,7 @@ class SOVLOrchestrator(OrchestratorInterface):
             "state_manager": {"key": "state_manager", "required": True},
             "error_manager": {"key": "error_manager", "required": True},
             "generation_primer": {"key": "generation_primer", "required": True},
+            "chronos_system": {"key": "chronos_system", "required": True},
             "dialogue_context_manager": {"key": "state_manager", "required": False},
             "device": {"key": "device", "required": False},
             "lifecycle_manager": {"key": "lifecycle_manager", "required": False},
