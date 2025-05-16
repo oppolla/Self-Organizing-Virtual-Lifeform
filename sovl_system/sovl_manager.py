@@ -15,6 +15,7 @@ from sovl_logger import Logger
 from sovl_error import ErrorManager, ErrorRecord
 import gc
 from sovl_resource import ResourceManager
+import curses  # Add curses for native progress bar
 
 # Decorator function (defined outside the class for clarity)
 def _prevent_immediate_retry(recovery_func):
@@ -383,12 +384,10 @@ class ModelManager:
             return 2048  # Default to 2GB if estimation fails
 
     def load_models(self, lora_checkpoint_path: str = None):
-        """Load base and scaffold models along with their tokenizers.
-        Optionally loads LoRA weights for scaffold models from checkpoint.
-        Acquires GPU memory via ResourceManager before loading models.
-        """
+        """Load base and scaffold models along with their tokenizers with progress feedback."""
         try:
             with self._memory_lock:
+                print(f"[ModelManager] Starting model loading for {self.base_model_name} and scaffolds {self.scaffold_model_names}")
                 self._clear_scaffold_resources()
                 self._load_tokenizers()
                 # Estimate and acquire GPU memory for base model
@@ -396,7 +395,9 @@ class ModelManager:
                 if not self.resource_manager.acquire("gpu_memory", amount=model_size_mb):
                     raise RuntimeError("Insufficient GPU memory for base model")
                 try:
+                    print(f"[ModelManager] Loading base model: {self.base_model_name}")
                     self._load_base_model()
+                    print(f"[ModelManager] Base model loaded successfully")
                 except Exception as e:
                     self.resource_manager.release("gpu_memory", amount=model_size_mb)
                     raise
@@ -407,9 +408,11 @@ class ModelManager:
                     if not self.resource_manager.acquire("gpu_memory", amount=scaffold_size_mb):
                         raise RuntimeError(f"Insufficient GPU memory for scaffold model {model_name}")
                     try:
+                        print(f"[ModelManager] Loading scaffold model: {model_name}")
                         scaffold_model, lora_manager = self._load_scaffold_model(model_name, lora_checkpoint_path)
                         self.scaffold_models.append(scaffold_model)
                         self.lora_managers.append(lora_manager)
+                        print(f"[ModelManager] Scaffold model {model_name} loaded successfully")
                     except Exception as e:
                         self.resource_manager.release("gpu_memory", amount=scaffold_size_mb)
                         raise
@@ -424,6 +427,7 @@ class ModelManager:
                         "quantization": self.quantization_mode
                     }
                 )
+                print(f"[ModelManager] All models loaded successfully")
         except Exception as e:
             self.error_manager.handle_error(
                 error=e,
@@ -521,11 +525,90 @@ class ModelManager:
             )
             raise
 
-    def _load_raw_scaffold_model(self, model_name: str):
-        """Load a single scaffold model with appropriate quantization."""
+    def _load_raw_base_model(self):
+        """Load the base model with appropriate quantization and progress feedback."""
+        screen = None
         try:
             with self._memory_lock:
-                # Load the scaffold model with appropriate quantization
+                self._log_event(
+                    "base_model_download_start",
+                    f"Starting download for base model: {self.base_model_name}",
+                    level="info",
+                    additional_info={"model_name": self.base_model_name}
+                )
+                screen = self._initialize_curses()
+                progress_callback = self._create_progress_callback(self.base_model_name, screen)
+                self._last_progress_logged = 0.0
+
+                if self.quantization_mode == "int4":
+                    with self._gpu_lock:
+                        self.base_model = AutoModelForCausalLM.from_pretrained(
+                            self.base_model_name,
+                            load_in_4bit=True,
+                            device_map="auto",
+                            torch_dtype=torch.float16,
+                            quantization_config=bnb.nn.QuantizeConfig(
+                                load_in_4bit=True,
+                                bnb_4bit_compute_dtype=torch.float16,
+                                bnb_4bit_use_double_quant=True,
+                                bnb_4bit_quant_type="nf4"
+                            ),
+                            progress_callback=progress_callback
+                        )
+                elif self.quantization_mode == "int8":
+                    with self._gpu_lock:
+                        self.base_model = AutoModelForCausalLM.from_pretrained(
+                            self.base_model_name,
+                            load_in_8bit=True,
+                            device_map="auto",
+                            torch_dtype=torch.float16,
+                            progress_callback=progress_callback
+                        )
+                else:  # fp16
+                    with self._gpu_lock:
+                        self.base_model = AutoModelForCausalLM.from_pretrained(
+                            self.base_model_name,
+                            torch_dtype=torch.float16,
+                            device_map="auto",
+                            progress_callback=progress_callback
+                        )
+
+                self.base_model.eval()
+                self._log_event(
+                    "base_model_download_complete",
+                    f"Completed download and loading for base model: {self.base_model_name}",
+                    level="info",
+                    additional_info={"model_name": self.base_model_name}
+                )
+                return self.base_model
+        except Exception as e:
+            if screen:
+                self._display_progress_bar(screen, self.base_model_name, 0.0, str(e))
+                time.sleep(1)
+            self._log_error(
+                f"Failed to load raw base model: {str(e)}",
+                error_type="base_model_loading_error",
+                stack_trace=traceback.format_exc()
+            )
+            raise
+        finally:
+            self._cleanup_curses(screen)
+
+    def _load_raw_scaffold_model(self, model_name: str):
+        """Load a single scaffold model with appropriate quantization and progress feedback."""
+        screen = None
+        try:
+            with self._memory_lock:
+                self._log_event(
+                    "scaffold_model_download_start",
+                    f"Starting download for scaffold model: {model_name}",
+                    level="info",
+                    additional_info={"model_name": model_name}
+                )
+                screen = self._initialize_curses()
+                progress_callback = self._create_progress_callback(model_name, screen)
+                self._last_progress_logged = 0.0
+
                 if self.quantization_mode == "int4":
                     with self._gpu_lock:
                         model = AutoModelForCausalLM.from_pretrained(
@@ -538,7 +621,8 @@ class ModelManager:
                                 bnb_4bit_compute_dtype=torch.float16,
                                 bnb_4bit_use_double_quant=True,
                                 bnb_4bit_quant_type="nf4"
-                            )
+                            ),
+                            progress_callback=progress_callback
                         )
                 elif self.quantization_mode == "int8":
                     with self._gpu_lock:
@@ -546,19 +630,30 @@ class ModelManager:
                             model_name,
                             load_in_8bit=True,
                             device_map="auto",
-                            torch_dtype=torch.float16
+                            torch_dtype=torch.float16,
+                            progress_callback=progress_callback
                         )
                 else:  # fp16
                     with self._gpu_lock:
                         model = AutoModelForCausalLM.from_pretrained(
                             model_name,
                             torch_dtype=torch.float16,
-                            device_map="auto"
+                            device_map="auto",
+                            progress_callback=progress_callback
                         )
-                
+
                 model.eval()
+                self._log_event(
+                    "scaffold_model_download_complete",
+                    f"Completed download and loading for scaffold model: {model_name}",
+                    level="info",
+                    additional_info={"model_name": model_name}
+                )
                 return model
         except Exception as e:
+            if screen:
+                self._display_progress_bar(screen, model_name, 0.0, str(e))
+                time.sleep(1)
             self._log_error(
                 f"Failed to load raw scaffold model {model_name}: {str(e)}",
                 error_type="scaffold_model_loading_error",
@@ -566,73 +661,65 @@ class ModelManager:
                 additional_info={"model_name": model_name}
             )
             raise
-
-    def _load_raw_base_model(self):
-        """Load the base model with appropriate quantization."""
-        try:
-            with self._memory_lock:
-                if self.quantization_mode == "int4":
-                    with self._gpu_lock:
-                        self.base_model = AutoModelForCausalLM.from_pretrained(
-                            self.base_model_name,
-                            load_in_4bit=True,
-                            device_map="auto",
-                            torch_dtype=torch.float16,
-                            quantization_config=bnb.nn.QuantizeConfig(
-                                load_in_4bit=True,
-                                bnb_4bit_compute_dtype=torch.float16,
-                                bnb_4bit_use_double_quant=True,
-                                bnb_4bit_quant_type="nf4"
-                            )
-                        )
-                elif self.quantization_mode == "int8":
-                    with self._gpu_lock:
-                        self.base_model = AutoModelForCausalLM.from_pretrained(
-                            self.base_model_name,
-                            load_in_8bit=True,
-                            device_map="auto",
-                            torch_dtype=torch.float16
-                        )
-                else:  # fp16
-                    with self._gpu_lock:
-                        self.base_model = AutoModelForCausalLM.from_pretrained(
-                            self.base_model_name,
-                            torch_dtype=torch.float16,
-                            device_map="auto"
-                        )
-                
-                self.base_model.eval()
-                return self.base_model
-        except Exception as e:
-            self._log_error(
-                f"Failed to load raw base model: {str(e)}",
-                error_type="base_model_loading_error",
-                stack_trace=traceback.format_exc()
-            )
-            raise
+        finally:
+            self._cleanup_curses(screen)
 
     def _load_tokenizers(self):
-        """Load tokenizers for both base and scaffold models."""
+        """Load tokenizers for both base and scaffold models with progress feedback."""
+        screen = None
         try:
             with self._memory_lock:
+                self._log_event(
+                    "tokenizer_download_start",
+                    f"Starting download for base tokenizer: {self.base_model_name}",
+                    level="info",
+                    additional_info={"model_name": self.base_model_name}
+                )
+                screen = self._initialize_curses()
+                progress_callback = self._create_progress_callback(f"{self.base_model_name}_tokenizer", screen)
+                self._last_progress_logged = 0.0
                 self.base_tokenizer = AutoTokenizer.from_pretrained(
                     self.base_model_name,
                     padding_side="left",
-                    truncation_side="left"
+                    truncation_side="left",
+                    progress_callback=progress_callback
                 )
-                
-                self.scaffold_tokenizers = [AutoTokenizer.from_pretrained(
-                    name,
-                    padding_side="left",
-                    truncation_side="left"
-                ) for name in self.scaffold_model_names]
-                
-                # Update scaffold_unk_ids after loading tokenizers
-                self.scaffold_unk_ids = [tokenizer.unk_token_id for tokenizer in self.scaffold_tokenizers]
-                
+                self._log_event(
+                    "tokenizer_download_complete",
+                    f"Completed download for base tokenizer: {self.base_model_name}",
+                    level="info",
+                    additional_info={"model_name": self.base_model_name}
+                )
+
+                self.scaffold_tokenizers = []
+                self.scaffold_unk_ids = []
+                for name in self.scaffold_model_names:
+                    self._log_event(
+                        "tokenizer_download_start",
+                        f"Starting download for scaffold tokenizer: {name}",
+                        level="info",
+                        additional_info={"model_name": name}
+                    )
+                    progress_callback = self._create_progress_callback(f"{name}_tokenizer", screen)
+                    self._last_progress_logged = 0.0
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        name,
+                        padding_side="left",
+                        truncation_side="left",
+                        progress_callback=progress_callback
+                    )
+                    self.scaffold_tokenizers.append(tokenizer)
+                    self.scaffold_unk_ids.append(tokenizer.unk_token_id)
+                    self._log_event(
+                        "tokenizer_download_complete",
+                        f"Completed download for scaffold tokenizer: {name}",
+                        level="info",
+                        additional_info={"model_name": name}
+                    )
+
                 self._log_event(
                     "tokenizer_loading",
-                    "Successfully loaded tokenizers",
+                    "Successfully loaded all tokenizers",
                     level="info",
                     additional_info={
                         "base_tokenizer": self.base_model_name,
@@ -640,6 +727,9 @@ class ModelManager:
                     }
                 )
         except Exception as e:
+            if screen:
+                self._display_progress_bar(screen, self.base_model_name, 0.0, str(e))
+                time.sleep(1)
             self.error_manager.handle_error(
                 error=e,
                 error_type="tokenizer_error",
@@ -650,6 +740,8 @@ class ModelManager:
                 }
             )
             raise
+        finally:
+            self._cleanup_curses(screen)
 
     def set_quantization_mode(self, mode: str):
         """Set the quantization mode and reload models if needed."""
@@ -1091,3 +1183,87 @@ class ModelManager:
         Property for convenient access to the current base model's max context length.
         """
         return self.get_max_context_length()
+
+    # --- Curses Progress Bar Helpers ---
+
+    def _initialize_curses(self) -> Optional["curses.window"]:
+        """Initialize a curses window for progress bar display."""
+        try:
+            screen = curses.initscr()
+            curses.noecho()
+            curses.cbreak()
+            screen.nodelay(1)
+            curses.start_color()
+            curses.use_default_colors()
+            if curses.has_colors():
+                curses.init_pair(1, curses.COLOR_GREEN, -1)  # Green for progress
+                curses.init_pair(2, curses.COLOR_RED, -1)   # Red for errors
+            return screen
+        except Exception as e:
+            self._log_error(
+                f"Failed to initialize curses for progress bar: {str(e)}",
+                error_type="curses_init_error",
+                stack_trace=traceback.format_exc()
+            )
+            return None
+
+    def _cleanup_curses(self, screen: Optional["curses.window"]):
+        """Clean up curses to restore terminal state."""
+        if screen is not None:
+            try:
+                screen.nodelay(0)
+                curses.nocbreak()
+                curses.echo()
+                curses.endwin()
+            except Exception as e:
+                self._log_error(
+                    f"Failed to clean up curses: {str(e)}",
+                    error_type="curses_cleanup_error",
+                    stack_trace=traceback.format_exc()
+                )
+
+    def _display_progress_bar(self, screen: Optional["curses.window"], model_name: str, progress: float, error: Optional[str] = None):
+        """Display a progress bar in the curses window."""
+        if screen is None:
+            return
+        try:
+            with self._memory_lock:
+                screen.clear()
+                max_y, max_x = screen.getmaxyx()
+                bar_width = min(50, max_x - 10)
+                filled = int(bar_width * progress)
+                bar = '=' * filled + '-' * (bar_width - filled)
+                display_name = model_name.split('/')[-1][:max_x-20]
+                if error:
+                    status = f"Error: {error[:max_x-10]}"
+                    color = curses.color_pair(2)
+                else:
+                    status = f"Downloading {display_name}: [{bar}] {progress*100:.1f}%"
+                    color = curses.color_pair(1)
+                screen.addstr(0, 0, status[:max_x-1], color)
+                screen.refresh()
+        except Exception as e:
+            self._log_error(
+                f"Curses display error for progress bar: {str(e)}",
+                error_type="curses_display_error",
+                stack_trace=traceback.format_exc()
+            )
+
+    def _create_progress_callback(self, model_name: str, screen: Optional["curses.window"]):
+        """Create a progress callback for huggingface_hub downloads with curses progress bar."""
+        def callback(downloaded: int, total: int):
+            if total:
+                progress = downloaded / total
+                self._display_progress_bar(screen, model_name, progress)
+                # Log progress every ~10%
+                if not hasattr(self, '_last_progress_logged'):
+                    self._last_progress_logged = 0.0
+                if progress >= (self._last_progress_logged + 0.1):
+                    self._log_event(
+                        "model_download_progress",
+                        f"Downloading {model_name}: {progress*100:.1f}%",
+                        level="info",
+                        additional_info={"model_name": model_name, "progress_percent": progress*100}
+                    )
+                    self._last_progress_logged = progress
+        return callback
