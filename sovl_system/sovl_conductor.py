@@ -2,11 +2,7 @@ import time
 import traceback
 from typing import Optional, Dict, Any, TYPE_CHECKING, List
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
-from threading import Lock
 from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_state import StateManager, StateTracker
@@ -16,10 +12,8 @@ import random
 from sovl_main import SOVLSystem, SystemContext
 from sovl_curiosity import CuriosityManager
 from sovl_memory import RAMManager, GPUMemoryManager
-from sovl_logger import Logger
 from sovl_manager import ModelManager
 from sovl_monitor import SystemMonitor, MemoryMonitor, TraitsMonitor
-from sovl_trainer import TrainingWorkflowManager
 import threading
 from sovl_resource import ResourceManager
 from sovl_api import SOVLAPI

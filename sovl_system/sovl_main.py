@@ -19,7 +19,7 @@ from peft import LoraConfig, get_peft_model, TaskType
 import bitsandbytes as bnb
 
 # Core components
-from sovl_config import ConfigManager, ValidationSchema
+from sovl_config import ConfigManager
 from sovl_state import StateManager, StateTracker
 from sovl_error import ErrorManager
 from sovl_logger import Logger
@@ -44,37 +44,19 @@ from sovl_bonder import BondCalculator, BondModulator
 from sovl_curiosity import CuriosityManager
 from sovl_temperament import TemperamentConfig, TemperamentSystem, TemperamentAdjuster
 from sovl_meditater import IntrospectionManager
-from sovl_scaffold import (
-    CrossAttentionInjector,
-    CrossAttentionLayer,
-    ScaffoldTokenMapper
-)
+from sovl_scaffold import ScaffoldTokenMapper
 
 # Monitoring components
 from sovl_monitor import MonitorManager
 
 # Utilities
 from sovl_utils import (
-    detect_repetitions,
-    safe_compare,
-    float_gt,
     synchronized,
-    validate_components,
-    NumericalGuard,
-    initialize_component_state,
-    sync_component_states,
-    validate_quantization_mode,
-    validate_component_states,
-    check_model_health as util_check_model_health,
-    ensure_dir_exists,
-    backup_file,
-    restore_file,
-    cleanup_components,
     atomic_file_counter,
     safe_append_to_file
 )
 from sovl_confidence import calculate_confidence_score, ConfidenceCalculator
-from sovl_io import  InsufficientDataError, prune_scribe_journal
+from sovl_io import  prune_scribe_journal
 from sovl_trainer import TrainingConfig, SOVLTrainer, TrainingWorkflowManager
 
 # Type checking imports
@@ -696,7 +678,6 @@ class SOVLSystem(SystemInterface):
     def run_dream_cycle_with_abort(self):
         """Set mode to 'dreaming', run Dreamer, allow abort, then return to 'online'."""
         import time
-        import sys
         import select
         from threading import Thread
         self.state_manager.set_mode('dreaming')
