@@ -13,10 +13,6 @@ class Chronos:
     Provides temporal context for LLM prompts, enabling the system to express awareness of the passage of time in a human-like way.
     Designed to be injected into system prompts alongside modules like viber and shamer.
     Easily expandable for more advanced temporal reasoning.
-
-    This class also supports referencing long-term memory events (e.g., from sovl_recaller), allowing the system to say things like
-    "We talked about this about two weeks ago" by searching for relevant past events and expressing their temporal distance in human terms.
-    Now includes pattern recognition, relative/absolute time references, fuzzy/uncertain time expressions, and meta-communicative memory fading for a more human feel.
     """
     def __init__(self, config_manager: ConfigManager, state_manager: StateManager, logger: Logger, config: Optional[dict] = None):
         """
