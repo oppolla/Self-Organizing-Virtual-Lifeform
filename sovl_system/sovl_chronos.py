@@ -280,8 +280,3 @@ class Chronos:
         if context_str:
             return f"{context_str}\n{base_prompt}"
         return base_prompt
-
-# Example for future expansion:
-# - Add semantic similarity for topic matching
-# - Add pattern recognition ("You usually message in the evenings.")
-# - Add support for future events (reminders, scheduled actions)
