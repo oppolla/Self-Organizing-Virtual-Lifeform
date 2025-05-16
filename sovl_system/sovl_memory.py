@@ -1,5 +1,4 @@
 import torch
-import json
 import os
 from collections import deque, defaultdict
 from threading import Lock
@@ -7,7 +6,7 @@ import time
 import traceback
 from typing import Optional, Dict, List, Tuple, Any, Union
 from sovl_logger import Logger
-from sovl_utils import log_memory_usage, safe_divide
+from sovl_utils import safe_divide
 from sovl_config import ConfigManager
 from sovl_hardware import HardwareManager
 from sovl_error import ErrorManager, ErrorRecord
