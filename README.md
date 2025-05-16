@@ -43,6 +43,63 @@ The system dynamically shapes its responses by analyzing conversational context,
     pip install torch transformers peft bitsandbytes pydantic numpy
     ```
 
+3. **Download Language Models**
+SOVL uses a modular multi-LLM architecture with a core model and satellite models. The recommended models are optimized for a modest GPU (8–16 GB VRAM) and use 4-bit quantization for efficiency. You’ll download these models from Hugging Face and configure them in sovl_config.json.
+
+a. Set Up Hugging Face CLI
+Log in to Hugging Face to authenticate model downloads:
+bash
+```
+pip install huggingface_hub
+huggingface-cli login
+```
+
+Enter your Hugging Face access token when prompted (from huggingface.co/settings/tokens).
+
+This caches your credentials in ~/.cache/huggingface/ for future downloads.
+
+b. Download Core Model
+The core model (base_model_name) is mistralai/Mistral-7B-Instruct-v0.3, a 7B parameter model for general-purpose tasks.
+bash
+```
+python -c "from transformers import AutoModelForCausalLM, AutoTokenizer; \
+model = AutoModelForCausalLM.from_pretrained('mistralai/Mistral-7B-Instruct-v0.3', load_in_4bit=True, device_map='auto'); \
+tokenizer = AutoTokenizer.from_pretrained('mistralai/Mistral-7B-Instruct-v0.3')"
+```
+
+Details: Downloads 5–6 GB of model weights to `/.cache/huggingface/hub/`. Requires ~5–6 GB VRAM with 4-bit quantization.
+
+c. Download Primary Satellite Model
+The primary satellite model (scaffold_model_name) is google/gemma-2b-it, a 2B parameter model for conversational tasks.
+bash
+```
+python -c "from transformers import AutoModelForCausalLM, AutoTokenizer; \
+model = AutoModelForCausalLM.from_pretrained('google/gemma-2b-it', load_in_4bit=True, device_map='auto'); \
+tokenizer = AutoTokenizer.from_pretrained('google/gemma-2b-it')"
+```
+
+Details: Downloads ~1–2 GB of model weights. Requires ~1–2 GB VRAM with 4-bit quantization.
+
+Note: Accept Gemma’s terms of use on Hugging Face before downloading (visit huggingface.co/google/gemma-2b-it).
+
+d. Download Additional Satellite Models
+The additional satellite models (scaffold_model_names) are google/gemma-2b-it (second instance) and google/flan-t5-base for conversational and introspective tasks.
+Gemma 2B-IT (Second Instance): Already downloaded above, as it’s the same model. SOVL will use separate LoRA adapters to differentiate roles.
+
+Flan-T5-Base:
+
+bash
+```
+python -c "from transformers import AutoModelForSeq2SeqLM, AutoTokenizer; \
+model = AutoModelForSeq2SeqLM.from_pretrained('google/flan-t5-base', load_in_4bit=True, device_map='auto'); \
+tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-base')"
+```
+
+Details: Downloads ~0.5–1 GB of model weights. Requires ~0.5–1 GB VRAM with 4-bit quantization.
+
+Total VRAM Usage: ~7–9 GB (Mistral 7B: 5–6 GB, Gemma 2B-IT: 1–2 GB, Flan-T5-Base: 0.5–1 GB), fitting 12–16 GB GPUs. For 8 GB VRAM, load one satellite at a time using sovl_manager.py.
+
+
 ### Running SOVL
 
 Start the system with the provided entry point:
