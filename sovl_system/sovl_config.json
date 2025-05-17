@@ -279,9 +279,9 @@
     "task_type": "CAUSAL_LM"
   },
   "model_config": {
-    "base_model_name": "mistralai/Mistral-7B-Instruct-v0.3",
-    "scaffold_model_name": "google/gemma-2b-it",
-    "scaffold_model_names": ["google/gemma-2b-it", "google/flan-t5-base"],
+    "base_model_name": "Qwen/Qwen3-8B",
+    "scaffold_model_name": "Qwen/Qwen3-1.7B",
+    "scaffold_model_names": [],
     "quantization_mode": "fp16"
 }
   "memory": {
