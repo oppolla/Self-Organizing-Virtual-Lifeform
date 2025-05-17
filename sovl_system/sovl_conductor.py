@@ -533,7 +533,7 @@ class SOVLOrchestrator(OrchestratorInterface):
         
         self._log_event("initialization_final_summary", {"succeeded": initialized_components, "failed_info": failed_components_info})
 
-        print("[SOVL System] All components successfully incarnated", flush=True)
+        print("[SOVL System] Incarnation Complete", flush=True)
 
         if not self.components.get("sovl_system"):
             # If sovl_system (a critical component) failed, the raise above should have caught it.
