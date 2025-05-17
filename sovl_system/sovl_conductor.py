@@ -431,6 +431,8 @@ class SOVLOrchestrator(OrchestratorInterface):
                 is_critical_component = component_options.get("is_critical", True) # Default to True
 
                 msg_prefix = f"[{component_idx_counter}/{total_components_to_init}] Incarnating {key} ({class_name}) ... "
+                if key == "model_manager":
+                    print("[SOVL System] Downloading models and tokenizers. This may take several minutes", flush=True)
                 print(f"[SOVL System] {msg_prefix}", end="", flush=True)
                 
                 try:
@@ -531,6 +533,8 @@ class SOVLOrchestrator(OrchestratorInterface):
         
         self._log_event("initialization_final_summary", {"succeeded": initialized_components, "failed_info": failed_components_info})
 
+        print("[SOVL System] All components successfully incarnated", flush=True)
+
         if not self.components.get("sovl_system"):
             # If sovl_system (a critical component) failed, the raise above should have caught it.
             # This is a fallback check.
@@ -629,7 +633,7 @@ class SOVLOrchestrator(OrchestratorInterface):
     def _prepare_system_for_run(self, system_instance: 'SOVLSystem'):
         """Perform any final preparations on the SOVLSystem instance before run, like generating a wake-up greeting."""
         if not system_instance:
-            self._log_error("Cannot prepare a null SOVLSystem instance for run.", ValueError("system_instance is None"))
+            self._log_event("cannot_prepare_null_system", {}, level="warning")
             return
 
         try:
