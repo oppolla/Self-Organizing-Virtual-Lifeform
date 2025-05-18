@@ -29,6 +29,7 @@ from sovl_recaller import DialogueContextManager
 import importlib
 import pkgutil
 import argparse
+from sovl_tester import SOVLTestRunner
 
 # Constants
 TRAIN_EPOCHS = 10
@@ -2970,80 +2971,70 @@ class CommandHandler(cmd.Cmd):
         print(f"Reload for component '{target}' is not implemented.")
 
     def do_test(self, arg):
+        """Test runner for the SOVL system.
+        
+        Usage:
+            /test                 - Show this help message
+            /test run            - Run all tests
+            /test list           - List available tests
+            /test <test_name>    - Run specific test
+            /test -v             - Run tests with verbose output
+            /test -p <pattern>   - Run tests matching pattern
         """
-        Run a comprehensive self-test of all major system classes and components.
-        Usage: /test
-        """
-        results = []
-        # Helper for safe checks
-        def safe_check(name, obj, method=None, args=None, kwargs=None, required=True, msg=None):
-            if not obj:
-                results.append((name, "FAIL" if required else "Not present", msg or "Not instantiated"))
+        runner = SOVLTestRunner(self.sovl_system, verbose='-v' in arg)
+        args = arg.split()
+
+        try:
+            # No arguments - show help
+            if not arg:
+                print(runner.get_test_help())
                 return
-            try:
-                if method:
-                    m = getattr(obj, method, None)
-                    if not m:
-                        results.append((name, "FAIL", f"No method '{method}'"))
-                        return
-                    a = args or []
-                    k = kwargs or {}
-                    m(*a, **k)
-                results.append((name, "PASS", msg or ""))
-            except Exception as e:
-                results.append((name, "FAIL", f"Exception: {e}"))
 
-        # Core system
-        safe_check("SOVLSystem", getattr(self, 'sovl_system', None))
-        safe_check("ConfigManager", getattr(self.sovl_system, 'config_handler', None), 'get_config')
-        safe_check("StateManager", getattr(self.sovl_system, 'state_manager', None), 'get_state')
-        safe_check("StateTracker", getattr(self.sovl_system, 'state_tracker', None), 'get_active_conversation_id', required=False)
-        # Generation & language
-        safe_check("GenerationManager", getattr(self.sovl_system, 'generation_manager', None), 'generate_text', args=["test"], kwargs={'num_return_sequences': 1}, required=True)
-        safe_check("ScaffoldProvider", getattr(self.sovl_system, 'scaffold_provider', None), 'get_scaffold_metrics', required=False)
-        safe_check("BondCalculator", self.bond_calculator, 'get_bond_score', args=[0], required=False)
-        # Memory & monitoring
-        safe_check("MemoryManager", getattr(self.sovl_system, 'memory_manager', None), 'get_status', required=False)
-        safe_check("RAMManager", getattr(self.sovl_system, 'ram_manager', None), 'get_status', required=False)
-        safe_check("GPUManger", getattr(self.sovl_system, 'gpu_manager', None), 'get_status', required=False)
-        safe_check("SystemMonitor", getattr(self, 'system_monitor', None), '_collect_metrics', required=False)
-        safe_check("MemoryMonitor", getattr(self, 'memory_monitor', None), 'get_status', required=False)
-        safe_check("TraitsMonitor", getattr(self, 'traits_monitor', None), 'get_traits', required=False)
-        # Logging, error, events
-        safe_check("Logger", getattr(self.sovl_system, 'logger', None), 'record_event', args=["test_event", "Self-test event", "info"], required=True)
-        safe_check("ErrorManager", getattr(self.sovl_system, 'error_manager', None), 'record_error', args=["selftest", "Self-test error", "", "do_test"], required=True)
-        safe_check("EventDispatcher", getattr(self.sovl_system, 'event_dispatcher', None), required=False)
-        # Introspection, curiosity, temperament, confidence
-        safe_check("IntrospectionManager", getattr(self.sovl_system, 'introspection_manager', None), required=False)
-        safe_check("CuriosityManager", self.curiosity_manager, 'generate_curiosity_question', args=["test"], required=False)
-        safe_check("TemperamentManager", self.temperament_manager, required=False)
-        safe_check("ConfidenceManager", self.confidence_manager, required=False)
-        # Learning, training, tuning
-        safe_check("Trainer", getattr(self.sovl_system, 'trainer', None), required=False)
-        safe_check("Tuner", getattr(self.sovl_system, 'tuner', None), required=False)
-        # Scriber, recaller, primer, dreamer
-        safe_check("Scriber", getattr(self.sovl_system, 'scriber', None), required=False)
-        safe_check("Recaller", getattr(self.sovl_system, 'recaller', None), 'get_long_term_context', required=False)
-        safe_check("PrimerManager", getattr(self.sovl_system, 'primer_manager', None), required=False)
-        safe_check("Dreamer", getattr(self.sovl_system, 'dreamer', None), required=False)
-        # Conductor, manager
-        safe_check("SOVLOrchestrator", getattr(self.sovl_system, 'orchestrator', None), required=False)
-        safe_check("SOVLManager", getattr(self.sovl_system, 'manager', None), required=False)
-        safe_check("ResourceManager", getattr(self.sovl_system, 'resource_manager', None), required=False)
-        # Journal/Queue/Records
-        safe_check("Queue", getattr(self.sovl_system, 'queue', None), required=False)
-        safe_check("Records", getattr(self.sovl_system, 'records', None), required=False)
-        safe_check("Journal", getattr(self.sovl_system, 'journal', None), required=False)
+            command = args[0].lower()
+            
+            if command == 'run':
+                # Run all tests
+                result = runner.run_tests()
+                print(result['formatted_output'])
+                runner.save_results(result)
+                
+            elif command == 'list':
+                # List available tests
+                tests = runner.discover_tests()
+                print("\n=== Available SOVL Tests ===")
+                for category, test_list in tests.items():
+                    print(f"\n{category.upper()}:")
+                    for test in test_list:
+                        print(f"  - {test['name']}")
+                        print(f"    {test['description']}")
+                
+            elif command == '-p' and len(args) > 1:
+                # Run pattern-matched tests
+                result = runner.run_tests(pattern=args[1])
+                print(result['formatted_output'])
+                runner.save_results(result)
+                
+            elif command == '-v':
+                # Run all tests in verbose mode
+                result = runner.run_tests()
+                print(result['formatted_output'])
+                runner.save_results(result)
+                
+            else:
+                # Run specific test
+                result = runner.run_tests(test_name=command)
+                print(result['formatted_output'])
+                runner.save_results(result)
 
-        # Print results
-        print("\nSystem Self-Test:")
-        print("-----------------")
-        fail_count = 0
-        for name, status, msg in results:
-            print(f"{name:22}: {status:8} {msg}")
-            if status == "FAIL":
-                fail_count += 1
-        print(f"\n{fail_count}/{len(results)} checks failed.")
+        except Exception as e:
+            print(f"Test execution error: {e}")
+            if self.verbose:
+                traceback.print_exc()
+
+    def complete_test(self, text, line, begidx, endidx):
+        """Tab completion for test command."""
+        runner = SOVLTestRunner(self.sovl_system)
+        return runner.get_completions(text)
 
     def _register_builtin_commands(self):
         """
@@ -3055,6 +3046,7 @@ class CommandHandler(cmd.Cmd):
                 cmd_name = attr_name[3:]
                 handler = getattr(self, attr_name)
                 self.register_command(cmd_name, handler)
+        self.register_command('test', self.do_test)
 
     def _register_external_commands(self):
         """
