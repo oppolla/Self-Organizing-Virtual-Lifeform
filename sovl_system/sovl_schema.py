@@ -648,3 +648,23 @@ class StateConfig(BaseModel):
     max_history: int = 100  # Maximum number of history entries to keep
     state_file: str = "state.json"  # Path to the state file
 
+class TestConfig(BaseModel):
+    """Configuration schema for the test runner."""
+    test_dir: str = "tests"
+    output_dir: str = "test_results"
+    parallel: bool = False
+    no_color: bool = False
+    test_patterns: List[str] = ["test_*.py", "*_test.py", "*_stress.py"]
+    slow_test_threshold: float = 1.0
+    save_results: bool = True
+    cleanup_on_exit: bool = True
+    state_preservation: bool = True
+    max_retries: int = 3
+    retry_delay: float = 1.0
+
+# Update imports at top of file to include TestConfig
+__all__ = [
+    # ... existing exports ...
+    'TestConfig',
+]
+
