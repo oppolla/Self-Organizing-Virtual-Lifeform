@@ -184,22 +184,38 @@
     "weight": 0.5
   },
   "bonding_config": {
-      "strong_bond_threshold": 0.8,
-      "weak_bond_threshold": 0.3,
-      "default_bond_score": 0.5,
-      "bond_decay_rate": 0.01,
-      "bond_memory_window": 100,
-      "interaction_weight": 1.0,
-      "modality_weights": {
-          "text": 1.0,
-          "face": 0.5,
-          "voice": 0.5
-      },
-      "context_strong": "You feel a strong, trusting connection to this user. Be warm, open, and familiar.",
-      "context_weak": "You feel distant from this user. Be formal and reserved.",
-      "context_neutral": "You feel a neutral connection to this user. Be polite and neutral.",
-      "bond_sensitivity": 1.0,
-      "enable_bonding": true
+    "strong_bond_threshold": 0.8,
+    "weak_bond_threshold": 0.3,
+    "default_bond_score": 0.5,
+    "min_bond_score": 0.0,
+    "max_bond_score": 1.0,
+    "weights": {
+        "curiosity": 0.25,
+        "stability": 0.25,
+        "coherence": 0.25,
+        "personalized": 0.25
+    },
+    "signature_similarity_threshold": 0.9,
+    "drift_threshold": 0.9,
+    "drift_consecutive": 20,
+    "signature_history_maxdays": 365,
+    "signature_history_maxlen": 200,
+    "archive_timeout_days": 365,
+    "max_signature_metadata": 30,
+    "state_sync_interval": 2.0,
+    "max_identified_users": 10000,
+    "archived_retention_days": 365,
+    "decay_lambda": 0.01,
+    "modality_weights": {
+        "text": 1.0,
+        "face": 0.5,
+        "voice": 0.5
+    },
+    "context_strong": "You feel a strong, trusting connection to this user. Be warm, open, and familiar.",
+    "context_weak": "You feel distant from this user. Be formal and reserved.",
+    "context_neutral": "You feel a neutral connection to this user. Be polite and neutral.",
+    "bond_sensitivity": 1.0,
+    "enable_bonding": true
   },
   "introspection_config": {
     "enable": true,

@@ -343,17 +343,31 @@ class BondingConfig(BaseModel):
             "personalized": 0.25
         }
     )  # Weights for bond components
+
+    # --- User identification sensitivity parameters ---
+    signature_similarity_threshold: float = 0.9  # Much higher for stickiness
+    drift_threshold: float = 0.9
+    drift_consecutive: int = 20
+    signature_history_maxdays: int = 365
+    signature_history_maxlen: int = 200
+    archive_timeout_days: int = 365
+
+    # --- Other bonder parameters ---
     max_signature_metadata: int = 30  # Max metadata entries for signature
     state_sync_interval: float = 2.0  # Interval (seconds) for state sync
-    signature_similarity_threshold: float = 0.15  # Similarity threshold for signature matching
     max_identified_users: int = 10000  # Max number of identified users (LRU cap)
     archived_retention_days: int = 365  # Days to retain archived users
-    signature_history_maxlen: int = 100  # Max length of signature history
-    signature_history_maxdays: int = 180  # Max days for signature history retention
-    drift_threshold: float = 0.25  # Threshold for drift detection
-    drift_consecutive: int = 5  # Consecutive drifts before action
-    archive_timeout_days: int = 365  # Days before archiving dormant profiles
     decay_lambda: float = 0.01  # Decay lambda for time-weighted averages
+
+    # --- Optional: for modality fusion ---
+    # If you want to validate these in schema as well, otherwise handled in config
+    # modality_weights: Dict[str, float] = Field(
+    #     default_factory=lambda: {
+    #         "text": 1.0,
+    #         "face": 0.5,
+    #         "voice": 0.5
+    #     }
+    # )
 
 # Used by: BondCalculator (sovl_bonder.py)
 class BondConfig(BaseModel):
