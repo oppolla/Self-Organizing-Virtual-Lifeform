@@ -523,3 +523,90 @@ Examples:
         self.cleanup()
         if exc_type:
             self._log_error("test_runner_error", exc_val)
+
+    def list_saved_results(self) -> List[str]:
+        """List all saved test result files in the output_dir, sorted by date (newest first)."""
+        output_dir = Path(self.output_dir)
+        if not output_dir.exists():
+            return []
+        files = list(output_dir.glob("test_results_*.json"))
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        return [str(f) for f in files]
+
+    def load_results(self, filename: str) -> Optional[Dict]:
+        """Load test results from a specified file in the output_dir."""
+        output_dir = Path(self.output_dir)
+        filepath = output_dir / filename if not os.path.isabs(filename) else Path(filename)
+        if not filepath.exists():
+            print(f"Results file not found: {filepath}")
+            return None
+        try:
+            with open(filepath, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Failed to load results from {filepath}: {e}")
+            return None
+
+    def show_results(self, filename: str = None):
+        """Load and print formatted results from a file. If no file is given, show the latest."""
+        files = self.list_saved_results()
+        if not files:
+            print("No saved test results found.")
+            return
+        if filename is None:
+            filepath = files[0]
+        else:
+            # Allow partial filename matching
+            matches = [f for f in files if filename in os.path.basename(f)]
+            if not matches:
+                print(f"No results file matching '{filename}' found.")
+                return
+            filepath = matches[0]
+        results = self.load_results(filepath)
+        if not results:
+            print(f"Could not load results from {filepath}.")
+            return
+        # Format and print results
+        # If loaded from file, results['results'] is a list of dicts, not TestResult objects
+        # We'll just print the formatted_output if present, else print summary
+        formatted = results.get('formatted_output')
+        if formatted:
+            print(formatted)
+        else:
+            summary = results.get('summary', {})
+            print(f"Results file: {filepath}")
+            print(f"Total: {summary.get('total', 0)}, Passed: {summary.get('passed', 0)}, Failed: {summary.get('failed', 0)}, Duration: {summary.get('duration', 0):.2f}s")
+
+    def delete_all_saved(self):
+        """Delete all saved test result files in the output_dir."""
+        output_dir = Path(self.output_dir)
+        if not output_dir.exists():
+            print("No test results directory found.")
+            return
+        files = list(output_dir.glob("test_results_*.json"))
+        count = 0
+        for f in files:
+            try:
+                f.unlink()
+                count += 1
+            except Exception as e:
+                print(f"Failed to delete {f}: {e}")
+        print(f"Deleted {count} test result file(s)." if count else "No test result files found to delete.")
+
+    def delete_specific_saved(self, filename: str):
+        """Delete a specific saved test result file by (partial) filename match."""
+        output_dir = Path(self.output_dir)
+        if not output_dir.exists():
+            print("No test results directory found.")
+            return
+        files = list(output_dir.glob("test_results_*.json"))
+        matches = [f for f in files if filename in f.name]
+        if not matches:
+            print(f"No results file matching '{filename}' found.")
+            return
+        for f in matches:
+            try:
+                f.unlink()
+                print(f"Deleted: {f.name}")
+            except Exception as e:
+                print(f"Failed to delete {f}: {e}")
