@@ -14,7 +14,6 @@ setup(
         "transformers",
         "peft",
         "bitsandbytes",
-        "pydantic",
         "numpy"
     ],
     entry_points={

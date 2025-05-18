@@ -3,7 +3,6 @@ import json
 from functools import lru_cache
 from typing import Optional, Any
 from pathlib import Path
-from pydantic import BaseModel
 from sovl_schema import (
        GestationConfig,
        OrchestratorConfig,
@@ -60,7 +59,7 @@ Usage:
 CONFIG_PATH = Path(__file__).parent / "sovl_config.json"
 
 
-class SOVLConfig(BaseModel):
+class SOVLConfig:
     # Add all top-level config sections as fields
     gestation: Optional[GestationConfig] = None
     orchestrator: Optional[OrchestratorConfig] = None

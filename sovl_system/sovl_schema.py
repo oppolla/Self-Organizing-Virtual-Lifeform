@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, field
 
 """
 SOVL Config Schema (Pydantic-based)
@@ -10,30 +10,30 @@ Incrementally add config sections as you migrate from the old schema.
 """
 
 # Example placeholder for a config section (remove or replace as you migrate sections)
-# class CoreConfig(BaseModel):
+# class CoreConfig:
 #     base_model_name: str
 #     ...
 
 # Top-level config model placeholder (expand as you add sections)
-# class SOVLConfig(BaseModel):
+# class SOVLConfig:
 #     core_config: CoreConfig
 #     ...
 
 # Used by: TirednessManager, SOVLSystem (sovl_main.py)
-class GestationConfig(BaseModel):
-    tiredness_threshold: float = Field(0.7, ge=0.0, le=1.0)  # Threshold above which the system is considered tired
-    tiredness_check_interval: int = Field(10, ge=1, le=3600)  # Interval (seconds) between tiredness checks
-    tiredness_decay_k: float = Field(0.01, ge=0.0001, le=1.0)  # Decay constant for tiredness as a function of data exposure
-    sleep_log_min: int = Field(10, ge=1, le=10000)  # Minimum number of log entries before sleep is considered
-    gestation_countdown_seconds: int = Field(30, ge=1, le=600)  # Countdown (seconds) before gestation begins after being triggered
-    tiredness_weights: Dict[str, float] = Field(default_factory=lambda: {"log": 0.4, "confidence": 0.3, "time": 0.3})  # Weights for log, confidence, and time in tiredness calculation
-    min_awake_seconds: int = Field(60, ge=1, le=86400)  # Minimum time (seconds) the system must stay awake between gestation cycles
-    max_awake_seconds: int = Field(7200, ge=1, le=86400)  # Maximum time (seconds) the system can stay awake before forced gestation
-    post_abort_cooldown_seconds: int = Field(120, ge=1, le=86400)  # Cooldown (seconds) after a gestation abort before another can be triggered
+class GestationConfig:
+    tiredness_threshold: float = 0.7  # Threshold above which the system is considered tired
+    tiredness_check_interval: int = 10  # Interval (seconds) between tiredness checks
+    tiredness_decay_k: float = 0.01  # Decay constant for tiredness as a function of data exposure
+    sleep_log_min: int = 10  # Minimum number of log entries before sleep is considered
+    gestation_countdown_seconds: int = 30  # Countdown (seconds) before gestation begins after being triggered
+    tiredness_weights: Dict[str, float] = field(default_factory=lambda: {"log": 0.4, "confidence": 0.3, "time": 0.3})  # Weights for log, confidence, and time in tiredness calculation
+    min_awake_seconds: int = 60  # Minimum time (seconds) the system must stay awake between gestation cycles
+    max_awake_seconds: int = 7200  # Maximum time (seconds) the system can stay awake before forced gestation
+    post_abort_cooldown_seconds: int = 120  # Cooldown (seconds) after a gestation abort before another can be triggered
     dream_after_gestation: bool = True  # Whether to run a dream cycle after gestation completes
 
 # Used by: SOVLOrchestrator (sovl_conductor.py)
-class OrchestratorConfig(BaseModel):
+class OrchestratorConfig:
     log_max_size_mb: int = 10  # Maximum log file size in megabytes
     save_path_suffix: str = "_final.json"  # Suffix for saved state files
     enable_logging: bool = True  # Enable or disable orchestrator logging
@@ -42,17 +42,17 @@ class OrchestratorConfig(BaseModel):
     max_backup_files: int = 5  # Maximum number of backup files to keep
 
 # Used by: EventDispatcher, StateEventDispatcher, MemoryEventDispatcher (sovl_events.py), Logger (sovl_logger.py)
-class LoggingConfig(BaseModel):
+class LoggingConfig:
     log_file: str = "sovl_events.log"  # Path to the log file
     max_size_mb: int = 10  # Maximum log file size in megabytes before rotation
     compress_old: bool = False  # Whether to compress old log files after rotation
 
 # Used by: EventDispatcher (sovl_events.py), possibly other modules
-class ControlsConfig(BaseModel):
+class ControlsConfig:
     monitor_deadlocks: bool = True  # Enable or disable deadlock monitoring for event locks
 
 # Used by: SystemMonitor, MemoryMonitor, TraitsMonitor (sovl_monitor.py)
-class MonitoringConfig(BaseModel):
+class MonitoringConfig:
     bond_history_maxlen: int = 30  # Max bond score history per user
     ram_critical_threshold_percent: float = 90.0  # RAM usage percent threshold for critical alert
     gpu_critical_threshold_percent: float = 95.0  # GPU usage percent threshold for critical alert
@@ -60,7 +60,7 @@ class MonitoringConfig(BaseModel):
     scaffold_fallback_rate_threshold: float = 0.2  # Scaffold fallback rate threshold
     poll_interval: float = 10.0  # Polling interval for monitor loops (seconds)
     trait_history_size: int = 100  # Number of samples to keep for trait history
-    trait_variance_thresholds: Dict[str, float] = Field(default_factory=lambda: {
+    trait_variance_thresholds: Dict[str, float] = field(default_factory=lambda: {
         'curiosity': 0.3,
         'confidence': 0.25,
         'lifecycle': 0.2,
@@ -71,7 +71,7 @@ class MonitoringConfig(BaseModel):
     gpu_critical_usage_mb: int = 4096  # GPU usage (MB) threshold for critical alert
 
 # Used by: RAMManager (sovl_memory.py)
-class RAMConfig(BaseModel):
+class RAMConfig:
     memory_threshold: float = 0.85  # RAM usage threshold (0.0-1.0) before triggering recovery
     memory_decay_rate: float = 0.95  # Decay rate for RAM memory
     max_batch_size: int = 32  # Maximum batch size for RAM operations
@@ -79,25 +79,25 @@ class RAMConfig(BaseModel):
     batch_size: int = 8  # Current batch size (may be updated dynamically)
 
 # Used by: GPUMemoryManager (sovl_memory.py)
-class GPUConfig(BaseModel):
+class GPUConfig:
     gpu_threshold: float = 0.85  # GPU usage threshold (0.0-1.0) before triggering recovery
     gpu_decay_rate: float = 0.95  # Decay rate for GPU memory
     max_gpu_memory_mb: int = 1024  # Maximum GPU memory in MB
 
 # Used by: MetadataProcessor (sovl_processor.py)
-class MetadataProcessorConfig(BaseModel):
+class MetadataProcessorConfig:
     state_cache_ttl: float = 2.0  # Time-to-live for state cache (seconds)
 
 # Used by: ScribeIngestionProcessor, memory/journal processing
-class ScribedConfig(BaseModel):
+class ScribedConfig:
     output_path: str = "scribe/sovl_scribe.jsonl"  # Path to scribe journal file
     max_file_size_mb: int = 50  # Max file size in MB before rotation
     buffer_size: int = 10  # Buffer size for scribe writes
 
 # Used by: ScribeIngestionProcessor, event weighting
-class TrainerWeightingConfig(BaseModel):
+class TrainerWeightingConfig:
     # This is a mapping of every possible metadata field/event type to a float weight
-    __root__: Dict[str, float] = Field(
+    __root__: Dict[str, float] = field(
         default_factory=lambda: {
             "internal_error_reflection": 0.2,
             "user_message": 1.0,
@@ -185,8 +185,8 @@ class TrainerWeightingConfig(BaseModel):
     )
 
 # Used by: ScribeIngestionProcessor, event weighting
-class EventTypeWeightsConfig(BaseModel):
-    __root__: Dict[str, float] = Field(
+class EventTypeWeightsConfig:
+    __root__: Dict[str, float] = field(
         default_factory=lambda: {
             "error_message": 0.2,
             "user_interaction": 1.0,
@@ -200,11 +200,11 @@ class EventTypeWeightsConfig(BaseModel):
     )
 
 # Used by: JSONLLoader, load_and_split_data (sovl_io.py)
-class IOConfig(BaseModel):
-    field_mapping: Dict[str, str] = Field(
+class IOConfig:
+    field_mapping: Dict[str, str] = field(
         default_factory=lambda: {"prompt": "prompt", "completion": "completion"}
     )  # Mapping of input fields to output fields
-    required_fields: List[str] = Field(
+    required_fields: List[str] = field(
         default_factory=lambda: ["prompt", "completion"]
     )  # Fields required in each entry
     min_string_length: int = 1  # Minimum allowed string length for fields
@@ -213,16 +213,16 @@ class IOConfig(BaseModel):
     shuffle_data: bool = True  # Shuffle data before splitting (used in data splitting)
 
 # Used by: JsonlWriter (sovl_io.py)
-class ScribedConfig(BaseModel):
+class ScribedConfig:
     log_path: str = "logs/sovl_scribed.jsonl"  # Path to scribe JSONL log file
     max_file_size_mb: int = 50  # Max file size in MB before rotation
     buffer_size: int = 10  # Number of entries to buffer before writing
 
 # Used by: load_and_split_data (sovl_io.py), and possibly elsewhere
-class CoreConfig(BaseModel):
+class CoreConfig:
     random_seed: int = 42  # Random seed for reproducibility
 
-class ControlsConfig(BaseModel):
+class ControlsConfig:
     scaffold_unk_id: Optional[int] = None  # Tokenizer unknown token ID
     use_token_map_memory: bool = True  # Use token map memory for scaffold
     dynamic_cross_attn_mode: Optional[Any] = None  # Dynamic cross-attention mode
@@ -240,18 +240,18 @@ class ControlsConfig(BaseModel):
     enable_error_listening: Optional[bool] = None  # Enable error listening (if used)
     dream_memory_weight: Optional[float] = None  # Dream memory weighting (if used)
 
-class GenerationConfig(BaseModel):
+class GenerationConfig:
     min_batch_size: int = 1  # Minimum batch size for generation
     max_batch_size: int = 8  # Maximum batch size for generation
     default_batch_size: int = 1  # Default batch size for generation
     mem_per_sample_mb: int = 100  # Estimated memory per sample in MB
 
-class TrainingConfig(BaseModel):
+class TrainingConfig:
     max_seq_length: int = 1024  # Maximum sequence length for training
     batch_size: int = 8  # Training batch size
-    dry_run_params: Dict[str, Any] = Field(default_factory=dict)  # Placeholder for dry run parameters
+    dry_run_params: Dict[str, Any] = field(default_factory=dict)  # Placeholder for dry run parameters
 
-class CuriosityConfig(BaseModel):
+class CuriosityConfig:
     enable_curiosity: bool = True  # Enable or disable curiosity system
     weight_ignorance: float = 0.7  # Weight for ignorance in curiosity score
     weight_novelty: float = 0.3  # Weight for novelty in curiosity score
@@ -292,7 +292,7 @@ class CuriosityConfig(BaseModel):
     min_temperature: float = 0.7
     max_temperature: float = 1.7
 
-class TemperamentConfig(BaseModel):
+class TemperamentConfig:
     mood_influence: float = 0.3  # Influence of mood on temperament
     history_maxlen: int = 5  # Max length of mood/temperament history
     temp_eager_threshold: float = 0.7  # Threshold for eager temperament
@@ -322,20 +322,20 @@ class TemperamentConfig(BaseModel):
     pressure_joy_rebound: float = 0.6
 
 # Used by: ConfidenceCalculator (sovl_confidence.py)
-class ConfidenceConfig(BaseModel):
+class ConfidenceConfig:
     min_confidence: float = 0.0  # Minimum allowed confidence score
     max_confidence: float = 1.0  # Maximum allowed confidence score
     default_confidence: float = 0.5  # Default confidence score if calculation fails
     min_history_length: int = 3  # Minimum history length for recovery/validation
 
 # Used by: BondCalculator, BondModulator (sovl_bonder.py)
-class BondingConfig(BaseModel):
+class BondingConfig:
     strong_bond_threshold: float = 0.8  # Threshold for strong bond
     weak_bond_threshold: float = 0.3  # Threshold for weak bond
     default_bond_score: float = 0.5  # Default bond score
     min_bond_score: float = 0.0  # Minimum bond score
     max_bond_score: float = 1.0  # Maximum bond score
-    weights: Dict[str, float] = Field(
+    weights: Dict[str, float] = field(
         default_factory=lambda: {
             "curiosity": 0.25,
             "stability": 0.25,
@@ -370,27 +370,27 @@ class BondingConfig(BaseModel):
     # )
 
 # Used by: BondCalculator (sovl_bonder.py)
-class BondConfig(BaseModel):
+class BondConfig:
     max_interactions: int = 100  # Max interactions for knowing score
     max_session_time: float = 3600.0  # Max session time for knowing score
     decay_rate: float = 0.95  # Decay rate for inactivity
     decay_interval: float = 86400.0  # Interval (seconds) for decay
     max_expected_dev: float = 20.0  # Max expected deviation for style consistency
 
-class IntrospectionUnifiedConfig(BaseModel):
+class IntrospectionUnifiedConfig:
     min_topic_duration: int = 30  # Minimum seconds a topic must span to trigger introspection
     min_topic_messages: int = 3   # Minimum user messages in a topic window
     min_topic_words: int = 100    # Minimum total words in a topic window
     topic_time_window: int = 600  # Time window (seconds) for topic engagement
 
-class IntrospectionConfig(BaseModel):
+class IntrospectionConfig:
     enable: bool = True  # Master switch for all introspection
     min_curiosity_trigger: float = 0.7  # Curiosity score threshold to trigger introspection
     max_confidence_trigger: float = 0.4  # Max confidence below which introspection may trigger
-    triggering_moods: List[str] = Field(default_factory=lambda: ["cautious", "melancholy"])  # Moods that can trigger introspection
+    triggering_moods: List[str] = field(default_factory=lambda: ["cautious", "melancholy"])  # Moods that can trigger introspection
     cooldown_seconds: int = 30  # Minimum seconds between introspection triggers
     base_approval_threshold: float = 0.6  # Default threshold for approving introspection results
-    status_phrases: List[str] = Field(default_factory=lambda: [
+    status_phrases: List[str] = field(default_factory=lambda: [
         "Processing...", "Considering carefully...", "Reviewing perspectives...", "Evaluating options..."
     ])  # Status messages shown during introspection
     debug_mode: bool = False  # Enable verbose logging and debug output
@@ -401,7 +401,7 @@ class IntrospectionConfig(BaseModel):
     introspect_min_interval: float = 0.5  # Minimum interval (seconds) between introspect checks
     idle_seconds: int = 60  # Idle time (seconds) before introspection can trigger
 
-    unified: IntrospectionUnifiedConfig = Field(default_factory=IntrospectionUnifiedConfig)  # Unified trigger system config
+    unified: IntrospectionUnifiedConfig = field(default_factory=IntrospectionUnifiedConfig)  # Unified trigger system config
 
     # Technique-agnostic parameters
     followup_depth: int = 3  # Default number of follow-up questions for recursive introspection
@@ -454,9 +454,9 @@ class IntrospectionConfig(BaseModel):
     max_pending_introspections: Optional[int] = None  # Max number of pending introspections to buffer
 
     # For future extensibility
-    extra: Dict[str, Any] = Field(default_factory=dict)  # Extra config for future use
+    extra: Dict[str, Any] = field(default_factory=dict)  # Extra config for future use
 
-class VibeConfig(BaseModel):
+class VibeConfig:
     history_maxlen: int = 20  # Max number of vibe profiles to keep in history
     default_vibe_score: float = 0.5  # Default vibe score when initializing
     min_vibe_score: float = 0.0  # Minimum allowed vibe score
@@ -477,7 +477,7 @@ class VibeConfig(BaseModel):
     vibe_lower_cooldown_turns: int = 5  # Number of turns to wait before allowing another vibe drop
 
 # Used by: AspirationSystem, AspirationManager (sovl_striver.py)
-class AspirationConfig(BaseModel):
+class AspirationConfig:
     n_recent: int = 50  # Number of recent interactions to consider for self-assessment and doctrine generation
     days_window: int = 7  # How many days back to look for relevant long-term memories
     max_tokens: int = 1024  # Maximum number of tokens for the LLM prompt
@@ -488,7 +488,7 @@ class AspirationConfig(BaseModel):
     doctrine_fallback: str = "Be open to new experiences."  # Default doctrine if LLM generation fails
 
 # Used by: ScaffoldTokenMapper, CrossAttentionLayer, ScaffoldProvider (sovl_scaffold.py)
-class ScaffoldConfig(BaseModel):
+class ScaffoldConfig:
     max_tokens_per_mapping: int = 3  # Maximum scaffold tokens per base token
     mapping_similarity_threshold: float = 0.7  # Similarity threshold for alternative mappings
     conflict_resolution_strategy: str = "keep_highest_conf"  # Strategy for resolving mapping conflicts
@@ -504,35 +504,35 @@ class ScaffoldConfig(BaseModel):
     subword_weight: float = 0.2  # Weight for subword similarity in mapping
     freq_weight: float = 0.1  # Weight for frequency in mapping
     drift_cache_size: int = 10000  # Size of drift cache
-    token_mapping_fallback_order: list = Field(default_factory=lambda: [
+    token_mapping_fallback_order: list = field(default_factory=lambda: [
         "levenshtein", "subword", "char", "split", "merge", "nearest", "unk"
     ])  # Order of fallback strategies for token mapping
     attention_chunk_size: int = 128  # Chunk size for attention computation
     gpu_memory_threshold: float = 0.85  # GPU memory usage threshold
-    token_mapping: dict = Field(default_factory=dict)  # Populated at runtime
-    attention_config: dict = Field(default_factory=dict)  # Populated at runtime
-    memory_config: dict = Field(default_factory=dict)  # Populated at runtime
+    token_mapping: dict = field(default_factory=dict)  # Populated at runtime
+    attention_config: dict = field(default_factory=dict)  # Populated at runtime
+    memory_config: dict = field(default_factory=dict)  # Populated at runtime
 
 # Used by: LoraAdapterManager (sovl_engram.py)
-class EngramLoraConfig(BaseModel):
+class EngramLoraConfig:
     lora_rank: int = 8  # LoRA rank (dimension of adaptation matrices)
     lora_alpha: int = 16  # LoRA alpha (scaling factor)
     lora_dropout: float = 0.1  # LoRA dropout rate
 
 # Used by: LoraAdapterManager (sovl_engram.py)
-class LoraConfig(BaseModel):
-    target_modules: list = Field(default_factory=lambda: ["q_proj", "v_proj"])  # Modules to adapt
+class LoraConfig:
+    target_modules: list = field(default_factory=lambda: ["q_proj", "v_proj"])  # Modules to adapt
     task_type: str = "CAUSAL_LM"  # Task type for LoRA/PEFT ("CAUSAL_LM", "SEQ_CLS", etc.)
 
 # Used by: ModelManager (sovl_manager.py)
-class ModelConfig(BaseModel):
+class ModelConfig:
     base_model_name: str  # Name or path of the base model
     scaffold_model_name: Optional[str] = None  # (Legacy) Name or path of a single scaffold model
     scaffold_model_names: Optional[List[str]] = None  # List of scaffold model names/paths (preferred)
     quantization_mode: str = "fp16"  # Quantization mode: "int4", "int8", or "fp16"
 
 # Used by: DialogueContextManager, ShortTermMemory, LongTermMemory (sovl_recaller.py)
-class MemoryConfig(BaseModel):
+class MemoryConfig:
     max_short_term: int = 50  # Max messages in short-term memory
     short_term_expiry_seconds: Optional[int] = None  # Expiry for short-term memory messages (seconds)
     embedding_dim: int = 128  # Embedding dimension for memory
@@ -547,18 +547,18 @@ class MemoryConfig(BaseModel):
     default_user_id: str = "default"  # Default user ID
 
 # Used by: ShameManager (sovl_shamer.py)
-class ApologyConfig(BaseModel):
-    direct_apology_weight: float = Field(0.4, ge=0.0, le=1.0)
-    casual_apology_weight: float = Field(0.3, ge=0.0, le=1.0)
-    defensive_apology_weight: float = Field(0.2, ge=0.0, le=1.0)
-    reconciliation_weight: float = Field(0.25, ge=0.0, le=1.0)
-    tentative_apology_weight: float = Field(0.15, ge=0.0, le=1.0)
-    politeness_marker_weight: float = Field(0.05, ge=0.0, le=1.0)
-    direct_apology_threshold: float = Field(0.4, ge=0.0, le=1.0)
-    tentative_apology_threshold: float = Field(0.6, ge=0.0, le=1.0)
+class ApologyConfig:
+    direct_apology_weight: float = 0.4
+    casual_apology_weight: float = 0.3
+    defensive_apology_weight: float = 0.2
+    reconciliation_weight: float = 0.25
+    tentative_apology_weight: float = 0.15
+    politeness_marker_weight: float = 0.05
+    direct_apology_threshold: float = 0.4
+    tentative_apology_threshold: float = 0.6
 
 # Used by: TrainingConfig, TrainingWorkflowManager (sovl_trainer.py)
-class TrainingConfigSchema(BaseModel):
+class TrainingConfigSchema:
     # Optimizer
     optimizer_type: str = "adamw"
     learning_rate: float = 2e-5
@@ -585,7 +585,7 @@ class TrainingConfigSchema(BaseModel):
     checkpoint_interval: int = 5000
     checkpoint_path: str = "checkpoints/sovl_trainer"
     dropout_rate: float = 0.1
-    metrics_to_track: list = Field(default_factory=lambda: ["loss", "accuracy", "confidence"])
+    metrics_to_track: list = field(default_factory=lambda: ["loss", "accuracy", "confidence"])
 
     # Logging
     log_file: str = "training_logs.jsonl"
@@ -600,7 +600,7 @@ class TrainingConfigSchema(BaseModel):
     error_cooldown: float = 1.0
     max_recent_errors: int = 100
     logging_verbosity: str = "info"
-    error_handling_config: dict = Field(default_factory=lambda: {
+    error_handling_config: dict = field(default_factory=lambda: {
         "max_history_per_error": 10,
         "critical_threshold": 5,
         "warning_threshold": 10,
@@ -611,7 +611,7 @@ class TrainingConfigSchema(BaseModel):
     })
 
 # Used by: ScribeQueue, get_scribe_queue, capture_scribe_event (sovl_queue.py)
-class QueueConfig(BaseModel):
+class QueueConfig:
     max_queue_size: int = 2000  # Maximum number of entries in the queue
     warning_threshold: float = 0.8  # Warn when queue is 80% full
     fallback_path: str = "scribe_fallback.jsonl"  # Path for fallback file if queue is full
@@ -620,20 +620,20 @@ class QueueConfig(BaseModel):
     fallback_rotation_count: int = 3  # Number of fallback file rotations to keep
 
 # Used by: Scriber (sovl_scribe.py)
-class ScribedConfig(BaseModel):
+class ScribedConfig:
     scribe_batch_size: int = 20  # Number of entries to batch before writing to file
     scribe_flush_interval: float = 2.0  # Seconds between forced flushes to file
     scribe_queue_maxsize: int = 2000  # Max queue size for scribe events
     output_path: str = "scribe/sovl_scribe.jsonl"  # Output path for scribe JSONL file
 
-class ErrorConfig(BaseModel):
+class ErrorConfig:
     error_cooldown: float = 1.0  # Cooldown (seconds) between error handling attempts
     warning_threshold: float = 5.0  # Number of errors before warning threshold is triggered
     error_threshold: float = 7.0  # Number of errors before error threshold is triggered
     critical_threshold: float = 10.0  # Number of errors before critical threshold is triggered
 
 # Used by: Logger (sovl_logger.py)
-class LoggingConfig(BaseModel):
+class LoggingConfig:
     log_file: str = "sovl_logs.jsonl"  # Path to the log file
     max_size_mb: int = 10  # Maximum log file size in megabytes before rotation
     compress_old: bool = False  # Whether to compress old log files after rotation
@@ -647,7 +647,7 @@ class LoggingConfig(BaseModel):
     logging_enabled: bool = True  # Universal on/off switch for all logging
     error_cooldown: float = 1.0  # Time in seconds before an error is no longer considered recent
     max_recent_errors: int = 100  # Maximum number of recent errors to track
-    error_handling_config: dict = {
+    error_handling_config: dict = field(default_factory=lambda: {
         "max_history_per_error": 10,
         "critical_threshold": 5,
         "warning_threshold": 10,
@@ -655,14 +655,14 @@ class LoggingConfig(BaseModel):
         "retry_delay": 1.0,
         "memory_recovery_attempts": 3,
         "memory_recovery_delay": 1.0
-    }
+    })
 
 # Used by: StateBase, SOVLState, StateManager, StateTracker (sovl_state.py)
-class StateConfig(BaseModel):
+class StateConfig:
     max_history: int = 100  # Maximum number of history entries to keep
     state_file: str = "state.json"  # Path to the state file
 
-class TestConfig(BaseModel):
+class TestConfig:
     """Configuration schema for the test runner."""
     test_dir: str = "tests"
     output_dir: str = "test_results"

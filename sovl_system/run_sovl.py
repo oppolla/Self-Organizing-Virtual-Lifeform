@@ -30,7 +30,6 @@ REQUIRED_PACKAGES = [
     "transformers",
     "peft",
     "bitsandbytes",
-    "pydantic",
     "numpy"
 ]
 
