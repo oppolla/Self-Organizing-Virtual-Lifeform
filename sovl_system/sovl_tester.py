@@ -439,19 +439,19 @@ class SOVLTestRunner:
         """Return help text for test command."""
         return """
 Test Command Usage:
------------------
-/test                 Show this help message
-/test all             Run all tests
-/test list            List available tests
-/test <test_name>     Run specific test
-/test -v              Run all tests with verbose output
-/test -p <pattern>    Run tests matching pattern
-
-Examples:
-  /test all                       # Run all tests
-  /test curiosity_test            # Run specific test
-  /test -p curiosity              # Run all tests with 'curiosity' in name
-  /test -v                        # Run all tests with verbose output
+  /test                      - Show help message
+  /test all                  - Run all tests
+  /test list                 - List available tests
+  /test <test_name>          - Run specific test
+  /test verbose              - Run tests with verbose output
+  /test pattern <pattern>    - Run tests matching pattern
+  /test save                 - Save the most recent test results
+  /test load                 - Show the most recent saved test results
+  /test load <file>          - Show a specific saved test result
+  /test delete all           - Delete all saved test result files
+  /test delete <file>        - Delete a specific saved test result file
+  /test history              - List all saved test result files
+  /test help                 - Show help message
 """
 
     def get_completions(self, text: str) -> List[str]:
