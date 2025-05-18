@@ -2982,19 +2982,19 @@ class CommandHandler(cmd.Cmd):
             if not arg or args[0].lower() == 'help':
                 print(runner.get_test_help())
                 print("\nAdditional commands:\n"
-                      "  /test                - Show help message"
-                      "  /test all            - Run all tests"
-                      "  /test list           - List available tests"
-                      "  /test <test_name>    - Run specific test"
-                      "  /test -v             - Run tests with verbose output"
-                      "  /test -p <pattern>   - Run tests matching pattern"
-                      "  /test save           - Save the most recent test results"
-                      "  /test load           - Show the most recent saved test results"
-                      "  /test load <file>    - Show a specific saved test result"
-                      "  /test delete all     - Delete all saved test result files"
-                      "  /test delete <file>  - Delete a specific saved test result file"
-                      "  /test history        - List all saved test result files"
-                      "  /test help           - Show help message")
+                      "  /test                      - Show help message"
+                      "  /test all                  - Run all tests"
+                      "  /test list                 - List available tests"
+                      "  /test <test_name>          - Run specific test"
+                      "  /test verbose              - Run tests with verbose output"
+                      "  /test pattern <pattern>    - Run tests matching pattern"
+                      "  /test save                 - Save the most recent test results"
+                      "  /test load                 - Show the most recent saved test results"
+                      "  /test load <file>          - Show a specific saved test result"
+                      "  /test delete all           - Delete all saved test result files"
+                      "  /test delete <file>        - Delete a specific saved test result file"
+                      "  /test history              - List all saved test result files"
+                      "  /test help                 - Show help message")
                 return
 
             command = args[0].lower()
@@ -3056,7 +3056,7 @@ class CommandHandler(cmd.Cmd):
                         print(f"    {test['description']}")
                 return
 
-            if command == '-p' and len(args) > 1:
+            if command == 'pattern' and len(args) > 1:
                 # Run pattern-matched tests
                 result = runner.run_tests(pattern=args[1])
                 print(result['formatted_output'])
@@ -3064,7 +3064,7 @@ class CommandHandler(cmd.Cmd):
                 self._last_test_results = result
                 return
 
-            if command == '-v':
+            if command == 'verbose':
                 # Run all tests in verbose mode
                 result = runner.run_tests()
                 print(result['formatted_output'])
