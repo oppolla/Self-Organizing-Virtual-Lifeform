@@ -10,7 +10,7 @@
 6. Disable that startup data sovl_seed part. Save it for Soulprint
 7. Consider an "offline" mode for maintainence
 8. Helios structure - sun like
-
+9. Procedure system must be a process it uses to cone up with a consistantly formatted procedure list. save it with special metadata tag?
 
 
 
