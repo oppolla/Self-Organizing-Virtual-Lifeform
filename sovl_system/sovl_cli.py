@@ -2971,22 +2971,8 @@ class CommandHandler(cmd.Cmd):
         print(f"Reload for component '{target}' is not implemented.")
 
     def do_test(self, arg):
-        """Test runner for the SOVL system.
-        
-        Sub-commands:
-            /test                - Show help message
-            /test all            - Run all tests
-            /test list           - List available tests
-            /test <test_name>    - Run specific test
-            /test -v             - Run tests with verbose output
-            /test -p <pattern>   - Run tests matching pattern
-            /test save           - Save the most recent test results
-            /test load           - Show the most recent saved test results
-            /test load <file>    - Show a specific saved test result
-            /test delete all     - Delete all saved test result files
-            /test delete <file>  - Delete a specific saved test result file
-            /test history        - List all saved test result files
-            /test help           - Show help message
+        """
+        Test runner for the SOVL system.
         """
         runner = SOVLTestRunner(self.sovl_system, verbose='-v' in arg)
         args = arg.split()
@@ -2997,7 +2983,20 @@ class CommandHandler(cmd.Cmd):
             # No arguments or help - show help
             if not arg or args[0].lower() == 'help':
                 print(runner.get_test_help())
-                print("\nAdditional commands:\n  /test save           Save the most recent test results\n  /test load latest    Show the most recent saved test results\n  /test load <file>    Show a specific saved test result\n  /test delete all     Delete all saved test result files\n  /test delete <file>  Delete a specific saved test result file\n  /test history        List all saved test result files")
+                print("\nAdditional commands:\n"
+                      " /test                 - Show help message"
+                      "  /test all            - Run all tests"
+                      "  /test list           - List available tests"
+                      "  /test <test_name>    - Run specific test"
+                      "  /test -v             - Run tests with verbose output"
+                      "  /test -p <pattern>   - Run tests matching pattern"
+                      "  /test save           - Save the most recent test results"
+                      "  /test load           - Show the most recent saved test results"
+                      "  /test load <file>    - Show a specific saved test result"
+                      "  /test delete all     - Delete all saved test result files"
+                      "  /test delete <file>  - Delete a specific saved test result file"
+                      "  /test history        - List all saved test result files"
+                      "  /test help           - Show help message")
                 return
 
             command = args[0].lower()
