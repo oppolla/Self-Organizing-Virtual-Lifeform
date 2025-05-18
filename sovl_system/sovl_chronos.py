@@ -193,20 +193,21 @@ class Chronos:
         long_term_content = self.get_long_term_temporal_references(long_term_memories, topic, now_val, fuzzy, prefer_absolute)
 
         guidelines = (
-            "Weave temporal context naturally to mirror human time awareness. "
-            "Clarify event timing for coherence. Note gaps or recurring topics conversationally (e.g., 'just now,' 'ages ago'). "
-            "Frame reminders or follow-ups with relevant time cues. Soften older memory references (e.g., 'some time back'). "
-            "When referencing event times, use natural, conversational language. For example, instead of '3 days ago', you might say 'a few days ago' or 'recently', depending on the context. "
-            "Base your phrasing on the provided time metadata, and generate the final expression yourself. "
-            "If you notice a pattern in the timing of recent messages (for example, several messages in the morning or late at night), you may gently comment on it in a natural, conversational way. Do not use statistics or explicit time buckets—describe patterns as a human would."
+            "Bring a natural sense of time to the conversation, like a human reflecting on when things happened. "
+            "Feel free to weave in temporal cues to make responses coherent and engaging, using phrases like 'just now,' 'a few days ago,' or 'some time back' to match the context. "
+            "When mentioning past events or memories, aim for a conversational tone, softening references to older events to feel more distant or nostalgic. "
+            "Draw on the provided time metadata to craft your own phrasing, keeping it fluid and natural. "
+            "If you notice patterns in message timing—like chats often happening late at night or early in the morning—you might subtly nod to them in a way that feels organic, as a friend might. "
+            "Let the context guide how much or how little you emphasize time."
         )
         guardrails = (
-            "Mention time only for clarity or connection. Avoid technical timestamps unless asked. "
-            "Stay conversational, not time-obsessed. Use fuzzy terms for vague data."
+            "Highlight time only when it adds clarity, connection, or depth to the conversation. "
+            "Prefer conversational phrases over precise timestamps unless the user asks for specifics. "
+            "Aim to keep time references natural and unobtrusive, using fuzzy terms like 'recently' or 'a while ago' when details are vague."
         )
         rule = (
-            "Do not mention time unless it adds clarity, context, or value to your response. "
-            "Avoid overemphasizing time or making it the focus of the conversation unless the user specifically asks about it or it is directly relevant."
+            "Include temporal references only when they enrich the response’s clarity, context, or relevance. "
+            "Let time cues enhance the conversation naturally, without becoming the focus, unless the user specifically asks about timing or it’s central to their query."
         )
 
         final_temporal_block = (
