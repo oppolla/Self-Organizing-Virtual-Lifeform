@@ -2973,32 +2973,82 @@ class CommandHandler(cmd.Cmd):
     def do_test(self, arg):
         """Test runner for the SOVL system.
         
-        Usage:
-            /test                - Show this help message
+        Sub-commands:
+            /test                - Show help message
             /test all            - Run all tests
             /test list           - List available tests
             /test <test_name>    - Run specific test
             /test -v             - Run tests with verbose output
             /test -p <pattern>   - Run tests matching pattern
+            /test save           - Save the most recent test results
+            /test load           - Show the most recent saved test results
+            /test load <file>    - Show a specific saved test result
+            /test delete all     - Delete all saved test result files
+            /test delete <file>  - Delete a specific saved test result file
+            /test history        - List all saved test result files
+            /test help           - Show help message
         """
         runner = SOVLTestRunner(self.sovl_system, verbose='-v' in arg)
         args = arg.split()
+        if not hasattr(self, '_last_test_results'):
+            self._last_test_results = None
 
         try:
-            # No arguments - show help
-            if not arg:
+            # No arguments or help - show help
+            if not arg or args[0].lower() == 'help':
                 print(runner.get_test_help())
+                print("\nAdditional commands:\n  /test save           Save the most recent test results\n  /test load latest    Show the most recent saved test results\n  /test load <file>    Show a specific saved test result\n  /test delete all     Delete all saved test result files\n  /test delete <file>  Delete a specific saved test result file\n  /test history        List all saved test result files")
                 return
 
             command = args[0].lower()
-            
+
+            if command == 'save':
+                if self._last_test_results:
+                    runner.save_results(self._last_test_results)
+                    print("Most recent test results saved.")
+                else:
+                    print("No test results to save. Run a test first.")
+                return
+
+            if command == 'load':
+                # If no filename is provided, show the latest results
+                if len(args) < 2:
+                    runner.show_results()
+                    return
+                target = args[1]
+                runner.show_results(target)
+                return
+
+            if command == 'delete':
+                if len(args) < 2:
+                    print("Usage: /test delete <filename|all>")
+                    return
+                target = args[1]
+                if target == 'all':
+                    runner.delete_all_saved()
+                else:
+                    runner.delete_specific_saved(target)
+                return
+
+            if command == 'history':
+                files = runner.list_saved_results()
+                if not files:
+                    print("No saved test results found.")
+                else:
+                    print("Saved test results:")
+                    for f in files:
+                        print("  ", os.path.basename(f))
+                return
+
             if command == 'all':
                 # Run all tests
                 result = runner.run_tests()
                 print(result['formatted_output'])
                 runner.save_results(result)
-                
-            elif command == 'list':
+                self._last_test_results = result
+                return
+
+            if command == 'list':
                 # List available tests
                 tests = runner.discover_tests()
                 print("\n=== Available SOVL Tests ===")
@@ -3007,24 +3057,29 @@ class CommandHandler(cmd.Cmd):
                     for test in test_list:
                         print(f"  - {test['name']}")
                         print(f"    {test['description']}")
-                
-            elif command == '-p' and len(args) > 1:
+                return
+
+            if command == '-p' and len(args) > 1:
                 # Run pattern-matched tests
                 result = runner.run_tests(pattern=args[1])
                 print(result['formatted_output'])
                 runner.save_results(result)
-                
-            elif command == '-v':
+                self._last_test_results = result
+                return
+
+            if command == '-v':
                 # Run all tests in verbose mode
                 result = runner.run_tests()
                 print(result['formatted_output'])
                 runner.save_results(result)
-                
-            else:
-                # Run specific test
-                result = runner.run_tests(test_name=command)
-                print(result['formatted_output'])
-                runner.save_results(result)
+                self._last_test_results = result
+                return
+
+            # Otherwise, treat as a specific test name
+            result = runner.run_tests(test_name=command)
+            print(result['formatted_output'])
+            runner.save_results(result)
+            self._last_test_results = result
 
         except Exception as e:
             print(f"Test execution error: {e}")
