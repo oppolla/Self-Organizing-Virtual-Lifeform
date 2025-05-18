@@ -2982,7 +2982,7 @@ class CommandHandler(cmd.Cmd):
             if not arg or args[0].lower() == 'help':
                 print(runner.get_test_help())
                 print("\nAdditional commands:\n"
-                      " /test                 - Show help message"
+                      "  /test                - Show help message"
                       "  /test all            - Run all tests"
                       "  /test list           - List available tests"
                       "  /test <test_name>    - Run specific test"
