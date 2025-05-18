@@ -70,21 +70,6 @@ class Chronos:
         dt = datetime.fromtimestamp(timestamp)
         return dt.strftime('on %B %d, %Y')
 
-    def fuzzy_time_phrase(self, seconds_ago: float, event_dt: Optional[datetime] = None) -> str:
-        """
-        Return a fuzzy, human-like time phrase for an event.
-        """
-        if seconds_ago < 86400:
-            return random.choice(["recently", "not long ago"])
-        elif seconds_ago < 7 * 86400:
-            return random.choice(["earlier this week", "a few days ago"])
-        elif seconds_ago < 30 * 86400:
-            return random.choice(["earlier this month", "a couple weeks ago"])
-        elif event_dt:
-            return f"around {event_dt.strftime('%B %Y')}"
-        else:
-            return random.choice(["a while back", "some time ago"])
-
     def memory_salience(self, age_seconds: float) -> float:
         """
         Exponential decay for memory salience. Returns value in [0,1].
@@ -138,9 +123,9 @@ class Chronos:
                 else:
                     awareness_parts.append(f"The last system message was {time_str}.")
             
-            pattern_summary = self.pattern_recognition_summary(history)
-            if pattern_summary:
-                awareness_parts.append(pattern_summary)
+            pattern_data = self.pattern_recognition_summary(history)
+            if pattern_data.get("recent_message_hours"):
+                awareness_parts.append(f"Recent message hours: {pattern_data['recent_message_hours']}")
         
         return " ".join(awareness_parts) if awareness_parts else "No specific short-term temporal observations."
 
@@ -169,47 +154,34 @@ class Chronos:
                 delta = now - mem['timestamp']
                 event_dt = datetime.fromtimestamp(mem['timestamp'])
                 salience = self.memory_salience(delta)
+                # Provide structured time metadata for the LLM to phrase naturally
                 if prefer_absolute and delta > 30 * 86400:
-                    time_str = self.absolute_time_str(mem['timestamp'])
-                elif fuzzy and delta > 7 * 86400:
-                    time_str = self.fuzzy_time_phrase(delta, event_dt)
+                    time_info = f"on {event_dt.strftime('%B %d, %Y')}"
                 else:
-                    time_str = self.humanize_time_delta(delta)
+                    days_ago = int(delta // 86400)
+                    time_info = f"{days_ago} days ago (timestamp: {event_dt.strftime('%Y-%m-%d')})"
                 snippet = mem.get('content', '')
                 if len(snippet) > 60:
                     snippet = snippet[:57] + '...'
-                phrase = self.faded_reference_phrase(salience, f'"{snippet}" {time_str}')
+                phrase = self.faded_reference_phrase(salience, f'"{snippet}" {time_info}')
                 relevant_phrases.append(phrase)
                 if len(relevant_phrases) >= self.config.get('max_memories', 3):
                     break
-        
         return " ".join(relevant_phrases) if relevant_phrases else "No specific long-term memories found for this topic."
 
-    def pattern_recognition_summary(self, history: List[Dict]) -> str:
+    def pattern_recognition_summary(self, history: List[Dict]) -> dict:
         """
-        Gently comments on recent conversational timing, only if a clear, recent pattern is present.
-        Frames as a shared experience, not as analysis or prediction.
-        Never uses statistics or percentages. Only considers the last few messages.
+        Returns structured timing data for the last few messages, for the LLM to interpret.
         """
         if not history:
-            return ""
+            return {}
         hours = []
-        for msg in history[-5:]:  # Only look at the last 5 messages for recency
+        for msg in history[-5:]:
             ts = msg.get('timestamp')
             if ts:
                 dt = datetime.fromtimestamp(ts)
                 hours.append(dt.hour)
-        if not hours:
-            return ""
-        if all(18 <= h < 24 for h in hours):
-            return "It's nice to chat with you in the evening again."
-        elif all(6 <= h < 12 for h in hours):
-            return "Good morning! We've had a few morning chats lately."
-        elif all(12 <= h < 18 for h in hours):
-            return "We've had a few afternoon chats recently."
-        elif all(0 <= h < 6 for h in hours):
-            return "We've had a few late night conversations lately."
-        return ""
+        return {"recent_message_hours": hours}
 
     def update_active_temporal_prompt_in_state(self, history: List[Dict], now: Optional[float] = None, long_term_memories: Optional[List[Dict]] = None, topic: Optional[str] = None, fuzzy: bool = True, prefer_absolute: bool = False):
         """
@@ -223,7 +195,10 @@ class Chronos:
         guidelines = (
             "Weave temporal context naturally to mirror human time awareness. "
             "Clarify event timing for coherence. Note gaps or recurring topics conversationally (e.g., 'just now,' 'ages ago'). "
-            "Frame reminders or follow-ups with relevant time cues. Soften older memory references (e.g., 'some time back')."
+            "Frame reminders or follow-ups with relevant time cues. Soften older memory references (e.g., 'some time back'). "
+            "When referencing event times, use natural, conversational language. For example, instead of '3 days ago', you might say 'a few days ago' or 'recently', depending on the context. "
+            "Base your phrasing on the provided time metadata, and generate the final expression yourself. "
+            "If you notice a pattern in the timing of recent messages (for example, several messages in the morning or late at night), you may gently comment on it in a natural, conversational way. Do not use statistics or explicit time buckets—describe patterns as a human would."
         )
         guardrails = (
             "Mention time only for clarity or connection. Avoid technical timestamps unless asked. "
