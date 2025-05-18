@@ -440,17 +440,18 @@ class SOVLTestRunner:
         return """
 Test Command Usage:
 -----------------
-/test                 Run all tests
-/test list           List available tests
-/test <test_name>    Run specific test
-/test -v             Run tests with verbose output
-/test -p <pattern>   Run tests matching pattern
+/test                 Show this help message
+/test run             Run all tests
+/test list            List available tests
+/test <test_name>     Run specific test
+/test -v              Run all tests with verbose output
+/test -p <pattern>    Run tests matching pattern
 
 Examples:
-  /test                          # Run all tests
-  /test curiosity_test          # Run specific test
-  /test -p curiosity           # Run all tests with 'curiosity' in name
-  /test -v                      # Run all tests with verbose output
+  /test run                       # Run all tests
+  /test curiosity_test            # Run specific test
+  /test -p curiosity              # Run all tests with 'curiosity' in name
+  /test -v                        # Run all tests with verbose output
 """
 
     def get_completions(self, text: str) -> List[str]:
