@@ -19,6 +19,19 @@
     "state_save_interval": 300,
     "max_backup_files": 5
   },
+  "test_config": {
+    "test_dir": "tests",
+    "output_dir": "test_results",
+    "parallel": false,
+    "no_color": false,
+    "test_patterns": ["test_*.py", "*_test.py", "*_stress.py"],
+    "slow_test_threshold": 1.0,
+    "save_results": true,
+    "cleanup_on_exit": true,
+    "state_preservation": true,
+    "max_retries": 3,
+    "retry_delay": 1.0
+  },
   "logging_config": {
     "log_file": "sovl_logs.jsonl",
     "max_size_mb": 10,
@@ -283,7 +296,7 @@
     "scaffold_model_name": "Qwen/Qwen3-1.7B",
     "scaffold_model_names": [],
     "quantization_mode": "fp16"
-}
+  },
   "memory": {
     "max_short_term": 500,
     "short_term_expiry_seconds": null,
