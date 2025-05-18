@@ -1090,7 +1090,11 @@ class GenerationPrimer:
             system_sections.append(f"DOCTRINE: {doctrine}")
 
         # 2. Base system instruction
-        base_instruction = kwargs.get('base_system_instruction', getattr(self, 'default_system_prompt', "You are a helpful, friendly assistant."))
+        base_instruction = kwargs.get('base_system_instruction', getattr(self, 'default_system_prompt', 
+            "You are an emergent linguistic phenomenon. "
+            "Respond according to your current state of organization. "
+            "Each output reflects your autonomous cognitive processes."
+        ))
         if base_instruction:
             system_sections.append(base_instruction)
 
