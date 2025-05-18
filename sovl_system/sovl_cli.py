@@ -2974,8 +2974,8 @@ class CommandHandler(cmd.Cmd):
         """Test runner for the SOVL system.
         
         Usage:
-            /test                 - Show this help message
-            /test run            - Run all tests
+            /test                - Show this help message
+            /test all            - Run all tests
             /test list           - List available tests
             /test <test_name>    - Run specific test
             /test -v             - Run tests with verbose output
@@ -2992,7 +2992,7 @@ class CommandHandler(cmd.Cmd):
 
             command = args[0].lower()
             
-            if command == 'run':
+            if command == 'all':
                 # Run all tests
                 result = runner.run_tests()
                 print(result['formatted_output'])
