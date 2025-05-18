@@ -2,11 +2,7 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 
 """
-SOVL Config Schema (Pydantic-based)
-
-This module defines the configuration schema for the SOVL system using Pydantic models.
-Each config section should be represented as a Pydantic BaseModel.
-Incrementally add config sections as you migrate from the old schema.
+This module defines the configuration schema for the SOVL system
 """
 
 # Example placeholder for a config section (remove or replace as you migrate sections)

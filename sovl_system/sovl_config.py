@@ -39,21 +39,9 @@ from sovl_schema import (
    )
 
 """
-SOVL Config Manager (Pydantic-based, Backwards Compatible)
+SOVL Config Manager
 
-This module loads and manages the SOVL system configuration using the new Pydantic schema (sovl_config_schema.py).
-All config validation, defaults, and structure are handled by the Pydantic models.
-
-Backwards compatibility:
-- Provides old class names (ConfigManager, ConfigNamespace, etc.) as shims.
-- Singleton config instance.
-- Legacy get(), get_section(), and attribute/dict access patterns.
-
-Usage:
-    from sovl_config import load_config, ConfigManager
-    config = load_config()
-    # Access: config.controls_config.base_temperature
-    # Legacy: ConfigManager().get('controls_config.base_temperature')
+This module loads and manages the SOVL system configuration using schema (sovl_config_schema.py).
 """
 
 CONFIG_PATH = Path(__file__).parent / "sovl_config.json"
@@ -98,7 +86,7 @@ _config_instance: Optional[SOVLConfig] = None
 
 def load_config(path: str = CONFIG_PATH, reload: bool = False) -> SOVLConfig:
     """
-    Load and validate the SOVL config from JSON using the Pydantic schema.
+    Load and validate the SOVL config from JSON.
     Caches the config instance unless reload=True.
     """
     global _config_instance
