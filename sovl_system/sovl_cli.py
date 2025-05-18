@@ -2978,9 +2978,7 @@ class CommandHandler(cmd.Cmd):
         args = arg.split()
         if not hasattr(self, '_last_test_results'):
             self._last_test_results = None
-
         try:
-            # No arguments or help - show help
             if not arg or args[0].lower() == 'help':
                 print(runner.get_test_help())
                 print("\nAdditional commands:\n"
