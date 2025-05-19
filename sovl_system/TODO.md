@@ -2,8 +2,8 @@
 
 ## General Taks:
 
-1. Build a moral code system where it makes entries for its personal ethos
-2. Pydantic redundant remive requirement
+1. Build a moral code system where it makes entries for its personal 
+2. Confirm default system prompt is part of full system prompt
 3. 
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
