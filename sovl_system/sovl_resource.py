@@ -2,9 +2,10 @@ import threading
 from collections import defaultdict
 from typing import Optional, Dict, Any, Union
 import torch
+import time
 import traceback
 from transformers import AutoConfig
-from sovl_logger import Logger
+from sovl_logger import Logger, LoggerConfig
 from sovl_error import ErrorManager
 
 class ResourceManager:
