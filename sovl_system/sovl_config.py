@@ -1,4 +1,3 @@
-
 import json
 from functools import lru_cache
 from typing import Optional, Any
@@ -35,7 +34,9 @@ from sovl_schema import (
        TrainingConfigSchema,
        QueueConfig,
        ErrorConfig,
-       StateConfig
+       StateConfig,
+       ApologyConfig,
+       TestConfig
    )
 
 """
@@ -81,6 +82,8 @@ class SOVLConfig:
     queue: Optional[QueueConfig] = None
     error: Optional[ErrorConfig] = None
     state: Optional[StateConfig] = None
+    apology: Optional[ApologyConfig] = None
+    test: Optional[TestConfig] = None
 
 _config_instance: Optional[SOVLConfig] = None
 
