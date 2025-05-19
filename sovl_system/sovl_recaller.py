@@ -661,7 +661,6 @@ class DialogueContextManager:
             if self.model_manager is not None and hasattr(self.model_manager, 'base_model') and hasattr(self.model_manager, 'base_tokenizer'):
                 tokenizer = self.model_manager.base_tokenizer
                 model = self.model_manager.base_model
-                import torch
                 inputs = tokenizer(text, return_tensors='pt', truncation=True, max_length=128)
                 with torch.no_grad():
                     outputs = model(**inputs, output_hidden_states=True)
