@@ -308,7 +308,7 @@ def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float
         energy_prompt = PROMPT_LIBRARY['energy'][energy_label]
         flow_prompt = PROMPT_LIBRARY['flow'][flow_label]
         resonance_prompt = PROMPT_LIBRARY['resonance'][resonance_label]
-        resonance_prompt = PROMPT_LIBRARY['engagement'][engagement_label]
+        engagement_prompt = PROMPT_LIBRARY['engagement'][engagement_label]
 
         # Bond system
         bond = validate_score(bond_score, 'bond_score')
@@ -373,7 +373,7 @@ def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float
         return (
             "SYSTEM PROMPT:\n"
             "- **Tone:** Use a mix of neutral and expressive words with a balanced tone.\n"
-            "- **Structure:** Write medium sentences (8–12 words) with clear transitions.\n"
+            "- **Structure:** Write medium sentences (8-12 words) with clear transitions.\n"
             "- **Emotional Alignment:** Use language that partially matches the user's emotional state.\n"
             "- **Questioning:** Include one concise, relevant question in 80% of responses.\n"
             "- **Personal Connection:** Use friendly language with moderate personal references and light warmth.\n"
