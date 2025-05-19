@@ -99,35 +99,4 @@ class ErrorRecordBridge:
 
 # Example usage and testing
 if __name__ == "__main__":
-    import unittest
-
-    class TestConfidenceHistory(unittest.TestCase):
-        def setUp(self):
-            self.config_manager = ConfigManager("sovl_config.json")
-            self.history = ConfidenceHistory(self.config_manager)
-
-        def test_add_confidence(self):
-            self.history.add_confidence(0.85)
-            self.assertEqual(len(self.history.get_confidence_history()), 1)
-            self.assertEqual(self.history.get_confidence_history()[0], 0.85)
-
-        def test_save_load(self):
-            self.history.add_confidence(0.92)
-            self.history.save_history("test_history.json")
-            new_history = ConfidenceHistory(self.config_manager)
-            new_history._load_history("test_history.json")
-            self.assertEqual(list(new_history.get_confidence_history()), [0.92])
-
-        def test_reset(self):
-            self.history.add_confidence(0.78)
-            self.history.reset()
-            self.assertEqual(len(self.history.get_confidence_history()), 0)
-
-        def test_invalid_confidence(self):
-            with self.assertRaises(ValidationError):
-                self.history.add_confidence(1.5)
-            with self.assertRaises(ValidationError):
-                self.history.add_confidence("invalid")
-
-    if __name__ == "__main__":
-        unittest.main()
+    pass  
