@@ -606,6 +606,24 @@ class TrainingConfigSchema:
         "memory_recovery_delay": 1.0
     })
 
+# Used by: GrafterManager (sovl_grafter.py)
+class GrafterConfig:
+    plugin_directory: str = "plugins"  # Directory containing plugin modules
+    enabled_plugins: List[str] = field(default_factory=list)  # List of enabled plugin names
+    max_plugins: int = 10  # Maximum number of concurrent plugins
+    plugin_timeout: float = 30.0  # Timeout for plugin operations in seconds
+    allow_dynamic_loading: bool = True  # Whether to allow loading plugins at runtime
+    log_plugin_errors: bool = True  # Whether to log plugin errors
+    plugin_load_retry_attempts: int = 3  # Number of times to retry loading a plugin
+    plugin_load_retry_delay: float = 1.0  # Delay between retry attempts in seconds
+    plugin_state_sync_interval: float = 2.0  # Interval for plugin state synchronization
+    plugin_cleanup_timeout: float = 5.0  # Timeout for plugin cleanup operations
+    plugin_memory_threshold_mb: int = 512  # Memory threshold per plugin in MB
+    plugin_gpu_memory_threshold: float = 0.2  # GPU memory threshold per plugin (0-1)
+    plugin_error_cooldown: float = 1.0  # Cooldown period after plugin errors
+    plugin_max_errors: int = 5  # Maximum errors before plugin is disabled
+    plugin_config_validation: bool = True  # Whether to validate plugin configs
+
 # Used by: ScribeQueue, get_scribe_queue, capture_scribe_event (sovl_queue.py)
 class QueueConfig:
     max_queue_size: int = 2000  # Maximum number of entries in the queue

@@ -97,6 +97,13 @@ class SystemConstants:
     LOG_BUFFER_SIZE = 1000
     LOG_FLUSH_INTERVAL = 5.0  # seconds
 
+    # Grafter system
+    GRAFTER_DIR = "plugins"
+    MAX_GRAFTS = 10
+    GRAFT_TIMEOUT = 30.0  # seconds
+    GRAFT_RETRY_DELAY = 1.0  # seconds
+    GRAFT_ERROR_COOLDOWN = 5.0  # seconds
+
 # --- Autonomous Tiredness & Sleep Logic ---
 TIREDNESS_THRESHOLD = 0.7  # Tune as needed
 TIREDNESS_CHECK_INTERVAL = 10  # seconds
@@ -121,7 +128,6 @@ class SystemContext:
         event_dispatcher,
         session_id=None,
         session_lock=None,
-        # ... add any other dependencies you need ...
     ):
         self.config_manager = config_manager
         self.logger = logger
@@ -131,6 +137,7 @@ class SystemContext:
         self.ram_manager = ram_manager
         self.gpu_manager = gpu_manager
         self.event_dispatcher = event_dispatcher
+        self.grafter = None  # Will be set by SOVLSystem
         # Session ID logic
         if session_id is not None:
             self.session_id = session_id
@@ -143,7 +150,6 @@ class SystemContext:
                 lock,
                 logger=self.logger
             )
-        # ... assign any other dependencies ...
 
 class SystemInitializationError(Exception):
     """Custom exception for system initialization failures."""
@@ -340,6 +346,25 @@ class SOVLSystem(SystemInterface):
             self._stop_monitoring_event = Event()
             self._monitor_thread = None
 
+            # Initialize grafter (plugin system)
+            try:
+                from sovl_grafter import initialize_plugin_manager
+                self.grafter = initialize_plugin_manager(self)
+                self.context.grafter = self.grafter
+                self.logger.record({
+                    "event": "grafter_initialized",
+                    "plugin_count": len(self.grafter.plugins) if self.grafter else 0,
+                    "timestamp": time.time()
+                })
+            except Exception as e:
+                self.grafter = None
+                if hasattr(self, 'error_manager') and self.error_manager:
+                    self.error_manager.handle_error(
+                        error_type="grafter_init",
+                        error_message=f"Failed to initialize grafter: {str(e)}",
+                        error=e
+                    )
+
             self.monitor_manager = MonitorManager(
                 config_manager=context.config_manager,
                 logger=context.logger,
@@ -470,6 +495,11 @@ class SOVLSystem(SystemInterface):
                 "error_manager": {
                     "status": "initialized",
                     "error_count": len(self.error_manager.get_error_stats()["error_counts"]) if self.error_manager else 0
+                },
+                "grafter": {
+                    "status": "initialized" if self.grafter else "disabled",
+                    "plugin_count": len(self.grafter.plugins) if self.grafter else 0,
+                    "active_plugins": [p.get_metadata().name for p in self.grafter.plugins.values()] if self.grafter else []
                 }
             }
             with self._lock:
@@ -546,7 +576,7 @@ class SOVLSystem(SystemInterface):
         """Get the status of all components."""
         try:
             with self._lock:
-                return {
+                status = {
                     "config_handler": bool(self.config_handler),
                     "model_manager": bool(self.model_manager),
                     "memory_monitor": bool(self.monitor_manager),
@@ -554,8 +584,14 @@ class SOVLSystem(SystemInterface):
                     "error_manager": bool(self.error_manager),
                     "system_monitor": bool(self.monitor_manager),
                     "traits_monitor": bool(self.monitor_manager),
-                    "temperament_system": bool(self.temperament_system)
+                    "temperament_system": bool(self.temperament_system),
+                    "grafter": bool(self.grafter)
                 }
+                # Add individual plugin status
+                if self.grafter:
+                    for plugin_name, plugin in self.grafter.plugins.items():
+                        status[f"graft_{plugin_name}"] = plugin.validate()
+                return status
         except Exception as e:
             self.error_manager.handle_error(
                 error_type="component_status",

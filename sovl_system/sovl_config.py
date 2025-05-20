@@ -36,7 +36,8 @@ from sovl_schema import (
        ErrorConfig,
        StateConfig,
        ApologyConfig,
-       TestConfig
+       TestConfig,
+       GrafterConfig
    )
 
 """
@@ -84,6 +85,7 @@ class SOVLConfig:
     state: Optional[StateConfig] = None
     apology: Optional[ApologyConfig] = None
     test: Optional[TestConfig] = None
+    grafter: Optional[GrafterConfig] = None
 
 _config_instance: Optional[SOVLConfig] = None
 

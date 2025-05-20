@@ -649,8 +649,11 @@ class GenerationPrimer:
         """
         Adjusts a parameter (e.g., temperature) based on trait and vibe influences.
         Uses an additive approach for predictability and consistency.
+        Now integrates plugin adjustments.
         """
         try:
+            adjusted_value = base_value
+            
             if parameter_type == "temperature":
                 # Only use vibe energy for adjustment
                 vibe_profile = None
@@ -664,17 +667,40 @@ class GenerationPrimer:
                             energy = vibe_profile.dimensions.get("energy_base_energy", 0.5)
                 adjustment = (energy - 0.5) * 0.2  # Scale to ±0.1 for vibe energy
                 adjusted_value = base_value + adjustment
+                
+                # Allow plugins to adjust parameters
+                if hasattr(self.system, 'plugin_manager'):
+                    param_context = {
+                        "parameter_type": parameter_type,
+                        "base_value": base_value,
+                        "current_value": adjusted_value,
+                        "vibe_energy": energy,
+                        "traits": traits
+                    }
+                    plugin_adjustments = self.system.plugin_manager.execute_hook(
+                        "adjust_generation_params",
+                        param_context
+                    )
+                    if plugin_adjustments:
+                        # Take the last plugin's adjustment
+                        final_adjustment = plugin_adjustments[-1]
+                        if isinstance(final_adjustment, dict) and "value" in final_adjustment:
+                            adjusted_value = final_adjustment["value"]
+                
+                # Ensure final value is within valid range
                 adjusted_value = max(0.1, min(1.0, adjusted_value))
+                
                 self.logger.record_event(
                     event_type="parameter_adjusted",
-                    message="Parameter adjusted (additive approach)",
+                    message="Parameter adjusted (additive approach with plugin integration)",
                     level="info",
                     additional_info={
                         "parameter_type": parameter_type,
                         "base_value": base_value,
                         "adjusted_value": adjusted_value,
                         "vibe_energy": energy,
-                        "adjustment": adjustment
+                        "initial_adjustment": adjustment,
+                        "plugin_adjustments_applied": bool(plugin_adjustments if 'plugin_adjustments' in locals() else False)
                     }
                 )
                 return adjusted_value
@@ -1083,9 +1109,30 @@ class GenerationPrimer:
     def assemble_full_prompt(self, user_prompt, shamer=None, *args, **kwargs):
         current_state = self.state_manager.get_state()
         system_sections = []
+        
+        # Execute pre-assembly plugin hooks
+        context = {
+            "user_prompt": user_prompt,
+            "current_state": current_state,
+            "kwargs": kwargs
+        }
+        if hasattr(self.system, 'plugin_manager'):
+            context = self.system.plugin_manager.execute_hook(
+                "pre_prompt_assembly",
+                context
+            )
+            user_prompt = context.get("user_prompt", user_prompt)
 
         # 1. Base system instruction (DEFAULT_SYSTEM_PROMPT)
         base_instruction = kwargs.get('base_system_instruction', self.default_system_prompt)
+        if base_instruction and hasattr(self.system, 'plugin_manager'):
+            # Allow plugins to modify the system prompt
+            modified_instructions = self.system.plugin_manager.execute_hook(
+                "modify_system_prompt",
+                {"prompt": base_instruction}
+            )
+            if modified_instructions:
+                base_instruction = modified_instructions[-1].get("prompt", base_instruction)
         if base_instruction:
             system_sections.append(base_instruction)
 
@@ -1105,6 +1152,16 @@ class GenerationPrimer:
         # 4. Vibe prompt (added as its own section)
         bond_score = kwargs.get("bond_score", 0.5)
         trait_prompts = self.get_traits_prompts(bond_score=bond_score)
+        
+        # Allow plugins to modify traits
+        if hasattr(self.system, 'plugin_manager'):
+            modified_traits = self.system.plugin_manager.execute_hook(
+                "modify_traits",
+                {"trait_prompts": trait_prompts}
+            )
+            if modified_traits:
+                trait_prompts = modified_traits[-1].get("trait_prompts", trait_prompts)
+        
         if trait_prompts:
             vibe_parts = []
             for k in ["energy", "flow", "resonance", "engagement"]:
@@ -1143,6 +1200,16 @@ class GenerationPrimer:
                             system_sections.append(empathy_prompt_text)
                             break
 
+        # 9. Plugin memory context
+        if hasattr(self.system, 'plugin_manager'):
+            plugin_memories = self.system.plugin_manager.execute_hook(
+                "provide_memory_context",
+                {}
+            )
+            for memory in plugin_memories:
+                if memory:
+                    system_sections.append(f"PLUGIN MEMORY:\n{memory}")
+
         # --- Assemble the Full Prompt --- 
         full_prompt_parts = []
 
@@ -1162,6 +1229,15 @@ class GenerationPrimer:
         # Join all major parts with double newlines
         full_prompt = "\n\n".join(filter(None, full_prompt_parts))
 
+        # Execute post-assembly plugin hooks
+        if hasattr(self.system, 'plugin_manager'):
+            modified_prompts = self.system.plugin_manager.execute_hook(
+                "post_prompt_assembly",
+                {"prompt": full_prompt}
+            )
+            if modified_prompts:
+                full_prompt = modified_prompts[-1].get("prompt", full_prompt)
+
         # Log the assembled prompt details for traceability
         self.logger.record_event(
             event_type="system_prompt_assembled",
@@ -1177,6 +1253,7 @@ class GenerationPrimer:
                 "sarcasm_flag_active": sarcasm_flag,
                 "empathy_prompt_added": 'empathy_prompt_text' in locals() and bool(empathy_prompt_text),
                 "memory_context_present": bool(memory_context),
+                "plugin_hooks_executed": hasattr(self.system, 'plugin_manager'),
                 "final_prompt_preview": full_prompt[:200] + ("..." if len(full_prompt) > 200 else "")
             }
         )
