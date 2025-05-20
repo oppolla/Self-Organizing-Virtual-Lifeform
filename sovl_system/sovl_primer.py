@@ -880,7 +880,7 @@ class GenerationPrimer:
                 if not hasattr(state, 'confidence') or not isinstance(state.confidence, (int, float)):
                     self.logger.log_error("Invalid or missing confidence attribute in StateManager")
                     return state
-                if isinstance(error, (torch.cuda.OutOfMemoryError, MemoryError)):
+                if isinstance(error, MemoryError):
                     state.confidence = max(0.1, state.confidence - 0.1)
                 elif isinstance(error, (ValueError, RuntimeError)):
                     state.confidence = max(0.2, state.confidence - 0.05)
