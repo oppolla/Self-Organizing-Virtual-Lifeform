@@ -1,10 +1,11 @@
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 import torch
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ScaffoldError
 from sovl_config import ConfigManager
 from sovl_utils import check_adaptation_dependencies
 from sovl_scaffold import CrossAttentionInjector
+
 
 """
 LoRA Adapter and Adapter Management for SOVL System
@@ -13,12 +14,14 @@ LoRA Adapter and Adapter Management for SOVL System
 # Optional: Only import PEFT if available
 try:
     from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PrefixTuningConfig
+    from transformers.adapters import AdapterConfig
 except ImportError:
     LoraConfig = None
     get_peft_model = None
     TaskType = None
     PeftModel = None
     PrefixTuningConfig = None
+    AdapterConfig = None
 
 class LoraAdapterManager:
     """
@@ -79,7 +82,7 @@ class LoraAdapterManager:
         # Use id() or a hash of model state_dict keys for cache
         return id(model)
 
-    def apply_with_fallbacks(self, model: torch.nn.Module) -> (torch.nn.Module, str):
+    def apply_with_fallbacks(self, model: torch.nn.Module) -> Tuple[torch.nn.Module, str]:
         self._lazy_validate()
         self._lazy_check_dependencies()
         model_id = self._get_model_id(model)
@@ -116,10 +119,6 @@ class LoraAdapterManager:
         # 2. Try Adapters
         if self.enable_adapters:
             try:
-                try:
-                    from transformers.adapters import AdapterConfig
-                except ImportError:
-                    AdapterConfig = None
                 if AdapterConfig is not None:
                     adapter_config = AdapterConfig()
                     if hasattr(model, 'add_adapter') and hasattr(model, 'set_active_adapters'):
