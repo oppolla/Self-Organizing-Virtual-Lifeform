@@ -29,6 +29,7 @@ from sovl_queue import get_scribe_queue
 from sovl_scribe import Scriber
 from sovl_volition import AutonomyManager
 from sovl_chronos import Chronos
+from sovl_dreamer import Dreamer
 
 # Model and processing
 from sovl_manager import ModelManager
