@@ -12,7 +12,6 @@ from sovl_config import ConfigManager
 from sovl_processor import MetadataProcessor
 from sovl_memory import RAMManager, GPUMemoryManager
 from sovl_logger import Logger, LoggerConfig
-from transformers import get_linear_schedule_with_warmup
 from sovl_engram import LoraAdapterManager
 from sovl_io import JSONLLoader, StreamingJSONLoader, ScribeJSONLBatchLoader
 from sovl_events import EventHandler
