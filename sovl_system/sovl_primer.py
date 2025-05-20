@@ -265,7 +265,11 @@ def get_range_label(val):
     else:
         return 'very_high'
 
-def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float = 0.5) -> str:
+def traits_to_prompt_instructions(
+    vibe_profile: 'VibeProfile',
+    bond_score: float = 0.5,
+    return_separate: bool = False
+) -> str | dict:
     dims = vibe_profile.dimensions
     def validate_score(score, key):
         if not isinstance(score, (int, float)) or score < 0.0 or score > 1.0:
@@ -315,9 +319,17 @@ def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float
         bond_label = get_range_label(bond)
         bond_prompt = PROMPT_LIBRARY['bond'][bond_label]
 
+        if return_separate:
+            return {
+                "energy": energy_prompt,
+                "flow": flow_prompt,
+                "resonance": resonance_prompt,
+                "engagement": engagement_prompt,
+                "bond": bond_prompt
+            }
+
         # Edge case lookup
         def match_edge_case():
-            # Try all keys in EDGE_CASE_PROMPT_LIBRARY, with None as wildcard
             for key, val in EDGE_CASE_PROMPT_LIBRARY.items():
                 ek, fk, rk, egk = key
                 if (
@@ -336,7 +348,6 @@ def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float
                 event_type="vibe_edge_case",
                 component="VibeSystem"
             )
-            # Compose the prompt in the specified order
             prompt_parts = ["SYSTEM PROMPT:"]
             for part in edge_case["order"]:
                 if part == "combo_prompt":
@@ -352,7 +363,6 @@ def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float
             prompt_parts.append("- **Rule:** Never break character or reference being an AI.")
             return "\n".join(prompt_parts)
 
-        # Default Case (add bond prompt)
         return (
             "SYSTEM PROMPT:\n"
             f"- **Tone:** {energy_prompt}\n"
@@ -369,7 +379,6 @@ def traits_to_prompt_instructions(vibe_profile: 'VibeProfile', bond_score: float
             stack_trace=traceback.format_exc(),
             component="VibeSystem"
         )
-        # Fallback to default prompt
         return (
             "SYSTEM PROMPT:\n"
             "- **Tone:** Use a mix of neutral and expressive words with a balanced tone.\n"
@@ -772,11 +781,7 @@ class GenerationPrimer:
         """
         return self.compute_traits(**kwargs)
 
-    def get_traits_prompt(self, bond_score: float = 0.5) -> str:
-        """
-        Retrieve a VibeProfile based on recent vibes, averaging the last 3 for smoother transitions.
-        Returns a default neutral prompt if no recent vibes are available.
-        """
+    def get_traits_prompts(self, bond_score: float = 0.5) -> dict:
         from time import time as _time
         default_profile = VibeProfile(
             overall_score=0.5,
@@ -793,16 +798,15 @@ class GenerationPrimer:
         )
         if not self.dialogue_context_manager or not hasattr(self.dialogue_context_manager, 'short_term'):
             self.logger.log_warning("Dialogue context manager or short-term memory unavailable; using default vibe prompt.")
-            return traits_to_prompt_instructions(default_profile, bond_score)
+            return traits_to_prompt_instructions(default_profile, bond_score, return_separate=True)
         short_term = getattr(self.dialogue_context_manager, 'short_term', None)
         if not short_term or not hasattr(short_term, 'get_recent_vibes'):
             self.logger.log_warning("Short-term memory or get_recent_vibes unavailable; using default vibe prompt.")
-            return traits_to_prompt_instructions(default_profile, bond_score)
+            return traits_to_prompt_instructions(default_profile, bond_score, return_separate=True)
         recent_vibes = short_term.get_recent_vibes(n=3)
         if not recent_vibes:
             self.logger.log_warning("No recent vibes found; using default vibe prompt.")
-            return traits_to_prompt_instructions(default_profile, bond_score)
-        # Average vibe scores (weighted by recency)
+            return traits_to_prompt_instructions(default_profile, bond_score, return_separate=True)
         weights = [0.5, 0.3, 0.2] if len(recent_vibes) == 3 else [0.6, 0.4] if len(recent_vibes) == 2 else [1.0]
         energy = sum(w * v.dimensions.get("energy_base_energy", 0.5) for w, v in zip(weights, recent_vibes[:len(weights)]))
         flow = sum(w * v.dimensions.get("flow_rhythm_score", 0.5) for w, v in zip(weights, recent_vibes[:len(weights)]))
@@ -823,7 +827,7 @@ class GenerationPrimer:
             salient_phrases=recent_vibes[-1].salient_phrases,  # Use latest phrases
             timestamp=_time()
         )
-        return traits_to_prompt_instructions(averaged_profile, bond_score)
+        return traits_to_prompt_instructions(averaged_profile, bond_score, return_separate=True)
 
     def prepare_for_generation(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """
@@ -831,7 +835,7 @@ class GenerationPrimer:
         Now includes a 'traits_prompt' key with high-granularity vibe context for system prompt injection.
         """
         traits = self.get_all_traits(prompt=prompt, **kwargs)
-        traits_prompt = self.get_traits_prompt(bond_score=traits.get("bond", 0.5))
+        traits_prompt = self.get_traits_prompts(bond_score=traits.get("bond", 0.5))
         return {"traits": traits, "traits_prompt": traits_prompt}
 
     def update_state(self, new_state: 'StateManager'):
@@ -1077,29 +1081,18 @@ class GenerationPrimer:
         )
 
     def assemble_full_prompt(self, user_prompt, shamer=None, *args, **kwargs):
-        """
-        Assemble the final prompt string for the LLM, combining:
-        - Doctrine (aspiration/mission statement) from state_manager
-        - An optional base system instruction (defaults to the system's philosophy)
-        - The high-granularity vibe context (from get_traits_prompt, includes bond)
-        - The Chronos temporal block (temporal awareness, long-term memory, guidelines)
-        - The memory context (short-term/long-term, passed in)
-        - The user's prompt
-        Skips any empty sections. Accepts **kwargs for future extensibility.
-        Logs the applied system prompt for traceability.
-        """
         current_state = self.state_manager.get_state()
         system_sections = []
 
-        # 1. Doctrine
-        doctrine = current_state.get_aspiration_doctrine() if hasattr(current_state, 'get_aspiration_doctrine') else ""
-        if doctrine:
-            system_sections.append(f"DOCTRINE: {doctrine}")
-
-        # 2. Base system instruction (cleaner logic)
+        # 1. Base system instruction (DEFAULT_SYSTEM_PROMPT)
         base_instruction = kwargs.get('base_system_instruction', self.default_system_prompt)
         if base_instruction:
             system_sections.append(base_instruction)
+
+        # 2. Doctrine
+        doctrine = current_state.get_aspiration_doctrine() if hasattr(current_state, 'get_aspiration_doctrine') else ""
+        if doctrine:
+            system_sections.append(f"DOCTRINE: {doctrine}")
 
         # 3. Thin ice logic
         thin_ice_level = 0
@@ -1107,28 +1100,31 @@ class GenerationPrimer:
             thin_ice_level, _ = shamer.get_thin_ice_level()
             if thin_ice_level > 0:
                 level_prompt = THIN_ICE_PROMPTS.get(thin_ice_level, THIN_ICE_PROMPTS[1])
-                system_sections.append(f"{THIN_ICE_OVER_PROMPT}\\n{level_prompt}")
+                system_sections.append(f"{THIN_ICE_OVER_PROMPT}\n{level_prompt}")
 
-        # 4. Vibe and Bond prompt (TRAITS)
+        # 4. Vibe prompt (added as its own section)
         bond_score = kwargs.get("bond_score", 0.5)
-        traits_prompt_str = self.get_traits_prompt(bond_score=bond_score) # This itself starts with "SYSTEM PROMPT: - **Tone:**..."
-        # We need to strip the "SYSTEM PROMPT:" if present, and the TRAITS: label will be added if content exists
-        if traits_prompt_str:
-            if traits_prompt_str.upper().startswith("SYSTEM PROMPT:"):
-                traits_content = traits_prompt_str[len("SYSTEM PROMPT:"):].strip()
-            else:
-                traits_content = traits_prompt_str
-            if traits_content: # Only add TRAITS section if there's actual content after stripping
-                 system_sections.append(f"TRAITS:\n{traits_content}")
+        trait_prompts = self.get_traits_prompts(bond_score=bond_score)
+        if trait_prompts:
+            vibe_parts = []
+            for k in ["energy", "flow", "resonance", "engagement"]:
+                if trait_prompts.get(k):
+                    vibe_parts.append(f"- **{k.capitalize()}:** {trait_prompts[k]}")
+            if vibe_parts:
+                system_sections.append("VIBE TRAITS:\n" + "\n".join(vibe_parts))
 
-        # 5. Temporal Context Block (from Chronos via SOVLState)
+        # 5. Bond prompt (added as its own section)
+        if trait_prompts and trait_prompts.get("bond"):
+            system_sections.append("BOND TRAIT:\n" + trait_prompts["bond"])
+
+        # 6. Temporal Context Block (from Chronos via SOVLState)
         temporal_block_from_state = ""
         if hasattr(current_state, 'active_temporal_prompt') and current_state.active_temporal_prompt:
             temporal_block_from_state = current_state.active_temporal_prompt
-        if temporal_block_from_state: # Directly append the structured block
+        if temporal_block_from_state:
             system_sections.append(temporal_block_from_state)
 
-        # 6. Sarcasm prompt
+        # 7. Sarcasm prompt
         sarcasm_flag = False
         if shamer is not None and hasattr(shamer, 'get_shame_context') and current_state is not None:
             shame_context = shamer.get_shame_context(current_state)
@@ -1136,7 +1132,7 @@ class GenerationPrimer:
             if sarcasm_flag:
                 system_sections.append(SARCASM_SYSTEM_PROMPT)
 
-        # 7. Empathy prompt from active shames
+        # 8. Empathy prompt from active shames
         if shamer is not None and hasattr(shamer, 'get_shame_context') and current_state is not None:
             shame_context = shamer.get_shame_context(current_state)
             if shame_context.get("active_shames"):
@@ -1145,15 +1141,15 @@ class GenerationPrimer:
                         empathy_prompt_text = sp["context"]["empathy_prompt"]
                         if empathy_prompt_text:
                             system_sections.append(empathy_prompt_text)
-                            break # Add only the most recent active one
-        
+                            break
+
         # --- Assemble the Full Prompt --- 
         full_prompt_parts = []
 
         # Prepend "SYSTEM PROMPT:" if there are any system sections
         if system_sections:
             full_prompt_parts.append("SYSTEM PROMPT:")
-            full_prompt_parts.append("\n\n".join(system_sections)) # Join sections with double newline
+            full_prompt_parts.append("\n\n".join(system_sections))
 
         # Add Memory Context (if any)
         memory_context = kwargs.get('memory_context', "")
@@ -1164,7 +1160,7 @@ class GenerationPrimer:
         full_prompt_parts.append(user_prompt)
         
         # Join all major parts with double newlines
-        full_prompt = "\n\n".join(filter(None, full_prompt_parts)) # filter(None, ...) removes empty strings that might result from empty sections
+        full_prompt = "\n\n".join(filter(None, full_prompt_parts))
 
         # Log the assembled prompt details for traceability
         self.logger.record_event(
@@ -1172,10 +1168,11 @@ class GenerationPrimer:
             message="Unified system prompt assembled for LLM",
             level="debug",
             additional_info={
-                "doctrine_present": bool(doctrine),
                 "base_instruction_present": bool(base_instruction),
+                "doctrine_present": bool(doctrine),
                 "thin_ice_level": thin_ice_level,
-                "traits_prompt_content_present": bool(traits_prompt_str and traits_content),
+                "vibe_traits_present": bool(trait_prompts and any(trait_prompts.get(k) for k in ["energy", "flow", "resonance", "engagement"])),
+                "bond_trait_present": bool(trait_prompts and trait_prompts.get("bond")),
                 "temporal_block_present": bool(temporal_block_from_state),
                 "sarcasm_flag_active": sarcasm_flag,
                 "empathy_prompt_added": 'empathy_prompt_text' in locals() and bool(empathy_prompt_text),
