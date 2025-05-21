@@ -11,7 +11,6 @@ class Plugin(PluginInterface):
     2. Adjust generation parameters
     3. Add context before and after prompt assembly
     4. Provide memory context
-    5. Influence personality traits
     
     To create your own plugin:
     1. Create a Python file in the plugins directory
@@ -111,25 +110,6 @@ class Plugin(PluginInterface):
                "- Code organization best practices\n" \
                "- Error handling patterns\n" \
                "- Performance optimization techniques"
-    
-    def get_trait_modifiers(self) -> Dict[str, Dict[str, float]]:
-        """
-        Optional: Modify AI personality traits.
-        """
-        return {
-            "technical_depth": {
-                "base_value": 0.8,     # Prefer detailed technical explanations
-                "context_weight": 0.3   # Moderately influenced by context
-            },
-            "explanation_detail": {
-                "base_value": 0.7,     # Detailed but not overwhelming
-                "context_weight": 0.4   # More responsive to context
-            },
-            "code_focus": {
-                "base_value": 0.9,     # Strong emphasis on code examples
-                "context_weight": 0.5   # Highly context-dependent
-            }
-        }
     
     def cleanup(self) -> None:
         """
