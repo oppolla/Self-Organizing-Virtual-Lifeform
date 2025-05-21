@@ -61,7 +61,7 @@ class GenerationManager:
         self.components = {}  # For compatibility with other modules
         # ResourceManager integration
         if resource_manager is None:
-            self.resource_manager = ResourceManager(logger=self.logger)
+            self.resource_manager = ResourceManager(logger=self.logger, error_manager=self.error_manager)
         else:
             self.resource_manager = resource_manager
         self.components["resource_manager"] = self.resource_manager

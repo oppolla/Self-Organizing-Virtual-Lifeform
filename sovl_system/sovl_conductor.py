@@ -44,7 +44,10 @@ class SOVLOrchestrator(OrchestratorInterface):
         # Base infrastructure components with no dependencies
         ("config_manager", "sovl_config", "ConfigManager", {}, {"is_critical": True}),
         ("logger", "sovl_logger", "Logger", {}, {"is_critical": True}),
-        ("resource_manager", "sovl_resource", "ResourceManager", {}, {"is_critical": False}),
+        ("resource_manager", "sovl_resource", "ResourceManager", {
+            "logger": {"key": "logger", "required": True},
+            "error_manager": {"key": "error_manager", "required": False}
+        }, {"is_critical": False}),
         ("state_manager", "sovl_state", "StateManager", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},

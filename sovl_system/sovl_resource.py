@@ -238,35 +238,3 @@ class ResourceManager:
                 error_type=type(error).__name__,
                 error_context=error_context
             )
-
-def estimate_model_size(model_name: str, quantization: str = "none") -> int:
-    """
-    Estimate the memory size of a model in MB.
-    
-    Args:
-        model_name: Name or path of the model (e.g., 'bert-base-uncased').
-        quantization: Quantization mode ('none', '4bit', '8bit').
-        
-    Returns:
-        int: Estimated size in MB.
-    """
-    try:
-        config = AutoConfig.from_pretrained(model_name)
-        param_count = sum(p.numel() for p in torch.nn.Module.from_config(config).parameters())
-        bytes_per_param = 4  # Default fp32
-        if quantization == "4bit":
-            bytes_per_param = 0.5
-        elif quantization == "8bit":
-            bytes_per_param = 1
-        elif quantization == "fp16":
-            bytes_per_param = 2
-        size_bytes = param_count * bytes_per_param
-        return size_bytes // (1024 * 1024)  # Convert to MB
-    except Exception as e:
-        logger = Logger(LoggerConfig())  # Fallback logger
-        logger.log_error(
-            error_msg=f"Failed to estimate model size for {model_name}: {str(e)}",
-            error_type="model_size_estimation_error",
-            stack_trace=traceback.format_exc()
-        )
-        return 2048  # Default to 2GB if estimation fails

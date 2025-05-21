@@ -89,14 +89,17 @@ class ModelManager:
         self._gpu_lock = Lock()  # Add dedicated GPU lock
         self._last_failed_recovery_key = None  # Track last failed recovery attempt
         self.components = {}  # For compatibility with other modules
+
+        # Initialize error manager FIRST
+        self._initialize_error_manager()
+
         # ResourceManager integration
         if resource_manager is None:
-            self.resource_manager = ResourceManager(logger=self._logger)
+            self.resource_manager = ResourceManager(logger=self._logger, error_manager=self.error_manager)
         else:
             self.resource_manager = resource_manager
         self.components["resource_manager"] = self.resource_manager
-        # Initialize error manager
-        self._initialize_error_manager()
+        
         # Initialize configuration
         self._initialize_config()
         # Model storage
