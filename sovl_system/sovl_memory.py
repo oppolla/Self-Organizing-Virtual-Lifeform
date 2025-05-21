@@ -22,10 +22,12 @@ class RAMManager:
         self._config_manager = config_manager
         self._logger = logger
         self._memory_lock = Lock()
-        self.hardware = HardwareManager(config_manager, logger)
         
-        # Initialize error manager
+        # Initialize error manager FIRST so it can be passed to HardwareManager
         self._initialize_error_manager()
+        
+        # Pass the initialized self.error_manager to HardwareManager
+        self.hardware = HardwareManager(config_manager, logger, self.error_manager)
         
         # Initialize RAM
         self._initialize_ram()
@@ -229,10 +231,12 @@ class GPUMemoryManager:
         self._config_manager = config_manager
         self._logger = logger
         self._memory_lock = Lock()
-        self.hardware = HardwareManager(config_manager, logger)
         
-        # Initialize error manager
+        # Initialize error manager FIRST so it can be passed to HardwareManager
         self._initialize_error_manager()
+        
+        # Pass the initialized self.error_manager to HardwareManager
+        self.hardware = HardwareManager(config_manager, logger, self.error_manager)
         
         # Initialize GPU
         self._initialize_gpu()
