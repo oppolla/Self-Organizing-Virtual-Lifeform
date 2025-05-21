@@ -315,7 +315,7 @@ class Curiosity:
     ) -> float:
         """Compute curiosity score based on novelty only."""
         try:
-            memory_embeddings = self._get_valid_memory_embeddings()
+            memory_embeddings = self._get_valid_memory_embeddings(state)
             novelty = (
                 self._compute_novelty_score(memory_embeddings, query_embedding, device)
                 if memory_embeddings and query_embedding is not None
@@ -337,7 +337,7 @@ class Curiosity:
             self._log_error(f"Curiosity computation failed: {str(e)}")
             return 0.5
 
-    def _get_valid_memory_embeddings(self) -> List[torch.Tensor]:
+    def _get_valid_memory_embeddings(self, state) -> List[torch.Tensor]:
         """Get valid memory embeddings with memory constraints."""
         try:
             valid_embeddings = []
@@ -812,18 +812,18 @@ class CuriosityManager():
             )
             raise
 
-    def _get_valid_memory_embeddings(self) -> List[torch.Tensor]:
+    def _get_valid_memory_embeddings(self, state) -> List[torch.Tensor]:
         """Get valid memory embeddings with memory constraints."""
-        if not self.state_manager:
-            raise RuntimeError("CuriosityManager requires a StateManager for state access.")
         try:
             valid_embeddings = []
             batch_size = self.curiosity.batch_size
-            state = self.state_manager.get_state()
-            embeddings = getattr(state, 'embeddings', [])
+
+            embeddings = state.embeddings
+
             for i in range(0, len(embeddings), batch_size):
                 batch = embeddings[i:i + batch_size]
                 valid_embeddings.extend(batch)
+
             return valid_embeddings
         except Exception as e:
             self._record_error(f"Failed to get valid memory embeddings: {str(e)}")
