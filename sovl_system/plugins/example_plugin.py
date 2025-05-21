@@ -14,19 +14,19 @@ class Plugin(PluginInterface):
     5. Influence personality traits
     
     To create your own plugin:
-    1. Create a new directory in the plugins folder
-    2. Create an __init__.py file with a Plugin class that inherits from PluginInterface
-    3. Implement the required methods (initialize, get_metadata)
-    4. Implement any optional methods you want to use to modify the system's behavior
-    5. Add your plugin name to the enabled_plugins list in the configuration
+    1. Create a Python file in the plugins directory
+    2. Add your plugin name to enabled_plugins in sovl_config.json
+    
+    Required methods:
+    - initialize(system, context)
+    - get_metadata()
+    
+    All other methods are optional - implement only what you need.
     """
     
     def __init__(self):
-        """Initialize plugin state.
-        
-        The plugin maintains references to:
-        - system: The main SOVLSystem instance for accessing system components
-        - context: The SystemContext for accessing shared resources
+        """
+        Initialize plugin state.
         """
         self.system = None
         self.context = None
@@ -47,16 +47,8 @@ class Plugin(PluginInterface):
         self.context = context
     
     def get_metadata(self) -> PluginMetadata:
-        """Define plugin information.
-        
-        This metadata is used by the plugin manager to:
-        - Identify the plugin
-        - Track versions
-        - Provide descriptions
-        - Control plugin state (enabled/disabled)
-        
-        Returns:
-            PluginMetadata object with plugin information
+        """
+        Define plugin information.
         """
         return PluginMetadata(
             name="example_plugin",
@@ -67,22 +59,8 @@ class Plugin(PluginInterface):
         )
     
     def modify_system_prompt(self, base_prompt: str) -> str:
-        """Enhance the system prompt that defines AI behavior.
-        
-        Use this method to:
-        - Add specific instructions
-        - Define constraints
-        - Set behavioral guidelines
-        - Include custom context
-        
-        The modifications here directly influence how the AI understands
-        its role and how it should respond.
-        
-        Args:
-            base_prompt: The original system prompt
-        
-        Returns:
-            Modified system prompt with additional instructions
+        """
+        Optional: Add custom instructions to the system prompt.
         """
         return f"{base_prompt}\nAdditional instructions:\n" \
                f"1. Always provide code examples when explaining technical concepts\n" \
@@ -90,20 +68,8 @@ class Plugin(PluginInterface):
                f"3. Include error handling considerations in code suggestions"
     
     def get_generation_parameters(self) -> Dict[str, Any]:
-        """Configure AI response generation parameters.
-        
-        Use this method to adjust:
-        - temperature: Controls randomness (0.0-1.0)
-        - top_p: Controls diversity of token selection
-        - max_tokens: Limits response length
-        - presence_penalty: Encourages topic diversity
-        - frequency_penalty: Discourages repetition
-        
-        These parameters influence how the AI generates its responses,
-        affecting creativity, consistency, and style.
-        
-        Returns:
-            Dictionary of generation parameters
+        """
+        Optional: Configure AI generation parameters (temperature, top_p, etc).
         """
         return {
             "temperature": 0.7,  # Balanced between creativity and consistency
@@ -114,22 +80,8 @@ class Plugin(PluginInterface):
         }
     
     def pre_prompt_assembly(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """Modify context before the prompt is assembled.
-        
-        This is called before the final prompt is created, allowing you to:
-        - Add custom context
-        - Set preferences
-        - Include relevant information
-        - Modify existing context
-        
-        The context provided here influences how the prompt is assembled
-        and how the AI understands the current situation.
-        
-        Args:
-            context: Current context dictionary
-        
-        Returns:
-            Modified context dictionary
+        """
+        Optional: Modify context before prompt assembly.
         """
         context.update({
             "code_style": {
@@ -143,19 +95,8 @@ class Plugin(PluginInterface):
         return context
     
     def post_prompt_assembly(self, assembled_prompt: str) -> str:
-        """Modify the final prompt before it's sent to the AI.
-        
-        This is your last chance to modify the prompt, useful for:
-        - Adding final reminders
-        - Including global context
-        - Enforcing constraints
-        - Adding consistent suffixes
-        
-        Args:
-            assembled_prompt: The fully assembled prompt
-        
-        Returns:
-            Final modified prompt
+        """
+        Optional: Modify the final prompt before it's sent to the AI.
         """
         return f"{assembled_prompt}\n\nRemember to:\n" \
                f"- Consider edge cases\n" \
@@ -163,19 +104,8 @@ class Plugin(PluginInterface):
                f"- Provide practical examples"
     
     def get_memory_context(self) -> Optional[str]:
-        """Provide additional memory context for the AI.
-        
-        Use this to add relevant historical or contextual information like:
-        - Previous interactions
-        - Important topics
-        - Ongoing themes
-        - User preferences
-        
-        This context helps maintain consistency across interactions
-        and provides important background information.
-        
-        Returns:
-            String of memory context or None
+        """
+        Optional: Add historical or contextual information.
         """
         return "\nRecent topics discussed:\n" \
                "- Code organization best practices\n" \
@@ -183,17 +113,8 @@ class Plugin(PluginInterface):
                "- Performance optimization techniques"
     
     def get_trait_modifiers(self) -> Dict[str, Dict[str, float]]:
-        """Define or modify AI personality traits.
-        
-        Use this to influence the AI's personality by adjusting:
-        - base_value: The default strength of the trait (0.0-1.0)
-        - context_weight: How much context influences the trait (0.0-1.0)
-        
-        These traits influence how the AI expresses itself and
-        handles different situations.
-        
-        Returns:
-            Dictionary of trait definitions and their parameters
+        """
+        Optional: Modify AI personality traits.
         """
         return {
             "technical_depth": {
@@ -211,13 +132,8 @@ class Plugin(PluginInterface):
         }
     
     def cleanup(self) -> None:
-        """Clean up plugin resources.
-        
-        Called when the plugin is being unloaded. Use this to:
-        - Close connections
-        - Free resources
-        - Reset state
-        - Clean up any temporary data
+        """
+        Optional: Clean up plugin resources.
         """
         self.system = None
         self.context = None 
