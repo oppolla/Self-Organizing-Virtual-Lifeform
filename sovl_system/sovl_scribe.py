@@ -14,12 +14,6 @@ from sovl_queue import ScribeEntry
 from sovl_io import JsonlWriter
 import time
 
-class StateAccessorInterface:
-    """Interface for state accessor objects to ensure proper dependency handling."""
-    def get_state(self):
-        """Get the current state"""
-        raise NotImplementedError("StateAccessor must implement get_state method")
-
 class Scriber:
     """
     Central scribing subsystem for SOVL, managing metadata processing and scribed output.

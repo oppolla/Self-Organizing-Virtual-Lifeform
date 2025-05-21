@@ -339,7 +339,17 @@ class MetadataProcessor:
                     ):
                         current_state = self._cached_state
                     else:
-                        current_state = self.state_accessor.get_current_snapshot()
+                        if hasattr(self.state_accessor, 'state_manager') and \
+                           self.state_accessor.state_manager and \
+                           hasattr(self.state_accessor.state_manager, 'get_state'):
+                            current_state = self.state_accessor.state_manager.get_state()
+                        else:
+                            current_state = None
+                            self.logger.record_event(
+                                event_type="metadata_enrichment_warning",
+                                message="State accessor in MetadataProcessor does not have the expected state_manager.get_state() structure.",
+                                level="warning"
+                            )
                         self._cached_state = current_state
                         self._cached_state_time = now
                 if current_state:
