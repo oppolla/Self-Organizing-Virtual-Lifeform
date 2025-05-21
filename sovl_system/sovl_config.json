@@ -372,20 +372,7 @@
   },
   "grafter_config": {
     "plugin_directory": "plugins",
-    "enabled_plugins": ["example_plugin"],
-    "max_plugins": 10,
-    "plugin_timeout": 30.0,
-    "allow_dynamic_loading": true,
-    "log_plugin_errors": true,
-    "plugin_load_retry_attempts": 3,
-    "plugin_load_retry_delay": 1.0,
-    "plugin_state_sync_interval": 2.0,
-    "plugin_cleanup_timeout": 5.0,
-    "plugin_memory_threshold_mb": 512,
-    "plugin_gpu_memory_threshold": 0.2,
-    "plugin_error_cooldown": 1.0,
-    "plugin_max_errors": 5,
-    "plugin_config_validation": true
+    "enabled_plugins": []
   },
   "queue_config": {
     "max_queue_size": 2000,

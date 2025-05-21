@@ -351,6 +351,7 @@ class SOVLSystem(SystemInterface):
                 from sovl_grafter import initialize_plugin_manager
                 self.grafter = initialize_plugin_manager(self)
                 self.context.grafter = self.grafter
+                self.generation_manager.primer.system = self  # Set system reference for plugin access
                 self.logger.record({
                     "event": "grafter_initialized",
                     "plugin_count": len(self.grafter.plugins) if self.grafter else 0,

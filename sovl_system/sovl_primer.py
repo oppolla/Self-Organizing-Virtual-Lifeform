@@ -439,6 +439,7 @@ class GenerationPrimer:
         self.device = device
         self.lifecycle_manager = lifecycle_manager
         self.scaffold_manager = scaffold_manager
+        self.system = None  # Initialize system reference for plugin access
         # Validate dialogue_context_manager interface
         if dialogue_context_manager:
             if not (hasattr(dialogue_context_manager, 'short_term') and \
