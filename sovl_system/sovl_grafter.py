@@ -64,10 +64,6 @@ class PluginInterface(ABC):
     def get_memory_context(self) -> Optional[str]:
         """Provide additional memory context for generation."""
         return None
-    
-    def get_trait_modifiers(self) -> Dict[str, Dict[str, float]]:
-        """Provide modifiers for trait calculations."""
-        return {}
 
 class PluginManager:
     """Manages primer-focused plugins."""
@@ -111,8 +107,7 @@ class PluginManager:
             "post_prompt_assembly": [],
             "modify_system_prompt": [],
             "adjust_generation_params": [],
-            "provide_memory_context": [],
-            "modify_traits": []
+            "provide_memory_context": []
         }
 
         # Register schema and load config
@@ -278,28 +273,6 @@ class PluginManager:
                         error=e
                     )
             return "\n".join(contexts)
-
-    def get_combined_trait_modifiers(self) -> Dict[str, Dict[str, float]]:
-        """Combine trait modifiers from all plugins."""
-        with self.plugin_lock:
-            combined_modifiers = {}
-            for plugin in self.plugins.values():
-                try:
-                    modifiers = safe_execute(
-                        plugin.get_trait_modifiers,
-                        logger=self.logger
-                    ) or {}
-                    for trait, values in modifiers.items():
-                        if trait not in combined_modifiers:
-                            combined_modifiers[trait] = {}
-                        combined_modifiers[trait].update(values)
-                except Exception as e:
-                    self.error_manager.handle_error(
-                        error_type="trait_modifiers",
-                        error_message=f"Failed to get trait modifiers: {str(e)}",
-                        error=e
-                    )
-            return combined_modifiers
 
     def cleanup(self) -> None:
         """Cleanup all plugins."""
