@@ -11,7 +11,6 @@ class Plugin(PluginInterface):
     2. Adjust generation parameters
     3. Add context before and after prompt assembly
     4. Provide memory context
-    5. Influence personality traits
     
     To create your own plugin:
     1. Create a Python file in the plugins directory
