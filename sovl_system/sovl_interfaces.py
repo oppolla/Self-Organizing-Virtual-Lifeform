@@ -12,6 +12,33 @@ if TYPE_CHECKING:
     from sovl_error import ErrorManager
     from sovl_memory import RAMManager, GPUMemoryManager
     from sovl_main import SOVLSystem, SystemContext
+
+"""
+Defines core abstract interfaces, protocols, and mediation components for the SOVL system.
+
+This module serves as a central point for establishing contracts between major
+subsystems, such as the SOVLSystem and SOVLOrchestrator, and for managing
+their interactions to promote loose coupling and resolve dependencies.
+
+Key components include:
+- Abstract Base Classes (ABCs):
+    - SystemInterface: Defines the contract for the main SOVL system's operations.
+    - OrchestratorInterface: Defines the contract for the system orchestrator.
+    - StateAccessor: Defines the contract for state access and atomic updates.
+- Concrete Mediation Classes:
+    - SystemMediator: Manages interactions between the SOVLSystem and
+      SOVLOrchestrator via their interfaces to prevent circular dependencies.
+    - SOVLSystemAdapter: Adapts a SOVLSystem instance to the SystemInterface.
+    - SOVLOrchestratorAdapter: Adapts an SOVLOrchestrator instance to the
+      OrchestratorInterface.
+- Protocols (for Structural Typing):
+    - HasSessionID: Specifies an object is expected to provide a 'session_id'.
+    - HasLogger: Specifies an object is expected to provide a 'logger'.
+
+The primary architectural goal of this module is to enable a decoupled system
+where components interact through these well-defined abstractions rather than
+relying on direct concrete dependencies.
+"""
     
 class SystemInterface(ABC):
     """Core interface for the SOVL system."""
@@ -334,6 +361,22 @@ class SOVLSystemAdapter(SystemInterface):
     
     def shutdown(self) -> None:
         self.sovl_system.shutdown()
+
+    def toggle_memory(self, enable: bool) -> bool:
+        """Enable or disable memory features."""
+        return self.sovl_system.toggle_memory(enable)
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get statistics about memory usage."""
+        return self.sovl_system.get_memory_stats()
+
+    def get_component_status(self) -> Dict[str, bool]:
+        """Get status of all system components."""
+        return self.sovl_system.get_component_status()
+
+    def get_system_state(self) -> Dict[str, Any]:
+        """Get complete system state including status of all components."""
+        return self.sovl_system.get_system_state()
 
 class SOVLOrchestratorAdapter(OrchestratorInterface):
     """
