@@ -81,6 +81,7 @@ class SOVLOrchestrator(OrchestratorInterface):
         ("hardware_manager", "sovl_hardware", "HardwareManager", {
             "config_manager": {"key": "config_manager", "required": True},
             "logger": {"key": "logger", "required": True},
+            "error_manager": {"key": "error_manager", "required": True},
             "state_manager": {"key": "state_manager", "required": False}
         }, {"is_critical": False}),
         ("data_manager", "sovl_data", "DataManager", {

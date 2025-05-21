@@ -8,7 +8,7 @@ from sovl_config import ConfigManager
 from sovl_logger import Logger
 from sovl_memory import GPUMemoryManager, RAMManager
 from sovl_error import ErrorManager, ErrorRecord, ErrorRecordBridge
-from sovl_state import StateTracker
+from sovl_state import StateTracker, StateManager
 
 """
 Facade for hardware access, abstracting GPU and CPU operations to decouple
@@ -28,110 +28,105 @@ class HardwareConfig:
     mock_memory_total_mb: float = 8192.0  # Mock total memory for non-CUDA environments
 
     def validate(self) -> None:
-        """Validate configuration parameters."""
-        try:
-            if not isinstance(self.enable_cuda, bool):
-                raise HardwareError("enable_cuda must be boolean")
-            if self.memory_query_interval <= 0:
-                raise HardwareError("memory_query_interval must be positive")
-            if self.mock_memory_total_mb <= 0:
-                raise HardwareError("mock_memory_total_mb must be positive")
-        except HardwareError as e:
-            logger = getattr(self, 'logger', None)
-            if logger:
-                try:
-                    logger.log_error(f"HardwareConfig validation failed: {str(e)}", error_type="hardware_config_error", stack_trace=traceback.format_exc())
-                except Exception:
-                    print(f"[ERROR] HardwareConfig validation failed (logger error): {str(e)}")
-                    traceback.print_exc()
-            else:
-                print(f"[ERROR] HardwareConfig validation failed: {str(e)}")
-                traceback.print_exc()
-            raise HardwareError(f"Configuration validation failed: {str(e)}")
+        """Validate configuration parameters. Raises HardwareError on failure."""
+        if not isinstance(self.enable_cuda, bool):
+            raise HardwareError("enable_cuda must be boolean")
+        if self.memory_query_interval <= 0:
+            raise HardwareError("memory_query_interval must be positive")
+        if self.mock_memory_total_mb <= 0:
+            raise HardwareError("mock_memory_total_mb must be positive")
 
     @classmethod
     def from_config_manager(cls, config_manager: ConfigManager) -> 'HardwareConfig':
-        """Create configuration from ConfigManager."""
+        """Create configuration from ConfigManager, handling validation and logging."""
+        logger = getattr(config_manager, 'logger', None)
         try:
-            config = cls(
-                enable_cuda=config_manager.get("hardware.enable_cuda", torch.cuda.is_available()),
-                memory_query_interval=config_manager.get("hardware.memory_query_interval", 0.1),
-                mock_memory_total_mb=config_manager.get("hardware.mock_memory_total_mb", 8192.0)
-            )
-            config.validate()
-            logger = getattr(config_manager, 'logger', None)
+            config_data = {
+                "enable_cuda": config_manager.get("hardware.enable_cuda", torch.cuda.is_available()),
+                "memory_query_interval": config_manager.get("hardware.memory_query_interval", 0.1),
+                "mock_memory_total_mb": config_manager.get("hardware.mock_memory_total_mb", 8192.0)
+            }
+            instance = cls(**config_data)
+            instance.validate()  # Validate the created instance
+
             if logger:
                 try:
-                    logger.log_debug("HardwareConfig created successfully", event_type="hardware_config_success")
+                    logger.log_debug("HardwareConfig created and validated successfully", event_type="hardware_config_success")
                 except Exception:
-                    pass
-            return config
-        except Exception as e:
-            logger = getattr(config_manager, 'logger', None)
+                    # Optionally print if debug logging fails, but usually can be ignored
+                    pass # print("[DEBUG] HardwareConfig success log failed")
+            return instance
+        except HardwareError as e:  # Catch validation errors specifically
+            error_message = f"HardwareConfig validation failed: {str(e)}"
             if logger:
                 try:
-                    logger.log_error(f"Failed to create HardwareConfig: {str(e)}", error_type="hardware_config_error", stack_trace=traceback.format_exc())
+                    logger.log_error(error_message, error_type="hardware_config_validation_error", stack_trace=traceback.format_exc())
                 except Exception:
-                    print(f"[ERROR] Failed to create HardwareConfig (logger error): {str(e)}")
-                    traceback.print_exc()
+                    print(f"[ERROR] HardwareConfig validation logging failed: {error_message}\n{traceback.format_exc()}")
             else:
-                print(f"[ERROR] Failed to create HardwareConfig: {str(e)}")
-                traceback.print_exc()
-            raise HardwareError(f"Failed to create HardwareConfig: {str(e)}")
+                print(f"[ERROR] {error_message} (no logger)\n{traceback.format_exc()}")
+            raise # Re-raise the original HardwareError to be handled by the caller
+        except Exception as e: # Catch other potential errors during instantiation
+            error_message = f"Failed to create HardwareConfig: {str(e)}"
+            if logger:
+                try:
+                    logger.log_error(error_message, error_type="hardware_config_creation_error", stack_trace=traceback.format_exc())
+                except Exception:
+                    print(f"[ERROR] HardwareConfig creation logging failed: {error_message}\n{traceback.format_exc()}")
+            else:
+                print(f"[ERROR] {error_message} (no logger)\n{traceback.format_exc()}")
+            # Wrap generic exceptions in HardwareError for consistent error type from this factory
+            raise HardwareError(error_message) from e
 
 class HardwareManager:
     """Manages hardware access for memory and device operations."""
     
-    def __init__(self, config_manager: ConfigManager, logger: Logger, state_manager: Any = None):
+    def __init__(self, config_manager: ConfigManager, logger: Logger, error_manager: ErrorManager, state_manager: Optional[StateManager] = None):
         """
         Initialize the hardware manager.
 
         Args:
             config_manager: Configuration manager instance.
             logger: Logger for event recording.
-            state_manager: StateManager for atomic state updates.
+            error_manager: Central error manager instance.
+            state_manager: Optional central state manager for atomic state updates.
         """
         self.config_manager = config_manager
         self.logger = logger
-        self.state_manager = state_manager or getattr(self, 'context', None) and getattr(self.context, 'state_manager', None)
+        self.error_manager = error_manager # Use injected ErrorManager
+        self.state_manager = state_manager or getattr(self, 'context', None) and getattr(self.context, 'state_manager', None) # Keep existing logic for state_manager or direct pass
+
         try:
+            # Pass logger to from_config_manager if it needs one explicitly,
+            # but it's designed to get it from config_manager.
             self._config = HardwareConfig.from_config_manager(config_manager)
-        except Exception as e:
-            if self.logger:
-                try:
-                    self.logger.log_error(f"HardwareManager failed to load config: {str(e)}", error_type="hardware_manager_error", stack_trace=traceback.format_exc())
-                except Exception:
-                    print(f"[ERROR] HardwareManager failed to log config error: {str(e)}")
-                    traceback.print_exc()
-            else:
-                print(f"[ERROR] HardwareManager failed to load config: {str(e)}")
-                traceback.print_exc()
-            raise
+        except Exception as e: # Catch errors from HardwareConfig.from_config_manager
+            # Error logging is now handled within from_config_manager,
+            # but we still need to handle the re-raised exception here.
+            # Log that HardwareManager failed to initialize due to config failure.
+            log_msg = f"HardwareManager failed to initialize due to config loading/validation error: {str(e)}"
+            # Use self.logger if available, otherwise print. This __init__ gets logger.
+            self.logger.log_error(log_msg, error_type="hardware_manager_init_config_error", stack_trace=traceback.format_exc())
+            raise # Re-raise the exception to signal HardwareManager init failure.
+
         self._lock = Lock()
-        self._last_memory_query: float = 0.0
-        self._cached_memory_stats: Optional[Dict[str, float]] = None
         try:
             self._cuda_available = self._check_cuda_availability()
-        except Exception as e:
-            if self.logger:
-                try:
-                    self.logger.log_error(f"HardwareManager failed CUDA availability check: {str(e)}", error_type="hardware_manager_error", stack_trace=traceback.format_exc())
-                except Exception:
-                    print(f"[ERROR] HardwareManager failed to log CUDA check error: {str(e)}")
-                    traceback.print_exc()
-            else:
-                print(f"[ERROR] HardwareManager failed CUDA availability check: {str(e)}")
-                traceback.print_exc()
-            self._cuda_available = False
-        # Initialize error manager
-        self.error_manager = ErrorManager(
-            context=self,  # Pass self as context
-            state_tracker=StateTracker(),  # Create a minimal state tracker
-            config_manager=config_manager,
-            error_cooldown=1.0
-        )
-        # Register hardware-specific recovery strategies
+        except Exception as e: # Should be rare, _check_cuda_availability logs internally
+            self.logger.log_error(f"HardwareManager critical failure during CUDA availability check: {str(e)}", error_type="hardware_manager_cuda_check_critical", stack_trace=traceback.format_exc())
+            self._cuda_available = False # Ensure a safe default
+        
+        # ErrorManager is now injected, so we don't initialize it here.
+        # self.error_manager = ErrorManager(
+        #     context=self,
+        #     state_tracker=StateTracker(), # No longer creating local StateTracker
+        #     config_manager=config_manager,
+        #     error_cooldown=1.0
+        # )
+        
+        # Register hardware-specific recovery strategies with the injected error_manager
         self._register_recovery_strategies()
+
         if self.logger:
             try:
                 self._log_training_event("hardware_initialized", {
@@ -253,40 +248,6 @@ class HardwareManager:
         except Exception as e:
             self._log_error("Failed to check CUDA availability", e)
             return False
-
-    def get_memory_stats(self, device: Optional[torch.device] = None) -> Dict[str, Any]:
-        """Get memory statistics for specified device."""
-        try:
-            if device and device.type == 'cuda':
-                gpu_manager = GPUMemoryManager(self.config_manager, self.logger)
-                gpu_stats = gpu_manager.get_gpu_usage()
-                return {
-                    'device': str(device),
-                    'type': 'cuda',
-                    'allocated': gpu_stats.get('gpu_usage', 0.0),
-                    'available': gpu_stats.get('gpu_available', 0.0),
-                    'usage_percentage': gpu_stats.get('usage_percentage', 0.0)
-                }
-            else:
-                ram_manager = RAMManager(self.config_manager, self.logger)
-                ram_stats = ram_manager.check_memory_health()
-                return {
-                    'device': 'cpu',
-                    'type': 'cpu',
-                    'total': ram_stats.get('total', 0.0),
-                    'available': ram_stats.get('available', 0.0),
-                    'usage_percentage': ram_stats.get('usage_percent', 0.0)
-                }
-        except Exception as e:
-            self.error_manager.record_error(
-                error=e,
-                error_type="memory_stats_error",
-                context={
-                    "device": str(device) if device else "cpu",
-                    "operation": "get_memory_stats"
-                }
-            )
-            return {}
 
     def get_detailed_memory_stats(self, device: Optional[torch.device] = None) -> Dict[str, Any]:
         """
@@ -467,30 +428,48 @@ class HardwareManager:
 if __name__ == "__main__":
     from sovl_config import ConfigManager
     from sovl_logger import Logger
+    from sovl_error import ErrorManager # Make sure ErrorManager is imported for tests
+    from sovl_state import StateTracker # If needed for ErrorManager, but usually not for basic EM init
     import unittest
 
     class TestHardwareManager(unittest.TestCase):
         def setUp(self):
             self.logger = Logger("test_logs.jsonl")
             self.config_manager = ConfigManager("sovl_config.json", self.logger)
-            self.hardware = HardwareManager(self.config_manager, self.logger)
+            # Create a basic ErrorManager for testing purposes
+            # It might need a context, state_tracker, and config_manager depending on its own __init__
+            # For basic HardwareManager tests, a simple one might suffice, or pass None if allowed.
+            # Assuming ErrorManager can be initialized simply for this test context:
+            self.error_manager = ErrorManager(context=None, state_tracker=None, config_manager=self.config_manager, logger=self.logger)
+            self.hardware = HardwareManager(self.config_manager, self.logger, self.error_manager)
 
         def test_memory_stats_cuda(self):
             if self.hardware.is_cuda_available():
-                stats = self.hardware.get_memory_stats()
-                self.assertIn("allocated_mb", stats)
-                self.assertIn("reserved_mb", stats)
-                self.assertIn("total_memory_mb", stats)
-                self.assertIn("available_mb", stats)
-                self.assertGreaterEqual(stats["total_memory_mb"], 0)
-                self.assertGreaterEqual(stats["allocated_mb"], 0)
+                stats = self.hardware.get_detailed_memory_stats()
+                self.assertIn("allocated_bytes_current", stats)
+                self.assertIn("reserved_bytes_current", stats)
+                self.assertGreaterEqual(stats["allocated_bytes_current"], 0)
+                self.assertGreaterEqual(stats["reserved_bytes_current"], 0)
+            else:
+                stats = self.hardware.get_detailed_memory_stats()
+                self.assertEqual(stats, {})
 
         def test_memory_stats_cpu(self):
             self.config_manager.set("hardware.enable_cuda", False)
-            hardware = HardwareManager(self.config_manager, self.logger)
-            stats = hardware.get_memory_stats()
-            self.assertEqual(stats["total_memory_mb"], hardware._config.mock_memory_total_mb)
-            self.assertGreaterEqual(stats["allocated_mb"], 0)
+            # Re-initialize HardwareManager with CUDA disabled in config
+            cpu_hardware = HardwareManager(self.config_manager, self.logger, self.error_manager) 
+            self.assertFalse(cpu_hardware.is_cuda_available())
+
+            # get_detailed_memory_stats should be empty for CPU or when CUDA is off
+            detailed_stats = cpu_hardware.get_detailed_memory_stats()
+            self.assertEqual(detailed_stats, {})
+
+            # get_device_properties should return mock CPU info
+            props = cpu_hardware.get_device_properties()
+            # self.assertEqual(stats["total_memory_mb"], hardware._config.mock_memory_total_mb) # Old assertion
+            # self.assertGreaterEqual(stats["allocated_mb"], 0) # Old assertion
+            self.assertEqual(props["name"], "CPU")
+            self.assertEqual(props["total_memory_mb"], cpu_hardware._config.mock_memory_total_mb)
 
         def test_device_properties(self):
             props = self.hardware.get_device_properties()
