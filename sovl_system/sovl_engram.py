@@ -3,7 +3,6 @@ import torch
 from sovl_logger import Logger
 from sovl_error import ErrorManager, ScaffoldError
 from sovl_config import ConfigManager
-from sovl_utils import check_adaptation_dependencies
 from sovl_scaffold import CrossAttentionInjector
 
 
@@ -67,9 +66,62 @@ class LoraAdapterManager:
                 self.logger.log_error(f"LoRA config validation failed: {e}\n{traceback.format_exc()}", error_type="lora_config_error")
             self._validated = True
 
+    @staticmethod
+    def _check_adaptation_dependencies(logger=None, min_peft_version="0.4.0", check_adapters=True, check_prefix_tuning=True):
+        """
+        Check for PEFT/LoRA/adapter/prefix-tuning dependencies and version compatibility.
+        Returns a dict with enabled/disabled flags and reasons for each adaptation method.
+        """
+        result = {
+            "lora_enabled": False,
+            "adapters_enabled": False,
+            "prefix_tuning_enabled": False,
+            "reasons": {}
+        }
+        # Check PEFT/LoRA
+        try:
+            import pkg_resources
+            if LoraConfig is None or get_peft_model is None or TaskType is None or PeftModel is None:
+                raise ImportError("peft or required symbols not available")
+            peft_version = pkg_resources.get_distribution("peft").version
+            if pkg_resources.parse_version(peft_version) < pkg_resources.parse_version(min_peft_version):
+                msg = f"PEFT version {peft_version} < {min_peft_version}"
+                if logger: logger.log_error(msg, error_type="dependency_version_error")
+                result["reasons"]["lora"] = msg
+            else:
+                result["lora_enabled"] = True
+                result["reasons"]["lora"] = "OK"
+        except Exception as e:
+            msg = f"LoRA/PEFT unavailable: {e}"
+            if logger: logger.log_error(msg, error_type="dependency_error")
+            result["reasons"]["lora"] = str(e)
+        # Check adapters
+        if check_adapters:
+            try:
+                if AdapterConfig is None:
+                    raise ImportError("transformers.adapters.AdapterConfig not available")
+                result["adapters_enabled"] = True
+                result["reasons"]["adapters"] = "OK"
+            except Exception as e:
+                msg = f"Adapters unavailable: {e}"
+                if logger: logger.log_error(msg, error_type="dependency_error")
+                result["reasons"]["adapters"] = str(e)
+        # Check prefix tuning
+        if check_prefix_tuning:
+            try:
+                if PrefixTuningConfig is None:
+                    raise ImportError("peft.PrefixTuningConfig not available")
+                result["prefix_tuning_enabled"] = True
+                result["reasons"]["prefix_tuning"] = "OK"
+            except Exception as e:
+                msg = f"Prefix tuning unavailable: {e}"
+                if logger: logger.log_error(msg, error_type="dependency_error")
+                result["reasons"]["prefix_tuning"] = str(e)
+        return result
+
     def _lazy_check_dependencies(self):
         if not self._deps_checked:
-            deps = check_adaptation_dependencies(self.logger)
+            deps = self._check_adaptation_dependencies(self.logger)
             self.enabled = deps["lora_enabled"]
             self.enable_adapters = deps["adapters_enabled"]
             self.enable_prefix_tuning = deps["prefix_tuning_enabled"]

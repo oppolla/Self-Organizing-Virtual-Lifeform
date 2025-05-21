@@ -554,7 +554,6 @@ def move_batch_to_device(batch, device):
     Returns:
         Same structure as input but with all tensors moved to device
     """
-    import torch
     if isinstance(batch, torch.Tensor):
         return batch.to(device)
     elif isinstance(batch, dict):
@@ -676,62 +675,8 @@ def calculate_token_map_confidence(logits, *, source="base", allow_scaffold=Fals
         else:
             print(msg)
         raise ValueError(msg)
-    import torch
     probs = torch.nn.functional.softmax(logits, dim=-1)
     return probs.max(dim=-1).values.mean().item()
-
-def check_adaptation_dependencies(
-    logger,
-    min_peft_version="0.4.0",
-    min_transformers_version=None,
-    check_adapters=True,
-    check_prefix_tuning=True
-):
-    """
-    Check for PEFT/LoRA/adapter/prefix-tuning dependencies and version compatibility.
-    Returns a dict with enabled/disabled flags and reasons for each adaptation method.
-    """
-    result = {
-        "lora_enabled": False,
-        "adapters_enabled": False,
-        "prefix_tuning_enabled": False,
-        "reasons": {}
-    }
-    # Check PEFT/LoRA
-    try:
-        import pkg_resources
-        import peft
-        from peft import LoraConfig, get_peft_model, TaskType, PeftModel, PrefixTuningConfig
-        peft_version = pkg_resources.get_distribution("peft").version
-        if pkg_resources.parse_version(peft_version) < pkg_resources.parse_version(min_peft_version):
-            msg = f"PEFT version {peft_version} < {min_peft_version}"
-            logger.log_error(msg, error_type="dependency_version_error")
-            result["reasons"]["lora"] = msg
-        else:
-            result["lora_enabled"] = True
-            result["reasons"]["lora"] = "OK"
-    except Exception as e:
-        logger.log_error(f"LoRA/PEFT unavailable: {e}", error_type="dependency_error")
-        result["reasons"]["lora"] = str(e)
-    # Check adapters
-    if check_adapters:
-        try:
-            from transformers.adapters import AdapterConfig
-            result["adapters_enabled"] = True
-            result["reasons"]["adapters"] = "OK"
-        except Exception as e:
-            logger.log_error(f"Adapters unavailable: {e}", error_type="dependency_error")
-            result["reasons"]["adapters"] = str(e)
-    # Check prefix tuning
-    if check_prefix_tuning:
-        try:
-            from peft import PrefixTuningConfig
-            result["prefix_tuning_enabled"] = True
-            result["reasons"]["prefix_tuning"] = "OK"
-        except Exception as e:
-            logger.log_error(f"Prefix tuning unavailable: {e}", error_type="dependency_error")
-            result["reasons"]["prefix_tuning"] = str(e)
-    return result
 
 def ensure_dir_exists(path):
     """Ensure a directory exists."""
