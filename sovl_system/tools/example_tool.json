@@ -1,1 +1,30 @@
-json tool template
+{
+  "name": "auto_tldr",
+  "description": "Generates a short summary (TL;DR) from a block of text.",
+  "enabled": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "The text to summarize."
+      },
+      "max_sentences": {
+        "type": "integer",
+        "description": "Maximum number of sentences in the summary.",
+        "default": 3
+      }
+    },
+    "required": ["text"]
+  },
+  "examples": [
+    {
+      "input": {
+        "text": "Python is a popular programming language. It is used for AI and web development. It is easy to learn. Many people use it for data science.",
+        "max_sentences": 2
+      },
+      "output": "TL;DR: Python is a popular programming language. It is used for AI and web development."
+    }
+  ],
+  "tags": ["summarization", "text", "tldr"]
+}

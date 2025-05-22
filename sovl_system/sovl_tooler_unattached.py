@@ -48,6 +48,8 @@ class Tool:
     schema: ToolSchema
     execute_func: Callable[..., Any]
     module_path: Optional[str] = None
+    enabled: bool = True  # Whether the tool is enabled (from JSON schema or runtime)
+    activation_phrases: List[str] = field(default_factory=list)  # Per-tool activation phrases
 
 @dataclass
 class ProcedureStep:
@@ -89,13 +91,16 @@ class ToolRegistry:
                 self.logger.warn(f"Tool '{tool_instance.name}' from {tool_instance.module_path} (JSON: {tool_instance.schema.get('name', 'N/A')}.json) is redefining an existing tool.")
         self.tools[tool_instance.name] = tool_instance
         if self.logger:
-            self.logger.info(f"Tool '{tool_instance.name}' from {tool_instance.module_path} (JSON: {tool_instance.schema.get('name', 'N/A')}.json) registered.")
+            self.logger.info(f"Tool '{tool_instance.name}' from {tool_instance.module_path} (JSON: {tool_instance.schema.get('name', 'N/A')}.json) registered. Enabled: {tool_instance.enabled}")
 
     def get_tool(self, name: str) -> Optional[Tool]:
-        return self.tools.get(name)
+        tool = self.tools.get(name)
+        if tool and tool.enabled:
+            return tool
+        return None
 
     def get_all_tool_schemas(self) -> List[ToolSchema]:
-        return [tool.schema for tool in self.tools.values()]
+        return [tool.schema for tool in self.tools.values() if tool.enabled]
 
     def _validate_loaded_schema_structure(self, schema_dict: Dict[str, Any], json_file_path: str) -> bool:
         """Enhanced manual validation of the schema loaded from a JSON file."""
@@ -262,7 +267,8 @@ class ToolRegistry:
 
                 tool_name_from_schema = schema_dict["name"]
                 tool_description = schema_dict.get("description", "No description provided.")
-                
+                enabled = schema_dict.get("enabled", True)  # Read enabled from JSON, default True
+                activation_phrases = []
                 module_load_name = f"sovl_tool_modules.{base_name}"
                 try:
                     spec = importlib.util.spec_from_file_location(module_load_name, python_file_path)
@@ -278,6 +284,12 @@ class ToolRegistry:
                     
                     module = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(module)
+
+                    # Try to get ACTIVATION_PHRASES from the Python module
+                    if hasattr(module, "ACTIVATION_PHRASES"):
+                        activation_phrases = getattr(module, "ACTIVATION_PHRASES")
+                    elif "activation_phrases" in schema_dict:
+                        activation_phrases = schema_dict["activation_phrases"]
 
                     if not hasattr(module, tool_name_from_schema) or not callable(getattr(module, tool_name_from_schema)):
                         if self.logger: 
@@ -302,7 +314,9 @@ class ToolRegistry:
                         description=tool_description,
                         schema=schema_dict, 
                         execute_func=executable_func,
-                        module_path=python_file_path 
+                        module_path=python_file_path, 
+                        enabled=enabled,
+                        activation_phrases=activation_phrases
                     )
                     self.register_tool(tool_instance)
 
@@ -344,12 +358,13 @@ class ToolRegistry:
 # --- Tooler (Orchestrator) ---
 
 class Tooler:
-    def __init__(self, tool_registry: ToolRegistry, logger=None, llm_interface=None, procedure_manager=None, error_manager=None):
+    def __init__(self, tool_registry: ToolRegistry, logger=None, llm_interface=None, procedure_manager=None, error_manager=None, procedural_memory=None):
         self.tool_registry = tool_registry
         self.logger = logger if logger is not None else Logger.get_instance()
         self.llm_interface = llm_interface 
         self.procedure_manager = procedure_manager
         self.error_manager = error_manager
+        self.procedural_memory = procedural_memory
 
     def get_available_tools_for_llm(self) -> List[ToolSchema]:
         return self.tool_registry.get_all_tool_schemas()
@@ -431,15 +446,37 @@ class Tooler:
                 )
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
-    def detect_and_define_procedure(self, user_query: str, conversation_history: List[Any]):
-        if self.logger:
-            self.logger.info("Procedure detection triggered (conceptual).")
-        if not self.procedure_manager:
-            msg = "ProcedureManager not available for defining procedure."
-            if self.logger: self.logger.warn(msg)
-            return msg
-        
-        return "Procedure detection logic not fully implemented yet."
+    # --- Dynamic Tool/Procedure Guidance Section for System Prompt ---
+    def build_tool_guidance_section(self, max_examples_per_tool=1) -> str:
+        """
+        Build a section for the system prompt listing all available tools and procedures,
+        with their descriptions, parameters, and usage examples. This is dynamically
+        derived from the tools directory and procedural memory for extensibility.
+        """
+        lines = ["TOOL/PROCEDURE GUIDANCE:"]
+        # Tools
+        for tool in self.tool_registry.tools.values():
+            lines.append(f"- {tool.name}: {tool.description}")
+            # Parameters
+            param_strs = []
+            params = tool.schema.get('parameters', {}).get('properties', {})
+            for pname, pinfo in params.items():
+                ptype = pinfo.get('type', 'unknown')
+                pdesc = pinfo.get('description', '')
+                param_strs.append(f"{pname} ({ptype}): {pdesc}")
+            if param_strs:
+                lines.append(f"  Parameters: {', '.join(param_strs)}")
+            # Examples
+            examples = tool.schema.get("examples", [])[:max_examples_per_tool]
+            for ex in examples:
+                lines.append(f"  Example: input={ex['input']} output={ex['output']}")
+        # Procedures (if ProceduralMemory is available)
+        if self.procedural_memory is not None:
+            for proc_name in self.procedural_memory.list_procedures():
+                proc = self.procedural_memory.get_procedure(proc_name)
+                lines.append(f"- {proc['name']}: {proc.get('description', '')}")
+                # Optionally add a usage example if you store them
+        return "\n".join(lines)
 
 # --- Procedure Manager (SQLite based) ---
 
@@ -813,6 +850,22 @@ def detect_tool_activation(user_input: str, max_distance: int = 1) -> bool:
         if text.startswith(phrase):
             return True
         # Fuzzy match: allow small typos at the start
+        segment = text[:len(phrase)+2]
+        if levenshtein_distance(segment, phrase) <= max_distance:
+            return True
+    return False
+
+# --- Per-Tool Activation Detection Helper ---
+def detect_tool_activation_for_tool(user_input: str, tool: Tool, max_distance: int = 1) -> bool:
+    """
+    Returns True if the user input matches any of the tool's activation phrases (strict or fuzzy).
+    Falls back to global TOOL_ACTIVATION_PHRASES if tool.activation_phrases is empty.
+    """
+    phrases = tool.activation_phrases or TOOL_ACTIVATION_PHRASES
+    text = user_input.lower().strip()
+    for phrase in phrases:
+        if text.startswith(phrase):
+            return True
         segment = text[:len(phrase)+2]
         if levenshtein_distance(segment, phrase) <= max_distance:
             return True
