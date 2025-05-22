@@ -3,7 +3,7 @@
 ## General Taks:
 
 1. Build a moral code system where it makes entries for its personal 
-2. There should be a 
+2. There should be a tool use module like plugin but sub modules in a directory that the LLM has direct acceess to and can use, like code it can run. premade scripts you can ask it to do custom procedures 
 3. 
 4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
