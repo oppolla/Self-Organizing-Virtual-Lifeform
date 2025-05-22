@@ -8,6 +8,7 @@ import inspect # To inspect function signatures or for alternative ways to find 
 import sqlite3
 from sovl_logger import Logger
 from sovl_error import ErrorManager
+import re
 
 # --- Core Data Structures ---
 
@@ -644,3 +645,197 @@ class ProcedureManager:
             return False
         finally:
             if conn: conn.close()
+
+# --- Procedural Memory System (Third Pillar) ---
+
+class ProceduralMemory:
+    def __init__(self, db_path: str, tooler, logger, error_manager):
+        self.db_path = db_path
+        self.tooler = tooler
+        self.logger = logger
+        self.error_manager = error_manager
+        self._ensure_table_exists()
+        self._cache = {}
+
+    def _ensure_table_exists(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS procedures (
+                name TEXT PRIMARY KEY,
+                description TEXT,
+                steps TEXT,
+                metadata TEXT,
+                created_at REAL,
+                updated_at REAL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def add_procedure(self, name: str, description: str, steps: List[Dict[str, Any]], metadata: Optional[Dict[str, Any]] = None):
+        now = time.time()
+        record = {
+            "name": name,
+            "description": description,
+            "steps": steps,
+            "metadata": metadata or {},
+            "created_at": now,
+            "updated_at": now
+        }
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO procedures (name, description, steps, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            name, description, json.dumps(steps), json.dumps(metadata or {}), now, now
+        ))
+        conn.commit()
+        conn.close()
+        self._cache[name] = record
+        if self.logger:
+            self.logger.info(f"Procedure '{name}' added to procedural memory.")
+
+    def get_procedure(self, name: str) -> Optional[Dict[str, Any]]:
+        if name in self._cache:
+            return self._cache[name]
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, description, steps, metadata, created_at, updated_at FROM procedures WHERE name=?", (name,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            record = {
+                "name": row[0],
+                "description": row[1],
+                "steps": json.loads(row[2]),
+                "metadata": json.loads(row[3]),
+                "created_at": row[4],
+                "updated_at": row[5]
+            }
+            self._cache[name] = record
+            return record
+        return None
+
+    def list_procedures(self) -> List[str]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM procedures")
+        names = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return names
+
+    def delete_procedure(self, name: str) -> bool:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM procedures WHERE name=?", (name,))
+        conn.commit()
+        conn.close()
+        self._cache.pop(name, None)
+        if self.logger:
+            self.logger.info(f"Procedure '{name}' deleted from procedural memory.")
+        return cursor.rowcount > 0
+
+    def update_procedure(self, name: str, **fields):
+        proc = self.get_procedure(name)
+        if not proc:
+            raise ValueError(f"Procedure '{name}' not found.")
+        proc.update(fields)
+        proc['updated_at'] = time.time()
+        self.add_procedure(proc['name'], proc['description'], proc['steps'], proc['metadata'])
+
+    def execute_procedure(self, name: str, context: Optional[Dict[str, Any]] = None, params: Optional[Dict[str, Any]] = None):
+        proc = self.get_procedure(name)
+        if not proc:
+            if self.logger:
+                self.logger.error(f"Procedure '{name}' not found.")
+            return
+        for step in proc['steps']:
+            if step['action'] == 'call_tool':
+                tool_name = step['tool']
+                tool_params = step.get('params', {})
+                # Optionally merge in params/context
+                if self.logger:
+                    self.logger.info(f"Executing tool '{tool_name}' with params {tool_params}")
+                try:
+                    result = self.tooler.process_llm_tool_call(json.dumps({
+                        "tool_name": tool_name,
+                        "parameters": tool_params
+                    }))
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"Error executing tool '{tool_name}' in procedure '{name}': {e}")
+                    if self.error_manager:
+                        self.error_manager.record_error(
+                            error=e,
+                            error_type="procedure_tool_execution_error",
+                            context={"procedure": name, "tool": tool_name, "params": tool_params}
+                        )
+            elif step['action'] == 'message':
+                if self.logger:
+                    self.logger.info(f"Procedure message: {step['text']}")
+            # Add more action types as needed
+        if self.logger:
+            self.logger.info(f"Procedure '{name}' execution complete.")
+
+# --- Levenshtein Distance (Standard Library, as in sovl_shamer) ---
+def levenshtein_distance(a: str, b: str) -> int:
+    if len(a) < len(b):
+        return levenshtein_distance(b, a)
+    if len(b) == 0:
+        return len(a)
+    previous_row = range(len(b) + 1)
+    for i, c1 in enumerate(a):
+        current_row = [i + 1]
+        for j, c2 in enumerate(b):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+# --- Command-Style Tool/Procedure Activation Detection (Strict + Fuzzy) ---
+
+TOOL_ACTIVATION_PHRASES = [
+    "run", "execute", "do", "start", "perform", "please", "can you", "could you", "would you", "i need you to", "initiate"
+]
+
+def detect_tool_activation(user_input: str, max_distance: int = 1) -> bool:
+    """
+    Returns True if the user input matches a command-style pattern for tool/procedure activation.
+    Uses strict matching and Levenshtein distance fuzzy matching (max_distance=1 by default).
+    """
+    text = user_input.lower().strip()
+    for phrase in TOOL_ACTIVATION_PHRASES:
+        # Strict match at start
+        if text.startswith(phrase):
+            return True
+        # Fuzzy match: allow small typos at the start
+        segment = text[:len(phrase)+2]
+        if levenshtein_distance(segment, phrase) <= max_distance:
+            return True
+    return False
+
+def handle_procedure_activation(user_input: str, procedural_memory: 'ProceduralMemory', available_procedures: list = None):
+    """
+    Integrates tool/procedure activation detection with ProceduralMemory execution.
+    - Checks for activation using detect_tool_activation.
+    - Extracts procedure name by matching against available procedures.
+    - Notifies user before execution.
+    - Executes the procedure and reports completion.
+    """
+    if available_procedures is None:
+        available_procedures = procedural_memory.list_procedures()
+    if detect_tool_activation(user_input):
+        text = user_input.lower()
+        for proc_name in available_procedures:
+            if proc_name.lower() in text:
+                print(f"Okay, I will run the '{proc_name}' procedure now.")
+                procedural_memory.execute_procedure(proc_name)
+                print(f"Procedure '{proc_name}' execution complete.")
+                return True
+        print("Sorry, I couldn't find a matching procedure to run.")
+        return False
+    return False
