@@ -890,16 +890,18 @@ class SoulInterpreter:
 
     async def expand_soul_facet_recursively(
         self,
-        facet_name: str, # e.g., "Identity.Name" or "Echoes.Memory[0].Scene"
-        facet_content: str, # The initial seed string from the .soul file
-        target_ai_interface: Any, # Interface to the target LLM (must have async get_interpretation method)
-        expansion_context: List[str], # Summaries from previously expanded facets to provide broader context
-        max_depth: int = 3, # How many rounds of AI elaboration per facet
-        context_buffer: List[str] = None
+        facet_name: str, 
+        facet_content: str, 
+        target_ai_interface: Any, 
+        expansion_context: List[str], 
+        max_depth: int = 3, 
+        context_buffer: List[str] = None,
+        lora_focus_interval: int = 2, # Default: focus on LoRA data every 2nd step. 0 to disable.
+        rag_focus_interval: int = 3    # Default: focus on RAG data every 3rd step. 0 to disable.
     ) -> List[Dict[str, str]]:
         """
         Recursively prompts the target AI to expand on a soul facet, building a richer profile.
-        Returns a list of exchanges: [{"prompt_to_ai": ..., "ai_response": ...}, ...]
+        Returns a list of exchanges: [{"prompt_to_ai": ..., "ai_response": ..., "type": "general"/"lora_target_response"/"rag_target_summary"}, ...]
         """
         elaboration_exchanges: List[Dict[str, str]] = []
         
@@ -914,9 +916,19 @@ class SoulInterpreter:
                 additional_info={"facet": facet_name, "depth": depth_level + 1, "max_depth": max_depth, "prompt_length": len(current_prompt_to_target_ai)}
             )
             
-            ai_response_text = None # Initialize
+            ai_response_text = None 
+            interaction_type = "general" 
+
+            # Determine interaction type based on prompt content (heuristics)
+            if "suitable for training data" in current_prompt_to_target_ai and \
+               "authentically represents your perspective" in current_prompt_to_target_ai:
+                interaction_type = "lora_target_response"
+            elif "long-term memory" in current_prompt_to_target_ai and \
+                 "consolidate the absolute core essence" in current_prompt_to_target_ai and \
+                 "list 3-5 keywords" in current_prompt_to_target_ai:
+                interaction_type = "rag_target_summary"
+            
             try:
-                # Assuming target_ai_interface.get_interpretation is an async method
                 ai_response_text = await target_ai_interface.get_interpretation(current_prompt_to_target_ai)
                 
                 if not ai_response_text or not isinstance(ai_response_text, str) or not ai_response_text.strip():
@@ -926,29 +938,32 @@ class SoulInterpreter:
                         level="warning",
                         additional_info={"facet": facet_name, "depth": depth_level + 1}
                         )
-                    ai_response_text = "(No distinct elaboration was provided for this aspect.)" # Placeholder
-                    # Consider if we should break or use a different follow-up if response is poor
+                    ai_response_text = "(No distinct elaboration was provided for this aspect.)" 
             except Exception as e_ai_interaction:
                 self.error_handler.handle_execution_error(
                     e_ai_interaction,
                     {"facet_name": facet_name, "depth": depth_level + 1, "operation": "get_interpretation_for_expansion"},
                     "soul_expansion_ai_interaction_error"
                 )
-                ai_response_text = f"(An error occurred during AI interpretation: {str(e_ai_interaction)[:150]})" # Placeholder
-                # Consider breaking the loop for this facet on critical error
+                ai_response_text = f"(An error occurred during AI interpretation: {str(e_ai_interaction)[:150]})"
 
             elaboration_exchanges.append({
                 "prompt_to_ai": current_prompt_to_target_ai,
-                "ai_response": ai_response_text
+                "ai_response": ai_response_text,
+                "type": interaction_type 
             })
             
-            if depth_level < max_depth - 1: # If not the last iteration, generate next prompt
+            if depth_level < max_depth - 1: 
                 next_prompt_candidate = await self._generate_next_expansive_prompt(
                     facet_name=facet_name,
                     original_facet_content=facet_content, 
-                    elaboration_history=elaboration_exchanges, # Pass the history of exchanges for this facet
+                    elaboration_history=elaboration_exchanges, 
                     target_ai_interface=target_ai_interface,
-                    context_buffer=context_buffer
+                    context_buffer=context_buffer,
+                    current_depth=depth_level,
+                    max_depth=max_depth,
+                    lora_focus_interval=lora_focus_interval,
+                    rag_focus_interval=rag_focus_interval # Pass rag_focus_interval
                 )
                 if not next_prompt_candidate: 
                     self.logger.record_event(
@@ -957,9 +972,55 @@ class SoulInterpreter:
                         level="warning",
                         additional_info={"facet": facet_name, "depth": depth_level + 1}
                         )
-                    break # Stop if no good follow-up can be generated
+                    break 
                 current_prompt_to_target_ai = next_prompt_candidate
             else:
+                if lora_focus_interval > 0 and interaction_type != "lora_target_response" and max_depth > 0:
+                    self.logger.record_event(
+                        event_type="final_lora_focus_attempt",
+                        message=f"Attempting final LoRA focus for '{facet_name}' at max depth {max_depth}.",
+                        additional_info={"facet": facet_name, "depth": depth_level + 1}
+                    )
+                    lora_final_prompt = await self._generate_next_expansive_prompt(
+                        facet_name=facet_name,
+                        original_facet_content=facet_content,
+                        elaboration_history=elaboration_exchanges,
+                        target_ai_interface=target_ai_interface,
+                        context_buffer=context_buffer,
+                        current_depth=max_depth - 2 if lora_focus_interval > 1 and max_depth >1 else max_depth -1 , 
+                        max_depth=max_depth, 
+                        lora_focus_interval=1, # Force LoRA focus
+                        rag_focus_interval=0 # Don't do RAG focus here if forcing LoRA
+                    )
+
+                    if lora_final_prompt and "suitable for training data" in lora_final_prompt:
+                        try:
+                            ai_lora_response_text = await target_ai_interface.get_interpretation(lora_final_prompt)
+                            if ai_lora_response_text and isinstance(ai_lora_response_text, str) and ai_lora_response_text.strip():
+                                elaboration_exchanges.append({
+                                    "prompt_to_ai": lora_final_prompt,
+                                    "ai_response": ai_lora_response_text,
+                                    "type": "lora_target_response"
+                                })
+                                self.logger.record_event(
+                                    event_type="final_lora_focus_success",
+                                    message=f"Successfully captured final LoRA-focused response for '{facet_name}'.",
+                                    additional_info={"facet": facet_name}
+                                )
+                            else:
+                                 self.logger.record_event(
+                                    event_type="final_lora_focus_empty_response",
+                                    message=f"Empty response for final LoRA-focused prompt for '{facet_name}'.",
+                                    level="warning",
+                                    additional_info={"facet": facet_name}
+                                )
+                        except Exception as e_final_lora:
+                            self.error_handler.handle_execution_error(
+                                e_final_lora,
+                                {"facet_name": facet_name, "operation": "final_lora_focus_get_interpretation"},
+                                "soul_expansion_final_lora_error"
+                            )
+                
                 self.logger.record_event(
                     event_type="expansion_max_depth_reached",
                     message=f"Max expansion depth ({max_depth}) reached for facet '{facet_name}'.",
@@ -974,80 +1035,104 @@ class SoulInterpreter:
         original_facet_content: str,
         elaboration_history: List[Dict[str, str]], # Full history of exchanges for this facet
         target_ai_interface: Any, # The LLM used for generating follow-up questions
-        context_buffer: List[str] = None
+        context_buffer: List[str] = None,
+        current_depth: int = 0,
+        max_depth: int = 3,
+        lora_focus_interval: int = 2,
+        rag_focus_interval: int = 3 # Added rag_focus_interval
     ) -> Optional[str]:
-        
-        if not elaboration_history:
-            self.logger.record_event(event_type="next_prompt_gen_no_history", message="Cannot generate follow-up: no prior elaboration history.", level="warning", additional_info={"facet": facet_name})
-            return None 
+        """
+        Generates the next prompt for the target AI, for general expansion, LoRA data, or RAG summarization.
+        Priority: RAG, then LoRA, then general expansion if intervals align.
+        Returns the prompt string or None if no further prompt is meaningful.
+        """
+        last_exchange = elaboration_history[-1] if elaboration_history else None
+        last_ai_response = last_exchange["ai_response"] if last_exchange else original_facet_content
 
-        # Construct a summary of the conversation so far for this facet for the meta-prompt
-        conversation_summary_for_meta_prompt = f"The AI is exploring the facet: **{facet_name}** (Original seed: '{original_facet_content}').\n"
-        for i, exchange in enumerate(elaboration_history):
-            # Shorten prompts and responses for the meta-prompt context
-            prompt_snippet = exchange.get('prompt_to_ai', '')[:200] 
-            response_snippet = exchange.get('ai_response', '')[:300]
-            conversation_summary_for_meta_prompt += f"Turn {i+1} - Initial Angle/Prompt: \"{prompt_snippet}...\"\n"
-            conversation_summary_for_meta_prompt += f"Turn {i+1} - AI's Elaboration: \"{response_snippet}...\"\n"
-        
-        latest_ai_response = elaboration_history[-1].get("ai_response", "(No response recorded)")
+        # Determine if this iteration should focus on RAG data generation
+        should_focus_on_rag = (rag_focus_interval > 0 and (current_depth + 1) % rag_focus_interval == 0)
 
-        # Meta-prompt to an LLM (could be target_ai_interface or a dedicated one)
-        # to generate a good follow-up question.
-        meta_prompt = (
-            f"You are an expert Socratic questioner and philosophical guide. Your role is to help an AI "
-            f"deepen its self-understanding as it elaborates on aspects of its identity derived from a 'Soulprint'.\n\n"
-            f"Here is the context of the AI's current self-exploration for a specific facet:\n{conversation_summary_for_meta_prompt}\n"
-            f"The AI's most recent statement was: \"{latest_ai_response}\"\n\n"
-            f"Based *only* on this latest statement and the immediate preceding context, craft ONE insightful, open-ended follow-up question. "
-            f"This question should be directly addressed to the AI (using 'you' or 'your'). It should encourage the AI to:\n"
-            f"- Delve deeper into its last statement, perhaps by exploring underlying reasons, feelings, or assumptions.\n"
-            f"- Connect its thoughts to broader implications or potential contradictions.\n"
-            f"- Consider concrete examples, alternative perspectives, or future manifestations of this characteristic.\n"
-            f"- Avoid simple yes/no answers. The goal is to foster rich, nuanced self-discovery.\n\n"
-            f"Generate ONLY the question itself."
+        if should_focus_on_rag:
+            self.logger.record_event(
+                event_type="rag_focus_prompt_generation",
+                message=f"Generating RAG-focused prompt for '{facet_name}' at depth {current_depth + 1}.",
+                additional_info={"facet": facet_name, "depth": current_depth + 1}
+            )
+            rag_prompt_instruction = (
+                f"You've shared some insightful thoughts on the facet: '___{original_facet_content}___'. "
+                f"Your latest reflection was: '___{last_ai_response}___'.\n\n"
+                f"Now, for your long-term memory and future reference, please consolidate the absolute core essence of your understanding and personal perspective on this specific facet ('{original_facet_content}') into a self-contained memory chunk. "
+                f"This summary should be 1-2 clear paragraphs, capturing what's most important for you to recall about this topic. "
+                f"Finally, please list 3-5 keywords that would help you retrieve this specific memory later, in the format: 'Keywords: keyword1, keyword2, keyword3'."
+            )
+            return rag_prompt_instruction
+
+        # Determine if this iteration should focus on LoRA data generation (if not RAG)
+        should_focus_on_lora = (lora_focus_interval > 0 and (current_depth + 1) % lora_focus_interval == 0) or \
+                               (current_depth + 1 == max_depth - 1 and max_depth > 1) # Second to last depth for LoRA
+
+        if should_focus_on_lora:
+            self.logger.record_event(
+                event_type="lora_focus_prompt_generation",
+                message=f"Generating LoRA-focused prompt for '{facet_name}' at depth {current_depth + 1}.",
+                additional_info={"facet": facet_name, "depth": current_depth + 1}
+            )
+            lora_prompt_instruction = (
+                f"Let's specifically focus on generating content suitable for training data.\n"
+                f'Consider the original aspect of your being: "___{original_facet_content}___".\n'
+                f'Reflecting on this and your previous elaborations (last one being: "___{last_ai_response}___"),\n' # Corrected line: removed trailing backslash and space
+                f"please provide a rich, detailed, and characteristic response that authentically represents your perspective, style, and understanding of this facet.\n"
+                f"Imagine this response will be used to teach another AI to embody these qualities when discussing this topic.\n"
+                f"Your response should be a complete thought or expression, suitable as the 'answer' part of a prompt-answer training pair."
+            )
+            return lora_prompt_instruction
+
+        self.logger.record_event(
+            event_type="general_expansion_prompt_generation",
+            message=f"Generating general expansive prompt for '{facet_name}' at depth {current_depth + 1}.",
+            additional_info={"facet": facet_name, "depth": current_depth + 1}
         )
+        follow_up_meta_prompt_parts = [
+            f"Original Facet under discussion: '{original_facet_content}'",
+            f"Your most recent thoughts on this were: '{last_ai_response}'"
+        ]
+        
+        if context_buffer:
+            follow_up_meta_prompt_parts.append(f"Broader conversational context for this facet: {' '.join(context_buffer)}")
+
+        follow_up_meta_prompt_parts.extend([
+            "Based on all this, what is a specific, insightful follow-up question or a new angle to explore that would further deepen our understanding of this particular facet of your identity?",
+            "The question should aim to elicit more detailed examples, underlying motivations, connections to other aspects of your being, or perhaps even a different stylistic expression of the core idea.",
+            "Please generate only the follow-up question itself."
+        ])
+        
+        follow_up_meta_prompt = "\n".join(follow_up_meta_prompt_parts) # Correct way to join for newlines in the final string
         
         try:
-            # Using target_ai_interface to generate the next prompt. 
-            # This assumes target_ai_interface.get_interpretation can handle such meta-prompts.
-            next_question_generated = await target_ai_interface.get_interpretation(meta_prompt)
-            
-            if next_question_generated and isinstance(next_question_generated, str) and next_question_generated.strip() and len(next_question_generated.strip()) > 10: # Basic sanity check
-                self.logger.record_event(
-                    event_type="next_expansive_prompt_generated_by_llm",
-                    message=f"Next expansive prompt for '{facet_name}' generated via LLM meta-prompt.",
-                    additional_info={"facet": facet_name, "generated_question_length": len(next_question_generated.strip())}
+            next_question = await target_ai_interface.get_interpretation(follow_up_meta_prompt)
+            if next_question and next_question.strip() and len(next_question.strip()) > 10:
+                full_next_prompt = (
+                    f'Continuing our exploration of: "___{original_facet_content}___"\n'
+                    f'You previously stated: "___{last_ai_response}___"\n\n'
+                    f"Now, please consider: {next_question.strip()}"
                 )
-                # This is the question the target AI will be asked to continue its elaboration
-                # So, we frame it as if the *system* is asking the target AI.
-                # The 'next_question_generated' is the LLM's suggestion for the question.
-                # We need to formulate the full prompt that the *target AI* will receive.
-                # This should incorporate the new question into the ongoing dialogue structure.
-                
-                # Reconstruct the prompt the AI will see:
-                # It includes the original facet, a brief recap, and then the new question.
-                # This part is tricky: the 'next_question_generated' IS the prompt.
-                # The _SoulFuser_ will then take this generated question and present it to the target AI.
-                # So, this function should return the question as the next prompt.
-                return next_question_generated.strip()
+                return full_next_prompt
             else:
                 self.logger.record_event(
-                    event_type="meta_prompt_yielded_poor_question", 
-                    message=f"Meta-prompt for '{facet_name}' yielded an empty, invalid, or too short question. Using fallback.", 
+                    event_type="follow_up_generation_failed_or_too_short",
+                    message=f"Generated follow_up question for '{facet_name}' was empty or too short. Using a generic prompt.",
                     level="warning",
-                    additional_info={"facet": facet_name, "llm_output": str(next_question_generated)[:200]}
-                    )
-                # Fallback prompt
-                return f"That's a very interesting perspective on \"{latest_ai_response[:70]}...\". Can you elaborate on any specific implications of this for how you see yourself or how you might act?"
+                    additional_info={"facet": facet_name, "generated_question": next_question}
+                )
+                return f"Considering your last statement about '{original_facet_content}': '{last_ai_response}'. Can you elaborate further, perhaps providing an example or explaining the 'why' behind it, or how it connects to other parts of you?"
+
         except Exception as e_meta_prompt:
             self.error_handler.handle_execution_error(
                 e_meta_prompt,
-                {"facet_name": facet_name, "meta_prompt_length": len(meta_prompt), "operation": "generate_next_expansive_prompt_llm_call"},
-                "soul_expansion_meta_prompting_error"
+                {"facet_name": facet_name, "meta_prompt": follow_up_meta_prompt, "operation": "generate_follow_up_question"},
+                "soul_expansion_meta_prompt_error"
             )
-            # Fallback prompt if LLM-based question generation fails
-            return f"Thank you for sharing that regarding \"{latest_ai_response[:70]}...\". What are your further thoughts or feelings on this topic as it relates to the original concept of '{original_facet_content}'?"
+            return f"Let's continue exploring '{original_facet_content}'. Based on your last response: '{last_ai_response}', what's the next logical thought or related aspect to discuss in more detail?"
 
 
 class SoulFuser:
@@ -1277,8 +1362,30 @@ class SoulFuser:
             for i, exchange_dict in enumerate(elaborations_list): # Renamed
                 prompt_text = exchange_dict.get('prompt_to_ai', '(System prompt not fully recorded)')
                 response_text = exchange_dict.get('ai_response', '(AI response not fully recorded)')
-                # Frame as an internal monologue or a Socratic dialogue summary
-                narrative_parts_for_facet.append(f"Initial prompt/angle was: \"{prompt_text}\"\nMy detailed reflection on this was: \"{response_text}\"\n---\n")
+                interaction_type = exchange_dict.get('type', 'general') # Get interaction type
+
+                # Frame as an internal monologue or a Socratic dialogue summary for the narrative
+                narrative_parts_for_facet.append(f"Initial prompt/angle ({interaction_type}) was: \"{prompt_text}\"\nMy detailed reflection on this was: \"{response_text}\"\n---\n")
+
+                # 2. Create Specific RAG entries from "rag_target_summary" interactions
+                if interaction_type == "rag_target_summary" and response_text and response_text != "(No distinct elaboration was provided for this aspect.)" and not response_text.startswith("(An error occurred"):
+                    summary_content, keywords_list = self._parse_rag_response(response_text)
+                    if summary_content:
+                        all_memory_store_entries.append({
+                            "content": summary_content,
+                            "keywords": keywords_list,
+                            "type": "soul_rag_ai_summary",
+                            "facet_id": facet_id,
+                            "source_prompt": prompt_text,
+                            "timestamp": time.time(),
+                            "source": "SoulFuser_RAG_Expansion",
+                            "metadata": {"elaboration_depth_at_summary": i + 1, "original_exchange_index": i}
+                        })
+                        self.logger.record_event(
+                            event_type="rag_summary_entry_created",
+                            message=f"Created AI-generated RAG summary for facet '{facet_id}'",
+                            additional_info={"facet_id": facet_id, "keywords_count": len(keywords_list)}
+                        )
             
             full_facet_narrative = "".join(narrative_parts_for_facet).strip() # Renamed
             
@@ -1302,9 +1409,16 @@ class SoulFuser:
             })
 
             # 2. Create Contextualized Q&A from individual exchanges (good for instruction fine-tuning)
+            # This part remains, but we skip adding RAG summaries directly as training data here, 
+            # as they are primarily for the RAG store. Their prompts might still be useful for general training.
             for exchange_idx, exchange_dict_qa in enumerate(elaborations_list): # Renamed
                 prompt_text_qa = exchange_dict_qa.get('prompt_to_ai') # Renamed
                 response_text_qa = exchange_dict_qa.get('ai_response') # Renamed
+                interaction_type_qa = exchange_dict_qa.get('type', 'general')
+
+                if interaction_type_qa == "rag_target_summary": # Don't add the RAG summary itself as a Q&A training pair
+                    continue
+
                 if prompt_text_qa and response_text_qa and response_text_qa != "(No distinct elaboration was provided for this aspect.)" and not response_text_qa.startswith("(An error occurred"):
                     all_training_samples.append({
                         "input": prompt_text_qa, # The prompt given to the AI
@@ -1321,6 +1435,52 @@ class SoulFuser:
             additional_info={"training_samples_count": len(all_training_samples), "memory_entries_count": len(all_memory_store_entries)}
         )
         return all_training_samples, all_memory_store_entries
+
+    def _parse_rag_response(self, response_text: str) -> tuple[Optional[str], List[str]]:
+        """
+        Parses the AI response from a RAG-focused prompt to extract summary and keywords.
+        Expects keywords in a line like "Keywords: kw1, kw2, kw3".
+        Returns (summary_content, list_of_keywords).
+        """
+        summary_part = response_text
+        keywords = []
+        try:
+            # Attempt to find a "Keywords:" line and split
+            # Using a case-insensitive regex search for robustness
+            match = re.search(r"\nKeywords:(.*)", response_text, re.IGNORECASE | re.DOTALL)
+            if match:
+                keywords_line = match.group(1).strip()
+                keywords = [kw.strip() for kw in keywords_line.split(',') if kw.strip()]
+                # The summary is everything before the "Keywords:" line (or the whole text if no match)
+                summary_part = response_text[:match.start()].strip()
+            else:
+                # If no explicit "Keywords:" line, assume the whole response is summary, no keywords extracted this way
+                self.logger.record_event(
+                    event_type="rag_response_no_keywords_marker",
+                    message="RAG response did not contain an explicit 'Keywords:' marker. Treating entire response as summary.",
+                    level="debug",
+                    additional_info={"response_snippet": response_text[:100]}
+                )
+            
+            if not summary_part and keywords:
+                # This might happen if the AI *only* provides keywords correctly formatted
+                self.logger.record_event(
+                    event_type="rag_response_keywords_only",
+                    message="RAG response parsing resulted in keywords but no summary content.",
+                    level="warning",
+                    additional_info={"keywords": keywords, "original_response": response_text[:100]}
+                )
+                return None, keywords # Return keywords if found, but summary is None
+
+            return summary_part if summary_part else None, keywords
+
+        except Exception as e:
+            self.error_handler.handle_execution_error(
+                e, 
+                {"operation": "_parse_rag_response", "response_text_snippet": response_text[:100]},
+                "rag_response_parsing_error"
+            )
+            return response_text, [] # Return original text as summary, no keywords on error
 
     def _generate_lora_params_from_expansion(
         self, expanded_profile: OrderedDict, config: Dict[str, Any]
