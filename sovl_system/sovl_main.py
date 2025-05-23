@@ -22,7 +22,6 @@ from sovl_scribe import Scriber
 from sovl_volition import AutonomyManager
 from sovl_chronos import Chronos
 from sovl_dreamer import Dreamer
-from sovl_tooler import Tooler, ToolRegistry, ProcedureManager
 
 # Model and processing
 from sovl_manager import ModelManager
