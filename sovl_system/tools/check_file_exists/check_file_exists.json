@@ -1,0 +1,29 @@
+{
+  "name": "check_file_exists",
+  "description": "Check if a file or directory exists at the specified path.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "The path to check."
+      },
+      "check_type": {
+        "type": "string",
+        "description": "Type to check ('file', 'directory', 'any').",
+        "enum": ["file", "directory", "any"],
+        "default": "any"
+      }
+    },
+    "required": ["path"]
+  },
+  "examples": [
+    {
+      "input": "check if file.txt exists",
+      "output": {"tool_name": "check_file_exists", "parameters": {"path": "file.txt", "check_type": "file"}}
+    }
+  ],
+  "tags": ["file", "io", "system"],
+  "enabled": true,
+  "activation_phrases": ["check file", "file exists", "verify path"]
+}

@@ -1,0 +1,38 @@
+{
+  "name": "file_write",
+  "description": "Write or append text to a file.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The path to the file to write to."
+      },
+      "content": {
+        "type": "string",
+        "description": "The content to write to the file."
+      },
+      "mode": {
+        "type": "string",
+        "description": "Write mode ('write' or 'append').",
+        "enum": ["write", "append"],
+        "default": "write"
+      },
+      "encoding": {
+        "type": "string",
+        "description": "The file encoding (e.g., 'utf-8').",
+        "default": "utf-8"
+      }
+    },
+    "required": ["file_path", "content"]
+  },
+  "examples": [
+    {
+      "input": "write 'Hello' to /path/to/file.txt",
+      "output": {"tool_name": "file_write", "parameters": {"file_path": "/path/to/file.txt", "content": "Hello", "mode": "write", "encoding": "utf-8"}}
+    }
+  ],
+  "tags": ["file", "io", "write"],
+  "enabled": true,
+  "activation_phrases": ["write file", "save to file", "append to file"]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "system_info",
+  "description": "Retrieve basic system information (OS, CPU, memory usage).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "info_type": {
+        "type": "string",
+        "description": "Specific info to retrieve ('all', 'os', 'cpu', 'memory').",
+        "enum": ["all", "os", "cpu", "memory"],
+        "default": "all"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": "get system information",
+      "output": {"tool_name": "system_info", "parameters": {"info_type": "all"}}
+    }
+  ],
+  "tags": ["system", "info", "utility"],
+  "enabled": true,
+  "activation_phrases": ["system info", "computer status", "get system details"]
+}

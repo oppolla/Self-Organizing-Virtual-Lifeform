@@ -1,0 +1,23 @@
+{
+  "name": "system_command",
+  "description": "Execute a system command and return its output. Restricted to safe commands.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "The system command to execute (e.g., 'ls -l')."
+      }
+    },
+    "required": ["command"]
+  },
+  "examples": [
+    {
+      "input": "run ls -l in current directory",
+      "output": {"tool_name": "system_command", "parameters": {"command": "ls -l"}}
+    }
+  ],
+  "tags": ["system", "shell", "utility"],
+  "enabled": true,
+  "activation_phrases": ["run command", "execute shell", "system command"]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "file_copy",
+  "description": "Copy a file from a source path to a destination path.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "source_path": {
+        "type": "string",
+        "description": "The path to the source file."
+      },
+      "dest_path": {
+        "type": "string",
+        "description": "The path to the destination file."
+      },
+      "overwrite": {
+        "type": "boolean",
+        "description": "Whether to overwrite the destination file if it exists.",
+        "default": false
+      }
+    },
+    "required": ["source_path", "dest_path"]
+  },
+  "examples": [
+    {
+      "input": "copy file.txt to backup/file.txt",
+      "output": {"tool_name": "file_copy", "parameters": {"source_path": "file.txt", "dest_path": "backup/file.txt", "overwrite": false}}
+    }
+  ],
+  "tags": ["file", "io", "copy"],
+  "enabled": true,
+  "activation_phrases": ["copy file", "duplicate file", "move file"]
+}

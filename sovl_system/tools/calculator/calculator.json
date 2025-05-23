@@ -1,0 +1,39 @@
+{
+  "name": "calculator",
+  "description": "Perform a mathematical calculation from an expression. Supports advanced math functions (sin, cos, tan, sqrt, log, exp, pow, etc.), constants (pi, e), and safe built-ins (abs, round, min, max). Uses only Python's built-in math module.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "expression": {
+        "type": "string",
+        "description": "The mathematical expression to evaluate (e.g., '2 + 3 * 4', 'sin(pi / 2)', 'log(100, 10)'). Supports math functions and constants. Use '^' or '**' for exponentiation."
+      }
+    },
+    "required": ["expression"]
+  },
+  "examples": [
+    {
+      "input": "calculate 2 + 3 * 4",
+      "output": {"tool_name": "calculator", "parameters": {"expression": "2 + 3 * 4"}}
+    },
+    {
+      "input": "calculate sin(pi / 2)",
+      "output": {"tool_name": "calculator", "parameters": {"expression": "sin(pi / 2)"}}
+    },
+    {
+      "input": "calculate log(100, 10)",
+      "output": {"tool_name": "calculator", "parameters": {"expression": "log(100, 10)"}}
+    },
+    {
+      "input": "calculate 2 ^ 8",
+      "output": {"tool_name": "calculator", "parameters": {"expression": "2 ^ 8"}}
+    },
+    {
+      "input": "calculate max(1, 2, 3) + abs(-5)",
+      "output": {"tool_name": "calculator", "parameters": {"expression": "max(1, 2, 3) + abs(-5)"}}
+    }
+  ],
+  "tags": ["math", "calculation", "utility", "advanced"],
+  "enabled": true,
+  "activation_phrases": ["calculate", "compute", "do math"]
+}

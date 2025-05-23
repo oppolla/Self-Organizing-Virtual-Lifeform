@@ -1,0 +1,33 @@
+{
+  "name": "csv_read",
+  "description": "Read a CSV file and return its contents as a list of dictionaries.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The path to the CSV file."
+      },
+      "delimiter": {
+        "type": "string",
+        "description": "The delimiter used in the CSV file.",
+        "default": ","
+      },
+      "encoding": {
+        "type": "string",
+        "description": "The file encoding (e.g., 'utf-8').",
+        "default": "utf-8"
+      }
+    },
+    "required": ["file_path"]
+  },
+  "examples": [
+    {
+      "input": "read csv data.csv",
+      "output": {"tool_name": "csv_read", "parameters": {"file_path": "data.csv", "delimiter": ",", "encoding": "utf-8"}}
+    }
+  ],
+  "tags": ["csv", "data", "io"],
+  "enabled": true,
+  "activation_phrases": ["read csv", "load csv", "parse csv"]
+}

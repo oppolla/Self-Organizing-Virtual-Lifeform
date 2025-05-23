@@ -1,0 +1,28 @@
+{
+  "name": "file_read",
+  "description": "Read the contents of a file and return them as a string.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The path to the file to read."
+      },
+      "encoding": {
+        "type": "string",
+        "description": "The file encoding (e.g., 'utf-8').",
+        "default": "utf-8"
+      }
+    },
+    "required": ["file_path"]
+  },
+  "examples": [
+    {
+      "input": "read the file at /path/to/file.txt",
+      "output": {"tool_name": "file_read", "parameters": {"file_path": "/path/to/file.txt", "encoding": "utf-8"}}
+    }
+  ],
+  "tags": ["file", "io", "read"],
+  "enabled": true,
+  "activation_phrases": ["read file", "open file", "get file contents"]
+}

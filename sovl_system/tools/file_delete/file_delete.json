@@ -1,0 +1,23 @@
+{
+  "name": "file_delete",
+  "description": "Delete a file from the file system.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The path to the file to delete."
+      }
+    },
+    "required": ["file_path"]
+  },
+  "examples": [
+    {
+      "input": "delete temp.txt",
+      "output": {"tool_name": "file_delete", "parameters": {"file_path": "temp.txt"}}
+    }
+  ],
+  "tags": ["file", "io", "delete"],
+  "enabled": true,
+  "activation_phrases": ["delete file", "remove file", "erase file"]
+}

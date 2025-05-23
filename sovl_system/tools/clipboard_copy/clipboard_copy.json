@@ -1,0 +1,23 @@
+{
+  "name": "clipboard_copy",
+  "description": "Copy text to the system clipboard.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "The text to copy to the clipboard."
+      }
+    },
+    "required": ["text"]
+  },
+  "examples": [
+    {
+      "input": "copy 'Hello, World!' to clipboard",
+      "output": {"tool_name": "clipboard_copy", "parameters": {"text": "Hello, World!"}}
+    }
+  ],
+  "tags": ["clipboard", "text", "utility"],
+  "enabled": true,
+  "activation_phrases": ["copy to clipboard", "save to clipboard", "clipboard set"]
+}

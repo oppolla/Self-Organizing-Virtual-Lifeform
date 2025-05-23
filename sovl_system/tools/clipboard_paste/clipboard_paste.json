@@ -1,0 +1,17 @@
+{
+  "name": "clipboard_paste",
+  "description": "Retrieve text from the system clipboard.",
+  "parameters": {
+    "type": "object",
+    "properties": {}
+  },
+  "examples": [
+    {
+      "input": "paste from clipboard",
+      "output": {"tool_name": "clipboard_paste", "parameters": {}}
+    }
+  ],
+  "tags": ["clipboard", "text", "utility"],
+  "enabled": true,
+  "activation_phrases": ["paste from clipboard", "get clipboard", "read clipboard"]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "file_size",
+  "description": "Get the size of a file in bytes or human-readable format.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "The path to the file."
+      },
+      "human_readable": {
+        "type": "boolean",
+        "description": "Return size in human-readable format (e.g., '1.2 MB').",
+        "default": false
+      }
+    },
+    "required": ["file_path"]
+  },
+  "examples": [
+    {
+      "input": "get size of file.txt",
+      "output": {"tool_name": "file_size", "parameters": {"file_path": "file.txt", "human_readable": false}}
+    }
+  ],
+  "tags": ["file", "io", "system"],
+  "enabled": true,
+  "activation_phrases": ["file size", "check file size", "get file size"]
+}

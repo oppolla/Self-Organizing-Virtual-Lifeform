@@ -1,0 +1,28 @@
+{
+  "name": "create_directory",
+  "description": "Create a new directory at the specified path.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "The path for the new directory."
+      },
+      "parents": {
+        "type": "boolean",
+        "description": "Create parent directories if they don't exist.",
+        "default": true
+      }
+    },
+    "required": ["path"]
+  },
+  "examples": [
+    {
+      "input": "create folder /path/to/new_folder",
+      "output": {"tool_name": "create_directory", "parameters": {"path": "/path/to/new_folder", "parents": true}}
+    }
+  ],
+  "tags": ["file", "io", "directory"],
+  "enabled": true,
+  "activation_phrases": ["create folder", "make directory", "new folder"]
+}

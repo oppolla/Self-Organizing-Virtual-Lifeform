@@ -1,0 +1,23 @@
+{
+  "name": "current_time",
+  "description": "Get the current date and time in a specified format.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "format": {
+        "type": "string",
+        "description": "The format string for datetime (e.g., '%Y-%m-%d %H:%M:%S').",
+        "default": "%Y-%m-%d %H:%M:%S"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": "get the current time",
+      "output": {"tool_name": "current_time", "parameters": {"format": "%Y-%m-%d %H:%M:%S"}}
+    }
+  ],
+  "tags": ["time", "datetime", "utility"],
+  "enabled": true,
+  "activation_phrases": ["get time", "current time", "what time is it"]
+}

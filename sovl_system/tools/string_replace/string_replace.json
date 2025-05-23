@@ -1,0 +1,36 @@
+{
+  "name": "string_replace",
+  "description": "Replace occurrences of a pattern in a string with a replacement string.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "The input text to process."
+      },
+      "pattern": {
+        "type": "string",
+        "description": "The pattern to replace (supports regex)."
+      },
+      "replacement": {
+        "type": "string",
+        "description": "The string to replace the pattern with."
+      },
+      "is_regex": {
+        "type": "boolean",
+        "description": "Whether the pattern is a regular expression.",
+        "default": false
+      }
+    },
+    "required": ["text", "pattern", "replacement"]
+  },
+  "examples": [
+    {
+      "input": "replace 'cat' with 'dog' in 'I have a cat'",
+      "output": {"tool_name": "string_replace", "parameters": {"text": "I have a cat", "pattern": "cat", "replacement": "dog", "is_regex": false}}
+    }
+  ],
+  "tags": ["text", "string", "processing"],
+  "enabled": true,
+  "activation_phrases": ["replace text", "string replace", "substitute text"]
+}

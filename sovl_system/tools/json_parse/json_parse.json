@@ -1,0 +1,23 @@
+{
+  "name": "json_parse",
+  "description": "Parse a JSON string into a Python object.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "json_string": {
+        "type": "string",
+        "description": "The JSON string to parse."
+      }
+    },
+    "required": ["json_string"]
+  },
+  "examples": [
+    {
+      "input": "parse this: {\"key\": \"value\"}",
+      "output": {"tool_name": "json_parse", "parameters": {"json_string": "{\"key\": \"value\"}"}}
+    }
+  ],
+  "tags": ["json", "data", "parsing"],
+  "enabled": true,
+  "activation_phrases": ["parse json", "load json", "convert json"]
+}
