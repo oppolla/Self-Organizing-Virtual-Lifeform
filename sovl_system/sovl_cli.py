@@ -890,7 +890,7 @@ class CommandHandler(cmd.Cmd):
         state_manager = getattr(self.sovl_system.context, 'state_manager', None)
         if state_manager and hasattr(state_manager, 'load_state'):
             try:
-                loaded_state = state_manager.load_state(filename.replace('.json', ''))
+                loaded_state = state_manager.load_state(f"saves/{filename.replace('.json', '')}")
                 if loaded_state:
                     path = filename if filename.endswith('.json') else filename + '.json'
                     try:
@@ -907,7 +907,7 @@ class CommandHandler(cmd.Cmd):
                 print_error(f"Failed to load state from '{filename}': {e}")
         elif hasattr(self.sovl_system, 'load_state'):
             try:
-                self.sovl_system.load_state(filename)
+                self.sovl_system.load_state(f"saves/{filename}")
                 path = filename if filename.endswith('.json') else filename + '.json'
                 try:
                     size = os.path.getsize(path)

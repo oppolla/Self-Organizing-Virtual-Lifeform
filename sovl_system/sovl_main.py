@@ -979,7 +979,7 @@ class SOVLSystem(SystemInterface):
         state_manager = getattr(self.context, 'state_manager', None)
         if not state_manager:
             raise RuntimeError("StateManager not available for loading.")
-        loaded_state = state_manager.load_state(path_prefix)
+        loaded_state = state_manager.load_state(f"saves/{path_prefix}")
         if loaded_state:
             self.state_tracker.state = loaded_state
         else:

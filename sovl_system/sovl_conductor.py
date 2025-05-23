@@ -591,7 +591,7 @@ class SOVLOrchestrator(OrchestratorInterface):
             raise RuntimeError(msg)
 
         try:
-            loaded_state = self.state_manager.load_state(self.config_manager.config_path)
+            loaded_state = self.state_manager.load_state(f"saves/{os.path.basename(self.config_manager.config_path)}")
             is_valid_state = False
             if loaded_state:
                 state_dict_for_validation = loaded_state.to_dict() if hasattr(loaded_state, 'to_dict') else loaded_state
