@@ -4,7 +4,7 @@ import uvicorn
 import os
 import json
 from pydantic import BaseModel
-from sovl_system.sovl_main import SOVLSystem
+from sovl_api import SOVLAPI
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -17,8 +17,8 @@ try:
 except FileNotFoundError:
     raise RuntimeError(f"Configuration file not found: {CONFIG_FILE}")
 
-# Initialize SOVL system
-sovl_system = SOVLSystem()
+# Initialize SOVL API
+sovl_api = SOVLAPI(config_path=CONFIG_FILE)
 
 
 # Define Pydantic models for API requests
@@ -67,13 +67,15 @@ def update_config(new_config: dict = Body(...)):
 @app.post("/api/sovl")
 def handle_sovl_request(request: SOVLRequest):
     try:
-        response = sovl_system.generate(
-            request.prompt,
-            max_new_tokens=request.max_new_tokens,
-            temperature=request.temperature,
-            top_k=request.top_k,
-            do_sample=request.do_sample,
-        )
+        # Use SOVLAPI to send input and get output
+        sovl_api.send_input({
+            "prompt": request.prompt,
+            "max_new_tokens": request.max_new_tokens,
+            "temperature": request.temperature,
+            "top_k": request.top_k,
+            "do_sample": request.do_sample
+        })
+        response = sovl_api.get_output()
         return {"response": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing prompt: {str(e)}")
@@ -83,8 +85,12 @@ def handle_sovl_request(request: SOVLRequest):
 @app.post("/api/sovl/tune-curiosity")
 def tune_curiosity(params: dict = Body(...)):
     try:
-        sovl_system.tune_curiosity(**params)
-        return {"message": "Curiosity parameters updated successfully"}
+        # If SOVLAPI exposes this, otherwise fallback to system
+        if hasattr(sovl_api.system, "tune_curiosity"):
+            sovl_api.system.tune_curiosity(**params)
+            return {"message": "Curiosity parameters updated successfully"}
+        else:
+            raise HTTPException(status_code=501, detail="Curiosity tuning not supported via API.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error tuning curiosity: {str(e)}")
 
@@ -93,8 +99,11 @@ def tune_curiosity(params: dict = Body(...)):
 @app.get("/api/sovl/health")
 def check_health():
     try:
-        sovl_system.check_memory_health()
-        return {"message": "System health check completed successfully"}
+        if hasattr(sovl_api.system, "check_memory_health"):
+            sovl_api.system.check_memory_health()
+            return {"message": "System health check completed successfully"}
+        else:
+            raise HTTPException(status_code=501, detail="Health check not supported via API.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during health check: {str(e)}")
 
@@ -103,8 +112,11 @@ def check_health():
 @app.post("/api/sovl/set-sleep-params")
 def set_sleep_params(params: dict = Body(...)):
     try:
-        sovl_system.set_sleep_params(**params)
-        return {"message": "Sleep parameters updated successfully"}
+        if hasattr(sovl_api.system, "set_sleep_params"):
+            sovl_api.system.set_sleep_params(**params)
+            return {"message": "Sleep parameters updated successfully"}
+        else:
+            raise HTTPException(status_code=501, detail="Sleep parameter update not supported via API.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error setting sleep parameters: {str(e)}")
 
