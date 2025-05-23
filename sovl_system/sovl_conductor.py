@@ -35,7 +35,7 @@ class SOVLOrchestrator(OrchestratorInterface):
     """
     # Constants for configuration
     DEFAULT_CONFIG_PATH: str = "sovl_config.json"
-    DEFAULT_LOG_FILE: str = "sovl_orchestrator_logs.jsonl"
+    DEFAULT_LOG_FILE: str = "logs/sovl_orchestrator_logs.jsonl"
     LOG_MAX_SIZE_MB: int = 10
     SAVE_PATH_SUFFIX: str = "_final.json"
 

@@ -457,7 +457,7 @@ if __name__ == "__main__":
     # Initialize dependencies
     config_path = "sovl_config.json"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger = Logger(log_file="sovl_orchestrator_logs.jsonl")
+    logger = Logger(log_file="logs/sovl_orchestrator_logs.jsonl")
     config_manager = ConfigManager(config_path, logger)
     context = SystemContext(config_path, str(device))
     config_handler = ConfigHandler(config_path, context.logger, context.event_dispatcher)
@@ -490,7 +490,7 @@ if __name__ == "__main__":
         state_tracker=state_tracker,
         error_manager=error_manager
     )
-    orchestrator = SOVLOrchestrator(config_path=config_path, log_file="sovl_orchestrator_logs.jsonl")
+    orchestrator = SOVLOrchestrator(config_path=config_path, log_file="logs/sovl_orchestrator_logs.jsonl")
     
     # Create mediator and adapters
     mediator = SystemMediator(

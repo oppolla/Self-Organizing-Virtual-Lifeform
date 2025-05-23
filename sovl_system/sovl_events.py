@@ -102,7 +102,7 @@ class EventDispatcher:
         self._subscribers: Dict[str, List[Tuple[int, EventHandler]]] = defaultdict(list)
         self._channels: Dict[str, asyncio.Queue] = defaultdict(asyncio.Queue)
         self._lock = Lock()
-        self._logger = logger or Logger(LoggerConfig(log_file="sovl_events.log"))
+        self._logger = logger or Logger(LoggerConfig(log_file="logs/sovl_events.log"))
         self._notification_depth: int = 0
         self._deferred_unsubscriptions: Dict[str, Set[EventHandler]] = defaultdict(set)
         
@@ -276,7 +276,7 @@ class EventDispatcher:
         """Validate specific configuration values."""
         try:
             # Log file validation
-            log_file = self._get_config_value("logging_config.log_file", "sovl_events.log")
+            log_file = self._get_config_value("logging_config.log_file", "logs/sovl_events.log")
             if not isinstance(log_file, str) or not log_file:
                 raise ValueError(f"Invalid log_file: {log_file}")
 

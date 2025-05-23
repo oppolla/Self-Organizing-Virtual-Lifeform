@@ -27,7 +27,7 @@ class TrainingConfig:
     @dataclass
     class LoggingConfig:
         """Logging configuration parameters."""
-        log_file: str = "training_logs.jsonl"
+        log_file: str = "logs/training_logs.jsonl"
         max_size_mb: int = 10
         compress_old: bool = True
         max_in_memory_logs: int = 100
@@ -140,7 +140,7 @@ class TrainingConfig:
             )
             
             # Load logging config
-            self.logging.log_file = self.config_manager.get("training.logging.log_file", "training_logs.jsonl")
+            self.logging.log_file = self.config_manager.get("training.logging.log_file", "logs/training_logs.jsonl")
             self.logging.max_size_mb = self.config_manager.get("training.logging.max_size_mb", 10)
             self.logging.compress_old = self.config_manager.get("training.logging.compress_old", True)
             self.logging.max_in_memory_logs = self.config_manager.get("training.logging.max_in_memory_logs", 100)
