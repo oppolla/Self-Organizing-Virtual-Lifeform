@@ -710,6 +710,18 @@ class Tooler:
         else:
             return base_prompt
 
+    def audit_and_publish_draft_procedures(self, llm=None):
+        """
+        Audit and publish (or discard/keep) all draft procedures using the LLM.
+        Intended to be called after doctrine update (e.g., after striver/aspiration update).
+        The orchestrator should call this at the appropriate time.
+        """
+        if self.procedure_manager and hasattr(self.procedure_manager, 'audit_draft_procedures_with_llm'):
+            return self.procedure_manager.audit_draft_procedures_with_llm(llm or self.llm_interface)
+        if self.logger:
+            self.logger.warn("No procedure_manager or audit_draft_procedures_with_llm available in Tooler.")
+        return None
+
 # --- Procedure Manager (SQLite based) ---
 
 DEFAULT_DATABASE_DIR = "database" 
