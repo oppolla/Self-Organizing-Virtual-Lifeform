@@ -109,13 +109,17 @@ class CommandHistory:
 
     def save(self, filename="command_history.json"):
         import json
-        with open(filename, "w") as f:
+        import os
+        os.makedirs("user_data", exist_ok=True)
+        path = os.path.join("user_data", filename)
+        with open(path, "w") as f:
             json.dump(list(self.history), f)
 
     def load(self, filename="command_history.json"):
         import json, os
-        if os.path.exists(filename):
-            with open(filename, "r") as f:
+        path = os.path.join("user_data", filename)
+        if os.path.exists(path):
+            with open(path, "r") as f:
                 loaded = json.load(f)
                 # Backward compatibility: add timestamp if missing
                 for entry in loaded:
