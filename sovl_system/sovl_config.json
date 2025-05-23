@@ -317,7 +317,7 @@
     "max_short_term": 500,
     "short_term_expiry_seconds": null,
     "embedding_dim": 128,
-    "db_path": "conversations.db",
+    "db_path": "storage/conversations.db",
     "long_term_retention_days": null,
     "long_term_top_k": 5,
     "memory_logging_level": "info",

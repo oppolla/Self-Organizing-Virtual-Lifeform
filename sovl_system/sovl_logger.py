@@ -27,7 +27,7 @@ def set_logging_enabled_from_config(config_manager: ConfigManager):
 @dataclass
 class LoggerConfig:
     """Configuration for Logger with validation."""
-    log_file: str = "sovl_logs.jsonl"
+    log_file: str = "logs/sovl_logs.jsonl"
     max_size_mb: int = 10
     compress_old: bool = False
     max_in_memory_logs: int = 1000
@@ -330,6 +330,14 @@ class Logger(IErrorHandler):
             
             # Initialize configuration
             self.config = LoggerConfig()
+            
+            # Ensure log directory exists
+            log_dir = os.path.dirname(self.config.log_file)
+            if log_dir and not os.path.exists(log_dir):
+                try:
+                    os.makedirs(log_dir, exist_ok=True)
+                except Exception as e:
+                    print(f"Failed to create log directory '{log_dir}': {e}")
             
             # Initialize fallback logger for internal errors
             self._fallback_logger = logging.getLogger('sovl_internal')

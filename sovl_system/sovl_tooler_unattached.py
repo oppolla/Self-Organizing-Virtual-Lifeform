@@ -779,7 +779,7 @@ class Tooler:
 
 # --- Procedure Manager (SQLite based) ---
 
-DEFAULT_DATABASE_DIR = "database" 
+DEFAULT_DATABASE_DIR = "storage" 
 DEFAULT_DATABASE_FILE = os.path.join(DEFAULT_DATABASE_DIR, "procedures.db")
 
 class ProcedureManager:

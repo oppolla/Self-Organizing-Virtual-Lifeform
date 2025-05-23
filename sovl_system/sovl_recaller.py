@@ -274,6 +274,10 @@ class LongTermMemory:
     and are protected by _read_lock and _write_lock. Connection is cleaned up on error or deletion.
     """
     def __init__(self, db_path: str, embedding_dim: int, session_id: str, logger: Optional[Logger] = None, config_manager: Optional[ConfigManager] = None, retention_days: Optional[int] = None, top_k: int = 5, logging_level: str = "info", max_records: int = 10000, db_conn: Optional[sqlite3.Connection] = None):
+        # Ensure the directory for db_path exists
+        db_dir = os.path.dirname(db_path)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
         # Use config_manager for db_path, embedding_dim, retention_days, top_k, logging_level, max_records if provided
         if config_manager is not None:
             try:
