@@ -967,7 +967,7 @@ class SOVLSystem(SystemInterface):
         state_manager = getattr(self.context, 'state_manager', None)
         if not state_manager or not hasattr(self.state_tracker, 'state'):
             raise RuntimeError("StateManager or state not available for saving.")
-        state_manager.save_state(self.state_tracker.state, path_prefix)
+        state_manager.save_state(self.state_tracker.state, f"saves/{path_prefix}")
 
     def load_state(self, filename: str) -> None:
         """

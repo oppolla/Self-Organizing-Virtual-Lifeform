@@ -611,7 +611,7 @@ class SOVLOrchestrator(OrchestratorInterface):
                 )
                 self.state_manager._initialize_state()  # Initialize default state
                 loaded_state = self.state_manager._current_state
-                self.state_manager.save_state(loaded_state, self.config_manager.config_path)
+                self.state_manager.save_state(loaded_state, f"saves/{os.path.basename(self.config_manager.config_path)}")
                 self._log_event("default_state_initialized_and_saved")
             
             self.state = loaded_state # Uses the orchestrator's state property setter
@@ -927,7 +927,7 @@ class SOVLOrchestrator(OrchestratorInterface):
                     try:
                         emergency_path = f"emergency_state_{int(time.time())}.json"
                         if hasattr(self, 'state_manager') and self.state_manager and self.state:
-                            self.state_manager.save_state(self.state, emergency_path)
+                            self.state_manager.save_state(self.state, f"saves/{emergency_path}")
                             self._log_event("emergency_state_saved", {"path": emergency_path})
                     except Exception as save_e:
                         self._log_error("Emergency state save failed", save_e)
@@ -1040,8 +1040,8 @@ class SOVLOrchestrator(OrchestratorInterface):
             # Defensive: Attempt state save
             try:
                 if hasattr(self, 'state_manager') and self.state_manager and self.state:
-                    self.state_manager.save_state(self.state, "system_state_final")
-                    self._log_event("state_saved", {"path": "system_state_final.json"})
+                    self.state_manager.save_state(self.state, "saves/system_state_final")
+                    self._log_event("state_saved", {"path": "saves/system_state_final.json"})
             except Exception as e:
                 self._log_error("Failed to save state during shutdown", e)
             # Defensive: Attempt resource cleanup
@@ -1070,7 +1070,7 @@ class SOVLOrchestrator(OrchestratorInterface):
         try:
             # Attempt to save state atomically
             if self.state:
-                self.state_manager.save_state(self.state, "system_state_failure")
+                self.state_manager.save_state(self.state, "saves/system_state_failure")
             self._log_event("execution_failure_handled", {
                 "state_saved": self.state is not None,
                 "timestamp": time.time()

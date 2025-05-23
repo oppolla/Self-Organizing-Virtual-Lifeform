@@ -856,7 +856,7 @@ class CommandHandler(cmd.Cmd):
             try:
                 state = state_manager.get_state()
                 if state:
-                    state_manager.save_state(state, filename.replace('.json', ''))
+                    state_manager.save_state(state, f"saves/{filename.replace('.json', '')}")
                     # Get file size and timestamp
                     path = filename if filename.endswith('.json') else filename + '.json'
                     try:
@@ -871,7 +871,7 @@ class CommandHandler(cmd.Cmd):
                 print_error(f"Failed to save state to '{filename}': {e}")
         elif hasattr(self.sovl_system, 'save_state'):
             try:
-                self.sovl_system.save_state(filename)
+                self.sovl_system.save_state(f"saves/{filename}")
                 path = filename if filename.endswith('.json') else filename + '.json'
                 try:
                     size = os.path.getsize(path)
@@ -3239,7 +3239,7 @@ def shutdown_system(sovl_system: SOVLSystem):
     print("\nInitiating shutdown sequence...")
     try:
         if hasattr(sovl_system, 'save_state'):
-            sovl_system.save_state("final_state.json")
+            sovl_system.save_state("saves/final_state.json")
             print("Final state saved.")
         if hasattr(sovl_system, 'cmd_history'):
             sovl_system.cmd_history.save()
