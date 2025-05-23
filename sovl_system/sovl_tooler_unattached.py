@@ -1,10 +1,10 @@
 from typing import Callable, Dict, Any, List, TypedDict, Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 import json
-import time # For ProcedureDefinition timestamps
-import os # For ProcedureManager db path
+import time
+import os
 import importlib.util
-import inspect # To inspect function signatures or for alternative ways to find callables
+import inspect
 import sqlite3
 from sovl_logger import Logger
 from sovl_error import ErrorManager
@@ -53,8 +53,10 @@ class Tool:
 
 @dataclass
 class ProcedureStep:
-    tool_name: str
-    parameters: Dict[str, Any]
+    action: str
+    tool: Optional[str] = None
+    params: Optional[Dict[str, Any]] = None
+    text: Optional[str] = None
     description: Optional[str] = None
 
 @dataclass
@@ -63,8 +65,167 @@ class ProcedureDefinition:
     description: str
     steps: List[ProcedureStep]
     metadata: Dict[str, Any] = field(default_factory=dict)
-    created_at: Optional[float] = field(default_factory=time.time)
-    updated_at: Optional[float] = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    is_draft: bool = True
+
+# --- Core Step Handler Registry (Extensible) ---
+STEP_HANDLERS = {}
+
+def register_step_handler(action):
+    """Decorator to register a step handler for a given action name."""
+    def decorator(func):
+        STEP_HANDLERS[action] = func
+        return func
+    return decorator
+
+# Register core step handlers
+@register_step_handler("call_tool")
+def handle_call_tool(step, context):
+    tooler = context["tooler"]
+    tool_name = step.get("tool")
+    tool_params = step.get("params", {})
+    if tool_name:
+        return tooler.process_llm_tool_call(json.dumps({
+            "tool_name": tool_name,
+            "parameters": tool_params
+        }))
+    else:
+        raise ValueError("Step missing 'tool' field for call_tool action.")
+
+@register_step_handler("message")
+def handle_message(step, context):
+    msg = step.get("text", "")
+    logger = context.get("logger")
+    if logger:
+        logger.info(f"Procedure message: {msg}")
+    else:
+        print(f"Procedure message: {msg}")
+    return msg
+
+# --- Additional Core Step Handlers ---
+import time
+
+@register_step_handler("wait")
+def handle_wait(step, context):
+    """Pause execution for a set time (seconds) or until a condition (not implemented)."""
+    seconds = step.get("seconds")
+    if seconds is not None:
+        logger = context.get("logger")
+        if logger:
+            logger.info(f"Waiting for {seconds} seconds...")
+        else:
+            print(f"Waiting for {seconds} seconds...")
+        time.sleep(seconds)
+    # Future: implement condition-based waiting
+
+@register_step_handler("prompt_user")
+def handle_prompt_user(step, context):
+    """
+    Prompt the user for input and store the result in context["variables"].
+    UI-agnostic: uses context["user_prompt_callback"] if available, else returns a dict for the orchestrator/UI to handle.
+    """
+    prompt = step.get("prompt", "Enter a value:")
+    var_name = step.get("var_name", "user_input")
+    if context and callable(context.get("user_prompt_callback")):
+        value = context["user_prompt_callback"](prompt)
+        context["variables"][var_name] = value
+        return {"status": "ok", "value": value}
+    else:
+        # Return a special dict for the orchestrator/CLI to handle
+        return {"action": "prompt_user", "prompt": prompt, "var_name": var_name}
+
+@register_step_handler("set_variable")
+def handle_set_variable(step, context):
+    """Set a variable in context["variables"]."""
+    variable = step.get("variable")
+    value = step.get("value")
+    if variable:
+        context.setdefault("variables", {})[variable] = value
+        logger = context.get("logger")
+        if logger:
+            logger.info(f"Set variable '{variable}' to {value}")
+    else:
+        raise ValueError("Step missing 'variable' field for set_variable action.")
+
+@register_step_handler("use_result")
+def handle_use_result(step, context):
+    """Use the result of a previous step (by index) and store in a variable."""
+    from_step = step.get("from_step")
+    variable = step.get("variable")
+    if from_step is not None and variable:
+        results = context.setdefault("step_results", {})
+        value = results.get(from_step)
+        context.setdefault("variables", {})[variable] = value
+        logger = context.get("logger")
+        if logger:
+            logger.info(f"Used result from step {from_step} as '{variable}': {value}")
+    else:
+        raise ValueError("Step missing 'from_step' or 'variable' for use_result action.")
+
+@register_step_handler("branch")
+def handle_branch(step, context):
+    """Conditional logic: execute if_steps or else_steps based on a variable's value."""
+    condition = step.get("condition", {})
+    var = condition.get("variable")
+    equals = condition.get("equals")
+    variables = context.setdefault("variables", {})
+    if var is not None and equals is not None:
+        if variables.get(var) == equals:
+            steps = step.get("if_steps", [])
+        else:
+            steps = step.get("else_steps", [])
+        for substep in steps:
+            action = substep.get('action')
+            handler = STEP_HANDLERS.get(action)
+            if handler:
+                handler(substep, context)
+    else:
+        raise ValueError("branch step missing 'condition' with 'variable' and 'equals'.")
+
+@register_step_handler("loop")
+def handle_loop(step, context):
+    """Repeat a set of steps a number of times."""
+    times = step.get("times")
+    steps = step.get("steps", [])
+    if times is not None and steps:
+        for i in range(times):
+            logger = context.get("logger")
+            if logger:
+                logger.info(f"Loop iteration {i+1}/{times}")
+            for substep in steps:
+                action = substep.get('action')
+                handler = STEP_HANDLERS.get(action)
+                if handler:
+                    handler(substep, context)
+    else:
+        raise ValueError("loop step missing 'times' or 'steps'.")
+
+@register_step_handler("error_handler")
+def handle_error_handler(step, context):
+    """Try/catch error handling for a block of steps."""
+    try_steps = step.get("try_steps", [])
+    catch_steps = step.get("catch_steps", [])
+    try:
+        for substep in try_steps:
+            action = substep.get('action')
+            handler = STEP_HANDLERS.get(action)
+            if handler:
+                handler(substep, context)
+    except Exception as e:
+        logger = context.get("logger")
+        if logger:
+            logger.error(f"Error in try_steps: {e}")
+        for substep in catch_steps:
+            action = substep.get('action')
+            handler = STEP_HANDLERS.get(action)
+            if handler:
+                handler(substep, context)
+
+@register_step_handler("end")
+def handle_end(step, context):
+    """Explicitly end the procedure early."""
+    raise StopIteration("Procedure ended by 'end' step.")
 
 # --- Tool Registry ---
 
@@ -320,6 +481,13 @@ class ToolRegistry:
                     )
                     self.register_tool(tool_instance)
 
+                    # Merge custom step handlers from tool module
+                    if hasattr(module, "STEP_HANDLERS"):
+                        for action, handler in getattr(module, "STEP_HANDLERS").items():
+                            STEP_HANDLERS[action] = handler
+                    elif hasattr(module, "register_step_handlers"):
+                        module.register_step_handlers(STEP_HANDLERS)
+
                 except Exception as e:
                     if self.logger:
                         self.logger.error(f"Failed to load Python module or function for tool '{tool_name_from_schema}' from {python_file_path}: {e}", exc_info=True)
@@ -358,13 +526,12 @@ class ToolRegistry:
 # --- Tooler (Orchestrator) ---
 
 class Tooler:
-    def __init__(self, tool_registry: ToolRegistry, logger=None, llm_interface=None, procedure_manager=None, error_manager=None, procedural_memory=None):
+    def __init__(self, tool_registry: ToolRegistry, logger=None, llm_interface=None, procedure_manager=None, error_manager=None):
         self.tool_registry = tool_registry
         self.logger = logger if logger is not None else Logger.get_instance()
         self.llm_interface = llm_interface 
         self.procedure_manager = procedure_manager
         self.error_manager = error_manager
-        self.procedural_memory = procedural_memory
 
     def get_available_tools_for_llm(self) -> List[ToolSchema]:
         return self.tool_registry.get_all_tool_schemas()
@@ -446,37 +613,102 @@ class Tooler:
                 )
             return {"error": f"An unexpected error occurred: {str(e)}"}
 
-    # --- Dynamic Tool/Procedure Guidance Section for System Prompt ---
+    def should_inject_tool_guidance(self, user_input: str) -> bool:
+        """
+        Returns True if tool/procedure activation is detected for the given user input.
+        Used to determine if the tool guidance section should be injected into the system prompt.
+        """
+        if detect_tool_activation(user_input):
+            return True
+        for tool in self.tool_registry.tools.values():
+            if detect_tool_activation_for_tool(user_input, tool):
+                return True
+        return False
+
     def build_tool_guidance_section(self, max_examples_per_tool=1) -> str:
         """
-        Build a section for the system prompt listing all available tools and procedures,
-        with their descriptions, parameters, and usage examples. This is dynamically
-        derived from the tools directory and procedural memory for extensibility.
+        Build a detailed section for the system prompt listing all available tools and procedures,
+        with their descriptions, activation phrases, parameters, tags, and usage examples.
+        Returns an empty string if there are no enabled tools or procedures.
         """
-        lines = ["TOOL/PROCEDURE GUIDANCE:"]
+        if not any(tool.enabled for tool in self.tool_registry.tools.values()) and (
+            not self.procedure_manager or not self.procedure_manager.list_procedures(drafts_only=False)
+        ):
+            return ""
+        lines = [
+            "TOOL/PROCEDURE GUIDANCE:",
+            "You have access to the following tools and procedures. Use them when a user request matches their purpose. For each tool, the name, description, activation phrases, parameters, tags, and usage examples are provided.",
+            "When a user request matches a tool or procedure, respond with a tool call in the following format:",
+            '{"tool_name": "<tool_name>", "parameters": { ... }}',
+            "If no tool is appropriate, respond normally.\n"
+        ]
         # Tools
         for tool in self.tool_registry.tools.values():
-            lines.append(f"- {tool.name}: {tool.description}")
+            if not tool.enabled:
+                continue
+            lines.append(f"- Tool: {tool.name}")
+            lines.append(f"  Description: {tool.description}")
+            if tool.activation_phrases:
+                lines.append(f"  Activation Phrases: {', '.join(tool.activation_phrases)}")
             # Parameters
-            param_strs = []
             params = tool.schema.get('parameters', {}).get('properties', {})
-            for pname, pinfo in params.items():
-                ptype = pinfo.get('type', 'unknown')
-                pdesc = pinfo.get('description', '')
-                param_strs.append(f"{pname} ({ptype}): {pdesc}")
-            if param_strs:
-                lines.append(f"  Parameters: {', '.join(param_strs)}")
+            required = set(tool.schema.get('parameters', {}).get('required', []))
+            if params:
+                lines.append(f"  Parameters:")
+                for pname, pinfo in params.items():
+                    ptype = pinfo.get('type', 'unknown')
+                    pdesc = pinfo.get('description', '')
+                    default = pinfo.get('default', None)
+                    req = "required" if pname in required else "optional"
+                    default_str = f", default={default}" if default is not None else ""
+                    lines.append(f"    - {pname} ({ptype}, {req}{default_str}): {pdesc}")
+            # Tags
+            tags = tool.schema.get('tags', [])
+            if tags:
+                lines.append(f"  Tags: {', '.join(tags)}")
             # Examples
             examples = tool.schema.get("examples", [])[:max_examples_per_tool]
             for ex in examples:
-                lines.append(f"  Example: input={ex['input']} output={ex['output']}")
-        # Procedures (if ProceduralMemory is available)
-        if self.procedural_memory is not None:
-            for proc_name in self.procedural_memory.list_procedures():
-                proc = self.procedural_memory.get_procedure(proc_name)
-                lines.append(f"- {proc['name']}: {proc.get('description', '')}")
-                # Optionally add a usage example if you store them
+                lines.append(f"  Example:")
+                lines.append(f"    Input: {json.dumps(ex['input'])}")
+                lines.append(f"    Output: {ex['output']}")
+        # Procedures (if ProcedureManager is available and has procedures)
+        if self.procedure_manager is not None:
+            for proc_name in self.procedure_manager.list_procedures(drafts_only=False):
+                proc = self.procedure_manager.get_procedure(proc_name)
+                if proc: # Ensure procedure exists and is not a draft already filtered by list_procedures
+                    lines.append(f"- Procedure: {proc.name}")
+                    lines.append(f"  Description: {proc.description}")
+                    steps = proc.steps
+                    if steps:
+                        lines.append(f"  Steps:")
+                        for idx, step in enumerate(steps, 1):
+                            desc = step.description or ''
+                            tool = step.tool or ''
+                            params = step.params or {}
+                            lines.append(f"    {idx}. Action: {step.action}, Tool: {tool}, Params: {params} {('- ' + desc) if desc else ''}")
         return "\n".join(lines)
+
+    # --- Contextual System Prompt Builder ---
+    def build_contextual_system_prompt(self, user_input: str, base_prompt: str) -> str:
+        """
+        Build the system prompt for the LLM, injecting tool/procedure guidance only if activation is detected.
+        Uses both global and per-tool activation detection.
+        """
+        activation_detected = False
+        # Global activation detection
+        if detect_tool_activation(user_input):
+            activation_detected = True
+        else:
+            # Per-tool activation detection
+            for tool in self.tool_registry.tools.values():
+                if detect_tool_activation_for_tool(user_input, tool):
+                    activation_detected = True
+                    break
+        if activation_detected:
+            return base_prompt + "\n" + self.build_tool_guidance_section()
+        else:
+            return base_prompt
 
 # --- Procedure Manager (SQLite based) ---
 
@@ -484,211 +716,9 @@ DEFAULT_DATABASE_DIR = "database"
 DEFAULT_DATABASE_FILE = os.path.join(DEFAULT_DATABASE_DIR, "procedures.db")
 
 class ProcedureManager:
-    def __init__(self, db_path: str = DEFAULT_DATABASE_FILE, logger=None, error_manager=None):
-        self.db_path = os.path.abspath(db_path)
-        self.logger = logger if logger is not None else Logger.get_instance()
-        self.error_manager = error_manager
-        self._ensure_db_path_exists()
-        self._create_table_if_not_exists()
-
-    def _ensure_db_path_exists(self):
-        db_dir = os.path.dirname(self.db_path)
-        if not os.path.exists(db_dir):
-            if self.logger: self.logger.info(f"Database directory '{db_dir}' not found. Creating.")
-            try:
-                os.makedirs(db_dir, exist_ok=True)
-            except Exception as e:
-                if self.logger: self.logger.error(f"Failed to create database directory '{db_dir}': {e}", exc_info=True)
-                if self.error_manager:
-                    self.error_manager.record_error(
-                        error=e,
-                        error_type="procedure_db_dir_create_error",
-                        context={"db_dir": db_dir}
-                    )
-                raise
-        elif not os.path.isdir(db_dir):
-             if self.logger: self.logger.error(f"Database path '{db_dir}' exists but is not a directory.")
-             if self.error_manager:
-                self.error_manager.record_error(
-                    error=NotADirectoryError(f"Database path '{db_dir}' exists but is not a directory."),
-                    error_type="procedure_db_dir_not_directory",
-                    context={"db_dir": db_dir}
-                )
-             raise NotADirectoryError(f"Database path '{db_dir}' exists but is not a directory.")
-
-    def _create_table_if_not_exists(self):
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS procedures (
-                    name TEXT PRIMARY KEY,
-                    description TEXT,
-                    steps TEXT, 
-                    metadata TEXT, 
-                    created_at REAL,
-                    updated_at REAL
-                )
-            """)
-            conn.commit()
-            if self.logger: self.logger.debug(f"Procedures table ensured at {self.db_path}.")
-        except sqlite3.Error as e:
-            if self.logger: self.logger.error(f"SQLite error creating procedures table at {self.db_path}: {e}", exc_info=True)
-            if self.error_manager:
-                self.error_manager.record_error(
-                    error=e,
-                    error_type="procedure_db_table_create_error",
-                    context={"db_path": self.db_path}
-                )
-        finally:
-            if conn: conn.close()
-
-    def save_procedure(self, proc_def: ProcedureDefinition) -> bool:
-        conn = None
-        now = time.time()
-        proc_def.updated_at = now
-        if proc_def.created_at is None: 
-            proc_def.created_at = now
-
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            steps_json = json.dumps([step.__dict__ for step in proc_def.steps])
-            metadata_json = json.dumps(proc_def.metadata)
-
-            cursor.execute("""
-                INSERT INTO procedures (name, description, steps, metadata, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    description=excluded.description,
-                    steps=excluded.steps,
-                    metadata=excluded.metadata,
-                    updated_at=excluded.updated_at
-            """, (
-                proc_def.name,
-                proc_def.description,
-                steps_json,
-                metadata_json,
-                proc_def.created_at,
-                proc_def.updated_at
-            ))
-            conn.commit()
-            if self.logger: self.logger.info(f"Procedure '{proc_def.name}' saved successfully to {self.db_path}.")
-            return True
-        except sqlite3.Error as e:
-            if self.logger: self.logger.error(f"SQLite error saving procedure '{proc_def.name}' to {self.db_path}: {e}", exc_info=True)
-            if self.error_manager:
-                self.error_manager.record_error(
-                    error=e,
-                    error_type="procedure_db_save_error",
-                    context={"db_path": self.db_path, "procedure_name": proc_def.name}
-                )
-            return False
-        finally:
-            if conn: conn.close()
-
-    def get_procedure(self, name: str) -> Optional[ProcedureDefinition]:
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name, description, steps, metadata, created_at, updated_at FROM procedures WHERE name=?", (name,))
-            row = cursor.fetchone()
-            if row:
-                steps_list_of_dicts = json.loads(row[2])
-                steps = [ProcedureStep(**s_dict) for s_dict in steps_list_of_dicts]
-                metadata_dict = json.loads(row[3])
-                return ProcedureDefinition(
-                    name=row[0],
-                    description=row[1],
-                    steps=steps,
-                    metadata=metadata_dict,
-                    created_at=row[4],
-                    updated_at=row[5]
-                )
-            if self.logger: self.logger.debug(f"Procedure '{name}' not found in {self.db_path}.")
-            return None
-        except sqlite3.Error as e:
-            if self.logger: self.logger.error(f"SQLite error fetching procedure '{name}' from {self.db_path}: {e}", exc_info=True)
-            if self.error_manager:
-                self.error_manager.record_error(
-                    error=e,
-                    error_type="procedure_db_fetch_error",
-                    context={"db_path": self.db_path, "procedure_name": name}
-                )
-            return None
-        except json.JSONDecodeError as e: 
-            if self.logger: self.logger.error(f"JSON decode error for procedure '{name}' from DB {self.db_path}: {e}", exc_info=True)
-            if self.error_manager:
-                self.error_manager.record_error(
-                    error=e,
-                    error_type="procedure_db_json_decode_error",
-                    context={"db_path": self.db_path, "procedure_name": name}
-                )
-            return None
-        finally:
-            if conn: conn.close()
-
-    def list_procedures(self) -> List[Dict[str, Any]]: 
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name, description, updated_at FROM procedures ORDER BY name")
-            procedures = [
-                {
-                    "name": row[0],
-                    "description": row[1],
-                    "updated_at": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(row[2])) if row[2] else "N/A"
-                }
-                for row in cursor.fetchall()
-            ]
-            if self.logger: self.logger.debug(f"Listed {len(procedures)} procedures from {self.db_path}.")
-            return procedures
-        except sqlite3.Error as e:
-            if self.logger: self.logger.error(f"SQLite error listing procedures from {self.db_path}: {e}", exc_info=True)
-            if self.error_manager:
-                self.error_manager.record_error(
-                    error=e,
-                    error_type="procedure_db_list_error",
-                    context={"db_path": self.db_path}
-                )
-            return []
-        finally:
-            if conn: conn.close()
-
-    def delete_procedure(self, name: str) -> bool:
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM procedures WHERE name=?", (name,))
-            conn.commit()
-            deleted_count = cursor.rowcount
-            if deleted_count > 0:
-                if self.logger: self.logger.info(f"Procedure '{name}' deleted successfully from {self.db_path}.")
-            elif deleted_count == 0: 
-                if self.logger: self.logger.warn(f"Attempted to delete procedure '{name}' from {self.db_path}, but it was not found.")
-            return deleted_count > 0
-        except sqlite3.Error as e:
-            if self.logger: self.logger.error(f"SQLite error deleting procedure '{name}' from {self.db_path}: {e}", exc_info=True)
-            if self.error_manager:
-                self.error_manager.record_error(
-                    error=e,
-                    error_type="procedure_db_delete_error",
-                    context={"db_path": self.db_path, "procedure_name": name}
-                )
-            return False
-        finally:
-            if conn: conn.close()
-
-# --- Procedural Memory System (Third Pillar) ---
-
-class ProceduralMemory:
-    def __init__(self, db_path: str, tooler, logger, error_manager):
+    def __init__(self, db_path: str, step_handlers: Dict[str, Any], logger=None, error_manager=None):
         self.db_path = db_path
-        self.tooler = tooler
+        self.step_handlers = step_handlers
         self.logger = logger
         self.error_manager = error_manager
         self._ensure_table_exists()
@@ -704,66 +734,84 @@ class ProceduralMemory:
                 steps TEXT,
                 metadata TEXT,
                 created_at REAL,
-                updated_at REAL
+                updated_at REAL,
+                is_draft INTEGER DEFAULT 1
             )
         """)
         conn.commit()
         conn.close()
 
-    def add_procedure(self, name: str, description: str, steps: List[Dict[str, Any]], metadata: Optional[Dict[str, Any]] = None):
+    def add_procedure(self, proc: ProcedureDefinition):
         now = time.time()
-        record = {
-            "name": name,
-            "description": description,
-            "steps": steps,
-            "metadata": metadata or {},
-            "created_at": now,
-            "updated_at": now
-        }
+        proc.updated_at = now
+        if not proc.created_at:
+            proc.created_at = now
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT OR REPLACE INTO procedures (name, description, steps, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO procedures (name, description, steps, metadata, created_at, updated_at, is_draft)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            name, description, json.dumps(steps), json.dumps(metadata or {}), now, now
+            proc.name,
+            proc.description,
+            json.dumps([asdict(step) for step in proc.steps]),
+            json.dumps(proc.metadata),
+            proc.created_at,
+            proc.updated_at,
+            int(proc.is_draft)
         ))
         conn.commit()
         conn.close()
-        self._cache[name] = record
+        self._cache[proc.name] = proc
         if self.logger:
-            self.logger.info(f"Procedure '{name}' added to procedural memory.")
+            self.logger.info(f"Procedure '{proc.name}' added. Draft: {proc.is_draft}")
 
-    def get_procedure(self, name: str) -> Optional[Dict[str, Any]]:
+    def get_procedure(self, name: str) -> Optional[ProcedureDefinition]:
         if name in self._cache:
             return self._cache[name]
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT name, description, steps, metadata, created_at, updated_at FROM procedures WHERE name=?", (name,))
+        cursor.execute("SELECT name, description, steps, metadata, created_at, updated_at, is_draft FROM procedures WHERE name=?", (name,))
         row = cursor.fetchone()
         conn.close()
         if row:
-            record = {
-                "name": row[0],
-                "description": row[1],
-                "steps": json.loads(row[2]),
-                "metadata": json.loads(row[3]),
-                "created_at": row[4],
-                "updated_at": row[5]
-            }
-            self._cache[name] = record
-            return record
+            steps = [ProcedureStep(**s) for s in json.loads(row[2])]
+            proc = ProcedureDefinition(
+                name=row[0],
+                description=row[1],
+                steps=steps,
+                metadata=json.loads(row[3]),
+                created_at=row[4],
+                updated_at=row[5],
+                is_draft=bool(row[6])
+            )
+            self._cache[name] = proc
+            return proc
         return None
 
-    def list_procedures(self) -> List[str]:
+    def list_procedures(self, drafts_only=False) -> List[str]:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM procedures")
+        if drafts_only:
+            cursor.execute("SELECT name FROM procedures WHERE is_draft=1")
+        else:
+            cursor.execute("SELECT name FROM procedures WHERE is_draft=0")
         names = [row[0] for row in cursor.fetchall()]
         conn.close()
         return names
 
-    def delete_procedure(self, name: str) -> bool:
+    def publish_procedure(self, name: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE procedures SET is_draft=0 WHERE name=?", (name,))
+        conn.commit()
+        conn.close()
+        if self.logger:
+            self.logger.info(f"Procedure '{name}' published.")
+        if name in self._cache:
+            self._cache[name].is_draft = False
+
+    def delete_procedure(self, name: str):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM procedures WHERE name=?", (name,))
@@ -771,50 +819,58 @@ class ProceduralMemory:
         conn.close()
         self._cache.pop(name, None)
         if self.logger:
-            self.logger.info(f"Procedure '{name}' deleted from procedural memory.")
-        return cursor.rowcount > 0
+            self.logger.info(f"Procedure '{name}' deleted.")
 
-    def update_procedure(self, name: str, **fields):
-        proc = self.get_procedure(name)
-        if not proc:
-            raise ValueError(f"Procedure '{name}' not found.")
-        proc.update(fields)
-        proc['updated_at'] = time.time()
-        self.add_procedure(proc['name'], proc['description'], proc['steps'], proc['metadata'])
-
-    def execute_procedure(self, name: str, context: Optional[Dict[str, Any]] = None, params: Optional[Dict[str, Any]] = None):
+    def execute_procedure(self, name: str, context: Optional[Dict[str, Any]] = None):
         proc = self.get_procedure(name)
         if not proc:
             if self.logger:
                 self.logger.error(f"Procedure '{name}' not found.")
             return
-        for step in proc['steps']:
-            if step['action'] == 'call_tool':
-                tool_name = step['tool']
-                tool_params = step.get('params', {})
-                # Optionally merge in params/context
-                if self.logger:
-                    self.logger.info(f"Executing tool '{tool_name}' with params {tool_params}")
+        context = context or {}
+        context.setdefault("logger", self.logger)
+        for i, step in enumerate(proc.steps):
+            handler = self.step_handlers.get(step.action)
+            if handler:
                 try:
-                    result = self.tooler.process_llm_tool_call(json.dumps({
-                        "tool_name": tool_name,
-                        "parameters": tool_params
-                    }))
+                    handler(step, context)
                 except Exception as e:
                     if self.logger:
-                        self.logger.error(f"Error executing tool '{tool_name}' in procedure '{name}': {e}")
+                        self.logger.error(f"Error in step {i} ('{step.action}') of procedure '{name}': {e}")
                     if self.error_manager:
                         self.error_manager.record_error(
                             error=e,
-                            error_type="procedure_tool_execution_error",
-                            context={"procedure": name, "tool": tool_name, "params": tool_params}
+                            error_type="procedure_step_execution_error",
+                            context={"procedure": name, "step": asdict(step)}
                         )
-            elif step['action'] == 'message':
+            else:
                 if self.logger:
-                    self.logger.info(f"Procedure message: {step['text']}")
-            # Add more action types as needed
+                    self.logger.error(f"Unknown step action: {step.action} in procedure '{name}'")
         if self.logger:
             self.logger.info(f"Procedure '{name}' execution complete.")
+
+    def audit_draft_procedures_with_llm(self, llm):
+        draft_names = self.list_procedures(drafts_only=True)
+        for name in draft_names:
+            proc = self.get_procedure(name)
+            prompt = (
+                "You are an expert at evaluating procedural instructions for an AI agent.\n"
+                "Given the following draft procedure, decide if it is clear, complete, and useful.\n"
+                "Respond with one of: 'publish', 'discard', or 'keep as draft'.\n"
+                "If you choose 'publish', briefly explain why. If 'discard', explain the flaw.\n\n"
+                f"Procedure:\nName: {proc.name}\nDescription: {proc.description}\nSteps: {json.dumps([asdict(s) for s in proc.steps], indent=2)}\n"
+            )
+            # Placeholder: Replace with actual LLM call
+            result = llm.generate(prompt).strip().lower() if hasattr(llm, 'generate') else 'keep as draft'
+            if result.startswith("publish"):
+                self.publish_procedure(name)
+            elif result.startswith("discard"):
+                self.delete_procedure(name)
+            elif result.startswith("keep as draft"):
+                continue
+            else:
+                if self.logger:
+                    self.logger.warn(f"Ambiguous LLM audit result for procedure '{name}': {result}")
 
 # --- Levenshtein Distance (Standard Library, as in sovl_shamer) ---
 def levenshtein_distance(a: str, b: str) -> int:
@@ -871,24 +927,168 @@ def detect_tool_activation_for_tool(user_input: str, tool: Tool, max_distance: i
             return True
     return False
 
-def handle_procedure_activation(user_input: str, procedural_memory: 'ProceduralMemory', available_procedures: list = None):
+def handle_procedure_activation(user_input: str, procedure_manager: 'ProcedureManager', available_procedures: list = None, context: dict = None):
     """
-    Integrates tool/procedure activation detection with ProceduralMemory execution.
+    Integrates tool/procedure activation detection with ProcedureManager execution.
     - Checks for activation using detect_tool_activation.
     - Extracts procedure name by matching against available procedures.
-    - Notifies user before execution.
-    - Executes the procedure and reports completion.
+    - Notifies user before execution (returns event for orchestrator/UI).
+    - Executes the procedure and reports completion (returns event for orchestrator/UI).
     """
     if available_procedures is None:
-        available_procedures = procedural_memory.list_procedures()
+        # Only consider published procedures for activation
+        available_procedures = procedure_manager.list_procedures(drafts_only=False)
     if detect_tool_activation(user_input):
         text = user_input.lower()
         for proc_name in available_procedures:
             if proc_name.lower() in text:
-                print(f"Okay, I will run the '{proc_name}' procedure now.")
-                procedural_memory.execute_procedure(proc_name)
-                print(f"Procedure '{proc_name}' execution complete.")
-                return True
-        print("Sorry, I couldn't find a matching procedure to run.")
-        return False
+                # Instead of print, return event for orchestrator/UI
+                event = {
+                    "action": "procedure_activation",
+                    "message": f"Okay, I will run the '{proc_name}' procedure now.",
+                    "procedure": proc_name
+                }
+                # Optionally, allow orchestrator to confirm before execution
+                result = procedure_manager.execute_procedure(proc_name, context=context)
+                return {
+                    "event": event,
+                    "result": result,
+                    "completion_message": f"Procedure '{proc_name}' execution complete."
+                }
+        # No match found
+        return {"action": "procedure_activation_failed", "message": "Sorry, I couldn't find a matching procedure to run."}
     return False
+
+# --- Procedure Canonicalization Utility ---
+def canonicalize_procedure(proc: dict) -> dict:
+    """
+    Ensure a procedure dict conforms to the canonical JSON schema for LLM and system compatibility.
+    Fills in defaults for missing fields and validates step structure.
+    Raises ValueError for malformed steps.
+    """
+    import time
+    proc.setdefault("name", "unnamed_procedure")
+    proc.setdefault("description", "")
+    proc.setdefault("steps", [])
+    proc.setdefault("metadata", {})
+    proc.setdefault("created_at", time.time())
+    proc.setdefault("updated_at", time.time())
+    proc.setdefault("is_draft", True)
+    # Validate steps
+    for i, step in enumerate(proc["steps"]):
+        if "action" not in step:
+            raise ValueError(f"Step {i} is missing required 'action' field.")
+    return proc
+
+# --- Procedure Detection System ---
+import re
+
+class ProcedureDetector:
+    """
+    Detects whether a user input likely describes a procedure, using strong phrases, numbered list patterns,
+    and a concise set of imperative verbs. Designed to minimize false positives while capturing most real procedures.
+    Extendable for future LLM or advanced heuristic integration.
+    """
+    STRONG_PHRASES = [
+    "as a first step",
+    "begin with",
+    "before you start",
+    "do it like this",
+    "do this exactly like",
+    "execute it like this",
+    "first,",
+    "follow these steps",
+    "here's a guide to",
+    "here's how to",
+    "here's how you can",
+    "here's my way of doing it",
+    "here's the way to",
+    "here's what you need to do",
+    "how to",
+    "I need you to follow this",
+    "I want you to do it this way",
+    "I'll guide you through",
+    "I'll show you how to",
+    "I'll walk you through it",
+    "initially,",
+    "instructions:",
+    "kick off with",
+    "let me break it down for you",
+    "let me explain how to",
+    "let me show you how to",
+    "let me tell you how it's done",
+    "let me walk you through",
+    "let's go through the steps to",
+    "let's start with",
+    "make it happen like this",
+    "perform it this way",
+    "start by",
+    "step by step",
+    "the first thing to do is",
+    "the process is",
+    "the steps are",
+    "these are the steps to",
+    "this is how to",
+    "this is how you do it",
+    "this is the procedure for",
+    "this is the way to do it",
+    "this is what I want you to do",
+    "to accomplish this",
+    "to achieve this",
+    "to begin with",
+    "to carry this out",
+    "to complete this",
+    "to do this, follow",
+    "to ensure this works",
+    "to execute this",
+    "to finish this task",
+    "to get everything in place for",
+    "to get ready to",
+    "to get started",
+    "to get this done",
+    "to lay the groundwork for",
+    "to make it happen",
+    "to make sure it's done right",
+    "to make this work",
+    "to perform this",
+    "to prepare for this",
+    "to pull this off",
+    "to set this up",
+    "to solve this",
+    "to start off",
+    "to succeed at this",
+    "to tackle this"
+]
+    IMPERATIVE_VERBS = [
+        "do", "run", "install", "configure", "set up", "fix", "create", "build", "start", "perform", "follow",
+        "complete", "achieve", "implement", "use", "make", "get", "begin", "show", "explain", "write", "list",
+        "plan", "organize", "prepare", "review", "check", "test", "verify"
+    ]
+    @staticmethod
+    def detect_procedure(text: str, max_fuzzy_distance: int = 1) -> bool:
+        text_lc = text.lower().strip()
+        # Strong phrase match (strict or fuzzy)
+        for phrase in ProcedureDetector.STRONG_PHRASES:
+            if phrase in text_lc:
+                return True
+            # Fuzzy match at start
+            segment = text_lc[:len(phrase)+2]
+            if levenshtein_distance(segment, phrase) <= max_fuzzy_distance:
+                return True
+        # Numbered list pattern
+        if re.search(r"^\s*\d+\.\s+", text_lc, re.MULTILINE):
+            return True
+        if re.search(r"^\s*step\s*\d+\s*:", text_lc, re.MULTILINE):
+            return True
+        if re.search(r"^\s*(first|second|third|next|then|finally)[,:\-]", text_lc, re.MULTILINE):
+            return True
+        # Imperative verb at start (strict)
+        for verb in ProcedureDetector.IMPERATIVE_VERBS:
+            if text_lc.startswith(verb + " "):
+                return True
+        # Formatting/structural cues: multiple lines with numbers
+        lines = text_lc.splitlines()
+        numbered_lines = sum(1 for line in lines if re.match(r"^\s*\d+\.\s+", line))
+        if numbered_lines >= 2:
+            return True
+        return False

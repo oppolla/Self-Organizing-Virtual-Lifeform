@@ -28,3 +28,20 @@ def auto_tldr(text: str, max_sentences: int = 3) -> str:
         return "Error: No content to summarize."
     summary = ' '.join(sentences[:max_sentences])
     return f"TL;DR: {summary}"
+
+def custom_log_step(step, context):
+    """
+    Custom step: Log a custom message from a procedure step.
+    Usage in a procedure step:
+        {"action": "custom_log", "message": "This is a custom log from the tool!"}
+    """
+    msg = step.get("message", "[No message provided]")
+    logger = context.get("logger")
+    if logger:
+        logger.info(f"[example_tool custom_log] {msg}")
+    else:
+        print(f"[example_tool custom_log] {msg}")
+
+STEP_HANDLERS = {
+    "custom_log": custom_log_step
+}
