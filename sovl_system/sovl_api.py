@@ -1,6 +1,10 @@
 from sovl_conductor import SOVLOrchestrator
 from sovl_main import SOVLSystem, SystemContext
 from typing import Any, Callable, Optional, List, Dict
+import os
+import json
+import shutil
+import datetime
 
 """
 sovl_api.py
@@ -217,3 +221,117 @@ class SOVLAPI:
         if hasattr(self.orchestrator, "reload_config"):
             return self.orchestrator.reload_config()
         return False
+
+    CONFIG_FILE = "sovl_config.json"
+    DEFAULTS_FILE = "sovl_config.defaults.json"
+
+    def get_config(self, section: str = None, key: str = None):
+        """
+        Get the full config, a section, or a specific key (dot notation supported).
+        """
+        with open(self.CONFIG_FILE, "r") as f:
+            config = json.load(f)
+        if section is None and key is None:
+            return config
+        node = config
+        if section:
+            for p in section.split('.'):
+                if isinstance(node, dict) and p in node:
+                    node = node[p]
+                else:
+                    raise KeyError(f"Section '{section}' not found in config.")
+        if key:
+            for p in key.split('.'):
+                if isinstance(node, dict) and p in node:
+                    node = node[p]
+                else:
+                    raise KeyError(f"Key '{key}' not found in config.")
+        return node
+
+    def set_config(self, key: str, value: any):
+        """
+        Set a config value using dot notation, with type validation.
+        """
+        with open(self.CONFIG_FILE, "r") as f:
+            config = json.load(f)
+        parts = key.split('.')
+        node = config
+        for p in parts[:-1]:
+            if p in node and isinstance(node[p], dict):
+                node = node[p]
+            else:
+                raise KeyError(f"Config key '{key}' not found.")
+        last_key = parts[-1]
+        if last_key not in node:
+            raise KeyError(f"Config key '{key}' not found.")
+        current_value = node[last_key]
+        expected_type = type(current_value)
+        try:
+            # Try to cast value to the expected type
+            if expected_type is bool:
+                # Special handling for bool
+                if isinstance(value, str):
+                    value = value.lower() in ("true", "1", "yes", "on")
+                else:
+                    value = bool(value)
+            else:
+                value = expected_type(value)
+        except Exception:
+            raise ValueError(f"Type mismatch: expected {expected_type.__name__} for key '{key}'")
+        node[last_key] = value
+        with open(self.CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=4)
+        self.reload_config()
+
+    def reset_config(self, section: str = None):
+        """
+        Reset the whole config or a section to defaults, with backup.
+        """
+        # Backup current config
+        ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+        backup_path = f"{self.CONFIG_FILE}.bak-{ts}"
+        shutil.copy2(self.CONFIG_FILE, backup_path)
+        with open(self.DEFAULTS_FILE, "r") as f:
+            defaults = json.load(f)
+        if section:
+            with open(self.CONFIG_FILE, "r") as f:
+                config = json.load(f)
+            if section not in defaults:
+                raise KeyError(f"Section '{section}' not found in defaults.")
+            config[section] = defaults[section]
+            with open(self.CONFIG_FILE, "w") as f:
+                json.dump(config, f, indent=4)
+        else:
+            with open(self.CONFIG_FILE, "w") as f:
+                json.dump(defaults, f, indent=4)
+        self.reload_config()
+
+    def search_config(self, term: str):
+        """
+        Search for config keys containing the term (dot notation).
+        """
+        with open(self.CONFIG_FILE, "r") as f:
+            config = json.load(f)
+        results = []
+        def search(node, path=[]):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    search(v, path + [k])
+            else:
+                key_path = '.'.join(path)
+                if term.lower() in key_path.lower():
+                    results.append(key_path)
+        search(config)
+        return results
+
+    def help_config(self, key: str):
+        """
+        Return value, type, and a placeholder for description for a config key.
+        """
+        value = self.get_config(key=key)
+        return {
+            "key": key,
+            "value": value,
+            "type": type(value).__name__,
+            "description": "(No inline description. See docs or schema for details.)"
+        }
