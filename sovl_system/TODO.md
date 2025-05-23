@@ -2,10 +2,10 @@
 
 ## General Taks:
 
-1. Build a moral code system where it makes entries for its personal 
-2. There should be a tool use module like plugin but sub modules in a directory that the LLM has direct acceess to and can use, like code it can run. premade scripts you can ask it to do custom procedures 
+1. Build a moral code system where it makes entries for its personal -- expansion of striver module? jsonl list where entries cannot be removed once added. long scale time based decay only?
+2. 
 3. 
-4. System should know unix time at initialization or always. maybe part of the recall sysyem where it knows its own monitoring in real time. can always reference it. 
+4.  
 5. multi scaffold support improvements, multi scaffold name system: (look at sovl_cli). name selector system? death of scaffold?
 6. Disable that startup data sovl_seed part. Save it for Soulprint
 7. Consider an "offline" mode for maintainence
