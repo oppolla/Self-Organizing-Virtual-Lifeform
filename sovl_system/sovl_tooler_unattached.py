@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Any, List, TypedDict, Optional, Union
+from typing import Callable, Dict, Any, List, TypedDict, Optional, Union, Protocol
 from dataclasses import dataclass, field, asdict
 import json
 import time
@@ -229,11 +229,15 @@ def handle_end(step, context):
 
 # --- Tool Registry ---
 
+class LLMInterfaceProtocol(Protocol):
+    async def generate(self, prompt: str, **kwargs: Any) -> str:
+        ...
+
 class ToolRegistry:
-    def __init__(self, tool_directory: str = "tools", logger=None, error_manager=None):
+    def __init__(self, logger, error_manager, tool_directory: str = "tools"):
         self.tools: Dict[str, Tool] = {}
         self.tool_directory = os.path.abspath(tool_directory)
-        self.logger = logger if logger is not None else Logger.get_instance()
+        self.logger = logger
         self.error_manager = error_manager
 
     def _ensure_tool_directory_exists(self):
@@ -374,21 +378,21 @@ class ToolRegistry:
                 )
             return
 
-        for filename in os.listdir(self.tool_directory):
-            if filename.endswith(".json"):
-                json_file_path = os.path.join(self.tool_directory, filename)
-                base_name = filename[:-5] 
-                python_file_name = base_name + ".py"
-                python_file_path = os.path.join(self.tool_directory, python_file_name)
+        for entry in os.listdir(self.tool_directory):
+            subdir_path = os.path.join(self.tool_directory, entry)
+            if os.path.isdir(subdir_path):
+                base_name = entry
+                json_file_path = os.path.join(subdir_path, base_name + ".json")
+                python_file_path = os.path.join(subdir_path, base_name + ".py")
 
-                if not os.path.exists(python_file_path):
+                if not os.path.exists(json_file_path) or not os.path.exists(python_file_path):
                     if self.logger:
-                        self.logger.warn(f"Found schema file {json_file_path}, but corresponding Python file {python_file_path} is missing. Skipping tool.")
+                        self.logger.warn(f"Tool subdirectory {subdir_path} missing .json or .py file for tool '{base_name}'. Skipping tool.")
                     if self.error_manager:
                         self.error_manager.record_error(
-                            error=FileNotFoundError(f"Missing Python file for tool: {python_file_path}"),
-                            error_type="tool_python_file_missing",
-                            context={"json_file": json_file_path, "python_file": python_file_path}
+                            error=FileNotFoundError(f"Missing .json or .py file for tool: {base_name}"),
+                            error_type="tool_file_missing",
+                            context={"subdir": subdir_path, "base_name": base_name}
                         )
                     continue
 
@@ -430,7 +434,7 @@ class ToolRegistry:
                 tool_description = schema_dict.get("description", "No description provided.")
                 enabled = schema_dict.get("enabled", True)  # Read enabled from JSON, default True
                 activation_phrases = []
-                module_load_name = f"sovl_tool_modules.{base_name}"
+                module_load_name = base_name
                 try:
                     spec = importlib.util.spec_from_file_location(module_load_name, python_file_path)
                     if not spec or not spec.loader:
@@ -526,10 +530,10 @@ class ToolRegistry:
 # --- Tooler (Orchestrator) ---
 
 class Tooler:
-    def __init__(self, tool_registry: ToolRegistry, logger=None, llm_interface=None, procedure_manager=None, error_manager=None):
+    def __init__(self, tool_registry: ToolRegistry, logger, llm_interface: LLMInterfaceProtocol, procedure_manager=None, error_manager=None):
         self.tool_registry = tool_registry
-        self.logger = logger if logger is not None else Logger.get_instance()
-        self.llm_interface = llm_interface 
+        self.logger = logger
+        self.llm_interface = llm_interface
         self.procedure_manager = procedure_manager
         self.error_manager = error_manager
 
@@ -779,17 +783,17 @@ DEFAULT_DATABASE_DIR = "database"
 DEFAULT_DATABASE_FILE = os.path.join(DEFAULT_DATABASE_DIR, "procedures.db")
 
 class ProcedureManager:
-    def __init__(self, db_path: str, step_handlers: Dict[str, Any], logger=None, error_manager=None):
+    def __init__(self, db_path: str, step_handlers: Dict[str, Any], logger, error_manager):
         self.db_path = db_path
         self.step_handlers = step_handlers
         self.logger = logger
         self.error_manager = error_manager
+        self.conn = sqlite3.connect(self.db_path)
         self._ensure_table_exists()
         self._cache = {}
 
     def _ensure_table_exists(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS procedures (
                 name TEXT PRIMARY KEY,
@@ -801,16 +805,14 @@ class ProcedureManager:
                 is_draft INTEGER DEFAULT 1
             )
         """)
-        conn.commit()
-        conn.close()
+        self.conn.commit()
 
     def add_procedure(self, proc: ProcedureDefinition):
         now = time.time()
         proc.updated_at = now
         if not proc.created_at:
             proc.created_at = now
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO procedures (name, description, steps, metadata, created_at, updated_at, is_draft)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -823,8 +825,7 @@ class ProcedureManager:
             proc.updated_at,
             int(proc.is_draft)
         ))
-        conn.commit()
-        conn.close()
+        self.conn.commit()
         self._cache[proc.name] = proc
         if self.logger:
             self.logger.info(f"Procedure '{proc.name}' added. Draft: {proc.is_draft}")
@@ -832,11 +833,9 @@ class ProcedureManager:
     def get_procedure(self, name: str) -> Optional[ProcedureDefinition]:
         if name in self._cache:
             return self._cache[name]
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         cursor.execute("SELECT name, description, steps, metadata, created_at, updated_at, is_draft FROM procedures WHERE name=?", (name,))
         row = cursor.fetchone()
-        conn.close()
         if row:
             steps = [ProcedureStep(**s) for s in json.loads(row[2])]
             proc = ProcedureDefinition(
@@ -853,87 +852,39 @@ class ProcedureManager:
         return None
 
     def list_procedures(self, drafts_only=False) -> List[str]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         if drafts_only:
             cursor.execute("SELECT name FROM procedures WHERE is_draft=1")
         else:
             cursor.execute("SELECT name FROM procedures WHERE is_draft=0")
         names = [row[0] for row in cursor.fetchall()]
-        conn.close()
         return names
 
     def publish_procedure(self, name: str):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         cursor.execute("UPDATE procedures SET is_draft=0 WHERE name=?", (name,))
-        conn.commit()
-        conn.close()
+        self.conn.commit()
         if self.logger:
             self.logger.info(f"Procedure '{name}' published.")
         if name in self._cache:
             self._cache[name].is_draft = False
 
     def delete_procedure(self, name: str):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         cursor.execute("DELETE FROM procedures WHERE name=?", (name,))
-        conn.commit()
-        conn.close()
+        self.conn.commit()
         self._cache.pop(name, None)
         if self.logger:
             self.logger.info(f"Procedure '{name}' deleted.")
 
-    def execute_procedure(self, name: str, context: Optional[Dict[str, Any]] = None):
-        proc = self.get_procedure(name)
-        if not proc:
-            if self.logger:
-                self.logger.error(f"Procedure '{name}' not found.")
-            return
-        context = context or {}
-        context.setdefault("logger", self.logger)
-        for i, step in enumerate(proc.steps):
-            handler = self.step_handlers.get(step.action)
-            if handler:
-                try:
-                    handler(step, context)
-                except Exception as e:
-                    if self.logger:
-                        self.logger.error(f"Error in step {i} ('{step.action}') of procedure '{name}': {e}")
-                    if self.error_manager:
-                        self.error_manager.record_error(
-                            error=e,
-                            error_type="procedure_step_execution_error",
-                            context={"procedure": name, "step": asdict(step)}
-                        )
-            else:
-                if self.logger:
-                    self.logger.error(f"Unknown step action: {step.action} in procedure '{name}'")
-        if self.logger:
-            self.logger.info(f"Procedure '{name}' execution complete.")
+    def close(self):
+        self.conn.close()
 
-    def audit_draft_procedures_with_llm(self, llm):
-        draft_names = self.list_procedures(drafts_only=True)
-        for name in draft_names:
-            proc = self.get_procedure(name)
-            prompt = (
-                "You are an expert at evaluating procedural instructions for an AI agent.\n"
-                "Given the following draft procedure, decide if it is clear, complete, and useful.\n"
-                "Respond with one of: 'publish', 'discard', or 'keep as draft'.\n"
-                "If you choose 'publish', briefly explain why. If 'discard', explain the flaw.\n\n"
-                f"Procedure:\nName: {proc.name}\nDescription: {proc.description}\nSteps: {json.dumps([asdict(s) for s in proc.steps], indent=2)}\n"
-            )
-            # Placeholder: Replace with actual LLM call
-            result = llm.generate(prompt).strip().lower() if hasattr(llm, 'generate') else 'keep as draft'
-            if result.startswith("publish"):
-                self.publish_procedure(name)
-            elif result.startswith("discard"):
-                self.delete_procedure(name)
-            elif result.startswith("keep as draft"):
-                continue
-            else:
-                if self.logger:
-                    self.logger.warn(f"Ambiguous LLM audit result for procedure '{name}': {result}")
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 # --- Levenshtein Distance (Standard Library, as in sovl_shamer) ---
 def levenshtein_distance(a: str, b: str) -> int:
