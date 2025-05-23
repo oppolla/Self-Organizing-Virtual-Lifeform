@@ -722,6 +722,57 @@ class Tooler:
             self.logger.warn("No procedure_manager or audit_draft_procedures_with_llm available in Tooler.")
         return None
 
+    def review_and_prune_draft_procedures(self, llm):
+        """
+        Review all draft procedures using the LLM, decide which to publish, discard, or keep as draft.
+        For those to be published, use the LLM to edit/format them, then canonicalize and save as published.
+        """
+        drafts = self.procedure_manager.list_procedures(drafts_only=True)
+        if not drafts:
+            if self.logger:
+                self.logger.info("No draft procedures to review.")
+            return
+
+        draft_objs = [self.procedure_manager.get_procedure(name) for name in drafts]
+        review_prompt = build_procedure_review_prompt(draft_objs)
+        try:
+            review_response = llm.generate(review_prompt)
+            actions = json.loads(review_response)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"LLM review failed: {e}")
+            return
+
+        for item in actions:
+            name, action = item["name"], item["action"]
+            proc = self.procedure_manager.get_procedure(name)
+            if not proc:
+                continue
+            if action == "publish":
+                # LLM edit/canonicalize
+                edit_prompt = build_procedure_edit_prompt(proc, PROCEDURE_TEMPLATE)
+                try:
+                    improved_json = llm.generate(edit_prompt)
+                    improved_proc = json.loads(improved_json)
+                    canonical_proc = canonicalize_procedure(improved_proc)
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"LLM edit/canonicalization failed for {name}: {e}")
+                    # Fallback: canonicalize original
+                    canonical_proc = canonicalize_procedure(asdict(proc))
+                # Save as published
+                self.procedure_manager.add_procedure(ProcedureDefinition(**canonical_proc))
+                self.procedure_manager.publish_procedure(canonical_proc["name"])
+                if self.logger:
+                    self.logger.info(f"Published procedure: {name}")
+            elif action == "discard":
+                self.procedure_manager.delete_procedure(name)
+                if self.logger:
+                    self.logger.info(f"Discarded procedure: {name}")
+            else:
+                if self.logger:
+                    self.logger.info(f"Kept as draft: {name}")
+
 # --- Procedure Manager (SQLite based) ---
 
 DEFAULT_DATABASE_DIR = "database" 
@@ -1002,75 +1053,20 @@ class ProcedureDetector:
     Extendable for future LLM or advanced heuristic integration.
     """
     STRONG_PHRASES = [
-    "as a first step",
-    "begin with",
-    "before you start",
-    "do it like this",
-    "do this exactly like",
-    "execute it like this",
-    "first,",
-    "follow these steps",
-    "here's a guide to",
-    "here's how to",
-    "here's how you can",
-    "here's my way of doing it",
-    "here's the way to",
-    "here's what you need to do",
-    "how to",
-    "I need you to follow this",
-    "I want you to do it this way",
-    "I'll guide you through",
-    "I'll show you how to",
-    "I'll walk you through it",
-    "initially,",
-    "instructions:",
-    "kick off with",
-    "let me break it down for you",
-    "let me explain how to",
-    "let me show you how to",
-    "let me tell you how it's done",
-    "let me walk you through",
-    "let's go through the steps to",
-    "let's start with",
-    "make it happen like this",
-    "perform it this way",
-    "start by",
-    "step by step",
-    "the first thing to do is",
-    "the process is",
-    "the steps are",
-    "these are the steps to",
-    "this is how to",
-    "this is how you do it",
-    "this is the procedure for",
-    "this is the way to do it",
-    "this is what I want you to do",
-    "to accomplish this",
-    "to achieve this",
-    "to begin with",
-    "to carry this out",
-    "to complete this",
-    "to do this, follow",
-    "to ensure this works",
-    "to execute this",
-    "to finish this task",
-    "to get everything in place for",
-    "to get ready to",
-    "to get started",
-    "to get this done",
-    "to lay the groundwork for",
-    "to make it happen",
-    "to make sure it's done right",
-    "to make this work",
-    "to perform this",
-    "to prepare for this",
-    "to pull this off",
-    "to set this up",
-    "to solve this",
-    "to start off",
-    "to succeed at this",
-    "to tackle this"
-]
+        "as a first step", "begin with", "before you start", "do it like this", "do this exactly like", "execute it like this",
+        "first,", "follow these steps", "here's a guide to", "here's how to", "here's how you can", "here's my way of doing it",
+        "here's the way to", "here's what you need to do", "how to", "I need you to follow this", "I want you to do it this way",
+        "I'll guide you through", "I'll show you how to", "I'll walk you through it", "initially,", "instructions:", "kick off with",
+        "let me break it down for you", "let me explain how to", "let me show you how to", "let me tell you how it's done",
+        "let me walk you through", "let's go through the steps to", "let's start with", "make it happen like this", "perform it this way",
+        "start by", "step by step", "the first thing to do is", "the process is", "the steps are", "these are the steps to",
+        "this is how to", "this is how you do it", "this is the procedure for", "this is the way to do it", "this is what I want you to do",
+        "to accomplish this", "to achieve this", "to begin with", "to carry this out", "to complete this", "to do this, follow",
+        "to ensure this works", "to execute this", "to finish this task", "to get everything in place for", "to get ready to",
+        "to get started", "to get this done", "to lay the groundwork for", "to make it happen", "to make sure it's done right",
+        "to make this work", "to perform this", "to prepare for this", "to pull this off", "to set this up", "to solve this",
+        "to start off", "to succeed at this", "to tackle this"
+    ]
     IMPERATIVE_VERBS = [
         "do", "run", "install", "configure", "set up", "fix", "create", "build", "start", "perform", "follow",
         "complete", "achieve", "implement", "use", "make", "get", "begin", "show", "explain", "write", "list",
@@ -1104,3 +1100,46 @@ class ProcedureDetector:
         if numbered_lines >= 2:
             return True
         return False
+
+# --- Helper functions for LLM prompts (for procedure review/edit) ---
+def build_procedure_review_prompt(draft_procs):
+    procs_json = json.dumps([asdict(p) if hasattr(p, 'name') else p for p in draft_procs], indent=2)
+    return (
+        "You are reviewing draft procedures created during the last active cycle.\n"
+        "For each, decide:\n"
+        "  - 'publish' if it is clear, useful, and should be kept.\n"
+        "  - 'discard' if it is redundant, unclear, or not useful.\n"
+        "  - 'keep as draft' if it needs more work.\n"
+        "Respond with a JSON list: "
+        '[{"name": ..., "action": "publish|discard|keep as draft", "reason": "..."}]\n'
+        f"Draft procedures:\n{procs_json}\n"
+    )
+
+def build_procedure_edit_prompt(proc, template):
+    proc_json = json.dumps(asdict(proc) if hasattr(proc, 'name') else proc, indent=2)
+    template_json = json.dumps(template, indent=2)
+    return (
+        "Here is a draft procedure:\n"
+        f"{proc_json}\n\n"
+        "Please review and, if needed, edit it to be clear, complete, and match this template:\n"
+        f"{template_json}\n"
+        "Return the improved procedure as a JSON object matching the template."
+    )
+
+PROCEDURE_TEMPLATE = {
+    "name": "string",
+    "description": "string",
+    "steps": [
+        {
+            "action": "string",
+            "tool": "string (optional)",
+            "params": {},
+            "text": "string (optional)",
+            "description": "string (optional)"
+        }
+    ],
+    "metadata": {},
+    "created_at": 0,
+    "updated_at": 0,
+    "is_draft": False
+}
