@@ -149,12 +149,14 @@ class PluginManager:
                 return False
 
     def load_plugins(self, system: 'SOVLSystem') -> int:
-        """Load enabled plugins."""
+        """Load enabled plugins from subdirectories."""
         loaded_count = 0
         with self.plugin_lock:
+            # Scan for subdirectories in the plugin directory
             for plugin_name in self.enabled_plugins:
                 try:
-                    plugin = self._load_plugin_module(plugin_name)
+                    plugin_dir = os.path.join(self.plugin_dir, plugin_name)
+                    plugin = self._load_plugin_module(plugin_dir)
                     if plugin:
                         plugin.initialize(system, self.context)
                         if self.register_plugin(plugin):
@@ -167,32 +169,30 @@ class PluginManager:
                     )
         return loaded_count
 
-    def _load_plugin_module(self, plugin_name: str) -> Optional[PluginInterface]:
-        """Load a plugin module."""
+    def _load_plugin_module(self, plugin_dir: str) -> Optional[PluginInterface]:
+        """
+        Load a plugin module from a subdirectory. The main plugin file must be named after the directory (e.g., plugins/example_plugin/example_plugin.py).
+        """
         try:
-            module_path = os.path.join(self.plugin_dir, plugin_name)
-            if not os.path.exists(module_path):
-                raise PluginError(f"Plugin directory {module_path} does not exist")
-            
+            plugin_name = os.path.basename(plugin_dir)
+            plugin_file = os.path.join(plugin_dir, f"{plugin_name}.py")
+            if not os.path.isfile(plugin_file):
+                raise PluginError(f"Plugin file {plugin_file} does not exist")
             spec = importlib.util.spec_from_file_location(
-                f"plugins.{plugin_name}",
-                os.path.join(module_path, "__init__.py")
+                f"plugins.{plugin_name}", plugin_file
             )
             if not spec or not spec.loader:
                 raise PluginError(f"Failed to create spec for plugin {plugin_name}")
-            
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            
             plugin_class = getattr(module, "Plugin", None)
             if not plugin_class or not issubclass(plugin_class, PluginInterface):
                 raise PluginError(f"Plugin {plugin_name} does not implement PluginInterface")
-            
             return plugin_class()
         except Exception as e:
             self.error_manager.handle_error(
                 error_type="plugin_load",
-                error_message=f"Failed to load plugin module {plugin_name}: {str(e)}",
+                error_message=f"Failed to load plugin module {plugin_dir}: {str(e)}",
                 error=e
             )
             return None
