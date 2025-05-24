@@ -87,7 +87,7 @@ class Scriber:
 
         try:
             # Determine scribe output path from config or explicit override
-            self.scribe_path = getattr(self, 'scribe_path', None) or config_manager.get("scribed_config.output_path", "scribe/sovl_scribe.jsonl")
+            self.scribe_path = getattr(self, 'scribe_path', None) or config_manager.get("scribed_config.output_path", "data/sovl_scribe.jsonl")
             os.makedirs(os.path.dirname(self.scribe_path), exist_ok=True)
             
             # --- Ensure scribe journal file is created on init ---

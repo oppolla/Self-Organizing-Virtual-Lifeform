@@ -110,7 +110,7 @@
     "scribe_batch_size": 20,
     "scribe_flush_interval": 2.0,
     "scribe_queue_maxsize": 2000,
-    "output_path": "scribe/scribe_journal.jsonl"
+    "output_path": "data/scribe_journal.jsonl"
   },
   "core_config": {
     "random_seed": 42
